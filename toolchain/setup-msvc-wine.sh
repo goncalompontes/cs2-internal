@@ -20,4 +20,4 @@ fi
 
 echo
 echo "Done. Source the environment before configuring the payload:"
-echo "  BIN=$DEST/bin/x64 . $DEST/msvcenv-native.sh"
+echo "  BIN=$ROOT/msvc/bin/x64 . $ROOT/msvcenv-native.sh"

@@ -3,8 +3,9 @@
 ## Phase 0 — Environment (in progress)
 - [x] Repo scaffold, ADRs, agent conventions
 - [x] Enable built-in LSP
-- [ ] Install toolchain: msvc-wine, Ghidra + ReVa
-- [ ] Add MCP servers (tree-sitter, ReVa)
+- [x] msvc-wine toolchain + cross-compiled `payload.dll`
+- [x] Ghidra + ReVa installed
+- [ ] Add MCP servers (tree-sitter, ReVa) — wired, verifying
 - [ ] Steam + multilib + Proton; offline `-insecure` loop
 - [ ] Install the Windows (Proton) build of the target
 
