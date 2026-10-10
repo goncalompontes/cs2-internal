@@ -11,12 +11,14 @@
 - [ ] Verify offline `-insecure` run
 
 ## Phase 1 — External dumper (no injection)
-- [ ] Module enumeration + fingerprinting
-- [ ] Pattern scanner + RIP-relative resolution
+- [x] Module enumeration + fingerprinting
+- [x] Pattern scanner + RIP-relative resolution
+- [x] Fixture-based unit tests (pattern engine)
+- [x] Basic CLI (`--pattern`, `--exports`, `--json`)
 - [ ] schema walker → generated headers
 - [ ] `CreateInterface` resolver
 - [ ] Emit `offsets.json` / `interfaces.hpp` / `schemas/*.hpp`
-- [ ] Fixture-based unit tests
+- [ ] Optional `memflow` backend behind `ProcessMemory`
 
 ## Phase 2 — Manual-map loader
 - [ ] PE map (sections, relocs, imports, TLS)
