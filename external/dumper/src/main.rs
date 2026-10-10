@@ -1,12 +1,14 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 
+use cs2_dumper::interfaces;
 use cs2_dumper::memory::{find_pid, LinuxProcMemory, ProcessMemory};
 use cs2_dumper::output::{self, DumpManifest};
 use cs2_dumper::pattern::Pattern;
 use cs2_dumper::pe;
+use cs2_dumper::schema::{self, SchemaLayout};
 
-/// External offset/interface dumper.
+/// External offset/interface/schema dumper.
 #[derive(Parser, Debug)]
 #[command(name = "cs2-dumper", version, about)]
 struct Cli {
@@ -30,29 +32,54 @@ struct Cli {
     #[arg(long)]
     exports: bool,
 
+    /// Enumerate `CreateInterface` registrations in the module.
+    #[arg(long)]
+    interfaces: bool,
+
+    /// Extra interface-name seeds (repeatable) for --interfaces discovery.
+    #[arg(long = "interface-seed")]
+    interface_seeds: Vec<String>,
+
+    /// Dump the schema system. Requires --schema-system.
+    #[arg(long)]
+    schema: bool,
+
+    /// Address of the CSchemaSystem (hex, e.g. 0x7ff6...).
+    #[arg(long)]
+    schema_system: Option<String>,
+
     /// Emit JSON instead of human-readable text.
     #[arg(long)]
     json: bool,
 }
+
+/// Common interfaces used as discovery seeds.
+const DEFAULT_INTERFACE_SEEDS: &[&str] = &[
+    "SchemaSystem_001",
+    "Source2Client002",
+    "Source2ClientPrediction001",
+    "Source2EngineToClient001",
+    "GameClientExports001",
+    "EngineServiceMgr001",
+    "GameEventSystemClientV001",
+    "Source2ClientUI001",
+    "ClientToolsInfo_001",
+    "Source2ClientConfig001",
+];
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let pid = match cli.pid {
         Some(pid) => pid,
-        None => find_pid(&cli.process).ok_or_else(|| {
-            anyhow!(
-                "process {:?} not found; is the client running?",
-                cli.process
-            )
-        })?,
+        None => find_pid(&cli.process)
+            .ok_or_else(|| anyhow!("process {:?} not found; is the client running?", cli.process))?,
     };
 
-    let mem = LinuxProcMemory::open(pid)
-        .with_context(|| format!("opening memory of pid {pid}"))?;
+    let mem = LinuxProcMemory::open(pid).with_context(|| format!("opening memory of pid {pid}"))?;
     let modules = mem.modules();
 
-    if cli.json && cli.pattern.is_none() && !cli.exports {
+    if cli.json && cli.pattern.is_none() && !cli.exports && !cli.interfaces && !cli.schema {
         let manifest = DumpManifest::new(&cli.process, pid, &modules);
         println!("{}", output::to_json(&manifest));
         return Ok(());
@@ -77,11 +104,7 @@ fn main() -> Result<()> {
             matches.len()
         );
         for hit in matches.iter().take(16) {
-            let abs = module.base + hit;
-            println!(
-                "  0x{abs:012x}  {} + 0x{hit:x}",
-                module.name
-            );
+            println!("  0x{:012x}  {} + 0x{hit:x}", module.base + hit, module.name);
         }
     }
 
@@ -107,6 +130,36 @@ fn main() -> Result<()> {
         }
     }
 
+    if cli.interfaces {
+        let module = mem
+            .module_by_name(&cli.module)
+            .ok_or_else(|| anyhow!("module {:?} not found", cli.module))?;
+        let mut seeds: Vec<&str> = DEFAULT_INTERFACE_SEEDS.to_vec();
+        seeds.extend(cli.interface_seeds.iter().map(String::as_str));
+        let found = interfaces::enumerate(&mem, module.base, module.size, &seeds)?;
+        println!("\n{} — {} interface(s)", module.name, found.len());
+        for it in &found {
+            println!("  {:<40} rva=0x{:x} create=0x{:x}", it.name, it.rva, it.create_rva);
+        }
+    }
+
+    if cli.schema {
+        let schema_system = parse_hex(
+            cli.schema_system
+                .as_deref()
+                .ok_or_else(|| anyhow!("--schema requires --schema-system <hex>"))?,
+        )?;
+        let layout = SchemaLayout::default();
+        let classes = schema::dump(&mem, schema_system, &layout)?;
+        println!("\nschema — {} class(es)", classes.len());
+        for c in &classes {
+            println!("  {:<24} {} ({} fields, size 0x{:x})", c.module, c.name, c.fields.len(), c.size);
+            for f in &c.fields {
+                println!("      +0x{:<4x} {:<32} {}", f.offset, f.name, f.type_name);
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -121,4 +174,10 @@ fn read_module(mem: &impl ProcessMemory, base: usize, size: usize) -> Vec<u8> {
         off += n;
     }
     out
+}
+
+fn parse_hex(text: &str) -> Result<usize> {
+    let t = text.trim();
+    let t = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    usize::from_str_radix(t, 16).with_context(|| format!("invalid hex address: {text:?}"))
 }

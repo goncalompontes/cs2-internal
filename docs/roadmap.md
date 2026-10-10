@@ -13,11 +13,12 @@
 ## Phase 1 — External dumper (no injection)
 - [x] Module enumeration + fingerprinting
 - [x] Pattern scanner + RIP-relative resolution
-- [x] Fixture-based unit tests (pattern engine)
-- [x] Basic CLI (`--pattern`, `--exports`, `--json`)
-- [ ] schema walker → generated headers
-- [ ] `CreateInterface` resolver
-- [ ] Emit `offsets.json` / `interfaces.hpp` / `schemas/*.hpp`
+- [x] Fixture-based unit tests (pattern, interfaces, schema)
+- [x] Basic CLI (`--pattern`, `--exports`, `--interfaces`, `--schema`, `--json`)
+- [x] schema walker (traversal + JSON emit; layout needs calibration)
+- [x] `CreateInterface` resolver (seed-based)
+- [ ] Header generation (`interfaces.hpp`, `schemas/*.hpp`) from JSON
+- [ ] Calibrate `SchemaLayout` + resolve schema-system address against the live build
 - [ ] Optional `memflow` backend behind `ProcessMemory`
 
 ## Phase 2 — Manual-map loader

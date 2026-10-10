@@ -8,9 +8,12 @@
 //! `memflow` backend can be added without touching the analysis code.
 
 pub mod analysis;
+pub mod interfaces;
 pub mod memory;
 pub mod output;
 pub mod pattern;
 pub mod pe;
+pub mod reader;
+pub mod schema;
 
 pub use pattern::{resolve_rip_relative, Pattern, Signature};
