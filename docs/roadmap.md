@@ -5,9 +5,10 @@
 - [x] Enable built-in LSP
 - [x] msvc-wine toolchain + cross-compiled `payload.dll`
 - [x] Ghidra + ReVa installed
-- [x] MCP servers (treesitter connected; ReVa verified — needs `opencode service restart` to activate)
-- [ ] Steam + multilib + Proton; offline `-insecure` loop
+- [x] MCP servers (treesitter + reva connected)
+- [x] Offline run loop documented (docs/architecture.md)
 - [ ] Install the Windows (Proton) build of the target
+- [ ] Verify offline `-insecure` run
 
 ## Phase 1 — External dumper (no injection)
 - [ ] Module enumeration + fingerprinting
