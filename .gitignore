@@ -1,0 +1,25 @@
+# Meson
+build/
+build-*/
+_install/
+
+# msvc-wine toolchain (large, non-redistributable)
+toolchain/msvc/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+uv.lock
+
+# Rust
+target/
+
+# Local artifacts / captured dumps (never commit game binaries)
+artifacts/
+*.dump
+*.bin
+
+# Editor / OS
+.DS_Store
+*.swp

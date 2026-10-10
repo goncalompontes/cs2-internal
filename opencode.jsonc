@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Built-in LSP (clangd auto-installs for C/C++; pyright for Python; rust-analyzer for Rust).
+  // Meson emits compile_commands.json so clangd resolves our C++ correctly.
+  "lsp": true,
+
+  // MCP servers are added after their dependencies are installed (see docs/architecture.md):
+  //   - treesitter-mcp : token-cheap structural code views
+  //   - ReVa           : Ghidra-powered static RE (needs Ghidra 12 + ReVa extension)
+  // Add them with:  opencode mcp add <name> ...
+  "mcp": {
+    "servers": {}
+  }
+}
