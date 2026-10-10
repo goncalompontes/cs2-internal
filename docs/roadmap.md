@@ -22,7 +22,11 @@
 - [ ] Optional `memflow` backend behind `ProcessMemory`
 
 ## Phase 2 — Manual-map loader
-- [ ] PE map (sections, relocs, imports, TLS)
+- [x] Portable PE parser (headers, sections, imports, relocations, exports) — fixture-tested
+- [x] Manual-map core (section mapping + base relocations) — fixture-tested
+- [ ] `ImageSink` over real remote target memory
+- [ ] Import resolution against target modules
+- [ ] TLS + exception handling
 - [ ] Load a trivial logging DLL into the offline target process
 - [ ] Bypass `LoadLibrary` block / signature check via manual mapping
 
