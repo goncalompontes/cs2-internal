@@ -60,3 +60,15 @@ request #4499). Therefore:
 Python for glue/analysis, C++ for the payload, Rust only where performance
 demands (e.g. the external dumper may be Rust + `memflow`).
 
+## ADR-0010 — Naming & no globals (Rust-style)
+**Status:** accepted
+
+Naming follows Rust conventions: `snake_case` for functions/variables/
+namespaces, `PascalCase` for types, `SCREAMING_SNAKE_CASE` for constants. No
+Hungarian/Windows prefixes (`g_`, `m_`, `p`, `dw`, `b`); `g_pSchemaSystem` is
+wrong, `schema_system` is right. Use `enum class` instead of flag ints.
+
+**No global mutable state.** State is passed explicitly or owned by an explicit
+context object. Prefer nested namespaces/modules over name prefixes. The
+target's own symbol names may appear in docs/comments only, never as our
+identifiers.

@@ -12,5 +12,9 @@ project('cs2-internal', 'cpp',
 # cross-compiled for Windows (see toolchain/).
 subdir('tools')
 
+# Platform-independent manual-map core (built natively here for its tests, and
+# cross-compiled into the payload).
+subdir('payload/loader')
+
 # Quick self-check so `meson test` is meaningful from day one.
 test('host-probe', host_probe)

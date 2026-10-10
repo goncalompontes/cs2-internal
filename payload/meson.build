@@ -17,6 +17,8 @@ project('cs2-payload', 'cpp',
     'buildtype=debugoptimized',
   ])
 
+subdir('loader')
+
 if host_machine.system() != 'windows'
   message(
     'cs2-payload targets Windows. This configure produced no targets. ' +
@@ -25,5 +27,7 @@ else
   shared_library('payload',
     'src/payload_main.cpp',
     name_prefix : '',   # payload.dll, not libpayload.dll
-    install : false)
+    install : false,
+    include_directories : loader_inc,
+    link_with : loader_lib)
 endif

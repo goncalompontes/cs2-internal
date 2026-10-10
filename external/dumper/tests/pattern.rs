@@ -64,7 +64,7 @@ fn signature_resolves_rva_with_rip() {
     bytes[match_off + 3..match_off + 7].copy_from_slice(&disp.to_le_bytes());
 
     let sig = Signature {
-        name: "dwTest".into(),
+        name: "test_offset".into(),
         module: "client.dll".into(),
         pattern: Pattern::parse("48 8B 05 ?? ?? ?? ??").unwrap(),
         rip_offset: Some(3),
