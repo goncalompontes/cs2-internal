@@ -16,7 +16,10 @@
 - [x] Fixture-based unit tests (pattern, interfaces, schema)
 - [x] Basic CLI (`--pattern`, `--exports`, `--interfaces`, `--schema`, `--json`)
 - [x] schema walker (traversal + JSON emit; layout needs calibration)
-- [x] `CreateInterface` resolver (seed-based)
+- [x] Offline `--file` analysis mode (no process needed)
+- [~] `CreateInterface` resolver — finds interface tables (123 in client.dll) but
+      not the full registration set; the authoritative `s_pInterfaceRegs` list
+      must be located via the `CreateInterface` export (disasm with ReVa)
 - [ ] Header generation (`interfaces.hpp`, `schemas/*.hpp`) from JSON
 - [ ] Calibrate `SchemaLayout` + resolve schema-system address against the live build
 - [ ] Optional `memflow` backend behind `ProcessMemory`

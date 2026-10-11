@@ -91,32 +91,32 @@ fn looks_like_interface_name(s: &str) -> bool {
     bytes[n - 1].is_ascii_digit() && bytes[n - 2].is_ascii_digit() && bytes[n - 3].is_ascii_digit()
 }
 
-/// Enumerate *all* interfaces by scanning the module for `InterfaceReg`-shaped
-/// structures, then walking from the discovered list heads.
+/// Enumerate *all* interfaces by scanning the module for `{create, name}`
+/// registration entries (16-byte stride in current builds).
 pub fn enumerate_all<R: MemoryRead>(reader: &R, base: usize, size: usize) -> Result<Vec<Interface>> {
     let bytes = reader.read_bytes(base, size)?;
     let end = base + size;
 
-    let mut candidates: Vec<usize> = Vec::new();
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
     let mut offset = 0usize;
-    while offset + INTERFACE_REG_SIZE <= bytes.len() {
+    while offset + 16 <= bytes.len() {
         let create = read_u64_at(&bytes, offset);
         let name_ptr = read_u64_at(&bytes, offset + 8) as usize;
-        let next = read_u64_at(&bytes, offset + 16) as usize;
-
-        if create >= base && create < end && name_ptr >= base && name_ptr < end
-            && (next == 0 || (next >= base && next < end))
-        {
+        if create >= base && create < end && name_ptr >= base && name_ptr < end {
             if let Some(name) = cstring_at(&bytes, name_ptr - base) {
-                if looks_like_interface_name(&name) {
-                    candidates.push(base + offset);
+                if looks_like_interface_name(&name) && seen.insert(name.clone()) {
+                    out.push(Interface {
+                        name,
+                        rva: base + offset,
+                        create_rva: create - base,
+                    });
                 }
             }
         }
         offset += 8;
     }
-
-    Ok(resolve_heads(reader, base, size, candidates))
+    Ok(out)
 }
 
 /// Enumerate interfaces by locating `InterfaceReg` nodes via pointers to the
