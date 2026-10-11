@@ -41,7 +41,7 @@
 
 ## Phase 4 — State introspection
 - [ ] Local player fields via schema offsets
-- [ ] Debug HUD (position/velocity/health/money/…)
+- [ ] Debug HUD (position/velocity/health/… values)
 - [ ] Control channel (IPC) + scenario runner
 
 ## Phase 5 — Interfaces, events, deeper introspection
