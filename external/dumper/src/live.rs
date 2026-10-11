@@ -191,6 +191,36 @@ pub fn read_span(mem: &dyn ProcessMemory, base: usize, size: usize) -> Vec<u8> {
     out
 }
 
+/// Read a module image, sizing it from the mapped range but preferring the PE
+/// header's `SizeOfImage` when it is larger (Wine maps most of a PE image
+/// anonymously, so `/proc/<pid>/maps` only reports the header page).
+pub fn read_module_image(mem: &dyn ProcessMemory, base: usize, mapped_size: usize) -> Vec<u8> {
+    const MAX: usize = 512 << 20;
+    let head = read_span(mem, base, 0x1000);
+    let mut size = mapped_size.max(0x1000);
+    if let Some(size_of_image) = pe_size_of_image(&head) {
+        if size_of_image > size {
+            size = size_of_image;
+        }
+    }
+    read_span(mem, base, size.min(MAX))
+}
+
+/// Decode `SizeOfImage` straight from PE headers. Deliberately does not use
+/// `goblin`: full parsing eagerly walks data directories and fails on a
+/// headers-only buffer.
+fn pe_size_of_image(head: &[u8]) -> Option<usize> {
+    if head.len() < 0x40 || &head[0..2] != b"MZ" {
+        return None;
+    }
+    let e_lfanew = u32::from_le_bytes(head[0x3c..0x40].try_into().ok()?) as usize;
+    if head.len() < e_lfanew + 0x54 || &head[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
+        return None;
+    }
+    let size = u32::from_le_bytes(head[e_lfanew + 0x50..e_lfanew + 0x54].try_into().ok()?);
+    Some(size as usize)
+}
+
 /// Regions eligible for a value scan: readable, optionally writable-only.
 pub fn scan_regions(mem: &dyn ProcessMemory, writable_only: bool) -> Vec<Region> {
     mem.regions()
@@ -325,6 +355,18 @@ mod tests {
         };
         assert!(scan_regions(&mem, true).is_empty());
         assert_eq!(scan_regions(&mem, false).len(), 1);
+    }
+
+    #[test]
+    fn decodes_size_of_image_from_headers() {
+        let mut head = vec![0u8; 0x200];
+        head[0..2].copy_from_slice(b"MZ");
+        head[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+        head[0x40..0x44].copy_from_slice(b"PE\0\0");
+        head[0x40 + 0x50..0x40 + 0x54].copy_from_slice(&0x2994000u32.to_le_bytes());
+        assert_eq!(pe_size_of_image(&head), Some(0x2994000));
+        // Not a PE.
+        assert_eq!(pe_size_of_image(&[0u8; 8]), None);
     }
 
     #[test]

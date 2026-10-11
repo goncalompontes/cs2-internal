@@ -286,12 +286,13 @@ fn scan_pattern(session: &Session, args: &Value) -> Result<String> {
     let pattern = Pattern::parse(text)?;
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(64) as usize;
 
-    let (base, size) = match args.get("module").and_then(Value::as_str) {
+    let (base, bytes) = match args.get("module").and_then(Value::as_str) {
         Some(name) => {
             let module = mem
                 .module_by_name(name)
                 .ok_or_else(|| anyhow!("module {name:?} not found"))?;
-            (module.base, module.size)
+            let bytes = live::read_module_image(&*mem, module.base, module.size);
+            (module.base, bytes)
         }
         None => {
             let base = live::parse_addr(
@@ -299,11 +300,11 @@ fn scan_pattern(session: &Session, args: &Value) -> Result<String> {
                     .ok_or_else(|| anyhow!("need module or address"))?,
             )?;
             let size = args.get("size").and_then(Value::as_u64).unwrap_or(0x1000) as usize;
-            (base, size)
+            let bytes = live::read_span(&*mem, base, size);
+            (base, bytes)
         }
     };
 
-    let bytes = live::read_span(&*mem, base, size);
     let matches: Vec<String> = pattern
         .find_all(&bytes)
         .into_iter()
@@ -393,7 +394,7 @@ fn interfaces_cmd(session: &Session, args: &Value) -> Result<String> {
     let m = mem
         .module_by_name(module)
         .ok_or_else(|| anyhow!("module {module:?} not found"))?;
-    let bytes = live::read_span(&*mem, m.base, m.size);
+    let bytes = live::read_module_image(&*mem, m.base, m.size);
     let reader = BytesReader::new(m.base, bytes);
 
     let found = if let Some(global) = args.get("global").and_then(Value::as_str) {

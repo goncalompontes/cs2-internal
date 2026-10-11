@@ -1,14 +1,16 @@
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 
+use cs2_dumper::analysis;
 use cs2_dumper::interfaces;
+use cs2_dumper::live;
 use cs2_dumper::memory::{find_pid, LinuxProcMemory, ProcessMemory};
 use cs2_dumper::output::{self, DumpManifest};
 use cs2_dumper::pattern::Pattern;
 use cs2_dumper::pe::{self, PeInfo};
 use cs2_dumper::reader::BytesReader;
 use cs2_dumper::schema::{self, SchemaLayout};
-use cs2_dumper::{analysis, sdk};
+use cs2_dumper::sdk;
 
 /// External offset/interface/schema dumper.
 #[derive(Parser, Debug)]
@@ -61,6 +63,18 @@ struct Cli {
     /// Address of the CSchemaSystem (hex, e.g. 0x7ff6...).
     #[arg(long)]
     schema_system: Option<String>,
+
+    /// Read raw bytes at an address (hex) and print them as hex.
+    #[arg(long)]
+    read: Option<String>,
+
+    /// Dereference a pointer at an address (hex) and print the pointed-to address.
+    #[arg(long)]
+    read_ptr: Option<String>,
+
+    /// Number of bytes for --read (default 16).
+    #[arg(long, default_value_t = 16)]
+    len: usize,
 
     /// Emit JSON instead of human-readable text.
     #[arg(long)]
@@ -136,11 +150,31 @@ fn main() -> Result<()> {
     // Live process mode.
     let pid = match cli.pid {
         Some(pid) => pid,
-        None => find_pid(&cli.process)
-            .ok_or_else(|| anyhow!("process {:?} not found; is the client running?", cli.process))?,
+        None => find_pid(&cli.process).ok_or_else(|| {
+            anyhow!(
+                "process {:?} not found; is the client running?",
+                cli.process
+            )
+        })?,
     };
     let mem = LinuxProcMemory::open(pid).with_context(|| format!("opening memory of pid {pid}"))?;
     let modules = mem.modules();
+
+    if let Some(addr_text) = &cli.read_ptr {
+        let addr = parse_hex(addr_text)?;
+        let bytes = mem.read_vec(addr, 8).map_err(|e| anyhow!(e.to_string()))?;
+        println!("0x{:x}", u64::from_le_bytes(bytes[..8].try_into().unwrap()));
+        return Ok(());
+    }
+    if let Some(addr_text) = &cli.read {
+        let addr = parse_hex(addr_text)?;
+        let bytes = mem
+            .read_vec(addr, cli.len)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        println!("{}", hex.join(" "));
+        return Ok(());
+    }
 
     if cli.json && cli.pattern.is_none() && !cli.exports && !cli.interfaces && !cli.schema {
         let manifest = DumpManifest::new(&cli.process, pid, &modules);
@@ -149,9 +183,16 @@ fn main() -> Result<()> {
     }
 
     if !cli.json {
-        println!("process {:?} (pid {pid}) — {} modules", cli.process, modules.len());
+        println!(
+            "process {:?} (pid {pid}) — {} modules",
+            cli.process,
+            modules.len()
+        );
         for m in &modules {
-            println!("  {:<28} base=0x{:012x} size=0x{:x}", m.name, m.base, m.size);
+            println!(
+                "  {:<28} base=0x{:012x} size=0x{:x}",
+                m.name, m.base, m.size
+            );
         }
     }
 
@@ -159,7 +200,7 @@ fn main() -> Result<()> {
         let module = mem
             .module_by_name(&cli.module)
             .ok_or_else(|| anyhow!("module {:?} not found", cli.module))?;
-        let bytes = read_module(&mem, module.base, module.size);
+        let bytes = live::read_module_image(&mem, module.base, module.size);
         let info = pe::parse_image(&bytes).ok();
         return analyze(&cli, &module.name, &bytes, module.base, info.as_ref());
     }
@@ -178,7 +219,13 @@ fn main() -> Result<()> {
         }
         println!("\nschema — {} class(es)", classes.len());
         for c in &classes {
-            println!("  {:<24} {} ({} fields, size 0x{:x})", c.module, c.name, c.fields.len(), c.size);
+            println!(
+                "  {:<24} {} ({} fields, size 0x{:x})",
+                c.module,
+                c.name,
+                c.fields.len(),
+                c.size
+            );
             for f in &c.fields {
                 println!("      +0x{:<4x} {:<32} {}", f.offset, f.name, f.type_name);
             }
@@ -189,11 +236,21 @@ fn main() -> Result<()> {
 }
 
 /// Shared analysis over an in-memory module image.
-fn analyze(cli: &Cli, module_name: &str, bytes: &[u8], base: usize, info: Option<&PeInfo>) -> Result<()> {
+fn analyze(
+    cli: &Cli,
+    module_name: &str,
+    bytes: &[u8],
+    base: usize,
+    info: Option<&PeInfo>,
+) -> Result<()> {
     if let Some(pattern_text) = &cli.pattern {
         let pattern = Pattern::parse(pattern_text).context("parsing pattern")?;
         let matches = pattern.find_all(bytes);
-        println!("\npattern {:?} in {module_name} — {} match(es)", pattern_text, matches.len());
+        println!(
+            "\npattern {:?} in {module_name} — {} match(es)",
+            pattern_text,
+            matches.len()
+        );
         for hit in matches.iter().take(16) {
             println!("  0x{:012x}  {module_name} + 0x{hit:x}", base + hit);
         }
@@ -203,7 +260,11 @@ fn analyze(cli: &Cli, module_name: &str, bytes: &[u8], base: usize, info: Option
         match info {
             Some(info) => {
                 println!("\n{module_name} — {} exports", info.exports.len());
-                for e in info.exports.iter().filter(|e| e.name.contains("CreateInterface")) {
+                for e in info
+                    .exports
+                    .iter()
+                    .filter(|e| e.name.contains("CreateInterface"))
+                {
                     println!("  {:<32} rva=0x{:x}", e.name, e.rva);
                 }
             }
@@ -231,7 +292,10 @@ fn analyze(cli: &Cli, module_name: &str, bytes: &[u8], base: usize, info: Option
         } else {
             println!("\n{module_name} — {} interface(s)", found.len());
             for it in &found {
-                println!("  {:<40} rva=0x{:x} create=0x{:x}", it.name, it.rva, it.create_rva);
+                println!(
+                    "  {:<40} rva=0x{:x} create=0x{:x}",
+                    it.name, it.rva, it.create_rva
+                );
             }
         }
     }
@@ -282,21 +346,12 @@ fn read_json<T: serde::de::DeserializeOwned>(path: Option<&str>) -> Result<Vec<T
     }
 }
 
-/// Read a module range tolerantly: unmapped gaps become zeros rather than errors.
-fn read_module(mem: &impl ProcessMemory, base: usize, size: usize) -> Vec<u8> {
-    const CHUNK: usize = 0x1000;
-    let mut out = vec![0u8; size];
-    let mut off = 0;
-    while off < size {
-        let n = CHUNK.min(size - off);
-        let _ = mem.read(base + off, &mut out[off..off + n]);
-        off += n;
-    }
-    out
-}
-
+/// Parse `0x`-prefixed hex (or plain decimal) into a usize.
 fn parse_hex(text: &str) -> Result<usize> {
     let t = text.trim();
-    let t = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    let t = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .unwrap_or(t);
     usize::from_str_radix(t, 16).with_context(|| format!("invalid hex address: {text:?}"))
 }

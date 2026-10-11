@@ -129,10 +129,11 @@ pub fn parse_regions(maps: &str) -> Vec<Region> {
     let mut out = Vec::new();
     for line in maps.lines() {
         // e.g. 7f...-7f... rw-p 00000000 08:01 1234  /path  (path optional)
-        let mut fields = line.split_whitespace();
-        let Some(range) = fields.next() else { continue };
-        let Some(perms) = fields.next() else { continue };
-        let Some((start_s, end_s)) = range.split_once('-') else {
+        let parts: Vec<&str> = line.splitn(6, ' ').collect();
+        if parts.len() < 5 {
+            continue;
+        }
+        let Some((start_s, end_s)) = parts[0].split_once('-') else {
             continue;
         };
         let (Ok(start), Ok(end)) = (
@@ -141,12 +142,16 @@ pub fn parse_regions(maps: &str) -> Vec<Region> {
         ) else {
             continue;
         };
+        let perms = parts[1];
         let mut p = perms.chars();
         let read = p.next() == Some('r');
         let write = p.next() == Some('w');
         let execute = p.next() == Some('x');
-        // Remaining fields: offset, dev, inode, then an optional path.
-        let path = fields.nth(2).unwrap_or("").to_string();
+        let path = parts
+            .get(5)
+            .map(|s| s.trim_start())
+            .unwrap_or("")
+            .to_string();
         out.push(Region {
             start,
             end,
@@ -166,14 +171,16 @@ fn parse_maps(maps: &str) -> Vec<ModuleInfo> {
 
     for line in maps.lines() {
         // e.g. 7f...-7f... r-xp 00000000 08:01 1234  /path/to/client.dll
-        let Some((range, rest)) = line.split_once(' ') else {
+        // Split on the first 5 spaces; the remainder is the path, which may
+        // itself contain spaces (e.g. "Counter-Strike Global Offensive").
+        let parts: Vec<&str> = line.splitn(6, ' ').collect();
+        if parts.len() < 6 {
+            continue;
+        }
+        let Some((start_s, end_s)) = parts[0].split_once('-') else {
             continue;
         };
-        let Some((start_s, end_s)) = range.split_once('-') else {
-            continue;
-        };
-        // path is the last whitespace-separated field
-        let path = rest.split_whitespace().last().unwrap_or("");
+        let path = parts[5].trim_start();
         if !is_module_path(path) {
             continue;
         }
@@ -214,33 +221,102 @@ fn is_module_path(path: &str) -> bool {
 }
 
 /// Find a PID by process name: matches `/proc/<pid>/comm`, the `exe` basename,
-/// or the target's image name in the command line (handles Wine processes).
+/// or any command-line argument's basename (handles Wine processes, whose comm
+/// is a thread name and whose argv uses Windows-style paths). When several
+/// processes match (e.g. Steam's `reaper` wrapper), the one that actually maps
+/// the named image is preferred.
 pub fn find_pid(name: &str) -> Option<u32> {
     let entries = std::fs::read_dir("/proc").ok()?;
+    let mut fallback = None;
     for entry in entries.flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
         };
-        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-            if comm.trim().eq_ignore_ascii_case(name) {
-                return Some(pid);
-            }
+        let comm_match = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .map(|comm| comm.trim().eq_ignore_ascii_case(name))
+            .unwrap_or(false);
+        let exe_match = std::fs::read_link(format!("/proc/{pid}/exe"))
+            .map(|exe| {
+                exe.file_name()
+                    .is_some_and(|f| f.to_string_lossy().eq_ignore_ascii_case(name))
+            })
+            .unwrap_or(false);
+        let cmd_match = std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|cmdline| {
+                String::from_utf8_lossy(&cmdline)
+                    .split('\0')
+                    .any(|arg| basename(arg).eq_ignore_ascii_case(name))
+            })
+            .unwrap_or(false);
+
+        if !(comm_match || exe_match || cmd_match) {
+            continue;
         }
-        if let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) {
-            if exe
-                .file_name()
-                .map(|f| f.to_string_lossy().eq_ignore_ascii_case(name))
-                .unwrap_or(false)
-            {
-                return Some(pid);
-            }
+        if maps_image(pid, name) {
+            return Some(pid);
         }
-        if let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) {
-            let cmdline = String::from_utf8_lossy(&cmdline);
-            if cmdline.split('\0').any(|a| a.eq_ignore_ascii_case(name)) {
-                return Some(pid);
-            }
-        }
+        fallback.get_or_insert(pid);
     }
-    None
+    fallback
+}
+
+/// Last path component, splitting on both Unix and Windows separators.
+fn basename(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// Whether `/proc/<pid>/maps` maps a file whose basename is `name`.
+fn maps_image(pid: u32, name: &str) -> bool {
+    let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else {
+        return false;
+    };
+    maps.lines().any(|line| {
+        line.splitn(6, ' ')
+            .nth(5)
+            .is_some_and(|path| basename(path.trim()).eq_ignore_ascii_case(name))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MAPS: &str = "\
+6a0000-6b0000 r-xp 00000000 08:01 1234       /home/u/Counter-Strike Global Offensive/game/csgo/bin/win64/client.dll
+6b0000-6c0000 rw-p 00000000 00:00 0          [heap]
+7f00-8000 rw-s 00000000 08:01 99             /files/lib/wine/x86_64-windows/d3d11.dll
+";
+
+    #[test]
+    fn module_paths_may_contain_spaces() {
+        let modules = parse_maps(MAPS);
+        let names: Vec<&str> = modules.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"client.dll"), "got {names:?}");
+        assert!(names.contains(&"d3d11.dll"));
+        // [heap] is not a module.
+        assert_eq!(modules.len(), 2);
+        let client = modules.iter().find(|m| m.name == "client.dll").unwrap();
+        assert_eq!(client.base, 0x6a0000);
+        assert!(client
+            .path
+            .to_string_lossy()
+            .contains("Counter-Strike Global Offensive"));
+    }
+
+    #[test]
+    fn regions_parse_perms_and_spaced_paths() {
+        let regions = parse_regions(MAPS);
+        assert_eq!(regions.len(), 3);
+        assert!(regions[0].read && regions[0].execute && !regions[0].write);
+        assert!(regions[0].path.ends_with("client.dll"));
+        assert!(regions[1].write);
+        assert_eq!(regions[1].path, "[heap]");
+    }
+
+    #[test]
+    fn basename_handles_unix_and_windows_separators() {
+        assert_eq!(basename("/a/b/cs2.exe"), "cs2.exe");
+        assert_eq!(basename(r"S:\steamapps\game\bin\win64\cs2.exe"), "cs2.exe");
+        assert_eq!(basename("client.dll"), "client.dll");
+    }
 }

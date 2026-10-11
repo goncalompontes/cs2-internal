@@ -88,3 +88,12 @@ From `FUN_1800107d0` (`param_1` = `CSchemaSystem*`):
   vector/field stride) — the definitive source is a registrar's field walk, or a
   **runtime** dump via the `CSchemaSystem` global.
 - The exact type-scopes vector offset on `CSchemaSystem`.
+
+## Live status
+
+The live `CSchemaSystem*` is resolved (`config/schema-heads.json` +
+`scripts/calibrate-live.sh`), but `SchemaLayout` still holds placeholder offsets,
+so a live schema dump reads off the end of the object and errors (`EIO`).
+Calibrating `SchemaLayout` against the live object is the next step; the
+`cs2-live` MCP tools (`read`, `resolve_chain`, `scan_value`) are the intended
+means.

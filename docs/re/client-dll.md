@@ -37,6 +37,27 @@ Debug strings present in `.rdata` (good reference points for signatures):
 - `CEntitySystem::RegisterEntityClass`, `CEntitySystem::AllocateEntityIdentity`
 - `EntitySystem - Entity Networking - start/finish`, `EntitySystem - Class Tables`
 
+## Live (runtime) findings
+
+From `scripts/calibrate-live.sh` against the running client (Proton/Wine):
+
+- **ASLR**: module image bases differ per run (e.g. `client.dll` at
+  `0x6fffe57b0000`); the static VAs here are image-base-relative, so add the
+  live base to the RVAs.
+- **Interface counts (authoritative linked list):** `client.dll` 7,
+  `engine2.dll` 34, `schemasystem.dll` 1 (`SchemaSystem_001`). The earlier
+  16-byte heuristic scan latches onto an unrelated crypto-name table — do not
+  use it.
+- **Anonymous mappings:** Wine maps most of a PE image anonymously, so
+  `/proc/<pid>/maps` only reports a module's header page (and sometimes one
+  section). Module sizes and image extents must come from the PE
+  `SizeOfImage`, not the maps range.
+- **Spaced install path:** the depot lives under
+  `Counter-Strike Global Offensive`, so maps paths contain spaces — parse the
+  path as the remainder after the inode field.
+- **`CSchemaSystem*`** resolves to the same object from both the `client.dll`
+  and `schemasystem.dll` globals (e.g. `0x6ffff7696710`).
+
 ## TODO
 
 - Entity-list offset inside `CGameEntitySystem`.
