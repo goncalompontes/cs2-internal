@@ -25,7 +25,9 @@ out_dir="${2:-$root/payload/sdk}"
 stamp="${3:-}"
 
 if [[ $live -eq 1 ]]; then
-  "$root/scripts/calibrate-live.sh" "$dump_dir"
+  if ! "$root/scripts/calibrate-live.sh" "$dump_dir"; then
+    echo "gen-sdk: live calibration failed; using existing dumps in $dump_dir" >&2
+  fi
 fi
 
 args=(--gen "$out_dir")

@@ -63,6 +63,12 @@ Two loops feed `payload/sdk/*.hpp`:
    With `-Dlive_calibration=true` it refreshes the dumps first, so a release
    build can calibrate against a running target as part of the build.
 
+`scripts/release.sh` ties this together: it builds the dumper, runs live
+calibration, then configures the host build with `-Dlive_calibration=true` for
+a release build (and cross-builds the payload when msvc-wine is set up). Note
+that a `cargo build --release` replaces the dumper binary and **drops its file
+capability**, so re-apply `setcap cap_sys_ptrace+ep` after each dumper build.
+
 Reading another process's memory is subject to the ptrace policy; see the
 ptrace section below.
 
