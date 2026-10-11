@@ -29,11 +29,11 @@
 ## Phase 2 — Manual-map loader
 - [x] Portable PE parser (headers, sections, imports, relocations, exports) — fixture-tested
 - [x] Manual-map core (section mapping + base relocations) — fixture-tested
-- [ ] `ImageSink` over real remote target memory
-- [ ] Import resolution against target modules
-- [ ] TLS + exception handling
-- [ ] Load a trivial logging DLL into the offline target process
-- [ ] Bypass `LoadLibrary` block / signature check via manual mapping
+- [x] Map the image into real remote memory (local map + `WriteProcessMemory`)
+- [x] Import resolution against target modules (remote export-table walk)
+- [ ] TLS + exception handling (needed for the static-CRT payload)
+- [x] Load a trivial (CRT-less) logging DLL into a target process
+- [x] Bypass `LoadLibrary` block / signature check via manual mapping
 
 ## Phase 3 — Hook engine + overlay
 - [ ] Hook engine (vtable + inline)

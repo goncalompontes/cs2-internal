@@ -37,6 +37,16 @@ void boot() {
                 entity->size, entity->fields.size(), health);
   }
 #endif
+
+  // Marker file so injection is observable from outside the target process
+  // (printf may not be visible under the game's stdout redirection).
+#if defined(_WIN32)
+  if (std::FILE* file = std::fopen("C:\\cs2-payload-boot.txt", "a")) {
+    std::fprintf(file, "[cs2-payload] booted (pid %lu)\n",
+                 static_cast<unsigned long>(GetCurrentProcessId()));
+    std::fclose(file);
+  }
+#endif
 }
 
 }  // namespace cs2::payload

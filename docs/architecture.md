@@ -45,7 +45,12 @@ meson compile -C build-payload
 - `payload/features` — read-only state queries, debug HUD data assembly.
 - `payload/render` — `UiBackend` abstraction; **RmlUi** primary, **ImGui**
   fallback.
-- `injector` — manual-map injector run inside the same Proton prefix.
+- `injector` — manual-map injector (`injector.exe`, Windows x64) run inside the
+  same Proton prefix: parse the payload, map sections + apply relocations into a
+  local buffer, resolve imports by reading the target's module export tables,
+  `WriteProcessMemory` the image, then call the entry point on a remote thread
+  via a small x64 stub. Bypasses the target's `LoadLibrary`/signature checks.
+  Includes a `victim.exe` + CRT-less `trivial.dll` for offline validation.
 - `scripts/` — `gen-sdk.sh` (build-time header render), `calibrate-live.sh`
   (live dumps → `calibration/*.json`), `mcp-live.sh` (MCP wrapper).
 - `external/dumper --mcp` — live-analysis **MCP server** (stdio), wired into

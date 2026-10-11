@@ -143,6 +143,7 @@ void parse_imports(const ImageInfo& image, Bytes bytes, std::uint32_t dir_rva,
           break;
         }
         ImportSymbol symbol;
+        symbol.iat_rva = first_thunk + static_cast<std::uint32_t>(t * 8);
         if ((entry & 0x8000000000000000ULL) != 0) {
           symbol.by_ordinal = true;
           symbol.ordinal = static_cast<std::uint16_t>(entry & 0xFFFF);

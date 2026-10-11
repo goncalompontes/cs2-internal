@@ -37,6 +37,8 @@ struct ImportSymbol {
   std::string name;
   std::uint16_t ordinal{};
   bool by_ordinal{};
+  /// RVA of this symbol's slot in the import address table.
+  std::uint32_t iat_rva{};
 };
 
 struct ImportModule {

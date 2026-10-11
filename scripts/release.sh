@@ -66,11 +66,13 @@ meson compile -C build-release
 meson test -C build-release
 
 if [[ -f toolchain/msvcenv-native.sh ]]; then
-  echo "==> payload (cross, Windows)"
+  echo "==> payload + injector (cross, Windows)"
   # shellcheck disable=SC1091
   BIN=toolchain/msvc/bin/x64 . toolchain/msvcenv-native.sh
   setup build-payload payload --cross-file toolchain/windows-msvc.ini --buildtype=release
   meson compile -C build-payload
+  setup build-injector injector --cross-file toolchain/windows-msvc.ini --buildtype=release
+  meson compile -C build-injector
 else
   echo "==> payload skipped (toolchain/msvc not set up; run toolchain/setup-msvc-wine.sh)"
 fi
