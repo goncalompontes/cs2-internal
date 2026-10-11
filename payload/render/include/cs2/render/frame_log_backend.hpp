@@ -10,7 +10,7 @@ namespace cs2::render {
 // for the real overlay until RmlUi/ImGui lands.
 class FrameLogBackend final : public UiBackend {
  public:
-  [[nodiscard]] bool initialize() override;
+  [[nodiscard]] bool initialize(const RenderContext& context) override;
   void render() override;
   void shutdown() override;
 

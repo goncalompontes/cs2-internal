@@ -4,7 +4,8 @@
 
 namespace cs2::render {
 
-bool FrameLogBackend::initialize() {
+bool FrameLogBackend::initialize(const RenderContext& context) {
+  (void)context;
   std::puts("[cs2-render] frame-log backend initialized");
   return true;
 }

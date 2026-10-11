@@ -366,6 +366,41 @@ TlsSlot setup_tls(HANDLE process, std::uintptr_t remote_base,
   return slot;
 }
 
+/// Return the target's base for `name`, loading it into the target if needed
+/// (via a remote `LoadLibraryW` call).
+std::optional<std::uintptr_t> ensure_module(HANDLE process, const std::string& name) {
+  if (const auto base = remote_module_base(process, name.c_str())) {
+    return base;
+  }
+  const auto kernel32_base = remote_module_base(process, "kernel32.dll");
+  if (!kernel32_base) {
+    return std::nullopt;
+  }
+  const auto load_library = resolve_export(process, *kernel32_base, "LoadLibraryW", 0, false);
+  if (!load_library) {
+    return std::nullopt;
+  }
+  const std::wstring wide_name(name.begin(), name.end());
+  const std::size_t bytes = (wide_name.size() + 1) * sizeof(wchar_t);
+  void* memory = VirtualAllocEx(process, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  if (memory == nullptr) {
+    return std::nullopt;
+  }
+  if (!write_remote(process, reinterpret_cast<std::uintptr_t>(memory), wide_name.c_str(), bytes)) {
+    return std::nullopt;
+  }
+  HANDLE thread = CreateRemoteThread(process, nullptr, 0,
+                                     reinterpret_cast<LPTHREAD_START_ROUTINE>(*load_library),
+                                     memory, 0, nullptr);
+  if (thread == nullptr) {
+    return std::nullopt;
+  }
+  WaitForSingleObject(thread, 10000);
+  CloseHandle(thread);
+  // Re-enumerate: the returned HMODULE may exceed the 32-bit thread exit code.
+  return remote_module_base(process, name.c_str());
+}
+
 std::vector<std::byte> read_file(const char* path) {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
@@ -418,7 +453,7 @@ std::vector<std::byte> make_entry_stub(std::uintptr_t base, std::uintptr_t entry
 }
 
 void print_usage() {
-  std::puts("usage: injector.exe <process-name|pid> <payload.dll> [--no-call]");
+  std::puts("usage: injector.exe <process-name|pid> <payload.dll> [--no-call] [--load-missing]");
 }
 
 }  // namespace
@@ -430,7 +465,12 @@ int main(int argc, char** argv) {
   }
   const std::string target = argv[1];
   const std::string dll_path = argv[2];
-  const bool call_entry = !(argc > 3 && std::strcmp(argv[3], "--no-call") == 0);
+  bool call_entry = true;
+  bool load_missing = false;
+  for (int i = 3; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--no-call") == 0) call_entry = false;
+    if (std::strcmp(argv[i], "--load-missing") == 0) load_missing = true;
+  }
 
   std::uint32_t pid = 0;
   if (target.find_first_not_of("0123456789") == std::string::npos) {
@@ -485,7 +525,10 @@ int main(int argc, char** argv) {
 
   auto* bytes = sink.view().data();
   for (const auto& module : image.imports) {
-    const auto module_base = remote_module_base(process, module.name.c_str());
+    std::optional<std::uintptr_t> module_base = remote_module_base(process, module.name.c_str());
+    if (!module_base && load_missing) {
+      module_base = ensure_module(process, module.name);
+    }
     if (!module_base) {
       std::printf("injector: import module %s not found in target\n", module.name.c_str());
       return 1;

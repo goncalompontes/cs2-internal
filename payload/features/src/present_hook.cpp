@@ -22,7 +22,7 @@ PresentFn g_original_present = nullptr;
 
 long __stdcall present_detour(void* swapchain, unsigned sync_interval, unsigned flags) {
   if (g_active != nullptr) {
-    g_active->on_present();
+    g_active->on_present(swapchain);
   }
   return g_original_present(swapchain, sync_interval, flags);
 }
@@ -152,14 +152,39 @@ void PresentHook::uninstall() noexcept {
   if (!installed_) {
     return;
   }
+  if (backend_ready_ && backend_ != nullptr) {
+    backend_->shutdown();
+    backend_ready_ = false;
+  }
   g_active = nullptr;
   hook_.reset();
   installed_ = false;
 }
 
-void PresentHook::on_present() noexcept {
+void PresentHook::on_present(void* swapchain) noexcept {
   ++frames_;
-  if (backend_ != nullptr) {
+#if defined(_WIN32)
+  if (!backend_ready_ && swapchain != nullptr) {
+    auto* chain = static_cast<IDXGISwapChain*>(swapchain);
+    ID3D11Device* device = nullptr;
+    if (chain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)) >= 0 &&
+        device != nullptr) {
+      ID3D11DeviceContext* device_context = nullptr;
+      device->GetImmediateContext(&device_context);
+      DXGI_SWAP_CHAIN_DESC desc{};
+      chain->GetDesc(&desc);
+      context_.device = device;
+      context_.device_context = device_context;
+      context_.hwnd = desc.OutputWindow;
+      context_.swapchain = swapchain;
+      backend_ready_ = backend_ != nullptr && backend_->initialize(context_);
+      if (!backend_ready_) {
+        std::puts("[cs2-features] UI backend initialization failed");
+      }
+    }
+  }
+#endif
+  if (backend_ready_ && backend_ != nullptr) {
     backend_->render();
   }
 }

@@ -26,10 +26,12 @@ class PresentHook {
   [[nodiscard]] std::uint64_t frames() const noexcept { return frames_; }
 
   // Invoked by the detour before the original Present.
-  void on_present() noexcept;
+  void on_present(void* swapchain) noexcept;
 
  private:
   render::UiBackend* backend_;
+  render::RenderContext context_{};
+  bool backend_ready_ = false;
   std::unique_ptr<hooks::VtableHook> hook_;
   std::uint64_t frames_ = 0;
   bool installed_ = false;

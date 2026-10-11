@@ -5,7 +5,7 @@
 #include <cstdio>
 
 #include "cs2/features/present_hook.hpp"
-#include "cs2/render/frame_log_backend.hpp"
+#include "cs2/render/imgui_backend.hpp"
 
 #if __has_include("interfaces.hpp")
 #include "interfaces.hpp"
@@ -26,7 +26,7 @@ namespace {
 
 // Lifetime owner for the payload's subsystems (constructed on first boot).
 struct Runtime {
-  render::FrameLogBackend backend;
+  render::ImGuiBackend backend;
   features::PresentHook present{backend};
 };
 
@@ -64,9 +64,7 @@ void boot() {
   }
 #endif
 
-  if (!runtime().backend.initialize()) {
-    std::puts("[cs2-payload] UI backend failed to initialize");
-  }
+  // The Present hook initializes the UI backend once the swapchain is available.
   runtime().present.install();
 }
 

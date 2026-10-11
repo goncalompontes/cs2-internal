@@ -44,6 +44,7 @@ if host_machine.system() != 'windows'
     'cs2-payload targets Windows. This configure produced no targets. ' +
     'Use --cross-file toolchain/windows-msvc.ini to build the DLL.')
 else
+  subdir('third_party/imgui')
   subdir('hooks')
   subdir('render')
   subdir('features')

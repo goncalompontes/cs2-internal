@@ -18,7 +18,9 @@ wine injector.exe <process-name|pid> <payload.dll> [--no-call]
 ```
 
 `--no-call` maps and writes the image without invoking the entry point (useful
-to inspect the mapped image).
+to inspect the mapped image). `--load-missing` loads import modules that the
+target doesn't already have (via a remote `LoadLibraryW`); off by default, since
+a payload that needs a graphics stack should target a process that has one.
 
 ## Build
 
