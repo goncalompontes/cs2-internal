@@ -30,9 +30,11 @@
 - [x] Portable PE parser (headers, sections, imports, relocations, exports) — fixture-tested
 - [x] Manual-map core (section mapping + base relocations) — fixture-tested
 - [x] Map the image into real remote memory (local map + `WriteProcessMemory`)
-- [x] Import resolution against target modules (remote export-table walk)
-- [ ] TLS + exception handling (needed for the static-CRT payload)
-- [x] Load a trivial (CRT-less) logging DLL into a target process
+- [x] Import resolution against target modules (remote export-table walk, incl. forwarders)
+- [x] Register the image in the target's PEB `Ldr` loader list
+- [~] TLS + exception handling — the payload has no TLS directory; `.pdata`
+      exception tables are not yet registered (fine for non-throwing code)
+- [x] Load a DLL (trivial + the real `payload.dll`) into a target process
 - [x] Bypass `LoadLibrary` block / signature check via manual mapping
 
 ## Phase 3 — Hook engine + overlay

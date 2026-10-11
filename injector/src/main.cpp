@@ -105,11 +105,107 @@ std::string read_remote_string(HANDLE process, std::uintptr_t address, std::size
   return std::string(buffer.data());  // stops at NUL
 }
 
+std::uint64_t read_u64(HANDLE process, std::uintptr_t address) {
+  std::uint64_t value = 0;
+  read_remote(process, address, &value, sizeof(value));
+  return value;
+}
+
+bool write_u16(HANDLE process, std::uintptr_t address, std::uint16_t value) {
+  return write_remote(process, address, &value, sizeof(value));
+}
+
+bool write_u32(HANDLE process, std::uintptr_t address, std::uint32_t value) {
+  return write_remote(process, address, &value, sizeof(value));
+}
+
+bool write_u64(HANDLE process, std::uintptr_t address, std::uint64_t value) {
+  return write_remote(process, address, &value, sizeof(value));
+}
+
+// LDR_DATA_TABLE_ENTRY / PEB offsets (x64).
+constexpr std::size_t k_peb_ldr = 0x18;
+constexpr std::size_t k_ldr_in_load_order = 0x10;
+constexpr std::size_t k_ldr_in_memory_order = 0x20;
+constexpr std::size_t k_ldr_dll_base = 0x30;
+constexpr std::size_t k_ldr_entry_point = 0x38;
+constexpr std::size_t k_ldr_size_of_image = 0x40;
+constexpr std::size_t k_ldr_full_name = 0x48;
+constexpr std::size_t k_ldr_base_name = 0x58;
+
+/// Insert an LDR_DATA_TABLE_ENTRY for the mapped image into the target's PEB
+/// loader list, so loader-dependent CRT init (RtlPcToFileHeader,
+/// GetModuleHandle, ...) can find it.
+bool register_module(HANDLE process, std::uintptr_t base, std::uint32_t size_of_image,
+                     std::uint32_t entry_rva, const wchar_t* dll_name) {
+  using NtQueryInformationProcessFn = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  auto nt_query = reinterpret_cast<NtQueryInformationProcessFn>(
+      GetProcAddress(ntdll, "NtQueryInformationProcess"));
+  if (nt_query == nullptr) {
+    return false;
+  }
+
+  struct ProcessBasicInformation {
+    PVOID reserved1;
+    PVOID peb_base_address;
+    PVOID reserved2[2];
+    ULONG_PTR unique_process_id;
+    PVOID reserved3;
+  } pbi{};
+  if (nt_query(process, 0 /* ProcessBasicInformation */, &pbi, sizeof(pbi), nullptr) != 0) {
+    return false;
+  }
+
+  const std::uintptr_t peb = reinterpret_cast<std::uintptr_t>(pbi.peb_base_address);
+  const std::uint64_t ldr = read_u64(process, peb + k_peb_ldr);
+  if (ldr == 0) {
+    return false;
+  }
+
+  void* memory = VirtualAllocEx(process, nullptr, 0x400, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  if (memory == nullptr) {
+    return false;
+  }
+  const std::uintptr_t entry = reinterpret_cast<std::uintptr_t>(memory);
+  const std::size_t name_length = std::wcslen(dll_name);
+
+  // Name buffers, then the UNICODE_STRINGs that point at them.
+  write_remote(process, entry + 0x100, dll_name, (name_length + 1) * sizeof(wchar_t));
+  write_remote(process, entry + 0x140, dll_name, (name_length + 1) * sizeof(wchar_t));
+  const auto write_unicode_string = [&](std::size_t offset, std::uintptr_t buffer) {
+    write_u16(process, entry + offset, static_cast<std::uint16_t>(name_length * 2));
+    write_u16(process, entry + offset + 2, static_cast<std::uint16_t>((name_length + 1) * 2));
+    write_u64(process, entry + offset + 8, buffer);
+  };
+  write_unicode_string(k_ldr_base_name, entry + 0x100);
+  write_unicode_string(k_ldr_full_name, entry + 0x140);
+
+  write_u64(process, entry + k_ldr_dll_base, base);
+  write_u64(process, entry + k_ldr_entry_point, base + entry_rva);
+  write_u32(process, entry + k_ldr_size_of_image, size_of_image);
+
+  const auto link = [&](std::size_t list_offset, std::size_t links_offset) {
+    const std::uintptr_t head = ldr + list_offset;
+    const std::uint64_t first = read_u64(process, head);
+    write_u64(process, entry + links_offset, first);
+    write_u64(process, entry + links_offset + 8, head);
+    write_u64(process, first + 8, entry);
+    write_u64(process, head, entry);
+  };
+  link(k_ldr_in_load_order, 0x00);
+  link(k_ldr_in_memory_order, 0x10);
+  return true;
+}
+
 /// Resolve an exported symbol in a loaded module by reading its export table
-/// out of the target process.
+/// out of the target process. Handles forwarders (e.g. kernel32 -> kernelbase).
 std::optional<std::uintptr_t> resolve_export(HANDLE process, std::uintptr_t module_base,
                                              const std::string& name, std::uint16_t ordinal,
-                                             bool by_ordinal) {
+                                             bool by_ordinal, int depth = 0) {
+  if (depth > 4) {
+    return std::nullopt;
+  }
   std::byte dos[0x40];
   if (!read_remote(process, module_base, dos, sizeof(dos))) {
     return std::nullopt;
@@ -123,6 +219,7 @@ std::optional<std::uintptr_t> resolve_export(HANDLE process, std::uintptr_t modu
   const std::uint16_t magic = rd16(pe + 24);
   const std::size_t dirs = magic == 0x020B ? 24 + 112 : 24 + 96;
   const std::uint32_t export_rva = rd32(pe + dirs);
+  const std::uint32_t export_size = rd32(pe + dirs + 4);
   if (export_rva == 0) {
     return std::nullopt;
   }
@@ -137,37 +234,66 @@ std::optional<std::uintptr_t> resolve_export(HANDLE process, std::uintptr_t modu
   const std::uint32_t address_of_names = rd32(dir + 32);
   const std::uint32_t address_of_name_ordinals = rd32(dir + 36);
 
-  const auto function_at = [&](std::uint32_t index) -> std::optional<std::uintptr_t> {
+  const auto function_rva = [&](std::uint32_t index) -> std::optional<std::uint32_t> {
     std::byte entry[4];
     if (!read_remote(process, module_base + address_of_functions + index * 4, entry, 4)) {
       return std::nullopt;
     }
-    return module_base + rd32(entry);
+    return rd32(entry);
   };
 
+  std::optional<std::uint32_t> rva;
   if (by_ordinal) {
-    if (ordinal < ordinal_base) {
-      return std::nullopt;
+    if (ordinal >= ordinal_base) {
+      rva = function_rva(ordinal - ordinal_base);
     }
-    return function_at(ordinal - ordinal_base);
-  }
-
-  for (std::uint32_t i = 0; i < number_of_names && i < 65536; ++i) {
-    std::byte name_rva[4];
-    if (!read_remote(process, module_base + address_of_names + i * 4, name_rva, 4)) {
+  } else {
+    for (std::uint32_t i = 0; i < number_of_names && i < 65536; ++i) {
+      std::byte name_rva[4];
+      if (!read_remote(process, module_base + address_of_names + i * 4, name_rva, 4)) {
+        break;
+      }
+      const std::string candidate = read_remote_string(process, module_base + rd32(name_rva), 256);
+      if (candidate != name) {
+        continue;
+      }
+      std::byte ord_index[2];
+      if (!read_remote(process, module_base + address_of_name_ordinals + i * 2, ord_index, 2)) {
+        return std::nullopt;
+      }
+      rva = function_rva(rd16(ord_index));
       break;
     }
-    const std::string candidate = read_remote_string(process, module_base + rd32(name_rva), 256);
-    if (candidate != name) {
-      continue;
-    }
-    std::byte ord_index[2];
-    if (!read_remote(process, module_base + address_of_name_ordinals + i * 2, ord_index, 2)) {
+  }
+  if (!rva) {
+    return std::nullopt;
+  }
+
+  // A forwarder's "RVA" points inside the export directory at a "Dll.Symbol"
+  // string; resolve it against the named module instead of treating it as code.
+  if (*rva >= export_rva && *rva < export_rva + export_size) {
+    const std::string forwarder = read_remote_string(process, module_base + *rva, 256);
+    const std::size_t dot = forwarder.find('.');
+    if (dot == std::string::npos) {
       return std::nullopt;
     }
-    return function_at(rd16(ord_index));
+    std::string dll = forwarder.substr(0, dot);
+    const std::string symbol = forwarder.substr(dot + 1);
+    if (dll.find(".dll") == std::string::npos && dll.find(".DLL") == std::string::npos) {
+      dll += ".dll";
+    }
+    const auto forward_base = remote_module_base(process, dll.c_str());
+    if (!forward_base) {
+      return std::nullopt;
+    }
+    const bool forward_ordinal = !symbol.empty() && symbol[0] == '#';
+    const std::uint16_t forward_ord =
+        forward_ordinal ? static_cast<std::uint16_t>(std::stoi(symbol.substr(1))) : 0;
+    return resolve_export(process, *forward_base, forward_ordinal ? "" : symbol, forward_ord,
+                          forward_ordinal, depth + 1);
   }
-  return std::nullopt;
+
+  return module_base + *rva;
 }
 
 std::vector<std::byte> read_file(const char* path) {
@@ -295,6 +421,19 @@ int main(int argc, char** argv) {
   if (!write_remote(process, remote_base, sink.bytes().data(), image.size_of_image)) {
     std::printf("injector: WriteProcessMemory failed: %lu\n", GetLastError());
     return 1;
+  }
+
+  // Register the image in the target's PEB loader list so CRT init can find it.
+  {
+    const std::size_t slash = dll_path.find_last_of("\\/");
+    const std::string base_name = slash == std::string::npos ? dll_path : dll_path.substr(slash + 1);
+    const std::wstring wide_name(base_name.begin(), base_name.end());
+    if (register_module(process, remote_base, image.size_of_image, image.entry_point_rva,
+                        wide_name.c_str())) {
+      std::printf("injector: registered %s in the loader list\n", base_name.c_str());
+    } else {
+      std::puts("injector: warning: could not register module in the loader list");
+    }
   }
 
   if (!call_entry) {

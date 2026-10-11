@@ -43,7 +43,10 @@ cat "$WINEPREFIX/drive_c/cs2-trivial-boot.txt"
 
 ## Status
 
-Works end to end for a CRT-less DLL (map + relocations + import resolution +
-remote-thread entry). The static-CRT payload currently faults on entry because
-manual mapping does not set up the loader's TLS / CRT init; that is the
-remaining Phase 2 item.
+Works end to end: map + relocations + import resolution (incl. Wine's
+kernel32→kernelbase **forwarders**) + PEB loader registration + remote-thread
+entry. Verified by loading `trivial.dll` (CRT-less), a minimal CRT DLL, and the
+real `payload.dll` into `victim.exe` — each wrote its boot marker.
+
+Remaining: registering `.pdata` exception tables (`RtlAddFunctionTable`) for
+throwing code; not needed for the current payload.

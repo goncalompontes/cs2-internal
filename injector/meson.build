@@ -40,4 +40,7 @@ else
     install : false,
     override_options : ['b_vscrt=none'],
     link_args : ['/entry:DllMain'])
+  shared_library('crt_dll', 'tests/crt_dll.cpp',
+    name_prefix : '',
+    install : false)
 endif
