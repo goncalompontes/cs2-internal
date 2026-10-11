@@ -11,7 +11,9 @@
 //! ```
 //!
 //! We locate the list by finding pointers to known interface-name strings and
-//! reconstructing the list heads, then walking each list.
+//! reconstructing the list heads, then walking each list. All pointer fields are
+//! validated to lie inside the module, so stray byte matches don't derail the
+//! walk.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -29,30 +31,92 @@ pub struct Interface {
     pub create_rva: usize,
 }
 
-/// Walk one linked list starting at `first` (absolute address).
-pub fn walk_list<R: MemoryRead>(reader: &R, base: usize, first: usize) -> Result<Vec<Interface>> {
+/// Walk one linked list starting at `first` (absolute address). Stops at the
+/// end of the list or when a pointer leaves `[base, base + size)`.
+pub fn walk_list<R: MemoryRead>(
+    reader: &R,
+    base: usize,
+    size: usize,
+    first: usize,
+) -> Vec<Interface> {
+    let end = base + size;
     let mut out = Vec::new();
     let mut node = first;
     let mut guard = 0usize;
-    while node != 0 && guard < 8192 {
-        let create = reader.read_ptr(node)?;
-        let name_ptr = reader.read_ptr(node + 8)?;
-        let next = reader.read_ptr(node + 16)?;
 
-        if name_ptr != 0 {
-            let name = reader.read_cstring(name_ptr)?;
-            if looks_like_interface_name(&name) {
-                out.push(Interface {
-                    name,
-                    rva: node.wrapping_sub(base),
-                    create_rva: create.wrapping_sub(base),
-                });
+    while node != 0 && guard < 8192 {
+        if node < base || node + INTERFACE_REG_SIZE > end {
+            break;
+        }
+        let (Ok(create), Ok(name_ptr), Ok(next)) = (
+            reader.read_ptr(node),
+            reader.read_ptr(node + 8),
+            reader.read_ptr(node + 16),
+        ) else {
+            break;
+        };
+
+        if name_ptr >= base && name_ptr < end {
+            if let Ok(name) = reader.read_cstring(name_ptr) {
+                if looks_like_interface_name(&name) {
+                    out.push(Interface {
+                        name,
+                        rva: node - base,
+                        create_rva: create.wrapping_sub(base),
+                    });
+                }
             }
+        }
+
+        if next != 0 && (next < base || next >= end) {
+            break;
         }
         node = next;
         guard += 1;
     }
-    Ok(out)
+    out
+}
+
+/// Heuristic: interface names end in a 3-digit version, e.g. `Source2Client002`,
+/// `GameClientExports001`, `AnimationSystem_001`.
+fn looks_like_interface_name(s: &str) -> bool {
+    if s.len() < 5 || s.len() > 128 {
+        return false;
+    }
+    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    bytes[n - 1].is_ascii_digit() && bytes[n - 2].is_ascii_digit() && bytes[n - 3].is_ascii_digit()
+}
+
+/// Enumerate *all* interfaces by scanning the module for `InterfaceReg`-shaped
+/// structures, then walking from the discovered list heads.
+pub fn enumerate_all<R: MemoryRead>(reader: &R, base: usize, size: usize) -> Result<Vec<Interface>> {
+    let bytes = reader.read_bytes(base, size)?;
+    let end = base + size;
+
+    let mut candidates: Vec<usize> = Vec::new();
+    let mut offset = 0usize;
+    while offset + INTERFACE_REG_SIZE <= bytes.len() {
+        let create = read_u64_at(&bytes, offset);
+        let name_ptr = read_u64_at(&bytes, offset + 8) as usize;
+        let next = read_u64_at(&bytes, offset + 16) as usize;
+
+        if create >= base && create < end && name_ptr >= base && name_ptr < end
+            && (next == 0 || (next >= base && next < end))
+        {
+            if let Some(name) = cstring_at(&bytes, name_ptr - base) {
+                if looks_like_interface_name(&name) {
+                    candidates.push(base + offset);
+                }
+            }
+        }
+        offset += 8;
+    }
+
+    Ok(resolve_heads(reader, base, size, candidates))
 }
 
 /// Enumerate interfaces by locating `InterfaceReg` nodes via pointers to the
@@ -64,8 +128,8 @@ pub fn enumerate<R: MemoryRead>(
     seed_names: &[&str],
 ) -> Result<Vec<Interface>> {
     let bytes = reader.read_bytes(base, size)?;
+    let end = base + size;
 
-    // Collect candidate node addresses (name field at node+8).
     let mut candidates: Vec<usize> = Vec::new();
     for seed in seed_names {
         for str_off in find_subslice(&bytes, seed.as_bytes()) {
@@ -82,7 +146,26 @@ pub fn enumerate<R: MemoryRead>(
     candidates.sort_unstable();
     candidates.dedup();
 
-    // Heads are candidates not referenced as `next` by another candidate.
+    candidates.retain(|&c| {
+        let create = reader.read_ptr(c).ok();
+        let next = reader.read_ptr(c + 16).ok();
+        matches!((create, next), (Some(create), Some(next))
+            if create >= base && create < end && (next == 0 || (next >= base && next < end)))
+    });
+
+    Ok(resolve_heads(reader, base, size, candidates))
+}
+
+/// Compute list heads (nodes not referenced as `next`) and walk them.
+fn resolve_heads<R: MemoryRead>(
+    reader: &R,
+    base: usize,
+    size: usize,
+    mut candidates: Vec<usize>,
+) -> Vec<Interface> {
+    candidates.sort_unstable();
+    candidates.dedup();
+
     let mut referenced = std::collections::BTreeSet::new();
     for &c in &candidates {
         if let Ok(next) = reader.read_ptr(c + 16) {
@@ -92,30 +175,44 @@ pub fn enumerate<R: MemoryRead>(
         }
     }
     let heads: Vec<usize> = candidates
-        .iter()
-        .copied()
+        .into_iter()
         .filter(|c| !referenced.contains(c))
         .collect();
 
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for head in heads {
-        for it in walk_list(reader, base, head)? {
+        for it in walk_list(reader, base, size, head) {
             if seen.insert(it.name.clone()) {
                 out.push(it);
             }
         }
     }
-    Ok(out)
+    out
 }
 
-/// Heuristic: interface names look like `Source2Client002`, `GameClientExports001`.
-fn looks_like_interface_name(s: &str) -> bool {
-    if s.len() < 4 || s.len() > 128 {
-        return false;
+fn read_u64_at(bytes: &[u8], offset: usize) -> usize {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize
+}
+
+fn cstring_at(bytes: &[u8], offset: usize) -> Option<String> {
+    if offset >= bytes.len() {
+        return None;
     }
-    s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    let mut out = String::new();
+    let mut i = offset;
+    while i < bytes.len() && bytes[i] != 0 {
+        out.push(bytes[i] as char);
+        i += 1;
+        if out.len() > 128 {
+            return None;
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 pub fn find_subslice(hay: &[u8], needle: &[u8]) -> Vec<usize> {

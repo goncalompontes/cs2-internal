@@ -22,12 +22,12 @@ fn enumerates_linked_interface_list() {
     wstr(&mut data, 0x200, "GameClientExports001");
 
     // Node A @0x1000 -> next B @0x2000
-    w64(&mut data, 0x1000, 0x1000_5000); // create fn (arbitrary)
+    w64(&mut data, 0x1000, (BASE + 0x3000) as u64); // create fn inside module
     w64(&mut data, 0x1008, (BASE + 0x100) as u64);
     w64(&mut data, 0x1010, (BASE + 0x2000) as u64);
 
     // Node B @0x2000 -> end
-    w64(&mut data, 0x2000, 0x1000_6000);
+    w64(&mut data, 0x2000, (BASE + 0x3100) as u64);
     w64(&mut data, 0x2008, (BASE + 0x200) as u64);
     w64(&mut data, 0x2010, 0);
 
@@ -47,9 +47,31 @@ fn enumerates_linked_interface_list() {
 }
 
 #[test]
+fn enumerate_all_finds_list() {
+    let mut data = vec![0u8; 0x4000];
+    wstr(&mut data, 0x100, "Source2Client002");
+    wstr(&mut data, 0x200, "GameClientExports001");
+
+    w64(&mut data, 0x1000, (BASE + 0x3000) as u64);
+    w64(&mut data, 0x1008, (BASE + 0x100) as u64);
+    w64(&mut data, 0x1010, (BASE + 0x2000) as u64);
+
+    w64(&mut data, 0x2000, (BASE + 0x3100) as u64);
+    w64(&mut data, 0x2008, (BASE + 0x200) as u64);
+    w64(&mut data, 0x2010, 0);
+
+    let reader = BytesReader::new(BASE, data);
+    let found = interfaces::enumerate_all(&reader, BASE, 0x4000).unwrap();
+    assert_eq!(found.len(), 2);
+    let names: Vec<&str> = found.iter().map(|i| i.name.as_str()).collect();
+    assert!(names.contains(&"Source2Client002"));
+    assert!(names.contains(&"GameClientExports001"));
+}
+
+#[test]
 fn walk_stops_on_invalid_head() {
     let data = vec![0u8; 0x1000];
     let reader = BytesReader::new(BASE, data);
-    let list = interfaces::walk_list(&reader, BASE, 0).unwrap();
+    let list = interfaces::walk_list(&reader, BASE, 0x1000, 0);
     assert!(list.is_empty());
 }
