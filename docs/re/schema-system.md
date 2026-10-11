@@ -53,6 +53,24 @@ Registrar object shape (observed in `FUN_180493b30`):
 { const char* class_name; void* serializer; const char* serializer_name; int flags; }
 ```
 
+### Registrar internals (schemasystem.dll)
+
+- Registration helper `FUN_180001150` links a registrar object onto the list head:
+  ```c
+  node->next = g_registrars; g_registrars = node;   // node @ 0x1800657f0, vtable 0x18005a470
+  ```
+- A registrar's `vtable[0]` is the per-module installer. Example `FUN_180027400`
+  (schemasystem's own) runs per pass `param_3` (0..3):
+  - pass 0: init
+  - pass 1: `schema_system->vtable[+0x100](..., "schemasystem.dll", "schemasystem", &names, 0x76, &type_table)`
+    and `vtable[+0x108](..., &type_table2)`
+  - pass 2: `schema_system->vtable[+0x110](..., &class_table, failure)` → returns bool
+  - pass 3: `schema_system->vtable[+0x118](..., &class_table)` (finalize)
+
+So the `CSchemaSystem` vtable methods used during install are at offsets
+**`+0x100`, `+0x108`, `+0x110`, `+0x118`**. The class table (`0x76` = 118 entries
+for schemasystem) is the input that would reveal `SchemaClassInfoData`.
+
 ## `CSchemaSystem` partial layout
 
 From `FUN_1800107d0` (`param_1` = `CSchemaSystem*`):
