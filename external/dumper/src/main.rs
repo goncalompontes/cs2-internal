@@ -45,6 +45,14 @@ struct Cli {
     #[arg(long = "interface-seed")]
     interface_seeds: Vec<String>,
 
+    /// Walk the CreateInterface registration list from a known head address (hex).
+    #[arg(long)]
+    interfaces_head: Option<String>,
+
+    /// Walk from a module-local head *global* (hex); dereferences it first.
+    #[arg(long)]
+    interfaces_global: Option<String>,
+
     /// Dump the schema system. Requires --schema-system.
     #[arg(long)]
     schema: bool,
@@ -168,7 +176,13 @@ fn analyze(cli: &Cli, module_name: &str, bytes: &[u8], base: usize, info: Option
 
     if cli.interfaces {
         let reader = BytesReader::new(base, bytes.to_vec());
-        let found = if cli.interface_seeds.is_empty() {
+        let found = if let Some(global_text) = &cli.interfaces_global {
+            let global = parse_hex(global_text)?;
+            interfaces::walk_from_global(&reader, base, bytes.len(), global)?
+        } else if let Some(head_text) = &cli.interfaces_head {
+            let head = parse_hex(head_text)?;
+            interfaces::walk_list(&reader, base, bytes.len(), head)
+        } else if cli.interface_seeds.is_empty() {
             interfaces::enumerate_all(&reader, base, bytes.len())?
         } else {
             let mut seeds: Vec<&str> = DEFAULT_INTERFACE_SEEDS.to_vec();

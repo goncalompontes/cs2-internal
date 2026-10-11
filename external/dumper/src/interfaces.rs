@@ -77,6 +77,18 @@ pub fn walk_list<R: MemoryRead>(
     out
 }
 
+/// Walk the authoritative registration list from a module-local head *global*:
+/// reads `*global`, then walks the `InterfaceReg` linked list.
+pub fn walk_from_global<R: MemoryRead>(
+    reader: &R,
+    base: usize,
+    size: usize,
+    global_addr: usize,
+) -> Result<Vec<Interface>> {
+    let head = reader.read_ptr(global_addr)?;
+    Ok(walk_list(reader, base, size, head))
+}
+
 /// Heuristic: interface names end in a 3-digit version, e.g. `Source2Client002`,
 /// `GameClientExports001`, `AnimationSystem_001`.
 fn looks_like_interface_name(s: &str) -> bool {

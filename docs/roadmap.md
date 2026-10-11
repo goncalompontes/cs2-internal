@@ -17,9 +17,10 @@
 - [x] Basic CLI (`--pattern`, `--exports`, `--interfaces`, `--schema`, `--json`)
 - [x] schema walker (traversal + JSON emit; layout needs calibration)
 - [x] Offline `--file` analysis mode (no process needed)
-- [~] `CreateInterface` resolver — finds interface tables (123 in client.dll) but
-      not the full registration set; the authoritative `s_pInterfaceRegs` list
-      must be located via the `CreateInterface` export (disasm with ReVa)
+- [~] `CreateInterface` resolver — enumerates `{create, name}` registration
+      entries (134 in client.dll, 116 in engine2.dll, build 25815307). The a2x
+      reference list is stale for this build (e.g. `GameClientExports001` has no
+      reference in the image), so cross-checking needs a current dump.
 - [ ] Header generation (`interfaces.hpp`, `schemas/*.hpp`) from JSON
 - [ ] Calibrate `SchemaLayout` + resolve schema-system address against the live build
 - [ ] Optional `memflow` backend behind `ProcessMemory`
