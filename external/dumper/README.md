@@ -12,22 +12,6 @@ cargo test --manifest-path external/dumper/Cargo.toml
 cargo build --release --manifest-path external/dumper/Cargo.toml
 ```
 
-## Usage
-
-```sh
-# list modules of a running offline process
-cs2-dumper --process cs2.exe
-
-# JSON manifest
-cs2-dumper --json
-
-# scan a signature in a module
-cs2-dumper --pattern "48 8B 05 ?? ?? ?? ??" --module client.dll
-
-# list CreateInterface-related exports
-cs2-dumper --exports --module client.dll
-```
-
 ## Layout
 
 | Module | Responsibility |
@@ -38,6 +22,7 @@ cs2-dumper --exports --module client.dll
 | `pe` | PE image helpers (image base, size, exports) via `goblin` |
 | `interfaces` | `CreateInterface` registration-list resolver (seed-based) |
 | `schema` | schema walker (`SchemaLayout`, configurable offsets) |
+| `sdk` | C++ header generation (`interfaces.hpp`, `offsets.hpp`, `schemas/*.hpp`) |
 | `analysis` | signature registry + resolved offsets/interfaces (grows over time) |
 | `output` | JSON serialization |
 
@@ -65,7 +50,15 @@ cs2-dumper --interfaces --interface-seed MyNewInterface001
 
 # dump the schema system (needs the CSchemaSystem address)
 cs2-dumper --schema --schema-system 0x7ff6XXXXXXXX
+
+# generate C++ SDK headers from JSON dumps (default out dir: payload/sdk)
+cs2-dumper --interfaces --json --module client.dll > build/interfaces.json
+cs2-dumper --schema --json --schema-system 0x7ff6XXXXXXXX > build/schema.json
+cs2-dumper --gen --interfaces-json build/interfaces.json --schema-json build/schema.json
 ```
+
+`--gen` takes an optional output directory (`--gen out/sdk`, or bare `--gen`
+for `payload/sdk`). See `payload/sdk/README.md` for the regenerated layout.
 
 ## Tests
 
@@ -73,8 +66,8 @@ cs2-dumper --schema --schema-system 0x7ff6XXXXXXXX
 cargo test --manifest-path external/dumper/Cargo.toml
 ```
 
-Fixtures cover the pattern engine, the `InterfaceReg` list resolver, and the
-schema walker — all without a running game.
+Fixtures cover the pattern engine, the `InterfaceReg` list resolver, the
+schema walker and SDK header generation — all without a running game.
 
 ## Schema layout calibration
 

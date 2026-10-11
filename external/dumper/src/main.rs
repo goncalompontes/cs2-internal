@@ -8,6 +8,7 @@ use cs2_dumper::pattern::Pattern;
 use cs2_dumper::pe::{self, PeInfo};
 use cs2_dumper::reader::BytesReader;
 use cs2_dumper::schema::{self, SchemaLayout};
+use cs2_dumper::{analysis, sdk};
 
 /// External offset/interface/schema dumper.
 #[derive(Parser, Debug)]
@@ -64,6 +65,22 @@ struct Cli {
     /// Emit JSON instead of human-readable text.
     #[arg(long)]
     json: bool,
+
+    /// Generate C++ SDK headers into DIR (default: payload/sdk) from JSON dumps.
+    #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = "payload/sdk")]
+    gen: Option<String>,
+
+    /// Interfaces JSON (input for --gen), as emitted by `--interfaces --json`.
+    #[arg(long, value_name = "FILE")]
+    interfaces_json: Option<String>,
+
+    /// Schema JSON (input for --gen), as emitted by `--schema --json`.
+    #[arg(long, value_name = "FILE")]
+    schema_json: Option<String>,
+
+    /// Offsets JSON (input for --gen).
+    #[arg(long, value_name = "FILE")]
+    offsets_json: Option<String>,
 }
 
 /// Common interfaces used as discovery seeds.
@@ -82,6 +99,11 @@ const DEFAULT_INTERFACE_SEEDS: &[&str] = &[
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // SDK generation from JSON dumps — no process required.
+    if let Some(dir) = &cli.gen {
+        return generate_sdk(&cli, dir);
+    }
 
     // File mode: analyze a PE on disk.
     if let Some(path) = &cli.file {
@@ -139,6 +161,10 @@ fn main() -> Result<()> {
         )?;
         let layout = SchemaLayout::default();
         let classes = schema::dump(&mem, schema_system, &layout)?;
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&classes)?);
+            return Ok(());
+        }
         println!("\nschema — {} class(es)", classes.len());
         for c in &classes {
             println!("  {:<24} {} ({} fields, size 0x{:x})", c.module, c.name, c.fields.len(), c.size);
@@ -200,6 +226,48 @@ fn analyze(cli: &Cli, module_name: &str, bytes: &[u8], base: usize, info: Option
     }
 
     Ok(())
+}
+
+/// Generate C++ SDK headers from JSON dumps on disk.
+fn generate_sdk(cli: &Cli, dir: &str) -> Result<()> {
+    if cli.interfaces_json.is_none() && cli.schema_json.is_none() && cli.offsets_json.is_none() {
+        return Err(anyhow!(
+            "--gen needs at least one input: --interfaces-json / --schema-json / --offsets-json"
+        ));
+    }
+
+    let interfaces: Vec<interfaces::Interface> = read_json(cli.interfaces_json.as_deref())?;
+    let schema: Vec<schema::SchemaClass> = read_json(cli.schema_json.as_deref())?;
+    let offsets: Vec<analysis::Offset> = read_json(cli.offsets_json.as_deref())?;
+
+    let inputs = sdk::SdkInputs {
+        interfaces: &interfaces,
+        schema: &schema,
+        offsets: &offsets,
+    };
+    let written = sdk::write_sdk(std::path::Path::new(dir), &inputs)?;
+    println!(
+        "wrote {} SDK header(s) to {dir} ({} interfaces, {} classes, {} offsets)",
+        written.len(),
+        interfaces.len(),
+        schema.len(),
+        offsets.len()
+    );
+    for path in &written {
+        println!("  {}", path.display());
+    }
+    Ok(())
+}
+
+/// Read and deserialize a JSON file, defaulting to empty when no path is given.
+fn read_json<T: serde::de::DeserializeOwned>(path: Option<&str>) -> Result<Vec<T>> {
+    match path {
+        None => Ok(Vec::new()),
+        Some(path) => {
+            let text = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
+            serde_json::from_str(&text).with_context(|| format!("parsing {path}"))
+        }
+    }
 }
 
 /// Read a module range tolerantly: unmapped gaps become zeros rather than errors.

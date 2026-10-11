@@ -28,7 +28,9 @@ meson compile -C build-payload
   (`schemasystem.dll` / `SchemaSystem_001`), `CreateInterface` resolver.
   Emits `offsets.json`, `interfaces.hpp`, `schemas/*.hpp`, `manifest.json`.
   Memory access sits behind `ProcessMemory` / `MemoryRead` so a `memflow`
-  backend can be added without touching analysis code.
+  backend can be added without touching analysis code. Header generation
+  (`sdk`) is JSON-driven: `--gen [dir]` consumes `--interfaces-json` /
+  `--schema-json` / `--offsets-json` and writes into `payload/sdk` by default.
 - `payload/loader` — manual map: PE parse, sections, relocs, imports, TLS,
   DllMain.
 - `payload/core` — file logging (`spdlog`), config (`glaze`), module cache,

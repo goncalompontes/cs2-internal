@@ -57,14 +57,14 @@ impl Default for SchemaLayout {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaField {
     pub name: String,
     pub type_name: String,
     pub offset: u32,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaClass {
     pub module: String,
     pub name: String,

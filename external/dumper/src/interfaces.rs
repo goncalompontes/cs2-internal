@@ -16,13 +16,13 @@
 //! walk.
 
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::reader::MemoryRead;
 
 pub const INTERFACE_REG_SIZE: usize = 24;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interface {
     pub name: String,
     /// RVA of the `InterfaceReg` node.

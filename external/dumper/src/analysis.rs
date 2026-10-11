@@ -4,9 +4,9 @@
 //! the C++ payload. It starts small and grows as analysis progresses.
 
 use crate::pattern::Signature;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OffsetSource {
     Signature,
@@ -14,7 +14,7 @@ pub enum OffsetSource {
     Manual,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Offset {
     pub name: String,
     pub module: String,
