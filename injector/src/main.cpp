@@ -296,6 +296,76 @@ std::optional<std::uintptr_t> resolve_export(HANDLE process, std::uintptr_t modu
   return module_base + *rva;
 }
 
+/// A TLS slot allocated in the target for a manually mapped image.
+struct TlsSlot {
+  bool ok = false;
+  std::uint32_t index = 0;
+  std::uintptr_t block = 0;
+};
+
+/// Initialize TLS for the mapped image: allocate a slot in the target, point
+/// `_tls_index` at it, and build a per-thread block from the image's raw data.
+/// The block is set on the entry thread by the stub before `DllMain` runs.
+TlsSlot setup_tls(HANDLE process, std::uintptr_t remote_base,
+                  const cs2::loader::pe::ImageInfo& image, std::span<const std::byte> mapped) {
+  TlsSlot slot;
+  if (!image.tls.present) {
+    return slot;
+  }
+  const std::uint64_t raw_size =
+      image.tls.end_address_of_raw_data - image.tls.start_address_of_raw_data;
+  const std::size_t block_size =
+      static_cast<std::size_t>(raw_size) + image.tls.size_of_zero_fill;
+  if (block_size == 0) {
+    return slot;
+  }
+
+  const auto kernel32_base = remote_module_base(process, "kernel32.dll");
+  if (!kernel32_base) {
+    return slot;
+  }
+  const auto tls_alloc = resolve_export(process, *kernel32_base, "TlsAlloc", 0, false);
+  if (!tls_alloc) {
+    return slot;
+  }
+  HANDLE thread = CreateRemoteThread(process, nullptr, 0,
+                                     reinterpret_cast<LPTHREAD_START_ROUTINE>(*tls_alloc), nullptr,
+                                     0, nullptr);
+  if (thread == nullptr) {
+    return slot;
+  }
+  WaitForSingleObject(thread, 5000);
+  DWORD index = TLS_OUT_OF_INDEXES;
+  GetExitCodeThread(thread, &index);
+  CloseHandle(thread);
+  if (index == TLS_OUT_OF_INDEXES) {
+    return slot;
+  }
+
+  void* block = VirtualAllocEx(process, nullptr, block_size, MEM_COMMIT | MEM_RESERVE,
+                               PAGE_READWRITE);
+  if (block == nullptr) {
+    return slot;
+  }
+  std::vector<std::byte> local(block_size, std::byte{0});
+  const std::size_t raw_offset =
+      static_cast<std::size_t>(image.tls.start_address_of_raw_data - image.image_base);
+  if (raw_size != 0 && raw_offset + raw_size <= mapped.size()) {
+    std::memcpy(local.data(), mapped.data() + raw_offset, static_cast<std::size_t>(raw_size));
+  }
+  if (!write_remote(process, reinterpret_cast<std::uintptr_t>(block), local.data(), block_size)) {
+    return slot;
+  }
+
+  const std::uint32_t index_value = index;
+  write_u32(process, remote_base + (image.tls.address_of_index - image.image_base), index_value);
+
+  slot.ok = true;
+  slot.index = index;
+  slot.block = reinterpret_cast<std::uintptr_t>(block);
+  return slot;
+}
+
 std::vector<std::byte> read_file(const char* path) {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
@@ -308,25 +378,42 @@ std::vector<std::byte> read_file(const char* path) {
   return out;
 }
 
-/// x64 stub that calls `entry(base, DLL_PROCESS_ATTACH, 0)` and returns 0.
-std::vector<std::byte> make_entry_stub(std::uintptr_t base, std::uintptr_t entry) {
+/// x64 stub that (optionally) sets the thread's TLS slot directly via
+/// `gs:[0x58]`, then calls `entry(base, DLL_PROCESS_ATTACH, 0)` and returns 0.
+std::vector<std::byte> make_entry_stub(std::uintptr_t base, std::uintptr_t entry, bool set_tls,
+                                       std::uint32_t tls_index, std::uintptr_t tls_block) {
   std::vector<std::byte> code;
   const auto push = [&](std::initializer_list<std::uint8_t> bytes) {
     for (std::uint8_t b : bytes) {
       code.push_back(static_cast<std::byte>(b));
     }
   };
+  const auto push_imm64 = [&](std::uintptr_t value) {
+    for (int i = 0; i < 8; ++i) {
+      code.push_back(static_cast<std::byte>((value >> (8 * i)) & 0xFF));
+    }
+  };
+
+  if (set_tls) {
+    push({0x65, 0x48, 0x8B, 0x04, 0x25, 0x58, 0x00, 0x00, 0x00});  // mov rax, gs:[0x58]
+    push({0x48, 0xB9});                                            // mov rcx, tls_index
+    push_imm64(tls_index);
+    push({0x48, 0xBA});  // mov rdx, tls_block
+    push_imm64(tls_block);
+    push({0x48, 0x89, 0x14, 0xC8});  // mov [rax+rcx*8], rdx
+  }
+
   push({0x48, 0xB9});  // mov rcx, base
-  for (int i = 0; i < 8; ++i) code.push_back(static_cast<std::byte>((base >> (8 * i)) & 0xFF));
-  push({0xBA, 0x01, 0x00, 0x00, 0x00});          // mov edx, 1  (DLL_PROCESS_ATTACH)
-  push({0x45, 0x33, 0xC0});                       // xor r8d, r8d
-  push({0x48, 0xB8});                             // mov rax, entry
-  for (int i = 0; i < 8; ++i) code.push_back(static_cast<std::byte>((entry >> (8 * i)) & 0xFF));
-  push({0x48, 0x83, 0xEC, 0x28});                 // sub rsp, 0x28
-  push({0xFF, 0xD0});                             // call rax
-  push({0x48, 0x83, 0xC4, 0x28});                 // add rsp, 0x28
-  push({0x33, 0xC0});                             // xor eax, eax
-  push({0xC3});                                   // ret
+  push_imm64(base);
+  push({0xBA, 0x01, 0x00, 0x00, 0x00});  // mov edx, 1  (DLL_PROCESS_ATTACH)
+  push({0x45, 0x33, 0xC0});              // xor r8d, r8d
+  push({0x48, 0xB8});                    // mov rax, entry
+  push_imm64(entry);
+  push({0x48, 0x83, 0xEC, 0x28});  // sub rsp, 0x28
+  push({0xFF, 0xD0});              // call rax
+  push({0x48, 0x83, 0xC4, 0x28});  // add rsp, 0x28
+  push({0x33, 0xC0});              // xor eax, eax
+  push({0xC3});                    // ret
   return code;
 }
 
@@ -436,13 +523,24 @@ int main(int argc, char** argv) {
     }
   }
 
+  // TLS: allocate a slot in the target and initialize the image's TLS block.
+  const TlsSlot tls = setup_tls(process, remote_base, image, sink.bytes());
+  if (image.tls.present) {
+    if (tls.ok) {
+      std::printf("injector: TLS slot %u initialized\n", tls.index);
+    } else {
+      std::puts("injector: warning: TLS setup failed");
+    }
+  }
+
   if (!call_entry) {
     std::puts("injector: image written (--no-call; entry not invoked)");
     return 0;
   }
 
   const std::uintptr_t entry = remote_base + image.entry_point_rva;
-  const std::vector<std::byte> stub = make_entry_stub(remote_base, entry);
+  const std::vector<std::byte> stub =
+      make_entry_stub(remote_base, entry, tls.ok, tls.index, tls.block);
   void* stub_mem = VirtualAllocEx(process, nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE,
                                   PAGE_EXECUTE_READWRITE);
   if (stub_mem == nullptr || !write_remote(process, reinterpret_cast<std::uintptr_t>(stub_mem),

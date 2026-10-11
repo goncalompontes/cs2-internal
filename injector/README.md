@@ -49,4 +49,6 @@ entry. Verified by loading `trivial.dll` (CRT-less), a minimal CRT DLL, and the
 real `payload.dll` into `victim.exe` — each wrote its boot marker.
 
 Remaining: registering `.pdata` exception tables (`RtlAddFunctionTable`) for
-throwing code; not needed for the current payload.
+throwing code; not needed for the current payload. TLS is handled: the payload
+has a TLS directory, so the injector allocates a slot in the target and the
+entry stub sets the thread's slot via `gs:[0x58]` before `DllMain`.

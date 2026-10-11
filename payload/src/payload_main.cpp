@@ -1,9 +1,11 @@
-// payload_main.cpp — placeholder entry for the payload DLL.
+// payload_main.cpp — payload DLL entry.
 //
-// Real loader/manual-map entry, hook install and feature wiring land in
-// Phases 2-4. For now it proves the cross-compiled DLL links, and that the
-// generated SDK (payload/sdk) is consumable from the payload.
+// Boots the payload: logs SDK info, then installs the Present hook driving the
+// UI backend. Real overlay + features land in later phases.
 #include <cstdio>
+
+#include "cs2/features/present_hook.hpp"
+#include "cs2/render/frame_log_backend.hpp"
 
 #if __has_include("interfaces.hpp")
 #include "interfaces.hpp"
@@ -20,6 +22,20 @@
 #endif
 
 namespace cs2::payload {
+namespace {
+
+// Lifetime owner for the payload's subsystems (constructed on first boot).
+struct Runtime {
+  render::FrameLogBackend backend;
+  features::PresentHook present{backend};
+};
+
+Runtime& runtime() {
+  static Runtime instance;
+  return instance;
+}
+
+}  // namespace
 
 void boot() {
 #ifdef CS2_PAYLOAD_HAVE_INTERFACES
@@ -38,15 +54,20 @@ void boot() {
   }
 #endif
 
-  // Marker file so injection is observable from outside the target process
-  // (printf may not be visible under the game's stdout redirection).
+  // Marker file so injection is observable from outside the target process.
 #if defined(_WIN32)
-  if (std::FILE* file = std::fopen("C:\\cs2-payload-boot.txt", "a")) {
+  std::FILE* file = nullptr;
+  if (fopen_s(&file, "C:\\cs2-payload-boot.txt", "a") == 0 && file != nullptr) {
     std::fprintf(file, "[cs2-payload] booted (pid %lu)\n",
                  static_cast<unsigned long>(GetCurrentProcessId()));
     std::fclose(file);
   }
 #endif
+
+  if (!runtime().backend.initialize()) {
+    std::puts("[cs2-payload] UI backend failed to initialize");
+  }
+  runtime().present.install();
 }
 
 }  // namespace cs2::payload

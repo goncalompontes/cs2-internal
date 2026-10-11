@@ -40,11 +40,13 @@ meson compile -C build-payload
   the payload and by the host `sdk-consumer` test. Rendered by
   `scripts/gen-sdk.sh` from the host build (and from the payload build itself,
   so standalone payload builds work).
-- `payload/hooks` — hook engine (`SafetyHook`/`MinHook`) + targets: render
-  (`IDXGISwapChain::Present`, DX11 under DXVK), tick/frame, game events.
-- `payload/features` — read-only state queries, debug HUD data assembly.
-- `payload/render` — `UiBackend` abstraction; **RmlUi** primary, **ImGui**
-  fallback.
+- `payload/hooks` — hook engine: vtable hook + executable-memory/protection
+  helpers (host-tested). Inline hooks pending.
+- `payload/features` — `PresentHook` (`IDXGISwapChain::Present`, vtable index 8,
+  swapchain vtable discovered via a throwaway D3D11 device) driving the UI
+  backend. Read-only state queries / debug HUD pending.
+- `payload/render` — `UiBackend` abstraction (ADR-0007); a frame-log backend
+  stands in until **RmlUi** (primary) / **ImGui** (fallback) lands.
 - `injector` — manual-map injector (`injector.exe`, Windows x64) run inside the
   same Proton prefix: parse the payload, map sections + apply relocations into a
   local buffer, resolve imports by reading the target's module export tables,

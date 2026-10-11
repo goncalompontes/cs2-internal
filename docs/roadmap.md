@@ -32,15 +32,19 @@
 - [x] Map the image into real remote memory (local map + `WriteProcessMemory`)
 - [x] Import resolution against target modules (remote export-table walk, incl. forwarders)
 - [x] Register the image in the target's PEB `Ldr` loader list
-- [~] TLS + exception handling — the payload has no TLS directory; `.pdata`
-      exception tables are not yet registered (fine for non-throwing code)
+- [x] TLS — allocate a slot in the target and set the entry thread's slot via
+      `gs:[0x58]` in the stub before `DllMain` (the payload has a TLS directory)
+- [~] Exception handling — `.pdata` tables are not yet registered
+      (`RtlAddFunctionTable`); fine for non-throwing code
 - [x] Load a DLL (trivial + the real `payload.dll`) into a target process
 - [x] Bypass `LoadLibrary` block / signature check via manual mapping
 
 ## Phase 3 — Hook engine + overlay
-- [ ] Hook engine (vtable + inline)
-- [ ] `IDXGISwapChain::Present` hook (DX11 under DXVK)
-- [ ] `UiBackend` abstraction + RmlUi (or ImGui) blank overlay
+- [x] Hook engine — vtable hook + executable-memory/protection helpers (host-tested)
+- [x] `IDXGISwapChain::Present` hook (vtable index 8; swapchain vtable discovered
+      via a throwaway D3D11 device; engages only when DXGI is loaded)
+- [~] `UiBackend` abstraction + blank overlay — abstraction + frame-log backend
+      done; RmlUi/ImGui overlay pending
 
 ## Phase 4 — State introspection
 - [ ] Local player fields via schema offsets

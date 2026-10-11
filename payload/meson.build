@@ -44,11 +44,15 @@ if host_machine.system() != 'windows'
     'cs2-payload targets Windows. This configure produced no targets. ' +
     'Use --cross-file toolchain/windows-msvc.ini to build the DLL.')
 else
+  subdir('hooks')
+  subdir('render')
+  subdir('features')
+
   shared_library('payload',
     'src/payload_main.cpp',
     name_prefix : '',   # payload.dll, not libpayload.dll
     install : false,
     include_directories : loader_inc,
     link_with : loader_lib,
-    dependencies : sdk_dep)
+    dependencies : [sdk_dep, hooks_dep, render_dep, features_dep])
 endif

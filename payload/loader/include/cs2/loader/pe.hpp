@@ -57,6 +57,16 @@ struct ExportSymbol {
   std::uint32_t ordinal{};
 };
 
+/// The PE TLS directory, when present.
+struct TlsInfo {
+  bool present{};
+  std::uint64_t start_address_of_raw_data{};
+  std::uint64_t end_address_of_raw_data{};
+  std::uint64_t address_of_index{};
+  std::uint64_t address_of_callbacks{};
+  std::uint32_t size_of_zero_fill{};
+};
+
 struct ImageInfo {
   std::uint16_t machine{};
   std::uint64_t image_base{};
@@ -67,6 +77,7 @@ struct ImageInfo {
   std::vector<ImportModule> imports;
   std::vector<RelocationBlock> relocations;
   std::vector<ExportSymbol> exports;
+  TlsInfo tls;
 };
 
 // Parse a PE image from bytes (either a file image or an already-mapped image).

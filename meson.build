@@ -16,6 +16,9 @@ subdir('tools')
 # cross-compiled into the payload).
 subdir('payload/loader')
 
+# Hook engine (built natively here for its tests).
+subdir('payload/hooks')
+
 # --- Generated C++ SDK headers -------------------------------------------
 # Render payload/sdk/*.hpp from the calibration dumps in calibration/. The
 # generator is the Rust dumper, built on demand by scripts/gen-sdk.sh. With

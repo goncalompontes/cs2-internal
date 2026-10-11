@@ -229,6 +229,20 @@ void parse_exports(const ImageInfo& image, Bytes bytes, std::uint32_t dir_rva,
   }
 }
 
+void parse_tls(const ImageInfo& image, Bytes bytes, std::uint32_t dir_rva, TlsInfo& out) {
+  auto start = directory_offset(image, bytes, dir_rva);
+  if (!start || !has(bytes, *start, 0x28)) {
+    return;
+  }
+  const std::size_t at = *start;
+  out.present = true;
+  out.start_address_of_raw_data = rd64(bytes, at);
+  out.end_address_of_raw_data = rd64(bytes, at + 8);
+  out.address_of_index = rd64(bytes, at + 16);
+  out.address_of_callbacks = rd64(bytes, at + 24);
+  out.size_of_zero_fill = rd32(bytes, at + 32);
+}
+
 }  // namespace
 
 const char* to_string(Error error) noexcept {
@@ -307,6 +321,7 @@ std::expected<ImageInfo, Error> parse_image(Bytes image) {
   parse_exports(info, image, dir_rva(0), info.exports);
   parse_imports(info, image, dir_rva(1), info.imports);
   parse_relocations(info, image, dir_rva(5), dir_size(5), info.relocations);
+  parse_tls(info, image, dir_rva(9), info.tls);
 
   return info;
 }
