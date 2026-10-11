@@ -69,12 +69,12 @@ cargo test --manifest-path external/dumper/Cargo.toml
 Fixtures cover the pattern engine, the `InterfaceReg` list resolver, the
 schema walker and SDK header generation — all without a running game.
 
-## Schema layout calibration
+## Schema layout
 
-`schema::SchemaLayout` offsets are **version-specific placeholders**. They must
-be calibrated against the live build (via ReVa/Ghidra + a schema dump) before
-the schema output is trustworthy. The traversal/emit logic is fixture-tested
-against the same layout, so only the numbers need updating.
+`schema::SchemaLayout` defaults are **calibrated against the live client**
+(build 25815307) — see `docs/re/schema-system.md`. Class lookup walks a per-
+module hash map; fields come from the class's contiguous field array. Re-run
+`scripts/calibrate-live.sh` after a game update and re-check the offsets.
 
 ## Live analysis (MCP server)
 

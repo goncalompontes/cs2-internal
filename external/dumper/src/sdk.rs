@@ -412,6 +412,8 @@ fn unique_slug(s: &str, used: &[String]) -> String {
 }
 
 /// Quote `s` as a C++ string literal, escaping `\`, `"` and non-printables.
+/// Non-printable bytes use 3-digit octal escapes, which cannot merge with a
+/// following hex digit.
 fn cpp_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -423,8 +425,11 @@ fn cpp_string(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c.is_ascii_graphic() || c == ' ' => out.push(c),
+            c if (c as u32) <= 0xff => {
+                let _ = write!(out, "\\{:03o}", c as u32);
+            }
             c => {
-                let _ = write!(out, "\\x{:02x}", c as u32);
+                let _ = write!(out, "\\u{:04x}", c as u32);
             }
         }
     }

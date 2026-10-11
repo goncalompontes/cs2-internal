@@ -23,7 +23,7 @@
       reference list is stale for this build (e.g. `GameClientExports001` has no
       reference in the image), so cross-checking needs a current dump.
 - [x] Header generation (`interfaces.hpp`, `schemas/*.hpp`, `offsets.hpp`) from JSON
-- [ ] Calibrate `SchemaLayout` + resolve schema-system address against the live build
+- [x] Calibrate `SchemaLayout` + resolve schema-system address against the live build
 - [ ] Optional `memflow` backend behind `ProcessMemory`
 
 ## Phase 2 — Manual-map loader

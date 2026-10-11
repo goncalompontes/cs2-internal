@@ -111,6 +111,22 @@ def main():
         print(f"calibrate-live: {module}: CSchemaSystem = {ptr}", file=sys.stderr)
     (dump_dir / "schema_system.json").write_text(json.dumps(schema, indent=2))
 
+    # --- schema classes (uses the resolved CSchemaSystem pointer) ----------
+    system = next((e["schema_system"] for e in schema if e["schema_system"] not in ("0x0", None)), None)
+    if system:
+        print(f"calibrate-live: dumping schema at {system}", file=sys.stderr)
+        out = run(
+            binary, "--process", args.process, "--schema", "--json",
+            "--schema-system", system,
+        ).stdout
+        (dump_dir / "schema.json").write_text(out)
+        try:
+            print(f"calibrate-live: {len(json.loads(out))} class(es)", file=sys.stderr)
+        except json.JSONDecodeError:
+            pass
+    else:
+        print("calibrate-live: no CSchemaSystem resolved; skipping schema", file=sys.stderr)
+
     print(f"calibrate-live: wrote dumps to {dump_dir}", file=sys.stderr)
     return 0
 

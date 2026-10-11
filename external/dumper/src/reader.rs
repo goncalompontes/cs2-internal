@@ -15,6 +15,11 @@ pub trait MemoryRead {
         Ok(self.read_bytes(addr, 1)?[0])
     }
 
+    fn read_u16(&self, addr: usize) -> Result<u16> {
+        let b = self.read_bytes(addr, 2)?;
+        Ok(u16::from_le_bytes([b[0], b[1]]))
+    }
+
     fn read_i16(&self, addr: usize) -> Result<i16> {
         let b = self.read_bytes(addr, 2)?;
         Ok(i16::from_le_bytes([b[0], b[1]]))

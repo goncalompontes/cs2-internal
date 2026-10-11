@@ -89,34 +89,33 @@ From `FUN_1800107d0` (`param_1` = `CSchemaSystem*`):
   **runtime** dump via the `CSchemaSystem` global.
 - The exact type-scopes vector offset on `CSchemaSystem`.
 
-## Live status
+## Calibrated layout (build 25815307)
 
-The live `CSchemaSystem*` is resolved (`config/schema-heads.json` +
-`scripts/calibrate-live.sh`). Live object inspection (cs2-live MCP / `--read`)
-recovered these offsets for build 25815307:
+`SchemaLayout` defaults are calibrated against the live client via
+`scripts/calibrate-live.sh` (which resolves `CSchemaSystem*` and dumps). All
+offsets are image-base-relative struct members:
 
-| What | Where | Notes |
+| Structure | Offset | Meaning |
 |---|---|---|
-| `m_TypeScopes` data pointer | `CSchemaSystem + 0x198` | CUtlVector data |
-| type-scope count | `CSchemaSystem + 0x1a0` | `0x20` (32 scopes, one per module) |
-| scope `m_pTypeInfo` | `CSchemaTypeScope + 0x00` | pointer |
-| scope `m_Name` | `CSchemaTypeScope + 0x08` | **inline** char[16], e.g. `"client.dll"` |
-| type/class-info vector | `CSchemaSystem + 0x210` | 32 entries; `m_Name`@+0x08 (ptr), `m_ModuleName`@+0x10 (ptr), size (`u16`)@+0x20 |
-| `SchemaClassFieldData` | stride `0x20` | `m_Name`@+0x00, `m_pType`@+0x08, `m_nOffset`@+0x10 (`u32`) |
+| `CSchemaSystem` | `+0x190` | `m_TypeScopes` count (`u16`) |
+| `CSchemaSystem` | `+0x198` | `m_TypeScopes` data pointer |
+| `CSchemaTypeScope` | `+0x08` | `m_Name` — **inline** `char[]` (e.g. `"client.dll"`) |
+| `CSchemaTypeScope` | `+0x56c` | class count (`i32`) |
+| `CSchemaTypeScope` | `+0x5c0` | class hash buckets (`0x100` × `0x18`) |
+| bucket | `+0x10` | linked-list head |
+| bucket node | `+0x08` / `+0x10` | `next` / `SchemaClassInfoData*` |
+| `SchemaClassInfoData` | `+0x08` | `m_Name` |
+| `SchemaClassInfoData` | `+0x10` | `m_ModuleName` |
+| `SchemaClassInfoData` | `+0x20` | `m_nSize` (`u32`) |
+| `SchemaClassInfoData` | `+0x24` | field count (`u32`) |
+| `SchemaClassInfoData` | `+0x30` | fields array pointer |
+| `SchemaClassFieldData` | stride `0x20` | `m_Name`@+0x00, `m_pType`@+0x08, `m_nOffset` u32@+0x10 |
+| `CSchemaType` | `+0x08` | `m_Name` |
 
-Example scope names (from the live vector): `client.dll`, `server.dll`,
-`engine2.dll`, `schemasystem.dll`, `materialsystem2.dll`, `panorama.dll`, …
+Class lookup is a **hash map** (`0x100` buckets per scope), not a flat vector.
 
-**Consequences for the walker / `SchemaLayout`:**
+Verified live: 1061 classes / 7142 fields; `C_BaseEntity` has 82 fields with
+`m_iHealth` at `0x34c` (a known-correct offset), and `C_CSPlayerPawn` has 105.
 
-- The placeholder `type_scopes_offset` (`0x190`) is wrong; the data pointer is
-  at `+0x198` and the count at `+0x1a0` (so the vector's count offset is `0x8`).
-- A scope's name is **inline**, not a pointer, so the walker's
-  `read_cstring(read_ptr(scope + scope_name_offset))` cannot read it as-is.
-- The scope→classes vector offset is **not yet identified**: the scope objects
-  are surrounded by Windows heap poison (`0xaa`/`0xff`), so the classes list is
-  allocated elsewhere. Recovering it (and confirming the class-info/field
-  pointers) needs Ghidra struct recovery via ReVa — the next step.
-
-Until then `SchemaLayout` stays placeholder and a live schema dump is not
-trustworthy.
+The walker (`schema::dump`) and the SDK generator consume this directly;
+`payload/sdk/schemas/*.hpp` now contains real class/field metadata.
