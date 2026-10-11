@@ -13,6 +13,20 @@ namespace {
 
 using PresentFn = long(__stdcall*)(void*, unsigned, unsigned);
 
+// Append a line to a log file next to the drive root, so hook activity is
+// observable from outside the target process.
+void log_line(const char* text) noexcept {
+#if defined(_WIN32)
+  std::FILE* file = nullptr;
+  if (fopen_s(&file, "C:\\cs2-payload.log", "a") == 0 && file != nullptr) {
+    std::fprintf(file, "%s\n", text);
+    std::fclose(file);
+  }
+#else
+  (void)text;
+#endif
+}
+
 // Single registration point for the C-style hook callback. The detour needs to
 // reach the owning instance; this is the one place a module-static is used (the
 // alternative is threading a context through the hook engine, which is heavier
@@ -120,6 +134,7 @@ bool PresentHook::install() noexcept {
   if (installed_) {
     return true;
   }
+  log_line("present hook: install begin");
 #if defined(_WIN32)
   // Only hook when the graphics stack is already present (the game). This keeps
   // the payload safe to map into non-graphical targets.
@@ -130,6 +145,7 @@ bool PresentHook::install() noexcept {
   void** vtable = find_present_vtable();
   if (vtable == nullptr) {
     std::puts("[cs2-features] could not obtain the swapchain vtable");
+    log_line("present hook: vtable not found");
     return false;
   }
   g_original_present = reinterpret_cast<PresentFn>(vtable[k_present_index]);
@@ -142,6 +158,7 @@ bool PresentHook::install() noexcept {
   g_active = this;
   installed_ = true;
   std::puts("[cs2-features] IDXGISwapChain::Present hooked");
+  log_line("present hook installed");
   return true;
 #else
   return false;
@@ -180,12 +197,18 @@ void PresentHook::on_present(void* swapchain) noexcept {
       backend_ready_ = backend_ != nullptr && backend_->initialize(context_);
       if (!backend_ready_) {
         std::puts("[cs2-features] UI backend initialization failed");
+        log_line("ui backend init failed");
+      } else {
+        log_line("ui backend initialized (device/context/hwnd acquired)");
       }
     }
   }
 #endif
   if (backend_ready_ && backend_ != nullptr) {
     backend_->render();
+    if (frames_ % 300 == 0) {
+      log_line("presenting frames");
+    }
   }
 }
 

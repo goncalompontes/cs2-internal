@@ -37,6 +37,15 @@ Runtime& runtime() {
 
 }  // namespace
 
+#if defined(_WIN32)
+DWORD WINAPI install_thread(void*) {
+  // Install off the loader lock: device creation loads DLLs and would deadlock
+  // if done from DllMain.
+  cs2::payload::runtime().present.install();
+  return 0;
+}
+#endif
+
 void boot() {
 #ifdef CS2_PAYLOAD_HAVE_INTERFACES
   std::printf("[cs2-payload] boot; SDK has %zu interface(s)\n", cs2::sdk::INTERFACES.size());
@@ -65,7 +74,13 @@ void boot() {
 #endif
 
   // The Present hook initializes the UI backend once the swapchain is available.
+  // Run it on a separate thread so DllMain does not hold the loader lock while
+  // device creation loads DLLs.
+#if defined(_WIN32)
+  CreateThread(nullptr, 0, install_thread, nullptr, 0, nullptr);
+#else
   runtime().present.install();
+#endif
 }
 
 }  // namespace cs2::payload
