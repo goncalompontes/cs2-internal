@@ -16,6 +16,7 @@ pub mod output;
 pub mod pattern;
 pub mod pe;
 pub mod reader;
+pub mod rename;
 pub mod schema;
 pub mod sdk;
 

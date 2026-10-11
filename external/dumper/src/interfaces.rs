@@ -24,7 +24,11 @@ pub const INTERFACE_REG_SIZE: usize = 24;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interface {
+    /// Our identifier (ADR-0010), derived by [`crate::rename`].
     pub name: String,
+    /// The original target interface name (the `CreateInterface` key).
+    #[serde(default)]
+    pub target: String,
     /// RVA of the `InterfaceReg` node.
     pub rva: usize,
     /// RVA of the create function.
@@ -61,6 +65,7 @@ pub fn walk_list<R: MemoryRead>(
                 if looks_like_interface_name(&name) {
                     out.push(Interface {
                         name,
+                        target: String::new(),
                         rva: node - base,
                         create_rva: create.wrapping_sub(base),
                     });
@@ -105,7 +110,11 @@ fn looks_like_interface_name(s: &str) -> bool {
 
 /// Enumerate *all* interfaces by scanning the module for `{create, name}`
 /// registration entries (16-byte stride in current builds).
-pub fn enumerate_all<R: MemoryRead>(reader: &R, base: usize, size: usize) -> Result<Vec<Interface>> {
+pub fn enumerate_all<R: MemoryRead>(
+    reader: &R,
+    base: usize,
+    size: usize,
+) -> Result<Vec<Interface>> {
     let bytes = reader.read_bytes(base, size)?;
     let end = base + size;
 
@@ -120,6 +129,7 @@ pub fn enumerate_all<R: MemoryRead>(reader: &R, base: usize, size: usize) -> Res
                 if looks_like_interface_name(&name) && seen.insert(name.clone()) {
                     out.push(Interface {
                         name,
+                        target: String::new(),
                         rva: base + offset,
                         create_rva: create - base,
                     });

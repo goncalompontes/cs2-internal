@@ -26,7 +26,11 @@ cs2-dumper --gen --interfaces-json build/interfaces.json --schema-json build/sch
 | `schemas.hpp` | umbrella include for the per-module schema headers |
 | `schemas/<module>.hpp` | `cs2::sdk::schemas::<module>` — class/field metadata + lookups |
 
-All generated identifiers follow the project conventions (ADR-0010).
+All generated identifiers follow the project conventions (ADR-0010) and are
+produced by the dumper's rename pass (ADR-0011). Every entry also carries the
+**original target name** (`target` / `target_name`), so lookups by the game's own
+name still work (`find_class_by_target`, `field_offset_by_target`,
+`find_interface_by_target`).
 
 ## Caveat
 

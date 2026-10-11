@@ -22,6 +22,7 @@ cargo build --release --manifest-path external/dumper/Cargo.toml
 | `pe` | PE image helpers (image base, size, exports) via `goblin` |
 | `interfaces` | `CreateInterface` registration-list resolver (seed-based) |
 | `schema` | schema walker (`SchemaLayout`, configurable offsets) |
+| `rename` | symbol renaming to ADR-0010 + target mapping |
 | `sdk` | C++ header generation (`interfaces.hpp`, `offsets.hpp`, `schemas/*.hpp`) |
 | `analysis` | signature registry + resolved offsets/interfaces (grows over time) |
 | `output` | JSON serialization |
@@ -75,6 +76,14 @@ schema walker and SDK header generation — all without a running game.
 (build 25815307) — see `docs/re/schema-system.md`. Class lookup walks a per-
 module hash map; fields come from the class's contiguous field array. Re-run
 `scripts/calibrate-live.sh` after a game update and re-check the offsets.
+
+## Symbol renaming
+
+Emitted names follow ADR-0010 (see ADR-0011): target symbols are renamed
+(Source/Hungarian prefixes stripped, case-normalized, field type displays
+rewritten) and the original is preserved as `target` / `target_name`. The
+generated SDK exposes `find_class_by_target`, `field_offset_by_target` and
+`find_interface_by_target` so the game's own names still resolve.
 
 ## Live analysis (MCP server)
 

@@ -101,17 +101,26 @@ impl Default for SchemaLayout {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaField {
+    /// Our identifier (ADR-0010).
     pub name: String,
+    /// Field type display, rewritten to our naming.
     pub type_name: String,
     pub offset: u32,
+    /// Original target field name.
+    #[serde(default)]
+    pub target_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaClass {
     pub module: String,
+    /// Our type name (ADR-0010).
     pub name: String,
     pub size: u32,
     pub fields: Vec<SchemaField>,
+    /// Original target class name.
+    #[serde(default)]
+    pub target_name: String,
 }
 
 const MAX_CLASSES: usize = 1 << 17;
@@ -227,6 +236,7 @@ fn read_class<R: MemoryRead>(
             name: fname,
             type_name,
             offset,
+            target_name: String::new(),
         });
     }
 
@@ -239,6 +249,7 @@ fn read_class<R: MemoryRead>(
         name,
         size,
         fields,
+        target_name: String::new(),
     })
 }
 

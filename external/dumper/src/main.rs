@@ -9,6 +9,7 @@ use cs2_dumper::output::{self, DumpManifest};
 use cs2_dumper::pattern::Pattern;
 use cs2_dumper::pe::{self, PeInfo};
 use cs2_dumper::reader::BytesReader;
+use cs2_dumper::rename;
 use cs2_dumper::schema::{self, SchemaLayout};
 use cs2_dumper::sdk;
 
@@ -212,7 +213,8 @@ fn main() -> Result<()> {
                 .ok_or_else(|| anyhow!("--schema requires --schema-system <hex>"))?,
         )?;
         let layout = SchemaLayout::default();
-        let classes = schema::dump(&mem, schema_system, &layout)?;
+        let mut classes = schema::dump(&mem, schema_system, &layout)?;
+        rename::apply_schema(&mut classes);
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&classes)?);
             return Ok(());
@@ -274,7 +276,7 @@ fn analyze(
 
     if cli.interfaces {
         let reader = BytesReader::new(base, bytes.to_vec());
-        let found = if let Some(global_text) = &cli.interfaces_global {
+        let mut found = if let Some(global_text) = &cli.interfaces_global {
             let global = parse_hex(global_text)?;
             interfaces::walk_from_global(&reader, base, bytes.len(), global)?
         } else if let Some(head_text) = &cli.interfaces_head {
@@ -287,6 +289,7 @@ fn analyze(
             seeds.extend(cli.interface_seeds.iter().map(String::as_str));
             interfaces::enumerate(&reader, base, bytes.len(), &seeds)?
         };
+        rename::apply_interfaces(&mut found);
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&found)?);
         } else {

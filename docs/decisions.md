@@ -72,3 +72,18 @@ wrong, `schema_system` is right. Use `enum class` instead of flag ints.
 context object. Prefer nested namespaces/modules over name prefixes. The
 target's own symbol names may appear in docs/comments only, never as our
 identifiers.
+
+## ADR-0011 — Symbol renaming pass + target mapping
+**Status:** accepted
+
+Everything the dumper emits is run through a **rename pass** (`rename` module)
+that turns target symbols into our convention (ADR-0010): strip Source/Hungarian
+tags (`C_`/`C`, `m_`/`m_p`/`m_i`/`m_vec`/…, `_t`) and normalize to `snake_case`
+identifiers, `PascalCase` types and `SCREAMING_SNAKE_CASE` constants. Field type
+displays are rewritten too (`CCSPlayer_BulletServices*` → `CsPlayerBulletServices*`).
+
+The **original target name is always preserved** (`target` on interfaces,
+`target_name` on classes/fields) and emitted as a **compile-time mapping**, so
+lookups by the game's own name still work: `find_class_by_target`,
+`field_offset_by_target`, `find_interface_by_target`. Collisions are resolved
+deterministically (`_2`, `_3`, …).

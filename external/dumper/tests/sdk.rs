@@ -10,6 +10,7 @@ use cs2_dumper::sdk::{self, SdkInputs};
 fn interface(name: &str, node: usize, create: usize) -> Interface {
     Interface {
         name: name.to_string(),
+        target: String::new(),
         rva: node,
         create_rva: create,
     }
@@ -26,8 +27,10 @@ fn class(module: &str, name: &str, size: u32, fields: &[(&str, &str, u32)]) -> S
                 name: n.to_string(),
                 type_name: t.to_string(),
                 offset: *o,
+                target_name: String::new(),
             })
             .collect(),
+        target_name: String::new(),
     }
 }
 
@@ -40,9 +43,10 @@ fn renders_interfaces_table_and_lookup() {
     let text = sdk::render_interfaces(&items);
 
     assert!(text.contains("std::array<InterfaceInfo, 2> INTERFACES"));
-    assert!(text.contains("\"Source2Client002\", 0x1000, 0x2000"));
-    assert!(text.contains("\"GameClientExports001\", 0x1018, 0x2040"));
+    assert!(text.contains("\"Source2Client002\", \"\", 0x1000, 0x2000"));
+    assert!(text.contains("\"GameClientExports001\", \"\", 0x1018, 0x2040"));
     assert!(text.contains("find_interface"));
+    assert!(text.contains("find_interface_by_target"));
     assert!(text.contains("#pragma once"));
 }
 
@@ -123,12 +127,13 @@ fn renders_schema_module_with_fields_and_empty_class() {
     assert!(text.contains("inline constexpr std::string_view MODULE = \"client.dll\";"));
     assert!(text.contains("inline constexpr FieldInfo ccs_player_pawn_fields[] = {"));
     assert!(
-        text.contains("{\"m_iHealth\", \"int32\", 0x340}")
-            || text.contains("\"m_iHealth\", \"int32\", 0x340")
+        text.contains("{\"m_iHealth\", \"int32\", 0x340, \"\"}")
+            || text.contains("\"m_iHealth\", \"int32\", 0x340, \"\"")
     );
     // The empty class uses a default-constructed span, not a zero-length array.
     assert!(text.contains("std::span<const FieldInfo>{}"));
     assert!(text.contains("field_offset"));
+    assert!(text.contains("find_class_by_target"));
 }
 
 #[test]

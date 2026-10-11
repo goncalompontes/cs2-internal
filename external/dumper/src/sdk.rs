@@ -101,17 +101,26 @@ pub fn render_interfaces(items: &[Interface]) -> String {
 namespace cs2::sdk {
 
 struct InterfaceInfo {
-  std::string_view name;
+  std::string_view name;    // our identifier
+  std::string_view target;  // original target name (CreateInterface key)
   std::uint32_t node_rva;
   std::uint32_t create_rva;
 };
 
 "#;
     const EPILOGUE: &str = r#"
-// Look up a registration by name; returns nullptr if absent.
+// Look up a registration by our identifier; returns nullptr if absent.
 [[nodiscard]] inline const InterfaceInfo* find_interface(std::string_view name) noexcept {
   for (const InterfaceInfo& info : INTERFACES) {
     if (info.name == name) return &info;
+  }
+  return nullptr;
+}
+
+// Look up a registration by the original target name.
+[[nodiscard]] inline const InterfaceInfo* find_interface_by_target(std::string_view target) noexcept {
+  for (const InterfaceInfo& info : INTERFACES) {
+    if (info.target == target) return &info;
   }
   return nullptr;
 }
@@ -129,8 +138,9 @@ struct InterfaceInfo {
     for it in items {
         let _ = writeln!(
             s,
-            "  {{ {}, 0x{:x}, 0x{:x} }},",
+            "  {{ {}, {}, 0x{:x}, 0x{:x} }},",
             cpp_string(&it.name),
+            cpp_string(&it.target),
             it.rva,
             it.create_rva
         );
@@ -238,23 +248,33 @@ pub fn render_schema_module(module: &str, classes: &[&SchemaClass]) -> String {
 "#;
     const TYPES: &str = r#"
 struct FieldInfo {
-  std::string_view name;
-  std::string_view type;
+  std::string_view name;    // our identifier
+  std::string_view type;    // rewritten type display
   std::uint32_t offset;
+  std::string_view target;  // original target field name
 };
 
 struct ClassInfo {
-  std::string_view name;
+  std::string_view name;         // our type name
+  std::string_view target_name;  // original target class name
   std::uint32_t size;
   std::span<const FieldInfo> fields;
 };
 
 "#;
     const EPILOGUE: &str = r#"
-// Look up a class by name; returns nullptr if absent.
+// Look up a class by our name; returns nullptr if absent.
 [[nodiscard]] inline const ClassInfo* find_class(std::string_view name) noexcept {
   for (const ClassInfo& info : CLASSES) {
     if (info.name == name) return &info;
+  }
+  return nullptr;
+}
+
+// Look up a class by the original target name.
+[[nodiscard]] inline const ClassInfo* find_class_by_target(std::string_view target) noexcept {
+  for (const ClassInfo& info : CLASSES) {
+    if (info.target_name == target) return &info;
   }
   return nullptr;
 }
@@ -266,6 +286,17 @@ struct ClassInfo {
   if (cls == nullptr) return 0;
   for (const FieldInfo& field : cls->fields) {
     if (field.name == field_name) return field.offset;
+  }
+  return 0;
+}
+
+// Offset of a field by the original target names.
+[[nodiscard]] inline std::uint32_t field_offset_by_target(std::string_view class_target,
+                                                          std::string_view field_target) noexcept {
+  const ClassInfo* cls = find_class_by_target(class_target);
+  if (cls == nullptr) return 0;
+  for (const FieldInfo& field : cls->fields) {
+    if (field.target == field_target) return field.offset;
   }
   return 0;
 }
@@ -295,10 +326,11 @@ struct ClassInfo {
         for field in &class.fields {
             let _ = writeln!(
                 s,
-                "  {{ {}, {}, 0x{:x} }},",
+                "  {{ {}, {}, 0x{:x}, {} }},",
                 cpp_string(&field.name),
                 cpp_string(&field.type_name),
-                field.offset
+                field.offset,
+                cpp_string(&field.target_name)
             );
         }
         s.push_str("};\n\n");
@@ -313,8 +345,9 @@ struct ClassInfo {
         };
         let _ = writeln!(
             s,
-            "  {{ {}, 0x{:x}, {} }},",
+            "  {{ {}, {}, 0x{:x}, {} }},",
             cpp_string(&class.name),
+            cpp_string(&class.target_name),
             class.size,
             fields
         );
