@@ -1,0 +1,2 @@
+# Live calibration dumps — build-specific; regenerate with scripts/calibrate-live.sh.
+*.json

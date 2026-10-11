@@ -25,6 +25,13 @@
       "treesitter": {
         "type": "local",
         "command": ["/home/pontes/.local/bin/treesitter-mcp"]
+      },
+      // Live memory analysis of a running target (native /proc backend).
+      // Attach by process name; narrow values, resolve pointer chains, scan
+      // patterns, enumerate interfaces. Built on demand by the wrapper.
+      "cs2-live": {
+        "type": "local",
+        "command": ["/home/pontes/cs2-internal/scripts/mcp-live.sh"]
       }
     }
   }

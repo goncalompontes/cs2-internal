@@ -9,6 +9,8 @@
 
 pub mod analysis;
 pub mod interfaces;
+pub mod live;
+pub mod mcp;
 pub mod memory;
 pub mod output;
 pub mod pattern;

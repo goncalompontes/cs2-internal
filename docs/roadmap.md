@@ -7,6 +7,7 @@
 - [x] Ghidra + ReVa installed
 - [x] MCP servers (treesitter + reva connected)
 - [x] Offline run loop documented (docs/architecture.md)
+- [x] Live-analysis MCP server (`cs2-live`) + build-time SDK generation
 - [ ] Install the Windows (Proton) build of the target
 - [ ] Verify offline `-insecure` run
 

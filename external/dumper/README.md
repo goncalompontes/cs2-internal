@@ -76,6 +76,26 @@ be calibrated against the live build (via ReVa/Ghidra + a schema dump) before
 the schema output is trustworthy. The traversal/emit logic is fixture-tested
 against the same layout, so only the numbers need updating.
 
+## Live analysis (MCP server)
+
+`cs2-dumper --mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io)
+server over stdio for live memory analysis of a running target. It is wired
+into OpenCode as the `cs2-live` server (see `opencode.jsonc` and
+`scripts/mcp-live.sh`). Tools:
+
+| Tool | Purpose |
+|---|---|
+| `list_processes` / `attach` / `detach` | target selection (by name or pid) |
+| `modules` | loaded modules with base/size |
+| `read` / `read_cstring` | typed or raw reads |
+| `resolve_chain` | follow a pointer chain |
+| `scan_pattern` | IDA-style byte scan in a module/range |
+| `scan_value` / `scan_next` | Cheat-Engine-style value narrowing |
+| `interfaces` | enumerate `CreateInterface` registrations |
+
+All tools reuse the same memory/pattern/schema code as the CLI. Values are
+handled byte-exactly, so 64-bit pointers are matched precisely.
+
 ## Notes
 
 - Reading another process's `/proc/<pid>/mem` is subject to the kernel's ptrace

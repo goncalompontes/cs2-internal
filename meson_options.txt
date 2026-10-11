@@ -1,0 +1,9 @@
+option('sdk_gen',
+  type: 'boolean',
+  value: true,
+  description: 'Render the C++ SDK headers (payload/sdk) from calibration dumps during the build.')
+
+option('live_calibration',
+  type: 'boolean',
+  value: false,
+  description: 'Run live calibration against a running target before rendering SDK headers (requires the target running).')

@@ -17,6 +17,23 @@ pub struct ModuleInfo {
     pub size: usize,
 }
 
+/// A `/proc/<pid>/maps` region.
+#[derive(Debug, Clone)]
+pub struct Region {
+    pub start: usize,
+    pub end: usize,
+    pub read: bool,
+    pub write: bool,
+    pub execute: bool,
+    pub path: String,
+}
+
+impl Region {
+    pub fn size(&self) -> usize {
+        self.end.saturating_sub(self.start)
+    }
+}
+
 #[derive(Debug)]
 pub enum MemoryError {
     Io(std::io::Error),
@@ -45,6 +62,8 @@ pub trait ProcessMemory {
 
     fn modules(&self) -> Vec<ModuleInfo>;
 
+    fn regions(&self) -> Vec<Region>;
+
     fn read_vec(&self, addr: usize, len: usize) -> Result<Vec<u8>, MemoryError> {
         let mut buf = vec![0u8; len];
         self.read(addr, &mut buf)?;
@@ -62,6 +81,7 @@ pub struct LinuxProcMemory {
     pid: u32,
     mem: File,
     modules: Vec<ModuleInfo>,
+    regions: Vec<Region>,
 }
 
 impl LinuxProcMemory {
@@ -72,6 +92,7 @@ impl LinuxProcMemory {
             pid,
             mem,
             modules: parse_maps(&maps),
+            regions: parse_regions(&maps),
         })
     }
 
@@ -97,6 +118,45 @@ impl ProcessMemory for LinuxProcMemory {
     fn modules(&self) -> Vec<ModuleInfo> {
         self.modules.clone()
     }
+
+    fn regions(&self) -> Vec<Region> {
+        self.regions.clone()
+    }
+}
+
+/// Parse `/proc/<pid>/maps` into per-region entries.
+pub fn parse_regions(maps: &str) -> Vec<Region> {
+    let mut out = Vec::new();
+    for line in maps.lines() {
+        // e.g. 7f...-7f... rw-p 00000000 08:01 1234  /path  (path optional)
+        let mut fields = line.split_whitespace();
+        let Some(range) = fields.next() else { continue };
+        let Some(perms) = fields.next() else { continue };
+        let Some((start_s, end_s)) = range.split_once('-') else {
+            continue;
+        };
+        let (Ok(start), Ok(end)) = (
+            usize::from_str_radix(start_s, 16),
+            usize::from_str_radix(end_s, 16),
+        ) else {
+            continue;
+        };
+        let mut p = perms.chars();
+        let read = p.next() == Some('r');
+        let write = p.next() == Some('w');
+        let execute = p.next() == Some('x');
+        // Remaining fields: offset, dev, inode, then an optional path.
+        let path = fields.nth(2).unwrap_or("").to_string();
+        out.push(Region {
+            start,
+            end,
+            read,
+            write,
+            execute,
+            path,
+        });
+    }
+    out
 }
 
 /// Collapse `/proc/<pid>/maps` into one entry per file-backed module.

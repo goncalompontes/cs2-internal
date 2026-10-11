@@ -43,6 +43,28 @@ meson compile -C build-payload
 - `payload/render` — `UiBackend` abstraction; **RmlUi** primary, **ImGui**
   fallback.
 - `injector` — manual-map injector run inside the same Proton prefix.
+- `scripts/` — `gen-sdk.sh` (build-time header render), `calibrate-live.sh`
+  (live dumps → `calibration/*.json`), `mcp-live.sh` (MCP wrapper).
+- `external/dumper --mcp` — live-analysis **MCP server** (stdio), wired into
+  OpenCode as `cs2-live`: attach, module enumeration, typed reads, pointer
+  chains, pattern scans, and value scans with narrowing (a native,
+  scriptable alternative to Cheat Engine for a Wine/Proton target).
+
+## Live calibration & SDK generation
+
+Two loops feed `payload/sdk/*.hpp`:
+
+1. **Live calibration** (`scripts/calibrate-live.sh`) attaches to a running
+   target and writes `calibration/interfaces.json` (and `schema.json` when an
+   address is supplied). Interactive offset work is done through the
+   `cs2-live` MCP tools.
+2. **Build-time generation** — the `sdk-headers` Meson target runs
+   `scripts/gen-sdk.sh`, rendering headers from whatever dumps are present.
+   With `-Dlive_calibration=true` it refreshes the dumps first, so a release
+   build can calibrate against a running target as part of the build.
+
+Reading another process's memory is subject to the ptrace policy; see the
+ptrace section below.
 
 ## Testing & instrumentation (agent-drivable)
 

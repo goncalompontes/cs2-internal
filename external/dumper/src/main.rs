@@ -81,6 +81,10 @@ struct Cli {
     /// Offsets JSON (input for --gen).
     #[arg(long, value_name = "FILE")]
     offsets_json: Option<String>,
+
+    /// Run as an MCP (Model Context Protocol) server over stdio for live analysis.
+    #[arg(long)]
+    mcp: bool,
 }
 
 /// Common interfaces used as discovery seeds.
@@ -99,6 +103,11 @@ const DEFAULT_INTERFACE_SEEDS: &[&str] = &[
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Live-analysis MCP server over stdio.
+    if cli.mcp {
+        return cs2_dumper::mcp::serve();
+    }
 
     // SDK generation from JSON dumps — no process required.
     if let Some(dir) = &cli.gen {
@@ -139,9 +148,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    println!("process {:?} (pid {pid}) — {} modules", cli.process, modules.len());
-    for m in &modules {
-        println!("  {:<28} base=0x{:012x} size=0x{:x}", m.name, m.base, m.size);
+    if !cli.json {
+        println!("process {:?} (pid {pid}) — {} modules", cli.process, modules.len());
+        for m in &modules {
+            println!("  {:<28} base=0x{:012x} size=0x{:x}", m.name, m.base, m.size);
+        }
     }
 
     if cli.pattern.is_some() || cli.exports || cli.interfaces {
@@ -231,9 +242,10 @@ fn analyze(cli: &Cli, module_name: &str, bytes: &[u8], base: usize, info: Option
 /// Generate C++ SDK headers from JSON dumps on disk.
 fn generate_sdk(cli: &Cli, dir: &str) -> Result<()> {
     if cli.interfaces_json.is_none() && cli.schema_json.is_none() && cli.offsets_json.is_none() {
-        return Err(anyhow!(
-            "--gen needs at least one input: --interfaces-json / --schema-json / --offsets-json"
-        ));
+        eprintln!(
+            "warning: --gen called with no JSON inputs; writing empty SDK headers \
+             (pass --interfaces-json/--schema-json/--offsets-json)"
+        );
     }
 
     let interfaces: Vec<interfaces::Interface> = read_json(cli.interfaces_json.as_deref())?;

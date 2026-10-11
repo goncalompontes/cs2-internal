@@ -16,5 +16,29 @@ subdir('tools')
 # cross-compiled into the payload).
 subdir('payload/loader')
 
+# --- Generated C++ SDK headers -------------------------------------------
+# Render payload/sdk/*.hpp from the calibration dumps in calibration/. The
+# generator is the Rust dumper, built on demand by scripts/gen-sdk.sh. With
+# -Dlive_calibration=true the script refreshes the dumps from a running target
+# first (see scripts/calibrate-live.sh).
+if get_option('sdk_gen')
+  gen_sdk = find_program('scripts/gen-sdk.sh')
+  dump_dir = meson.current_source_dir() / 'calibration'
+  sdk_dir = meson.current_source_dir() / 'payload' / 'sdk'
+
+  gen_cmd = [gen_sdk, dump_dir, sdk_dir, '@OUTPUT@']
+  if get_option('live_calibration')
+    gen_cmd = [gen_sdk, '--live', dump_dir, sdk_dir, '@OUTPUT@']
+  endif
+
+  sdk_headers = custom_target('sdk-headers',
+    output : 'sdk-headers.stamp',
+    command : gen_cmd,
+    build_always_stale : true,
+    console : true,
+    build_by_default : true,
+  )
+endif
+
 # Quick self-check so `meson test` is meaningful from day one.
 test('host-probe', host_probe)
