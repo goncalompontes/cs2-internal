@@ -20,8 +20,8 @@ The target is C++; MSVC ABI needed for vtable/class interop. Built with
 ## ADR-0003 — Build system: Meson + Ninja
 **Status:** accepted
 
-Chosen over CMake. Host and payload are separate Meson
-projects (payload uses a cross file).
+Chosen over CMake. Host and payload are separate Meson projects (payload uses a
+cross file).
 
 ## ADR-0004 — Ghidra MCP: ReVa
 **Status:** accepted

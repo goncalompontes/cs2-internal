@@ -3,8 +3,8 @@
 Manual-map injector for loading the payload DLL into the target process.
 
 The target blocks `LoadLibrary` on unsigned modules and runs a
-catalog-signature check, so a manual map (map the PE ourselves, resolve imports/relocs, call the entry)
-is required.
+catalog-signature check, so a manual map (map the PE ourselves, resolve
+imports/relocs, call the entry) is required.
 
 Planned:
 - Windows manual-map injector (a small PE) run inside the same Proton prefix:
