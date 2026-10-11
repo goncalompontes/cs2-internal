@@ -38,6 +38,17 @@ if get_option('sdk_gen')
     console : true,
     build_by_default : true,
   )
+
+  # A dependency that carries the generated include dir and the generation
+  # order, so consumers (tests, and the payload) build against fresh headers.
+  sdk_dep = declare_dependency(
+    include_directories : include_directories('payload' / 'sdk'),
+    sources : sdk_headers,
+  )
+  sdk_consumer = executable('sdk-consumer', 'tools/sdk_consumer.cpp',
+    dependencies : sdk_dep,
+  )
+  test('sdk-consumer', sdk_consumer)
 endif
 
 # Quick self-check so `meson test` is meaningful from day one.

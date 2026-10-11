@@ -36,7 +36,10 @@ meson compile -C build-payload
 - `payload/core` — file logging (`spdlog`), config (`glaze`), module cache,
   scoped memory access, control channel (IPC).
 - `payload/scan` — in-process pattern engine (shares patterns with the dumper).
-- `payload/sdk` — generated headers (schemas, interfaces, offsets) + accessors.
+- `payload/sdk` — generated headers (schemas, interfaces, offsets) consumed by
+  the payload and by the host `sdk-consumer` test. Rendered by
+  `scripts/gen-sdk.sh` from the host build (and from the payload build itself,
+  so standalone payload builds work).
 - `payload/hooks` — hook engine (`SafetyHook`/`MinHook`) + targets: render
   (`IDXGISwapChain::Present`, DX11 under DXVK), tick/frame, game events.
 - `payload/features` — read-only state queries, debug HUD data assembly.
