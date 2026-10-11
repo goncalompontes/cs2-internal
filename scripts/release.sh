@@ -24,17 +24,20 @@ cd "$root"
 
 bin="$root/external/dumper/target/release/cs2-dumper"
 
-echo "==> building dumper (release)"
-cargo build --release --manifest-path external/dumper/Cargo.toml
-
-if ! getcap "$bin" 2>/dev/null | grep -q cap_sys_ptrace; then
-  echo "warning: $bin lacks cap_sys_ptrace; live calibration will be skipped/fail" >&2
-  echo "         grant it with: sudo setcap cap_sys_ptrace+ep $bin" >&2
-fi
-
+# Calibrate BEFORE rebuilding: `cargo build --release` replaces the binary and
+# drops its file capability, so the (already capped) binary is the one that can
+# read the target.
 calibrate="${CS2_SKIP_CALIBRATION:-0}"
 live_flag=false
 if [[ "$calibrate" != "1" ]]; then
+  if [[ ! -x "$bin" ]]; then
+    echo "==> building dumper (release)"
+    cargo build --release --manifest-path external/dumper/Cargo.toml
+  fi
+  if ! getcap "$bin" 2>/dev/null | grep -q cap_sys_ptrace; then
+    echo "warning: $bin lacks cap_sys_ptrace; live calibration may fail" >&2
+    echo "         grant it with: sudo setcap cap_sys_ptrace+ep $bin" >&2
+  fi
   echo "==> live calibration"
   if ./scripts/calibrate-live.sh; then
     live_flag=true
@@ -42,6 +45,9 @@ if [[ "$calibrate" != "1" ]]; then
     echo "warning: live calibration failed; continuing without it" >&2
   fi
 fi
+
+echo "==> building dumper (release)"
+cargo build --release --manifest-path external/dumper/Cargo.toml
 
 setup() { # dir, source, extra...
   local dir="$1" src="$2"; shift 2
