@@ -92,8 +92,31 @@ From `FUN_1800107d0` (`param_1` = `CSchemaSystem*`):
 ## Live status
 
 The live `CSchemaSystem*` is resolved (`config/schema-heads.json` +
-`scripts/calibrate-live.sh`), but `SchemaLayout` still holds placeholder offsets,
-so a live schema dump reads off the end of the object and errors (`EIO`).
-Calibrating `SchemaLayout` against the live object is the next step; the
-`cs2-live` MCP tools (`read`, `resolve_chain`, `scan_value`) are the intended
-means.
+`scripts/calibrate-live.sh`). Live object inspection (cs2-live MCP / `--read`)
+recovered these offsets for build 25815307:
+
+| What | Where | Notes |
+|---|---|---|
+| `m_TypeScopes` data pointer | `CSchemaSystem + 0x198` | CUtlVector data |
+| type-scope count | `CSchemaSystem + 0x1a0` | `0x20` (32 scopes, one per module) |
+| scope `m_pTypeInfo` | `CSchemaTypeScope + 0x00` | pointer |
+| scope `m_Name` | `CSchemaTypeScope + 0x08` | **inline** char[16], e.g. `"client.dll"` |
+| type/class-info vector | `CSchemaSystem + 0x210` | 32 entries; `m_Name`@+0x08 (ptr), `m_ModuleName`@+0x10 (ptr), size (`u16`)@+0x20 |
+| `SchemaClassFieldData` | stride `0x20` | `m_Name`@+0x00, `m_pType`@+0x08, `m_nOffset`@+0x10 (`u32`) |
+
+Example scope names (from the live vector): `client.dll`, `server.dll`,
+`engine2.dll`, `schemasystem.dll`, `materialsystem2.dll`, `panorama.dll`, …
+
+**Consequences for the walker / `SchemaLayout`:**
+
+- The placeholder `type_scopes_offset` (`0x190`) is wrong; the data pointer is
+  at `+0x198` and the count at `+0x1a0` (so the vector's count offset is `0x8`).
+- A scope's name is **inline**, not a pointer, so the walker's
+  `read_cstring(read_ptr(scope + scope_name_offset))` cannot read it as-is.
+- The scope→classes vector offset is **not yet identified**: the scope objects
+  are surrounded by Windows heap poison (`0xaa`/`0xff`), so the classes list is
+  allocated elsewhere. Recovering it (and confirming the class-info/field
+  pointers) needs Ghidra struct recovery via ReVa — the next step.
+
+Until then `SchemaLayout` stays placeholder and a live schema dump is not
+trustworthy.
