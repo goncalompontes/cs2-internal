@@ -34,6 +34,9 @@ export JAVA_HOME=/usr/lib/jvm/java-27-openjdk
 
 Verify: `rea doctor` reports the `ghidra` scope check as `healthy`.
 
+For large targets, apply the local **Ghidra project cache** (one project per
+target digest, reused on later opens) — see `docs/rea-project-cache.md`.
+
 > After editing `opencode.jsonc` MCP entries, run `opencode service restart`
 > so the running service reloads configuration.
 

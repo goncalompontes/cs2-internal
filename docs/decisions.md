@@ -99,3 +99,8 @@ OpenCode config with `GHIDRA_INSTALL_DIR` + `JAVA_HOME`.
 The project no longer vendors Ghidra: ADR-0004's ReVa toolchain is retired and
 the ~1.4 GB download/extraction is removed from the tree. This keeps checkouts
 small and decouples RE tooling from the project tree.
+
+A **local patch** to the installed `rea-agents` package adds a Ghidra project
+cache (one project per target digest, reused with `-process -noanalysis`) so
+large targets are not re-analyzed on every open; upstream REA only offers
+exact-query snapshot replay. See `docs/rea-project-cache.md`.
