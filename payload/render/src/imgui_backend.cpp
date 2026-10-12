@@ -51,32 +51,24 @@ void ImGuiBackend::render() {
     return;
   }
 
-  // Keep the back-buffer render target in sync with the swapchain size; a stale
-  // RTV after a resize would draw into a released buffer.
-  DXGI_SWAP_CHAIN_DESC desc{};
-  if (chain->GetDesc(&desc) < 0) {
+  // Acquire the back buffer for this frame only. Holding a back-buffer
+  // reference across frames (a cached RTV) blocks the game's ResizeBuffers /
+  // present, which is what froze the game on a UI state change.
+  ID3D11Texture2D* back_buffer = nullptr;
+  if (FAILED(chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                              reinterpret_cast<void**>(&back_buffer))) ||
+      back_buffer == nullptr) {
     return;
   }
-  const unsigned width = desc.BufferDesc.Width;
-  const unsigned height = desc.BufferDesc.Height;
-  if (render_target_ == nullptr || width != render_target_width_ ||
-      height != render_target_height_) {
-    if (render_target_ != nullptr) {
-      static_cast<IUnknown*>(render_target_)->Release();
-      render_target_ = nullptr;
-    }
-    ID3D11Texture2D* back_buffer = nullptr;
-    if (SUCCEEDED(chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
-                                   reinterpret_cast<void**>(&back_buffer))) &&
-        back_buffer != nullptr) {
-      device->CreateRenderTargetView(back_buffer, nullptr,
-                                     reinterpret_cast<ID3D11RenderTargetView**>(&render_target_));
-      back_buffer->Release();
-      render_target_width_ = width;
-      render_target_height_ = height;
-    }
+  ID3D11RenderTargetView* render_target = nullptr;
+  const HRESULT create = device->CreateRenderTargetView(back_buffer, nullptr, &render_target);
+  DXGI_SWAP_CHAIN_DESC desc{};
+  if (render_target_width_ == 0 && chain->GetDesc(&desc) >= 0) {
+    render_target_width_ = desc.BufferDesc.Width;
+    render_target_height_ = desc.BufferDesc.Height;
   }
-  if (render_target_ == nullptr) {
+  back_buffer->Release();
+  if (FAILED(create) || render_target == nullptr) {
     return;
   }
 
@@ -84,7 +76,8 @@ void ImGuiBackend::render() {
   // Win32 platform backend (whose window/mouse calls from the render thread can
   // deadlock under Wine).
   ImGuiIO& io = ImGui::GetIO();
-  io.DisplaySize = ImVec2(static_cast<float>(width), static_cast<float>(height));
+  io.DisplaySize =
+      ImVec2(static_cast<float>(render_target_width_), static_cast<float>(render_target_height_));
   io.DeltaTime = 1.0f / 60.0f;
 
   ImGui_ImplDX11_NewFrame();
@@ -98,13 +91,11 @@ void ImGuiBackend::render() {
   ImGui::Render();
 
   // ImGui_ImplDX11_RenderDrawData draws into the *currently bound* render
-  // target, so bind the swapchain back buffer and restore the game's target
-  // afterwards.
+  // target, so bind the back buffer and restore the game's target afterwards.
   ID3D11RenderTargetView* saved_rtv = nullptr;
   ID3D11DepthStencilView* saved_dsv = nullptr;
   device_context->OMGetRenderTargets(1, &saved_rtv, &saved_dsv);
-  device_context->OMSetRenderTargets(
-      1, reinterpret_cast<ID3D11RenderTargetView* const*>(&render_target_), nullptr);
+  device_context->OMSetRenderTargets(1, &render_target, nullptr);
   ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
   device_context->OMSetRenderTargets(1, &saved_rtv, saved_dsv);
   if (saved_rtv != nullptr) {
@@ -113,6 +104,7 @@ void ImGuiBackend::render() {
   if (saved_dsv != nullptr) {
     saved_dsv->Release();
   }
+  render_target->Release();
   ++frames_;
 #endif
 }
@@ -123,10 +115,6 @@ void ImGuiBackend::shutdown() {
     ImGui_ImplDX11_Shutdown();
     ImGui::DestroyContext();
     initialized_ = false;
-  }
-  if (render_target_ != nullptr) {
-    static_cast<IUnknown*>(render_target_)->Release();
-    render_target_ = nullptr;
   }
 #endif
 }

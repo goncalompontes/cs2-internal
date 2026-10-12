@@ -22,7 +22,6 @@ class ImGuiBackend final : public UiBackend {
   void* device_ = nullptr;          // ID3D11Device*
   void* device_context_ = nullptr;  // ID3D11DeviceContext*
   void* swapchain_ = nullptr;       // IDXGISwapChain*
-  void* render_target_ = nullptr;   // ID3D11RenderTargetView* (back buffer)
   unsigned render_target_width_ = 0;
   unsigned render_target_height_ = 0;
 };

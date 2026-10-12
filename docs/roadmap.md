@@ -43,9 +43,14 @@
 - [x] Hook engine — vtable + inline (both host-tested)
 - [x] `IDXGISwapChain::Present` hook (vtable index 8; swapchain vtable via a
       throwaway D3D11 device; engages only when DXGI is loaded)
-- [~] `UiBackend` abstraction + overlay — ImGui backend (vendored, dx11+win32)
-      renders a window into the game's device and is **live-validated** (the
-      "cs2-internal" window draws over a running target); RmlUi pending
+- [~] `UiBackend` abstraction + overlay — ImGui backend renders a window into
+      the game's device and is **live-validated** (the "cs2-internal" window
+      draws over a running target). **Open:** interacting with the overlay
+      (clicking) freezes the game — `Present` stops completing, and it only
+      reproduces with the payload mapped. Next: hook
+      `IDXGISwapChain::ResizeBuffers` to release/recreate the overlay target
+      around a resize, and add a `WndProc` hook so clicks are consumed by the
+      overlay instead of reaching the game. RmlUi pending.
 
 ## Phase 4 — State introspection
 - [ ] Local player fields via schema offsets
