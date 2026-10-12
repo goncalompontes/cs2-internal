@@ -90,3 +90,16 @@ done > scripts/rea-project-cache.patch
 - Validated via the **CLI** on `schemasystem.dll`: cold **27.7 s** → warm
   **6.3 s**, with the program saved into the project and the marker written.
 - The MCP server must be restarted before `open_binary` uses the cache.
+
+## Upstream
+
+This local patch is a stopgap for the upstream design:
+
+- **Issue #1048** — "Open a pre-imported Ghidra project…" (open).
+- **PR #2150** — launcher `-process` branch for a caller-supplied project (open).
+- **Issue #2147** — follow-up: product wiring, digest binding, docs, real-provider verification.
+- **PR #2358** — our wiring PR (draft, stacked on #2150): adds
+  `REA_GHIDRA_EXISTING_PROJECT` / `REA_GHIDRA_EXISTING_PROGRAM`.
+
+Once an upstream release exposes the opt-in existing-project path, drop this
+patch and use those environment variables instead.
