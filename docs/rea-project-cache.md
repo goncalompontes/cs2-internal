@@ -54,17 +54,36 @@ raise `REA_GHIDRA_STARTUP_TIMEOUT_MS` in the `rea` MCP server environment
 
 ## Apply / re-apply
 
-`rea update` (npm) overwrites the patched files. Re-apply and restart the MCP
-server so the running process loads it:
+The global `rea` MCP server runs **`scripts/rea-mcp.sh`**, which (re)applies the
+patch on every server start and then `exec`s `rea mcp`:
+
+- patch already present → exec immediately;
+- patch missing and applies cleanly → apply, then exec;
+- patch does **not** apply (upstream changed the files) → leave the install
+  untouched, record the conflict to `artifacts/rea-project-cache-conflict.log`,
+  print it to stderr, and run REA **unpatched** so the server still works.
+
+A whole-patch `--dry-run` guards against partial application. To resolve a
+conflict, regenerate `scripts/rea-project-cache.patch` against the new
+`rea-agents` version (see below), then restart the server.
+
+Manual (re)apply, without the wrapper:
 
 ```sh
 scripts/apply-rea-project-cache.sh          # idempotent; optional REA_DIR / arg
 opencode service restart                    # the MCP server only reloads on restart
 ```
 
-The patch is version-pinned to `rea-agents@6.4.0`
-(`scripts/rea-project-cache.patch`); if an upgrade changes those files, the
-apply step fails loudly and the patch must be regenerated.
+Regenerate the patch after an upstream change:
+
+```sh
+cd /tmp && npm pack rea-agents@<version> && tar xzf rea-agents-<version>.tgz
+# re-apply your edits to package/dist/ghidra/{GhidraLauncher,GhidraClient}.js,
+# then diff them against the installed copy:
+for f in dist/ghidra/GhidraLauncher.js dist/ghidra/GhidraClient.js; do
+  diff -u --label "a/$f" --label "b/$f" "package/$f" "$HOME/.local/lib/node_modules/rea-agents/$f"
+done > scripts/rea-project-cache.patch
+```
 
 ## Status
 
