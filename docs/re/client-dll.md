@@ -128,8 +128,24 @@ Confirmed against a running target via the dumper's `/proc` backend
 
 ## Still to recover
 
-- **View matrix global.** Leads: `CViewRender::Render` @ `0x180c16bb0`
-  (`view.cpp:0x1c8`); per-slot render object accessor `FUN_180cec8f0` @
-  `0x180cec8f0` over base `0x182573478`; world-to-screen path
-  `FUN_180b63080` → `FUN_180cec8f0()->vtable[0x88]`. The matrix itself is not yet
-  pinned to a global (the menu view struct was still zeroed live).
+### View matrix
+
+The view pipeline is mapped, but the matrix is not a simple standalone global
+here and is only populated once a real 3D view is active (the menu camera is
+static, so live diffing found no matrix):
+
+- **`CViewRender` singleton** — the static object `DAT_182570420`
+  (RVA `0x2570420`), pointer global `DAT_182562698` (RVA `0x2562698`), vtable
+  `0x181c771b8` (RTTI `. ?AVCViewRender@@`, contains `CViewRender::Render`).
+  `FUN_180cef2e0` returns `&DAT_182570420`.
+- **View struct** — `CViewRender + 0x10` (stride `0x990` per player slot;
+  `CViewRender::Render` copies it to `+0x9a0` via `FUN_180a36810`).
+- **Per-slot client mode** — `FUN_180cec8f0(slot)` → `(&DAT_182573478)[slot]`,
+  class `ClientModeCSNormal` (vtable `0x181c99c20`); world-to-screen bounds via
+  `FUN_180b63080` → `FUN_180cec8f0()->vtable[0x88]`.
+- **View vectors** — `FUN_180b9b9c0` caches the view origin/angles from
+  `param_2+0x4a0` / `+0x4b8` into globals `0x1825589d0..0x182558a08`
+  (not the matrix).
+
+Pinning the matrix needs an active in-map camera (then a live diff of `.data`
+isolates the 64-byte region); this is the next step.
