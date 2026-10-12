@@ -65,6 +65,11 @@ struct Cli {
     #[arg(long)]
     schema_system: Option<String>,
 
+    /// Resolve the curated global offsets by scanning their signatures in the
+    /// module (see docs/re/client-dll.md) and print the RVAs.
+    #[arg(long)]
+    resolve_offsets: bool,
+
     /// Read raw bytes at an address (hex) and print them as hex.
     #[arg(long)]
     read: Option<String>,
@@ -177,7 +182,13 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if cli.json && cli.pattern.is_none() && !cli.exports && !cli.interfaces && !cli.schema {
+    if cli.json
+        && cli.pattern.is_none()
+        && !cli.exports
+        && !cli.interfaces
+        && !cli.schema
+        && !cli.resolve_offsets
+    {
         let manifest = DumpManifest::new(&cli.process, pid, &modules);
         println!("{}", output::to_json(&manifest));
         return Ok(());
@@ -197,7 +208,7 @@ fn main() -> Result<()> {
         }
     }
 
-    if cli.pattern.is_some() || cli.exports || cli.interfaces {
+    if cli.pattern.is_some() || cli.exports || cli.interfaces || cli.resolve_offsets {
         let module = mem
             .module_by_name(&cli.module)
             .ok_or_else(|| anyhow!("module {:?} not found", cli.module))?;
@@ -299,6 +310,21 @@ fn analyze(
                     "  {:<40} rva=0x{:x} create=0x{:x}",
                     it.name, it.rva, it.create_rva
                 );
+            }
+        }
+    }
+
+    if cli.resolve_offsets {
+        let (offsets, missing) = analysis::resolve_known(module_name, bytes, base);
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&offsets)?);
+        } else {
+            println!("\n{module_name} — {} offset(s)", offsets.len());
+            for off in &offsets {
+                println!("  {:<28} rva=0x{:x}", off.name, off.rva);
+            }
+            for name in &missing {
+                eprintln!("  unresolved: {name}");
             }
         }
     }

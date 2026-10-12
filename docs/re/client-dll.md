@@ -10,7 +10,7 @@ ID`). See `docs/rea-project-cache.md`.
 | What | Address | Notes |
 |---|---|---|
 | `CreateInterface` head global | `0x1827946c8` | `*global` = list head; NULL in file image |
-| `CGameEntitySystem` / `Source2EntitySystem` singleton | `0x182541b20` | vtable `0x181c25200` |
+| `Source2EntitySystem` registered node | `0x182541b20` | vtable `0x181c25200`; the live `CGameEntitySystem*` global is `0x182711598` (see below) |
 
 ### Interface list
 `CreateInterface` @ `0x1819c6770` reads head from `0x1827946c8` and walks
@@ -159,3 +159,70 @@ Supporting pipeline:
   `CViewRender::Render` copies it to `+0x9a0` via `FUN_180a36810`.
 - **Per-slot client mode** — `FUN_180cec8f0(slot)` → `(&DAT_182573478)[slot]`,
   class `ClientModeCSNormal` (vtable `0x181c99c20`).
+
+## Re-derivation (after a game update)
+
+Every absolute address above moves each build, so re-find them from stable
+anchors rather than memorising the numbers. The curated signatures live in
+`external/dumper/src/analysis.rs::known_signatures()` and resolve through their
+RIP-relative operands:
+
+```sh
+cs2-dumper --resolve-offsets                       # live process
+cs2-dumper --file client.dll --resolve-offsets     # on disk, no process
+cs2-dumper --resolve-offsets --json > calibration/offsets.json
+```
+
+That prints one RVA per global (`source=signature`). The manual recipe behind
+each signature — for when the instruction itself changes and the signature
+must be re-cut — is:
+
+### `game_entity_system` — `CGameEntitySystem*`
+- **Anchor:** string `CGameEntitySystem::InitEntity2NetworkClasses`
+  (also `CEntitySystem::AllocateEntityIdentity`).
+- **Steps:** xref the string → the function; its head does
+  `mov rbx, [rip+X]` — `X` is the global.
+- **Invariant:** `*(global)` is a heap object whose vtable is in `client.dll`.
+
+### `entity_list` — identity table (offset `+0x10` inside the entity system)
+- **Anchor:** string `CEntitySystem::AllocateEntityIdentity`
+  (`entitysystem.cpp:0x681`).
+- **Steps:** decompile it; the paged lookup `*(this + 0x10 + (index>>9)*8)` +
+  `(index & 0x1ff) * 0x70` is the entity list. The block-pointer global it reads
+  is `entity_list` (also referenced by the pawn accessor's `mov r9, [rip+X]`).
+- **Invariant:** 64 pages × 512 entries, stride `0x70`; `entry+0x00` = instance,
+  `+0x08` = class, `+0x10` = handle.
+
+### `game_rules` — `CGameRules*`
+- **Anchor:** string `CGameRules::CGameRules constructed`.
+- **Steps:** xref → the ctor; the store `mov [rip+X], rbx` of `this` is the
+  global (the derived `C_CSGameRules` ctor then swaps in the derived vtable).
+- **Invariant:** `*(global)` has a `client.dll` vtable.
+
+### `local_player_controllers` — per-slot controller array
+- **Anchor:** strings `GetLocalPlayerController` / `GetLocalPlayerPawn`.
+- **Steps:** xref → the VScript binding function (`FUN_180396820`) → its
+  `[7]`/`[8]` function-pointer table → the accessors; the accessor's
+  `lea rcx, [rip+X]` is the array base (indexed by slot, `slot == -1` → local
+  slot from `DAT_182557b80->vtable[0x310]()`).
+- **Invariant:** `*(array + slot*8)` has a `client.dll` vtable; `+0x6bc` = pawn
+  handle, resolved through `entity_list`.
+
+### `view_matrix` — world-to-screen (P × V)
+- **Anchor:** RTTI `.?AVCViewRender@@` and string `CViewRender::Render`.
+- **Steps:** the `CViewRender` code passes three adjacent `0x40` matrices; the
+  getter `return &global + i*0x40` is the world-to-screen array. The two matrices
+  immediately *before* it are the view (world→view) and the projection.
+- **Invariant:** `matrix@view_matrix == matrix@(view_matrix-0x40) ×
+  matrix@(view_matrix-0x80)` (projection × view). Only populated with an active
+  in-map camera.
+
+### Regenerating the SDK offsets
+
+```sh
+cs2-dumper --resolve-offsets --json > calibration/offsets.json
+cs2-dumper --gen --offsets-json calibration/offsets.json
+```
+
+A signature that stops matching is reported (`unresolved: <name>` / absent from
+the JSON) rather than silently skipped, so a moved global is visible.
