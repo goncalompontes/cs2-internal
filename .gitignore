@@ -5,7 +5,6 @@ _install/
 
 # Local toolchain downloads (large, non-redistributable)
 toolchain/msvc/
-toolchain/ghidra/
 toolchain/msvc-wine/
 toolchain/*.zip
 

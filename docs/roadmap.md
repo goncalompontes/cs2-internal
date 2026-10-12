@@ -4,8 +4,8 @@
 - [x] Repo scaffold, ADRs, agent conventions
 - [x] Enable built-in LSP
 - [x] msvc-wine toolchain + cross-compiled `payload.dll`
-- [x] Ghidra + ReVa installed
-- [x] MCP servers (treesitter + reva connected)
+- [x] Ghidra + REA installed (global; no project-local copy)
+- [x] MCP servers (treesitter + rea connected)
 - [x] Offline run loop documented (docs/architecture.md)
 - [x] Live-analysis MCP server (`cs2-live`) + build-time SDK generation
 - [ ] Install the Windows (Proton) build of the target

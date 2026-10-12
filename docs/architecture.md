@@ -94,7 +94,7 @@ ptrace section below.
    returning JSON. Enables full scripted/interactive sessions.
 4. **One-command e2e** — `scripts/e2e.sh`: virtual display → launch client →
    inject → run scenario → assert → exit code.
-5. **Ghidra headless** (ReVa, fake backend) for automated static checks.
+5. **Static RE** (REA + Ghidra) for automated static checks.
 
 ## Reading another process's memory (ptrace policy)
 

@@ -7,20 +7,13 @@
 
   "mcp": {
     "timeout": {
-      // ReVa boots Ghidra/pyghidra, which is slow on first startup.
+      // REA boots Ghidra, which is slow on first startup.
       "startup": 120000
     },
     "servers": {
-      // Ghidra-powered static RE (headless). Requires:
-      //   - Ghidra 12.x extracted (toolchain/ghidra/)
-      //   - `uv tool install reverse-engineering-assistant`
-      "reva": {
-        "type": "local",
-        "command": ["/home/pontes/.local/bin/mcp-reva"],
-        "environment": {
-          "GHIDRA_INSTALL_DIR": "/home/pontes/cs2-internal/toolchain/ghidra/ghidra_12.1.4_PUBLIC"
-        }
-      },
+      // Static RE is provided by the global `rea` server (see
+      // ~/.config/opencode/opencode.jsonc). Ghidra is installed globally at
+      // ~/.local/share/ghidra; this project carries no local copy.
       // Token-cheap structural code views (AST-first).
       "treesitter": {
         "type": "local",

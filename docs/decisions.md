@@ -24,7 +24,7 @@ Chosen over CMake. Host and payload are separate Meson projects (payload uses a
 cross file).
 
 ## ADR-0004 — Ghidra MCP: ReVa
-**Status:** accepted
+**Status:** superseded by ADR-0012
 
 `cgtudor/reverse-engineering-assistant` (context-rot-aware, assistant +
 headless modes) for Ghidra-driven static RE.
@@ -87,3 +87,15 @@ The **original target name is always preserved** (`target` on interfaces,
 lookups by the game's own name still work: `find_class_by_target`,
 `field_offset_by_target`, `find_interface_by_target`. Collisions are resolved
 deterministically (`_2`, `_3`, …).
+
+## ADR-0012 — Static RE: REA + global Ghidra
+**Status:** accepted
+
+Static RE is driven by **REA** (`rea-agents`, MCP server `rea`,
+`github.com/morluto/rea`) against a **global** Ghidra install
+(`~/.local/share/ghidra/ghidra_12.1.4_PUBLIC`), registered in the global
+OpenCode config with `GHIDRA_INSTALL_DIR` + `JAVA_HOME`.
+
+The project no longer vendors Ghidra: ADR-0004's ReVa toolchain is retired and
+the ~1.4 GB download/extraction is removed from the tree. This keeps checkouts
+small and decouples RE tooling from the project tree.

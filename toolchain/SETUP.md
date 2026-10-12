@@ -17,30 +17,22 @@ cd /tmp/ts && cargo build --release
 cp target/release/treesitter-mcp ~/.local/bin/
 ```
 
-### ReVa (Ghidra headless MCP)
-ReVa needs four things: the Python CLI, the Ghidra extension (provides the
-`reva` module), PyGhidra from the *local* Ghidra, and noo `mcp` 2.x (ReVa 7.3.1's
-bridge imports the mcp 1.x symbol name).
+### Static RE: REA + Ghidra (global)
+Static RE is provided by **REA** (`rea-agents`, MCP server `rea`) driving a
+**global** Ghidra install — this project keeps no local Ghidra copy. The server
+is registered in the global `~/.config/opencode/opencode.jsonc`.
 
 ```sh
-# 1. Ghidra 12.x (see toolchain/install-ghidra.sh)
-# 2. Python CLI
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv tool install reverse-engineering-assistant --with 'mcp<2'
+# CLI + MCP server
+npm install --global rea-agents
 
-# 3. Ghidra extension (matches your Ghidra version; 12.1.x build used here)
-curl -fL -o reva-ext.zip \
-  https://github.com/cyberkaida/reverse-engineering-assistant/releases/download/v7.3.1/ghidra_12.1.3_PUBLIC_20260903_reverse-engineering-assistant.zip
-unzip -q reva-ext.zip -d "$GHIDRA_INSTALL_DIR/Ghidra/Extensions/"
-
-# 4. PyGhidra from the local Ghidra, then re-pin mcp
-TP="$HOME/.local/share/uv/tools/reverse-engineering-assistant"
-uv pip install --python "$TP/bin/python" "$GHIDRA_INSTALL_DIR/Ghidra/Features/PyGhidra/pypkg"
-uv pip install --python "$TP/bin/python" 'mcp==1.30.0'
+# Ghidra 12.1.x, extracted outside the repo
+#   ~/.local/share/ghidra/ghidra_12.1.4_PUBLIC
+export GHIDRA_INSTALL_DIR="$HOME/.local/share/ghidra/ghidra_12.1.4_PUBLIC"
+export JAVA_HOME=/usr/lib/jvm/java-27-openjdk
 ```
 
-Verify: `GHIDRA_INSTALL_DIR=... mcp-reva </dev/null` should print
-`ReVa server ready ...` then `Bridge ready - stdio transport active`.
+Verify: `rea doctor` reports the `ghidra` scope check as `healthy`.
 
 > After editing `opencode.jsonc` MCP entries, run `opencode service restart`
 > so the running service reloads configuration.

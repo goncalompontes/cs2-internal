@@ -1,7 +1,7 @@
 # Reverse-engineering notes
 
-Static analysis of build `25815307` (Windows depot) done with **ReVa/Ghidra**
-(headless). Findings are recorded per subsystem and are a work in progress.
+Static analysis of build `25815307` (Windows depot) done with **Ghidra** (via
+REA, headless). Findings are recorded per subsystem and are a work in progress.
 
 - [`interface-system.md`](interface-system.md) — `CreateInterface` registration
 - [`schema-system.md`](schema-system.md) — schema system
