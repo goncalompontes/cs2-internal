@@ -14,14 +14,34 @@ namespace {
 using PresentFn = long(__stdcall*)(void*, unsigned, unsigned);
 
 // Append a line to a log file next to the drive root, so hook activity is
-// observable from outside the target process.
+// observable from outside the target process. Uses Win32 file I/O rather than
+// the CRT: a manually mapped payload only has its static-CRT per-thread state
+// initialized on the injector's entry thread, so the hook-install thread (and
+// the target's render thread) must not depend on the CRT here.
 void log_line(const char* text) noexcept {
 #if defined(_WIN32)
-  std::FILE* file = nullptr;
-  if (fopen_s(&file, "C:\\cs2-payload.log", "a") == 0 && file != nullptr) {
-    std::fprintf(file, "%s\n", text);
-    std::fclose(file);
+  using CreateFileAFn = HANDLE(__stdcall*)(const char*, unsigned long, unsigned long, void*,
+                                           unsigned long, unsigned long, HANDLE);
+  static CreateFileAFn create_file = nullptr;
+  if (create_file == nullptr) {
+    HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
+    if (kernel32 == nullptr) return;
+    create_file = reinterpret_cast<CreateFileAFn>(GetProcAddress(kernel32, "CreateFileA"));
+    if (create_file == nullptr) return;
   }
+  constexpr unsigned long k_file_append_data = 0x4;
+  constexpr unsigned long k_file_share_read = 0x1;
+  constexpr unsigned long k_open_always = 0x4;
+  constexpr unsigned long k_file_attribute_normal = 0x80;
+  HANDLE file = create_file("C:\\cs2-payload.log", k_file_append_data, k_file_share_read,
+                            nullptr, k_open_always, k_file_attribute_normal, nullptr);
+  if (file == nullptr || file == INVALID_HANDLE_VALUE) return;
+  std::size_t length = 0;
+  while (text[length] != '\0') ++length;
+  unsigned long written = 0;
+  WriteFile(file, text, static_cast<unsigned long>(length), &written, nullptr);
+  WriteFile(file, "\n", 1, &written, nullptr);
+  CloseHandle(file);
 #else
   (void)text;
 #endif

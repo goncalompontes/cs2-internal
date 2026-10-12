@@ -19,6 +19,10 @@ class ImGuiBackend final : public UiBackend {
  private:
   bool initialized_ = false;
   std::uint64_t frames_ = 0;
+  void* device_ = nullptr;          // ID3D11Device*
+  void* device_context_ = nullptr;  // ID3D11DeviceContext*
+  void* swapchain_ = nullptr;       // IDXGISwapChain*
+  void* render_target_ = nullptr;   // ID3D11RenderTargetView* (back buffer)
 };
 
 }  // namespace cs2::render

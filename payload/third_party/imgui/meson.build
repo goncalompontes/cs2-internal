@@ -12,7 +12,9 @@ imgui_lib = static_library('imgui',
     'backends/imgui_impl_win32.cpp',
   ),
   include_directories : imgui_inc,
-  cpp_args : ['-DIMGUI_DISABLE_OBSOLETE_FUNCTIONS'],
+  # The payload never uses gamepad input, and the backend's XInput LoadLibraryA
+  # loop hangs when called from a manually mapped module inside Present.
+  cpp_args : ['-DIMGUI_IMPL_WIN32_DISABLE_GAMEPAD'],
 )
 
 imgui_dep = declare_dependency(

@@ -24,15 +24,20 @@
 namespace cs2::payload {
 namespace {
 
-// Lifetime owner for the payload's subsystems (constructed on first boot).
+// Lifetime owner for the payload's subsystems. A namespace-scope global (not a
+// function-local static) so it is constructed during CRT startup on the
+// injector's entry thread: the static-init guard would otherwise run on the
+// hook-install thread, whose static-CRT per-thread state is not initialized for
+// a manually mapped module.
 struct Runtime {
   render::ImGuiBackend backend;
   features::PresentHook present{backend};
 };
 
+Runtime g_runtime;
+
 Runtime& runtime() {
-  static Runtime instance;
-  return instance;
+  return g_runtime;
 }
 
 }  // namespace

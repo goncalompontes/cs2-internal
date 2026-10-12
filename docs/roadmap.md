@@ -44,7 +44,8 @@
 - [x] `IDXGISwapChain::Present` hook (vtable index 8; swapchain vtable via a
       throwaway D3D11 device; engages only when DXGI is loaded)
 - [~] `UiBackend` abstraction + overlay — ImGui backend (vendored, dx11+win32)
-      renders a window into the game's device; RmlUi + live validation pending
+      renders a window into the game's device and is **live-validated** (the
+      "cs2-internal" window draws over a running target); RmlUi pending
 
 ## Phase 4 — State introspection
 - [ ] Local player fields via schema offsets

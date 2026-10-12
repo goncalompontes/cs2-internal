@@ -19,6 +19,9 @@ bool ImGuiBackend::initialize(const RenderContext& context) {
     std::puts("[cs2-render] ImGui backend: no device/context");
     return false;
   }
+  device_ = context.device;
+  device_context_ = context.device_context;
+  swapchain_ = context.swapchain;
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGui::StyleColorsDark();
@@ -56,6 +59,27 @@ void ImGuiBackend::render() {
   ImGui::End();
 
   ImGui::Render();
+
+  // ImGui_ImplDX11_RenderDrawData draws into the *currently bound* render
+  // target, so bind the swapchain back buffer first: the game's Present leaves
+  // an unrelated target bound, and ImGui would otherwise draw nowhere.
+  auto* chain = static_cast<IDXGISwapChain*>(swapchain_);
+  auto* device = static_cast<ID3D11Device*>(device_);
+  auto* device_context = static_cast<ID3D11DeviceContext*>(device_context_);
+  if (render_target_ == nullptr && chain != nullptr && device != nullptr) {
+    ID3D11Texture2D* back_buffer = nullptr;
+    if (SUCCEEDED(chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                   reinterpret_cast<void**>(&back_buffer))) &&
+        back_buffer != nullptr) {
+      device->CreateRenderTargetView(back_buffer, nullptr,
+                                     reinterpret_cast<ID3D11RenderTargetView**>(&render_target_));
+      back_buffer->Release();
+    }
+  }
+  if (render_target_ != nullptr && device_context != nullptr) {
+    device_context->OMSetRenderTargets(
+        1, reinterpret_cast<ID3D11RenderTargetView* const*>(&render_target_), nullptr);
+  }
   ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
   ++frames_;
 #endif
@@ -68,6 +92,10 @@ void ImGuiBackend::shutdown() {
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
     initialized_ = false;
+  }
+  if (render_target_ != nullptr) {
+    static_cast<IUnknown*>(render_target_)->Release();
+    render_target_ = nullptr;
   }
 #endif
 }
