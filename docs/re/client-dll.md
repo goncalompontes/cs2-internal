@@ -128,24 +128,34 @@ Confirmed against a running target via the dumper's `/proc` backend
 
 ## Still to recover
 
-### View matrix
+### View matrix (resolved)
 
-The view pipeline is mapped, but the matrix is not a simple standalone global
-here and is only populated once a real 3D view is active (the menu camera is
-static, so live diffing found no matrix):
+Three adjacent `float[4][4]` globals in `client.dll`'s `.data`, all populated
+with an active in-map camera (verified live in a loaded map):
 
-- **`CViewRender` singleton** — the static object `DAT_182570420`
-  (RVA `0x2570420`), pointer global `DAT_182562698` (RVA `0x2562698`), vtable
-  `0x181c771b8` (RTTI `. ?AVCViewRender@@`, contains `CViewRender::Render`).
-  `FUN_180cef2e0` returns `&DAT_182570420`.
-- **View struct** — `CViewRender + 0x10` (stride `0x990` per player slot;
-  `CViewRender::Render` copies it to `+0x9a0` via `FUN_180a36810`).
+| What | Address | RVA |
+|---|---|---|
+| View matrix (world→view) | `0x182561c50` | `0x2561c50` |
+| Projection matrix | `0x182561c90` | `0x2561c90` |
+| **World-to-screen (P × V)** | `0x182561cd0` | `0x2561cd0` |
+
+`0x182561cd0` is the `dwViewMatrix`-equivalent used for world-to-screen. It is
+indexed per player slot (stride `0x40`):
+
+- accessor `FUN_180c131c0(i) => &DAT_182561cd0 + i*0x40`;
+- `FUN_180c18cb0` calls it with the local slot from
+  `DAT_182557b80->vtable[0x310]()`;
+- `FUN_180c13800` passes `&0x182561c50`, `&0x182561c90`, `&0x182561cd0` together.
+
+Verified numerically live: `matrix@0x182561cd0 == matrix@0x182561c90 ×
+matrix@0x182561c50` (max element error `1.3e-5`, float rounding).
+
+Supporting pipeline:
+
+- **`CViewRender` singleton** — static object `DAT_182570420` (RVA `0x2570420`),
+  pointer global `DAT_182562698` (RVA `0x2562698`), vtable `0x181c771b8`
+  (RTTI `. ?AVCViewRender@@`, contains `CViewRender::Render`).
+- **View struct** — `CViewRender + 0x10` (stride `0x990` per slot);
+  `CViewRender::Render` copies it to `+0x9a0` via `FUN_180a36810`.
 - **Per-slot client mode** — `FUN_180cec8f0(slot)` → `(&DAT_182573478)[slot]`,
-  class `ClientModeCSNormal` (vtable `0x181c99c20`); world-to-screen bounds via
-  `FUN_180b63080` → `FUN_180cec8f0()->vtable[0x88]`.
-- **View vectors** — `FUN_180b9b9c0` caches the view origin/angles from
-  `param_2+0x4a0` / `+0x4b8` into globals `0x1825589d0..0x182558a08`
-  (not the matrix).
-
-Pinning the matrix needs an active in-map camera (then a live diff of `.data`
-isolates the 64-byte region); this is the next step.
+  class `ClientModeCSNormal` (vtable `0x181c99c20`).
