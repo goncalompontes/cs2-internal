@@ -108,13 +108,28 @@ object type.
 VScript bindings `GetLocalPlayerController` / `GetLocalPlayerPawn` live in
 `FUN_180396820`; they call the accessors above.
 
+## Live verification (Proton/Wine, build 25815307)
+
+Confirmed against a running target via the dumper's `/proc` backend
+(`cs2-dumper --process cs2.exe`, `cap_sys_ptrace`):
+
+- **Entity system** — `*(client.dll + 0x2711598)` is a heap object; its vtable is
+  RVA `0x1c288d0`. `*(client.dll + 0x2366770)` points to `entsys + 0x10`, and
+  `*(entsys + 0x10)` is block 0 of the identity table. So the **entity-list
+  offset `+0x10` and the paged layout are confirmed live**.
+- **Distinct objects** — the entity system's vtable (`0x181c288d0`) differs from
+  the `Source2EntitySystem` node's (`0x181c25200`), so `0x182541b20` is the
+  registered interface node, not the `CGameEntitySystem` instance.
+- **Game rules** — `*(client.dll + 0x255be80)` is a heap object with a
+  `client.dll` vtable (RVA `0x1badc90`); the base ctor sets the pointer and the
+  derived `C_CSGameRules` ctor swaps in the derived vtable.
+- **Local player controller** — `*(client.dll + 0x25338a8)` is a controller
+  object with a `client.dll` vtable (RVA `0x1c06520`).
+
 ## Still to recover
 
 - **View matrix global.** Leads: `CViewRender::Render` @ `0x180c16bb0`
   (`view.cpp:0x1c8`); per-slot render object accessor `FUN_180cec8f0` @
   `0x180cec8f0` over base `0x182573478`; world-to-screen path
   `FUN_180b63080` → `FUN_180cec8f0()->vtable[0x88]`. The matrix itself is not yet
-  pinned to a global.
-- **Entity-system base reconciliation.** The object referenced by `0x182711598`
-  and the `Source2EntitySystem` node at `0x182541b20` are distinct; confirm the
-  live pointer value (the game is currently not running).
+  pinned to a global (the menu view struct was still zeroed live).
