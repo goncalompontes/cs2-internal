@@ -1,7 +1,9 @@
 # `client.dll` (build 25815307)
 
-Image base `0x180000000`. Analysis is partial (auto-analysis hit the 600 s cap);
-functions/strings/references are populated, `Decompiler Parameter ID` did not run.
+Image base `0x180000000`. Analysis is now **complete** via the cached Ghidra
+project (one cold run, then `-process -noanalysis` reuse): 76,880 procedures and
+58,107 strings with the default analyzer set (including `Decompiler Parameter
+ID`). See `docs/rea-project-cache.md`.
 
 ## Globals found
 
@@ -58,10 +60,61 @@ From `scripts/calibrate-live.sh` against the running client (Proton/Wine):
 - **`CSchemaSystem*`** resolves to the same object from both the `client.dll`
   and `schemasystem.dll` globals (e.g. `0x6ffff7696710`).
 
-## TODO
+## Resolved accessors and globals
 
-- Entity-list offset inside `CGameEntitySystem`.
-- Local player controller/pawn accessor.
-- View matrix global.
-- Game rules global.
-- Resume full analysis with a longer timeout (`analyze-program timeoutSeconds:-1`).
+All addresses are image-base-relative VAs in the complete build-25815307
+analysis. Nothing here is a guessed pattern: each entry cites the function that
+produces it.
+
+### Entity system and entity list
+
+| What | Address | Notes |
+|---|---|---|
+| `CGameEntitySystem*` pointer global | `0x182711598` (RVA `0x2711598`) | Holds the entity-system pointer used by `CreateEntities`/`InitEntity2NetworkClasses`. |
+| Entity identity block array | `0x182366770` (RVA `0x2366770`) | The entity list; consistent with object base `0x182366760`. |
+| `Source2EntitySystem` registered node | `0x182541b20` | Registry node (vtable `0x181c25200`); distinct from the entity system above. |
+
+**Entity-list offset inside `CGameEntitySystem`: `+0x10`.** It is a paged
+identity table, not a flat pointer array:
+
+```
+page  = index >> 9          // 0..63   (64 pages)
+slot  = index & 0x1ff       // 0..511  (512 per page)
+entry = CEntityIdentity*    // stride 0x70
+```
+
+Evidence: `CEntitySystem::AllocateEntityIdentity` @ `0x1815aa050`
+(`entitysystem.cpp:0x681`, string-confirmed), reached from
+`CGameEntitySystem::CreateEntities` @ `0x1809d3530`. `CEntityIdentity`:
+`+0x00` = `m_pInstance` (the entity), `+0x08` = class, `+0x10` = handle/serial.
+
+### Game rules global
+
+| What | Address | Notes |
+|---|---|---|
+| `CGameRules*` global | `0x18255be80` (RVA `0x255be80`) | Set by `CGameRules::CGameRules` @ `0x180ba13b0`; read by `CGameRulesGameSystem::GameInit` @ `0x180b9f2c0`. |
+
+The schema field `C_CSGameRulesProxy::m_pGameRules` (`+0x600`) points at the same
+object type.
+
+### Local player (controller and pawn)
+
+| What | Address | Notes |
+|---|---|---|
+| Controller array base | `0x1825338a8` (RVA `0x25338a8`) | Slot-indexed `CBasePlayerController*` array. |
+| Controller accessor | `FUN_1809699f0` @ `0x1809699f0` | `slot == -1` resolves the local slot via `DAT_182557b80->vtable[0x310]()`. |
+| Pawn accessor | `FUN_180969a30` @ `0x180969a30` | Reads the pawn handle at `controller + 0x6bc` and resolves it through the entity list (`0x182366770`). |
+
+VScript bindings `GetLocalPlayerController` / `GetLocalPlayerPawn` live in
+`FUN_180396820`; they call the accessors above.
+
+## Still to recover
+
+- **View matrix global.** Leads: `CViewRender::Render` @ `0x180c16bb0`
+  (`view.cpp:0x1c8`); per-slot render object accessor `FUN_180cec8f0` @
+  `0x180cec8f0` over base `0x182573478`; world-to-screen path
+  `FUN_180b63080` → `FUN_180cec8f0()->vtable[0x88]`. The matrix itself is not yet
+  pinned to a global.
+- **Entity-system base reconciliation.** The object referenced by `0x182711598`
+  and the `Source2EntitySystem` node at `0x182541b20` are distinct; confirm the
+  live pointer value (the game is currently not running).
