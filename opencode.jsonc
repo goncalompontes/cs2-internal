@@ -12,19 +12,14 @@
     },
     "servers": {
       // Static RE is provided by the global `rea` server (see
-      // ~/.config/opencode/opencode.jsonc). Ghidra is installed globally at
-      // ~/.local/share/ghidra; this project carries no local copy.
-      // Token-cheap structural code views (AST-first).
+      // ~/.config/opencode/opencode.jsonc on the host). This project carries
+      // no local copy of Ghidra.
+      //
+      // Token-cheap structural code views (AST-first). Resolved from PATH so
+      // the same config works on Linux and Windows (treesitter-mcp[.exe]).
       "treesitter": {
         "type": "local",
-        "command": ["/home/pontes/.local/bin/treesitter-mcp"]
-      },
-      // Live memory analysis of a running target (native /proc backend).
-      // Attach by process name; narrow values, resolve pointer chains, scan
-      // patterns, enumerate interfaces. Built on demand by the wrapper.
-      "cs2-live": {
-        "type": "local",
-        "command": ["/home/pontes/cs2-internal/scripts/mcp-live.sh"]
+        "command": ["treesitter-mcp"]
       }
     }
   }
