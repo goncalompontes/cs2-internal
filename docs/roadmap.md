@@ -62,7 +62,8 @@
 - [x] Entity-system walk — paged identity table (`CGameEntitySystem + 0x10`),
       plus the local player (controller → pawn) via schema offsets
 - [x] Local player fields — health/max, armor, team, life state, world origin,
-      eye origin, velocity, eye angles, active weapon + clip/reserve ammo
+      eye origin, velocity, eye angles, active weapon + clip ammo (reserve is
+      read from `m_pReserveAmmo` but its client element is unverified)
 - [x] Enemies — every player pawn (matched by the local pawn's vtable, so no
       per-build vtable RVA is hard-coded) with the same fields, plus name and
       distance from the local player

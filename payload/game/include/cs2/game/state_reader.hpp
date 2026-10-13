@@ -56,6 +56,7 @@ class StateReader {
     std::uint32_t active_weapon = 0x60;
     // C_BasePlayerWeapon
     std::uint32_t clip1 = 0x1928;
+    // `m_pReserveAmmo` (client element/population unverified; clip is reliable).
     std::uint32_t reserve_ammo = 0x1930;
     // CGameSceneNode
     std::uint32_t abs_origin = 0xc8;
@@ -63,7 +64,7 @@ class StateReader {
     [[nodiscard]] static FieldOffsets resolve();
   };
 
-  [[nodiscard]] PlayerSnapshot read_player(int index, std::uintptr_t pawn) const;
+  [[nodiscard]] PlayerSnapshot read_player(int index, std::uintptr_t controller) const;
 
   std::uintptr_t client_base_ = 0;
   EntitySystem entities_;

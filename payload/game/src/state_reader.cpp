@@ -85,17 +85,34 @@ std::optional<StateReader> StateReader::attach() noexcept {
   return reader;
 }
 
-PlayerSnapshot StateReader::read_player(int index, std::uintptr_t pawn) const {
+PlayerSnapshot StateReader::read_player(int index, std::uintptr_t controller) const {
   const FieldOffsets& o = offsets_;
   PlayerSnapshot player;
   player.index = index;
+  player.controller = controller;
+
+  // Controller first: it carries the identity (name, team, local flag) even
+  // when the pawn is dead or not yet spawned.
+  player.name = read_inline_string(controller + o.player_name, 128);
+  std::uint8_t team = 0;
+  (void)read(controller + o.team, team);
+  player.team = team;
+  std::uint8_t is_local = 0;
+  (void)read(controller + o.is_local_controller, is_local);
+  player.is_local = is_local != 0;
+
+  std::uint32_t handle = read_or<std::uint32_t>(controller + o.player_pawn, 0);
+  if (handle == 0) {
+    handle = read_or<std::uint32_t>(controller + o.pawn, 0);
+  }
+  const std::uintptr_t pawn = entities_.resolve(handle);
+  if (pawn == 0) {
+    return player;
+  }
   player.pawn = pawn;
 
-  std::uint8_t team = 0;
   std::uint8_t life_state = 0;
-  (void)read(pawn + o.team, team);
   (void)read(pawn + o.life_state, life_state);
-  player.team = team;
   player.life_state = life_state;
   player.health = read_or<std::int32_t>(pawn + o.health, 0);
   player.max_health = read_or<std::int32_t>(pawn + o.max_health, 0);
@@ -112,17 +129,6 @@ PlayerSnapshot StateReader::read_player(int index, std::uintptr_t pawn) const {
   }
   (void)read(pawn + o.view_offset, view_offset);
   player.eye_origin = player.origin + view_offset;
-
-  // Controller: name + local flag.
-  const std::uintptr_t controller =
-      entities_.resolve(read_or<std::uint32_t>(pawn + o.controller, 0));
-  if (controller != 0) {
-    player.controller = controller;
-    player.name = read_inline_string(controller + o.player_name, 128);
-    std::uint8_t is_local = 0;
-    (void)read(controller + o.is_local_controller, is_local);
-    player.is_local = is_local != 0;
-  }
 
   // Active weapon: name + ammo.
   const std::uintptr_t services = read_or<std::uintptr_t>(pawn + o.weapon_services, 0);
@@ -148,22 +154,13 @@ Snapshot StateReader::snapshot() const {
   if (local_controller == 0) {
     return snapshot;
   }
-
-  std::uint32_t handle = read_or<std::uint32_t>(local_controller + offsets_.player_pawn, 0);
-  if (handle == 0) {
-    handle = read_or<std::uint32_t>(local_controller + offsets_.pawn, 0);
-  }
-  const std::uintptr_t local_pawn = entities_.resolve(handle);
-  if (local_pawn == 0) {
-    return snapshot;
-  }
   snapshot.valid = true;
-  snapshot.local_pawn = local_pawn;
 
-  // All players share the local pawn's vtable; enumerate them from the entity
-  // table by matching it (no per-build vtable RVA is hard-coded).
-  const std::uintptr_t pawn_vtable = read_or<std::uintptr_t>(local_pawn, 0);
-  for (int page = 0; pawn_vtable != 0 && page < EntitySystem::k_page_count; ++page) {
+  // All player controllers share the local controller's vtable; enumerate them
+  // from the entity table by matching it (no per-build vtable RVA is
+  // hard-coded).
+  const std::uintptr_t controller_vtable = read_or<std::uintptr_t>(local_controller, 0);
+  for (int page = 0; controller_vtable != 0 && page < EntitySystem::k_page_count; ++page) {
     const std::uintptr_t page_base = entities_.page(page);
     if (page_base == 0) {
       continue;
@@ -171,24 +168,22 @@ Snapshot StateReader::snapshot() const {
     for (int slot = 0; slot < EntitySystem::k_slots_per_page; ++slot) {
       const std::uintptr_t entry =
           page_base + EntitySystem::k_identity_stride * static_cast<std::uintptr_t>(slot);
-      const std::uintptr_t pawn = read_or<std::uintptr_t>(entry, 0);
-      if (pawn == 0 || read_or<std::uintptr_t>(pawn, 0) != pawn_vtable) {
+      const std::uintptr_t controller = read_or<std::uintptr_t>(entry, 0);
+      if (controller == 0 || read_or<std::uintptr_t>(controller, 0) != controller_vtable) {
         continue;
       }
       const int index = (page << EntitySystem::k_page_shift) | slot;
-      PlayerSnapshot player = read_player(index, pawn);
-      player.is_local = player.is_local || pawn == local_pawn;
+      PlayerSnapshot player = read_player(index, controller);
+      player.is_local = player.is_local || controller == local_controller;
+      if (player.is_local) {
+        snapshot.local = player;
+        snapshot.local_pawn = player.pawn;
+      }
       snapshot.players.push_back(std::move(player));
     }
   }
 
-  // Locate the local player, then measure everyone against it.
-  for (const PlayerSnapshot& player : snapshot.players) {
-    if (player.is_local) {
-      snapshot.local = player;
-      break;
-    }
-  }
+  // Measure everyone against the local player.
   if (snapshot.local.has_value()) {
     for (PlayerSnapshot& player : snapshot.players) {
       player.distance = distance(player.origin, snapshot.local->origin);
