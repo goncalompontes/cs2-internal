@@ -320,6 +320,8 @@ std::expected<ImageInfo, Error> parse_image(Bytes image) {
 
   parse_exports(info, image, dir_rva(0), info.exports);
   parse_imports(info, image, dir_rva(1), info.imports);
+  info.exception_directory_rva = dir_rva(3);
+  info.exception_directory_size = dir_size(3);
   parse_relocations(info, image, dir_rva(5), dir_size(5), info.relocations);
   parse_tls(info, image, dir_rva(9), info.tls);
 

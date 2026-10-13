@@ -145,7 +145,7 @@ void Esp::build(const game::Snapshot& snapshot, const game::Matrix4x4& view, flo
     }
 
     if (config_.weapon && !player.weapon.empty()) {
-      out.text((min.x + max.x) * 0.5F, max.y + 5.0F, k_color_text, weapon_label(player.weapon),
+      out.text((min.x + max.x) * 0.5F, max.y + 8.0F, k_color_text, weapon_label(player.weapon),
                true);
     }
 

@@ -45,9 +45,13 @@ if host_machine.system() != 'windows'
     'Use --cross-file toolchain/windows-msvc.ini to build the DLL.')
 else
   subdir('third_party/imgui')
-  subdir('third_party/kiero')
+  # kiero + MinHook were retired with ADR-0015 (the inline Present hook stalled
+  # the game under DXVK). The swapchain is now interposed via its method table.
+  # The vendored copy under third_party/kiero is kept for reference only.
   subdir('hooks')
   subdir('game')
+  subdir('diag')
+  subdir('tls')
   subdir('render')
   subdir('features')
 
@@ -57,5 +61,5 @@ else
     install : false,
     include_directories : loader_inc,
     link_with : loader_lib,
-    dependencies : [sdk_dep, hooks_dep, game_dep, render_dep, features_dep])
+    dependencies : [sdk_dep, hooks_dep, game_dep, diag_dep, render_dep, features_dep])
 endif

@@ -41,22 +41,25 @@
 
 ## Phase 3 — Hook engine + overlay
 - [x] Hook engine — vtable + inline (both host-tested)
-- [x] `IDXGISwapChain::Present` hook — discovered via **kiero** and installed as
-      a **MinHook inline hook** (`kiero::bind`, index 8), matching a known-working
-      reference overlay rather than patching the shared vtable slot. Engages only
-      when DXGI is loaded.
-- [~] `UiBackend` abstraction + overlay — ImGui backend (DX11 + Win32 platform
-      backends, cached back-buffer RTV, `WndProc` hook for input) renders a window
-      into the game's device and is **live-validated**. **Known quirk (accepted
-      for now):** a window/UI state change (resize, fullscreen toggle, opening
-      some menu panels) can stall the game — `Present` stops being reached. It
-      reproduces with the payload mapped and has been observed even with the
-      draw disabled and with a pure pass-through detour, so it is not the ImGui
-      draw itself; the render thread ends up blocked inside DXVK's Present while
-      CS2's main thread waits in `CRenderContextBase::Present` /
-      `CSwapChainBase::QueuePresentAndWait`. Next: keep working the swapchain
-      lifecycle (recreation/`ResizeBuffers`) or move the overlay off the present
-      path. RmlUi pending.
+- [x] `IDXGISwapChain` interposition — the swapchain `Present`/`ResizeBuffers`
+      method-table slots (and the factory `CreateSwapChain*` slots) are replaced
+      after discovery from a throwaway device/swapchain (**ADR-0015**), in place
+      of the kiero + MinHook inline hook (DXVK only conditionally reserves a
+      hot-patchable `Present` entry).
+- [x] Portable Vulkan present layer — `overlay/` (`libcs2_overlay_layer.so` +
+      manifest, `CS2_OVERLAY=1`) intercepts `vkQueuePresentKHR` under DXVK and
+      renders the shared-memory model with ImGui+Vulkan. Validated in CS2 **with
+      no payload** (draws, survives resize stress). See **ADR-0016**.
+- [~] `UiBackend` abstraction + overlay — the ImGui DX11 backend is retained but
+      no longer the default; rendering moved to the Vulkan layer. The Win32
+      platform backend/`WndProc` hook are not used (deadlock under Wine).
+- [~] **Present-path injection freeze (blocked on Wine/Proton)** — any injected
+      payload doing work in the render/present path stalls the game on a DXVK
+      swapchain/display-mode change (no frame of ours is ever on the stuck
+      stacks). Reproduced with DXGI/kiero inline hooks, method-table interposition,
+      a dedicated publish thread, and a game-present hook. See **ADR-0017**.
+      Next: validate the payload on **native Windows** (native D3D11/DXGI, no
+      DXVK); or go payload-free and have the layer read `client.dll` itself.
 
 ## Phase 4 — State introspection
 - [x] Entity-system walk — paged identity table (`CGameEntitySystem + 0x10`),
@@ -67,20 +70,19 @@
 - [x] Enemies — every player pawn (matched by the local pawn's vtable, so no
       per-build vtable RVA is hard-coded) with the same fields, plus name and
       distance from the local player
-- [x] Debug HUD — ImGui window rendering the snapshot
-      (`payload/game` → `render::HudModel` → `UiBackend`), refreshed at ~30 Hz;
-      the snapshot is also appended to `C:\cs2-payload.log` for headless
-      verification
+- [x] Debug HUD — `render::HudModel`/`DrawList`, refreshed at ~30 Hz and
+      serialized to the shared-memory model (rendered by the Vulkan layer); the
+      snapshot is also appended to `C:\cs2-payload.log` for headless verification
 - [x] World-to-screen — per-slot P×V matrix (`client.dll + 0x2561cd0`), row-major
       with a **column-vector** multiply (`clip = M · world`); verified live
       (`matrix@view_matrix == matrix@projection · matrix@view`) and covered by
       the host `game-matrix` test
 - [x] ESP overlay — UI-agnostic `render::DrawList` (boxes, filled rects, lines,
-      text) rendered by the ImGui backend: bounding box, health bar (left), ammo
-      bar (bottom), player name (top), weapon name (bottom) and right-side flags
-      (money, armor, helmet, kit, scoped, defusing, bomb, flash, ping, distance).
-      Flags/names/weapons use an embedded pixel font (Silkscreen, OFL), embedded
-      at build time by `scripts/gen-font.py`
+      text): bounding box, health bar (left), ammo bar (bottom), player name
+      (top), weapon name (bottom) and right-side flags (money, armor, helmet,
+      kit, scoped, defusing, bomb, flash, ping, distance). Flags/names/weapons
+      use an embedded pixel font (Silkscreen, OFL), embedded at build time by
+      `scripts/gen-font.py`.
 - [ ] Control channel (IPC) + scenario runner
 
 ## Phase 5 — Interfaces, events, deeper introspection

@@ -2,18 +2,16 @@
 
 #include <cstdio>
 
+#include "cs2/diag/watchdog.hpp"
+
 #if defined(_WIN32)
 #include <d3d11.h>
 #include <dxgi.h>
 #include <windows.h>
-
-#include "kiero.h"
 #endif
 
 namespace cs2::features {
 namespace {
-
-using PresentFn = long(__stdcall*)(void*, unsigned, unsigned);
 
 #if defined(_WIN32)
 // Append a line to a log file next to the drive root so hook activity is
@@ -46,20 +44,6 @@ void log_line(const char* text) noexcept {
 }
 #endif
 
-// Single registration point for the C-style hook callback: the detour needs to
-// reach the owning instance.
-PresentHook* g_active = nullptr;
-PresentFn g_original_present = nullptr;
-
-long __stdcall present_detour(void* swapchain, unsigned sync_interval, unsigned flags) {
-  if (g_active != nullptr) {
-    g_active->on_present(swapchain);
-  }
-  return g_original_present(swapchain, sync_interval, flags);
-}
-
-constexpr std::size_t k_present_index = 8;
-
 }  // namespace
 
 PresentHook::PresentHook(render::UiBackend& backend, Overlay& overlay) noexcept
@@ -67,39 +51,37 @@ PresentHook::PresentHook(render::UiBackend& backend, Overlay& overlay) noexcept
 
 PresentHook::~PresentHook() { uninstall(); }
 
+void PresentHook::present_callback(void* user, void* swapchain) noexcept {
+  static_cast<PresentHook*>(user)->on_present(swapchain);
+}
+
+void PresentHook::resize_callback(void* user) noexcept {
+  static_cast<PresentHook*>(user)->on_resize();
+}
+
 bool PresentHook::install() noexcept {
   if (installed_) {
     return true;
   }
 #if defined(_WIN32)
-  log_line("present hook: install begin");
-  // Only hook when the graphics stack is already present (the game). Keeps the
-  // payload safe to map into non-graphical targets.
+  log_line("present hook: install begin (dxgi method-table interposer)");
+  // Only interpose when the graphics stack is already present (the game). Keeps
+  // the payload safe to map into non-graphical targets.
   if (GetModuleHandleW(L"dxgi.dll") == nullptr || GetModuleHandleW(L"d3d11.dll") == nullptr) {
     std::puts("[cs2-features] dxgi/d3d11 not loaded; skipping Present hook");
     return false;
   }
 
-  // kiero builds a throwaway D3D11 device + swapchain to read the swapchain
-  // method table, then binds Present with a MinHook inline hook (not a shared
-  // vtable-slot patch).
-  const auto init_status = kiero::init(kiero::RenderType::D3D11);
-  log_line(init_status == kiero::Status::Success ? "kiero::init ok" : "kiero::init FAILED");
-  if (init_status != kiero::Status::Success) {
-    std::puts("[cs2-features] kiero::init failed");
+  // Replaces the swapchain Present/ResizeBuffers slots in the discovered method
+  // table instead of MinHook-patching the Present function body (DXVK only
+  // conditionally reserves a hot-patchable Present entry; ADR-0015).
+  if (!interposer_.install(&present_callback, &resize_callback, this)) {
+    std::puts("[cs2-features] DXGI interposition failed");
     return false;
   }
-  const auto bind_status = kiero::bind(k_present_index, reinterpret_cast<void**>(&g_original_present),
-                                       reinterpret_cast<void*>(&present_detour));
-  log_line(bind_status == kiero::Status::Success ? "kiero::bind ok" : "kiero::bind FAILED");
-  if (bind_status != kiero::Status::Success) {
-    std::puts("[cs2-features] kiero::bind failed");
-    return false;
-  }
-  g_active = this;
   installed_ = true;
-  std::puts("[cs2-features] IDXGISwapChain::Present hooked (kiero)");
-  log_line("present hook installed (kiero)");
+  std::puts("[cs2-features] IDXGISwapChain::Present interposed (DXGI method table)");
+  log_line("present hook installed (dxgi method-table interposer)");
   return true;
 #else
   return false;
@@ -114,15 +96,21 @@ void PresentHook::uninstall() noexcept {
     backend_->shutdown();
     backend_ready_ = false;
   }
-  g_active = nullptr;
-#if defined(_WIN32)
-  kiero::unbind(k_present_index);
-#endif
+  interposer_.uninstall();
   installed_ = false;
+}
+
+void PresentHook::on_resize() noexcept {
+  // Runs before the game's ResizeBuffers: drop any back-buffer reference the
+  // backend holds, or the resize fails and the game stalls.
+  if (backend_ready_ && backend_ != nullptr) {
+    backend_->on_before_resize();
+  }
 }
 
 void PresentHook::on_present(void* swapchain) noexcept {
   ++frames_;
+  diag::heartbeat();
 #if defined(_WIN32)
   if (swapchain == nullptr) {
     return;
@@ -171,7 +159,7 @@ void PresentHook::on_present(void* swapchain) noexcept {
     backend_ready_ = backend_ != nullptr && backend_->initialize(context_);
     log_line(backend_ready_ ? "ui backend initialized" : "ui backend init FAILED");
   }
-#endif
+
   if (backend_ready_ && backend_ != nullptr) {
     const float screen_width = static_cast<float>(desc.BufferDesc.Width);
     const float screen_height = static_cast<float>(desc.BufferDesc.Height);
@@ -181,6 +169,7 @@ void PresentHook::on_present(void* swapchain) noexcept {
       log_line("presenting frames");
     }
   }
+#endif
 }
 
 }  // namespace cs2::features

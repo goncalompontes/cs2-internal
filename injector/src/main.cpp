@@ -563,6 +563,66 @@ std::vector<std::byte> make_entry_stub(std::uintptr_t base, std::uintptr_t entry
   return code;
 }
 
+/// x64 stub that calls `target(a0, a1, a2)` (SysV->Win64: rcx/rdx/r8) and
+/// returns its result in eax (used for RtlAddFunctionTable). 
+std::vector<std::byte> make_call3_stub(std::uintptr_t target, std::uintptr_t a0, std::uint32_t a1,
+                                       std::uintptr_t a2) {
+  std::vector<std::byte> code;
+  const auto push = [&](std::initializer_list<std::uint8_t> bytes) {
+    for (std::uint8_t b : bytes) code.push_back(static_cast<std::byte>(b));
+  };
+  const auto push_imm64 = [&](std::uintptr_t value) {
+    for (int i = 0; i < 8; ++i) code.push_back(static_cast<std::byte>((value >> (8 * i)) & 0xFF));
+  };
+  push({0x48, 0xB9});  // mov rcx, a0
+  push_imm64(a0);
+  push({0xBA});  // mov edx, a1
+  for (int i = 0; i < 4; ++i) code.push_back(static_cast<std::byte>((a1 >> (8 * i)) & 0xFF));
+  push({0x49, 0xB8});  // mov r8, a2
+  push_imm64(a2);
+  push({0x48, 0xB8});  // mov rax, target
+  push_imm64(target);
+  push({0x48, 0x83, 0xEC, 0x28});  // sub rsp, 0x28
+  push({0xFF, 0xD0});              // call rax
+  push({0x48, 0x83, 0xC4, 0x28});  // add rsp, 0x28
+  push({0xC3});                    // ret  (result in eax)
+  return code;
+}
+
+/// Register the image's `.pdata` unwind tables in the target via
+/// `RtlAddFunctionTable`, so exceptions/SEH inside the mapped payload unwind
+/// correctly. Returns true if the target reported success.
+bool register_exception_table(HANDLE process, std::uintptr_t remote_base,
+                              const cs2::loader::pe::ImageInfo& image) {
+  if (image.exception_directory_rva == 0 || image.exception_directory_size < 12) {
+    return false;
+  }
+  const auto ntdll = remote_module_base(process, "ntdll.dll");
+  if (!ntdll) return false;
+  const auto add_function_table = resolve_export(process, *ntdll, "RtlAddFunctionTable", 0, false);
+  if (!add_function_table) return false;
+
+  const std::uint32_t count = image.exception_directory_size / 12;  // sizeof(RUNTIME_FUNCTION)
+  const std::vector<std::byte> stub =
+      make_call3_stub(*add_function_table, remote_base + image.exception_directory_rva, count,
+                      remote_base);
+  void* memory =
+      VirtualAllocEx(process, nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+  if (memory == nullptr ||
+      !write_remote(process, reinterpret_cast<std::uintptr_t>(memory), stub.data(), stub.size())) {
+    return false;
+  }
+  HANDLE thread = CreateRemoteThread(process, nullptr, 0,
+                                     reinterpret_cast<LPTHREAD_START_ROUTINE>(memory), nullptr, 0,
+                                     nullptr);
+  if (thread == nullptr) return false;
+  WaitForSingleObject(thread, 5000);
+  DWORD exit_code = 0;
+  GetExitCodeThread(thread, &exit_code);
+  CloseHandle(thread);
+  return exit_code != 0;
+}
+
 void print_usage() {
   std::puts("usage: injector.exe <process-name|pid> <payload.dll> [--no-call] [--load-missing]");
   std::puts("       injector.exe <process-name|pid> <ignored> --modules   # list target modules");
@@ -698,6 +758,17 @@ int main(int argc, char** argv) {
       std::printf("injector: registered %s in the loader list\n", base_name.c_str());
     } else {
       std::puts("injector: warning: could not register module in the loader list");
+    }
+  }
+
+  // Register the image's exception (.pdata) tables so exceptions/SEH inside the
+  // manually-mapped payload unwind instead of crashing the process.
+  if (image.exception_directory_size >= 12) {
+    if (register_exception_table(process, remote_base, image)) {
+      std::printf("injector: registered .pdata (%u function entries)\n",
+                  image.exception_directory_size / 12);
+    } else {
+      std::puts("injector: warning: could not register .pdata");
     }
   }
 

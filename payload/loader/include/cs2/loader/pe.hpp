@@ -78,6 +78,9 @@ struct ImageInfo {
   std::vector<RelocationBlock> relocations;
   std::vector<ExportSymbol> exports;
   TlsInfo tls;
+  /// RVA/size of the exception directory (`.pdata`), when present.
+  std::uint32_t exception_directory_rva{};
+  std::uint32_t exception_directory_size{};
 };
 
 // Parse a PE image from bytes (either a file image or an already-mapped image).

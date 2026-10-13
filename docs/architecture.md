@@ -52,23 +52,34 @@ meson compile -C build-payload
   every player). Field offsets come from the generated schema (ADR-0001);
   players are enumerated by matching the local pawn's vtable rather than a
   hard-coded per-build RVA.
-- `payload/features` — `PresentHook`: discovers the `IDXGISwapChain` method
-  table via **kiero** and installs `Present` (index 8) as a **MinHook inline
-  hook**, derives the device/context/HWND from the swapchain, and drives the UI
-  backend each frame. `DebugHud` builds a `render::HudModel` from a
-  `game::Snapshot` (throttled to ~10 Hz) and appends a compact dump to
-  `C:\cs2-payload.log`.
-- `payload/render` — `UiBackend` abstraction (ADR-0007) with an **ImGui** backend
-  (vendored `payload/third_party/imgui` + dx11/win32 backends; cached back-buffer
-  render target and a `WndProc` hook for input) and a frame-log stand-in;
-  **RmlUi** pending. The UI-agnostic `render::HudModel` (title + sections of
-  label/value lines) keeps the backend free of game types.
+- `payload/features` — `Overlay` builds a `render::OverlayModel` from a
+  `game::Snapshot` and serializes it to shared memory (`ModelPublisher`), and
+  appends a compact dump to `C:\cs2-payload.log`. `DxgiInterposer` (ADR-0015)
+  and `GamePresentHook` (game-present inline hook) are retained but **not the
+  default** — any payload work in the present/render path stalls DXVK under
+  Wine/Proton (**ADR-0017**). The Vulkan layer does the rendering.
+- `payload/render` — `UiBackend` abstraction (ADR-0007) with an **ImGui** DX11
+  backend (retained but unused; Win32 platform backend/`WndProc` not used) and a
+  frame-log stand-in. The UI-agnostic `render::HudModel`/`DrawList` (the
+  `wire::Model` wire format) keep the backend free of game types.
+- `overlay/` — **portable Vulkan present layer** (ADR-0016): intercepts
+  `vkCreateSwapchainKHR`/`vkQueuePresentKHR` (Linux `.so` under DXVK; a Windows
+  `.dll` via the Vulkan loader is TBD), reads the shared-memory model, writes the
+  presented extent back, and renders with ImGui+Vulkan (`imgui_impl_vulkan`).
+  Validated in CS2 without a payload. Enabled with `CS2_OVERLAY=1`.
+- `payload/tls` — per-thread TLS bootstrap for a manually-mapped image plus an
+  `NtCreateThreadEx(SKIP_THREAD_ATTACH)` thread helper (the loader never
+  initializes TLS for mapped modules; ADR-0016).
+- `payload/diag` — first-chance/unhandled crash handler and a freeze watchdog
+  (per-thread stacks) that captured the ADR-0015 freeze.
 - `injector` — manual-map injector (`injector.exe`, Windows x64) run inside the
   same Proton prefix: parse the payload, map sections + apply relocations into a
   local buffer, resolve imports by reading the target's module export tables,
-  `WriteProcessMemory` the image, then call the entry point on a remote thread
-  via a small x64 stub. Bypasses the target's `LoadLibrary`/signature checks.
-  Includes a `victim.exe` + CRT-less `trivial.dll` for offline validation.
+  register the image in the PEB loader list, register `.pdata`
+  (`RtlAddFunctionTable`), `WriteProcessMemory` the image, then call the entry
+  point on a remote thread via a small x64 stub. Bypasses the target's
+  `LoadLibrary`/signature checks. Includes `victim.exe` + CRT-less `trivial.dll`
+  for offline validation.
 - `scripts/` — `gen-sdk.sh` (build-time header render), `calibrate-live.sh`
   (live dumps → `calibration/*.json`), `mcp-live.sh` (MCP wrapper).
 - `external/dumper --mcp` — live-analysis **MCP server** (stdio), wired into

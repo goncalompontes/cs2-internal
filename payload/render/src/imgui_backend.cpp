@@ -13,27 +13,12 @@
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
-#include "imgui_impl_win32.h"
-
-// Declared out-of-band by imgui_impl_win32.h (it is `#if 0`'d there to avoid
-// dragging <windows.h> into the header).
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT message, WPARAM wparam,
-                                                            LPARAM lparam);
 #endif
 
 namespace cs2::render {
 namespace {
 
 #if defined(_WIN32)
-WNDPROC g_original_wndproc = nullptr;
-
-LRESULT __stdcall wndproc_detour(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-  if (ImGui_ImplWin32_WndProcHandler(hwnd, message, wparam, lparam)) {
-    return 1;
-  }
-  return CallWindowProc(g_original_wndproc, hwnd, message, wparam, lparam);
-}
-
 ImU32 to_u32(const Color& color) {
   return IM_COL32(color.r, color.g, color.b, color.a);
 }
@@ -63,9 +48,8 @@ void ImGuiBackend::load_fonts() {
 
 bool ImGuiBackend::initialize(const RenderContext& context) {
 #if defined(_WIN32)
-  if (context.device == nullptr || context.device_context == nullptr ||
-      context.swapchain == nullptr) {
-    std::puts("[cs2-render] ImGui backend: missing device/context/swapchain");
+  if (context.device == nullptr || context.device_context == nullptr) {
+    std::puts("[cs2-render] ImGui backend: missing device/context");
     return false;
   }
   device_ = context.device;
@@ -76,35 +60,13 @@ bool ImGuiBackend::initialize(const RenderContext& context) {
   ImGui::StyleColorsDark();
   load_fonts();
 
-  ImGui_ImplWin32_Init(context.hwnd);
+  // The Win32 platform backend is deliberately NOT used: its window/mouse calls
+  // from the render thread can deadlock under Wine, and the overlay is
+  // display-only. The frame size is fed to ImGui directly instead.
   if (!ImGui_ImplDX11_Init(static_cast<ID3D11Device*>(context.device),
                            static_cast<ID3D11DeviceContext*>(context.device_context))) {
     std::puts("[cs2-render] ImGui_ImplDX11_Init failed");
     return false;
-  }
-
-  // Create a render target for the swapchain back buffer (once), as the
-  // reference overlay does.
-  auto* chain = static_cast<IDXGISwapChain*>(context.swapchain);
-  ID3D11Texture2D* back_buffer = nullptr;
-  if (SUCCEEDED(chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
-                                 reinterpret_cast<void**>(&back_buffer))) &&
-      back_buffer != nullptr) {
-    static_cast<ID3D11Device*>(context.device)
-        ->CreateRenderTargetView(back_buffer, nullptr,
-                                 reinterpret_cast<ID3D11RenderTargetView**>(&render_target_));
-    back_buffer->Release();
-  }
-  if (render_target_ == nullptr) {
-    std::puts("[cs2-render] failed to create the back-buffer render target");
-    return false;
-  }
-
-  // Hook the window procedure so ImGui receives mouse/keyboard input.
-  if (context.hwnd != nullptr && g_original_wndproc == nullptr) {
-    g_original_wndproc = reinterpret_cast<WNDPROC>(
-        SetWindowLongPtrW(static_cast<HWND>(context.hwnd), GWLP_WNDPROC,
-                          reinterpret_cast<LONG_PTR>(&wndproc_detour)));
   }
 
   initialized_ = true;
@@ -114,6 +76,61 @@ bool ImGuiBackend::initialize(const RenderContext& context) {
   (void)context;
   return false;
 #endif
+}
+
+void ImGuiBackend::release_render_target() {
+#if defined(_WIN32)
+  if (render_target_ != nullptr) {
+    static_cast<IUnknown*>(render_target_)->Release();
+    render_target_ = nullptr;
+  }
+  render_target_width_ = 0;
+  render_target_height_ = 0;
+#endif
+}
+
+// Recreate the back-buffer render target when the swapchain size changes (or
+// after a resize). Returning a non-null `render_target_` means it is current.
+bool ImGuiBackend::ensure_render_target(const RenderContext& context) {
+#if defined(_WIN32)
+  if (context.swapchain == nullptr || context.device == nullptr) {
+    return render_target_ != nullptr;
+  }
+  auto* chain = static_cast<IDXGISwapChain*>(context.swapchain);
+  DXGI_SWAP_CHAIN_DESC desc{};
+  if (chain->GetDesc(&desc) < 0) {
+    return render_target_ != nullptr;
+  }
+  const unsigned width = desc.BufferDesc.Width;
+  const unsigned height = desc.BufferDesc.Height;
+  if (render_target_ != nullptr && width == render_target_width_ &&
+      height == render_target_height_) {
+    return true;  // still valid
+  }
+  release_render_target();
+
+  ID3D11Texture2D* back_buffer = nullptr;
+  if (SUCCEEDED(chain->GetBuffer(0, __uuidof(ID3D11Texture2D),
+                                 reinterpret_cast<void**>(&back_buffer))) &&
+      back_buffer != nullptr) {
+    static_cast<ID3D11Device*>(context.device)
+        ->CreateRenderTargetView(back_buffer, nullptr,
+                                 reinterpret_cast<ID3D11RenderTargetView**>(&render_target_));
+    back_buffer->Release();
+    render_target_width_ = width;
+    render_target_height_ = height;
+  }
+  return render_target_ != nullptr;
+#else
+  (void)context;
+  return false;
+#endif
+}
+
+void ImGuiBackend::on_before_resize() {
+  // Called from the ResizeBuffers detour before the game's resize: release the
+  // back-buffer reference so ResizeBuffers can proceed.
+  release_render_target();
 }
 
 void ImGuiBackend::draw_commands(const DrawList& draw) {
@@ -181,23 +198,23 @@ void ImGuiBackend::draw_hud(const HudModel& hud) {
 
 void ImGuiBackend::render(const RenderContext& context, const OverlayModel& model) {
 #if defined(_WIN32)
-  if (!initialized_ || render_target_ == nullptr) {
+  if (!initialized_) {
     return;
   }
   auto* device_context = static_cast<ID3D11DeviceContext*>(context.device_context);
-  if (device_context == nullptr) {
+  if (device_context == nullptr || !ensure_render_target(context)) {
     return;
   }
+  auto* render_target = static_cast<ID3D11RenderTargetView*>(render_target_);
 
-  DXGI_SWAP_CHAIN_DESC desc{};
-  if (context.swapchain != nullptr &&
-      static_cast<IDXGISwapChain*>(context.swapchain)->GetDesc(&desc) >= 0) {
-    render_target_width_ = desc.BufferDesc.Width;
-    render_target_height_ = desc.BufferDesc.Height;
-  }
+  // Display-only: set the frame size directly (the Win32 platform backend is not
+  // used). A positive size is required by ImGui_ImplDX11_NewFrame.
+  ImGuiIO& io = ImGui::GetIO();
+  io.DisplaySize = ImVec2(static_cast<float>(render_target_width_),
+                          static_cast<float>(render_target_height_));
+  io.DeltaTime = 1.0F / 60.0F;
 
   ImGui_ImplDX11_NewFrame();
-  ImGui_ImplWin32_NewFrame();
   ImGui::NewFrame();
 
   draw_commands(model.draw);
@@ -205,10 +222,20 @@ void ImGuiBackend::render(const RenderContext& context, const OverlayModel& mode
 
   ImGui::Render();
 
-  // ImGui_ImplDX11_RenderDrawData draws into the currently bound render target.
-  device_context->OMSetRenderTargets(
-      1, reinterpret_cast<ID3D11RenderTargetView* const*>(&render_target_), nullptr);
+  // ImGui_ImplDX11_RenderDrawData draws into the currently bound render target,
+  // so bind the swapchain back buffer and restore the game's target afterwards.
+  ID3D11RenderTargetView* saved_rtv = nullptr;
+  ID3D11DepthStencilView* saved_dsv = nullptr;
+  device_context->OMGetRenderTargets(1, &saved_rtv, &saved_dsv);
+  device_context->OMSetRenderTargets(1, &render_target, nullptr);
   ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+  device_context->OMSetRenderTargets(1, &saved_rtv, saved_dsv);
+  if (saved_rtv != nullptr) {
+    saved_rtv->Release();
+  }
+  if (saved_dsv != nullptr) {
+    saved_dsv->Release();
+  }
   ++frames_;
 #endif
 }
@@ -217,12 +244,8 @@ void ImGuiBackend::shutdown() {
 #if defined(_WIN32)
   if (initialized_) {
     ImGui_ImplDX11_Shutdown();
-    ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
-    if (render_target_ != nullptr) {
-      static_cast<ID3D11RenderTargetView*>(render_target_)->Release();
-      render_target_ = nullptr;
-    }
+    release_render_target();
     pixel_font_ = nullptr;
     initialized_ = false;
   }

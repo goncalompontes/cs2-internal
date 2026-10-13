@@ -7,23 +7,29 @@
 namespace cs2::render {
 
 // ImGui overlay backend (ADR-0007 fallback): renders into the target's D3D11
-// device via the vendored imgui_impl_dx11 / imgui_impl_win32 backends. Mirrors
-// the reference overlay: a render target is created once for the swapchain back
-// buffer, the window procedure is hooked so ImGui receives input, and the frame
-// is drawn into the back buffer before the game's Present.
+// device via the vendored `imgui_impl_dx11` backend. A render target for the
+// swapchain back buffer is cached and rebuilt when the swapchain is resized;
+// `on_before_resize` releases it so the game's `ResizeBuffers` can proceed.
 //
-// Two fonts are loaded: the ImGui default (debug window) and an embedded pixel
+// The Win32 platform backend and its `WndProc` hook are deliberately not used:
+// its window/mouse calls from the render thread deadlock under Wine, and the
+// overlay is display-only (ADR-0015).
+//
+// Two fonts are used: the ImGui default (debug window) and an embedded pixel
 // font (ESP text).
 class ImGuiBackend final : public UiBackend {
  public:
   [[nodiscard]] bool initialize(const RenderContext& context) override;
   void render(const RenderContext& context, const OverlayModel& model) override;
+  void on_before_resize() override;
   void shutdown() override;
 
   [[nodiscard]] std::uint64_t frames() const noexcept { return frames_; }
 
  private:
   void load_fonts();
+  void release_render_target();
+  [[nodiscard]] bool ensure_render_target(const RenderContext& context);
   void draw_commands(const DrawList& draw);
   void draw_hud(const HudModel& hud);
 

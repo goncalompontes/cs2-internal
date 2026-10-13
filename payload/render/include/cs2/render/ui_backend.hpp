@@ -27,6 +27,11 @@ class UiBackend {
   // pass it each time rather than the backend caching it.
   virtual void render(const RenderContext& context, const OverlayModel& model) = 0;
 
+  // Called from the `IDXGISwapChain::ResizeBuffers` detour, *before* the game's
+  // resize runs. Any held back-buffer view (which keeps a reference and would
+  // otherwise fail the resize) must be released here.
+  virtual void on_before_resize() {}
+
   // Called before unload.
   virtual void shutdown() = 0;
 };

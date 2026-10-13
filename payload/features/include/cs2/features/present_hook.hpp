@@ -2,16 +2,17 @@
 
 #include <cstdint>
 
+#include "cs2/features/dxgi_interposer.hpp"
 #include "cs2/features/overlay.hpp"
 #include "cs2/render/ui_backend.hpp"
 
 namespace cs2::features {
 
-// Hooks `IDXGISwapChain::Present` and drives a `UiBackend` every frame.
+// Drives a `UiBackend` every frame from an interposed `IDXGISwapChain::Present`.
 //
-// The swapchain method table is discovered by kiero, and the Present entry is
-// hooked with a MinHook inline hook (kiero::bind), matching the reference
-// overlay's approach rather than patching the shared vtable slot.
+// The swapchain is not inline-hooked: `DxgiInterposer` replaces the Present and
+// ResizeBuffers slots in the discovered swapchain method table (ADR-0015). The
+// device/context/HWND are derived from the swapchain on the first frame.
 class PresentHook {
  public:
   PresentHook(render::UiBackend& backend, Overlay& overlay) noexcept;
@@ -26,12 +27,19 @@ class PresentHook {
   [[nodiscard]] bool installed() const noexcept { return installed_; }
   [[nodiscard]] std::uint64_t frames() const noexcept { return frames_; }
 
-  // Invoked by the detour before the original Present.
+  // Invoked by the interposer before the original Present.
   void on_present(void* swapchain) noexcept;
 
+  // Invoked by the interposer before the original ResizeBuffers.
+  void on_resize() noexcept;
+
  private:
+  static void present_callback(void* user, void* swapchain) noexcept;
+  static void resize_callback(void* user) noexcept;
+
   render::UiBackend* backend_;
   Overlay* overlay_;
+  DxgiInterposer interposer_{};
   render::RenderContext context_{};
   bool backend_ready_ = false;
   std::uint64_t frames_ = 0;

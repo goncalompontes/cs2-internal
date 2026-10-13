@@ -8,6 +8,9 @@ toolchain/msvc/
 toolchain/msvc-wine/
 toolchain/*.zip
 
+# Fetched Vulkan headers (large; clone KhronosGroup/Vulkan-Headers into it)
+external/Vulkan-Headers/
+
 # Python
 __pycache__/
 *.pyc
