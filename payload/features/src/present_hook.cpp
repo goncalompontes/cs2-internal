@@ -62,7 +62,8 @@ constexpr std::size_t k_present_index = 8;
 
 }  // namespace
 
-PresentHook::PresentHook(render::UiBackend& backend) noexcept : backend_(&backend) {}
+PresentHook::PresentHook(render::UiBackend& backend, DebugHud& hud) noexcept
+    : backend_(&backend), hud_(&hud) {}
 
 PresentHook::~PresentHook() { uninstall(); }
 
@@ -172,7 +173,8 @@ void PresentHook::on_present(void* swapchain) noexcept {
   }
 #endif
   if (backend_ready_ && backend_ != nullptr) {
-    backend_->render(context_);
+    const render::HudModel& model = hud_ != nullptr ? hud_->update() : render::HudModel::empty();
+    backend_->render(context_, model);
     if (frames_ % 300 == 0) {
       log_line("presenting frames");
     }

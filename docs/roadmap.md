@@ -59,8 +59,17 @@
       path. RmlUi pending.
 
 ## Phase 4 — State introspection
-- [ ] Local player fields via schema offsets
-- [ ] Debug HUD (position/velocity/health/… values)
+- [x] Entity-system walk — paged identity table (`CGameEntitySystem + 0x10`),
+      plus the local player (controller → pawn) via schema offsets
+- [x] Local player fields — health/max, armor, team, life state, world origin,
+      eye origin, velocity, eye angles, active weapon + clip/reserve ammo
+- [x] Enemies — every player pawn (matched by the local pawn's vtable, so no
+      per-build vtable RVA is hard-coded) with the same fields, plus name and
+      distance from the local player
+- [x] Debug HUD — ImGui window rendering the snapshot
+      (`payload/game` → `render::HudModel` → `UiBackend`), refreshed at ~10 Hz;
+      the snapshot is also appended to `C:\cs2-payload.log` for headless
+      verification
 - [ ] Control channel (IPC) + scenario runner
 
 ## Phase 5 — Interfaces, events, deeper introspection

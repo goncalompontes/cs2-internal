@@ -27,6 +27,9 @@ meson compile -C build-payload
   (IDA-style sigs, wildcards, RIP-relative resolution), schema walker
   (`schemasystem.dll` / `SchemaSystem_001`), `CreateInterface` resolver.
   Emits `offsets.json`, `interfaces.hpp`, `schemas/*.hpp`, `manifest.json`.
+  The schema walker dedups per **(module, class)**, not per class name: client
+  and server register the same schema names with different layouts (e.g.
+  `CCSPlayerController`), and both must survive.
   Memory access sits behind `ProcessMemory` / `MemoryRead` so a `memflow`
   backend can be added without touching analysis code. Header generation
   (`sdk`) is JSON-driven: `--gen [dir]` consumes `--interfaces-json` /
@@ -42,14 +45,24 @@ meson compile -C build-payload
   so standalone payload builds work).
 - `payload/hooks` — hook engine: vtable + inline (prologue) hooks with
   executable-memory/protection helpers (host-tested).
+- `payload/game` — state introspection: safe in-process reads
+  (`ReadProcessMemory` on self, so an invalid pointer fails instead of faulting
+  — the payload has no registered exception tables), module lookup, the paged
+  entity identity table (`EntitySystem`), and `StateReader` (local player +
+  every player). Field offsets come from the generated schema (ADR-0001);
+  players are enumerated by matching the local pawn's vtable rather than a
+  hard-coded per-build RVA.
 - `payload/features` — `PresentHook`: discovers the `IDXGISwapChain` method
   table via **kiero** and installs `Present` (index 8) as a **MinHook inline
   hook**, derives the device/context/HWND from the swapchain, and drives the UI
-  backend each frame.
+  backend each frame. `DebugHud` builds a `render::HudModel` from a
+  `game::Snapshot` (throttled to ~10 Hz) and appends a compact dump to
+  `C:\cs2-payload.log`.
 - `payload/render` — `UiBackend` abstraction (ADR-0007) with an **ImGui** backend
   (vendored `payload/third_party/imgui` + dx11/win32 backends; cached back-buffer
   render target and a `WndProc` hook for input) and a frame-log stand-in;
-  **RmlUi** pending.
+  **RmlUi** pending. The UI-agnostic `render::HudModel` (title + sections of
+  label/value lines) keeps the backend free of game types.
 - `injector` — manual-map injector (`injector.exe`, Windows x64) run inside the
   same Proton prefix: parse the payload, map sections + apply relocations into a
   local buffer, resolve imports by reading the target's module export tables,

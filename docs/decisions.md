@@ -121,3 +121,27 @@ cross build: the payload project must declare `c` (MinHook is C), and MinHook's
 `__movsb` needs `<intrin.h>` under clang-cl. The ImGui backend uses the Win32
 platform backend plus a `WndProc` hook for input, and caches the back-buffer
 render target.
+
+## ADR-0014 — State introspection: schema offsets + vtable-matched players
+**Status:** accepted
+
+Player state is read in-process by `payload/game`:
+
+- **Field offsets from the schema** (`payload/sdk`, ADR-0001), with literals as
+  fallbacks. This depends on a dumper fix: the schema walker now dedups per
+  **(module, class)** rather than class name. `client.dll` and `server.dll`
+  register the same schema names with different layouts, so the old name-only
+  dedup silently dropped the client player-controller hierarchy — including the
+  only `m_bIsLocalPlayerController` field and the client-correct
+  `m_hPlayerPawn` offset.
+- **Safe reads.** Reads go through `ReadProcessMemory(GetCurrentProcess(), …)`.
+  The payload is manually mapped without registered `.pdata`, so an invalid
+  pointer must fail cleanly instead of faulting.
+- **Players by vtable match.** Enemies are enumerated from the paged entity
+  identity table by matching the local pawn's vtable, so no per-build vtable RVA
+  is hard-coded. The local player is the controller with
+  `m_bIsLocalPlayerController` (reached via the `local_player_controllers`
+  global), and its `m_hPlayerPawn` yields the local pawn.
+- **Presentation is decoupled.** The snapshot is rendered through the
+  UI-agnostic `render::HudModel` and also appended to `C:\cs2-payload.log`, so
+  the state is verifiable without the overlay.

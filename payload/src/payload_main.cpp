@@ -1,9 +1,10 @@
 // payload_main.cpp — payload DLL entry.
 //
-// Boots the payload: logs SDK info, then installs the Present hook driving the
-// UI backend. Real overlay + features land in later phases.
+// Boots the payload: installs the Present hook (kiero + MinHook) and drives the
+// ImGui debug HUD, which reads local-player/player state via `payload/game`.
 #include <cstdio>
 
+#include "cs2/features/debug_hud.hpp"
 #include "cs2/features/present_hook.hpp"
 #include "cs2/render/imgui_backend.hpp"
 
@@ -31,7 +32,8 @@ namespace {
 // a manually mapped module.
 struct Runtime {
   render::ImGuiBackend backend;
-  features::PresentHook present{backend};
+  features::DebugHud hud;
+  features::PresentHook present{backend, hud};
 };
 
 Runtime g_runtime;
@@ -46,6 +48,7 @@ Runtime& runtime() {
 DWORD WINAPI install_thread(void*) {
   // Install off the loader lock: device creation loads DLLs and would deadlock
   // if done from DllMain.
+  cs2::payload::runtime().hud.initialize();
   cs2::payload::runtime().present.install();
   return 0;
 }
@@ -59,12 +62,13 @@ void boot() {
 #endif
 
 #if defined(CS2_PAYLOAD_HAVE_SCHEMAS) && __has_include("schemas/client_dll.hpp")
-  const auto* entity = cs2::sdk::schemas::client_dll::find_class_by_target("C_BaseEntity");
-  if (entity != nullptr) {
-    const auto health =
-        cs2::sdk::schemas::client_dll::field_offset_by_target("C_BaseEntity", "m_iHealth");
-    std::printf("[cs2-payload] C_BaseEntity size=0x%x fields=%zu m_iHealth=0x%x\n",
-                entity->size, entity->fields.size(), health);
+  const auto* controller = cs2::sdk::schemas::client_dll::find_class_by_target("CBasePlayerController");
+  const auto local_flag =
+      cs2::sdk::schemas::client_dll::field_offset_by_target("CBasePlayerController",
+                                                            "m_bIsLocalPlayerController");
+  if (controller != nullptr) {
+    std::printf("[cs2-payload] CBasePlayerController size=0x%x fields=%zu m_bIsLocalPlayerController=0x%x\n",
+                controller->size, controller->fields.size(), local_flag);
   }
 #endif
 

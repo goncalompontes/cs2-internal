@@ -86,7 +86,7 @@ bool ImGuiBackend::initialize(const RenderContext& context) {
 #endif
 }
 
-void ImGuiBackend::render(const RenderContext& context) {
+void ImGuiBackend::render(const RenderContext& context, const HudModel& model) {
 #if defined(_WIN32)
   if (!initialized_ || render_target_ == nullptr) {
     return;
@@ -107,9 +107,22 @@ void ImGuiBackend::render(const RenderContext& context) {
   ImGui_ImplWin32_NewFrame();
   ImGui::NewFrame();
 
-  ImGui::Begin("cs2-internal");
-  ImGui::Text("frames presented: %llu", static_cast<unsigned long long>(frames_));
-  ImGui::Text("pid: %lu", static_cast<unsigned long>(GetCurrentProcessId()));
+  ImGui::SetNextWindowSize(ImVec2(460, 560), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(model.title.empty() ? "cs2-internal" : model.title.c_str())) {
+    for (const HudSection& section : model.sections) {
+      if (section.title.empty()) {
+        for (const HudLine& line : section.lines) {
+          ImGui::Text("%s: %s", line.label.c_str(), line.value.c_str());
+        }
+        continue;
+      }
+      if (ImGui::CollapsingHeader(section.title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (const HudLine& line : section.lines) {
+          ImGui::Text("%s: %s", line.label.c_str(), line.value.c_str());
+        }
+      }
+    }
+  }
   ImGui::End();
 
   ImGui::Render();

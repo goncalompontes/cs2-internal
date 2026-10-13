@@ -10,8 +10,9 @@ bool FrameLogBackend::initialize(const RenderContext& context) {
   return true;
 }
 
-void FrameLogBackend::render(const RenderContext& context) {
+void FrameLogBackend::render(const RenderContext& context, const HudModel& model) {
   (void)context;
+  (void)model;
   ++frames_;
   if (frames_ % 600 == 0) {
     std::printf("[cs2-render] %llu frames presented\n",

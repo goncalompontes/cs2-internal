@@ -47,6 +47,7 @@ else
   subdir('third_party/imgui')
   subdir('third_party/kiero')
   subdir('hooks')
+  subdir('game')
   subdir('render')
   subdir('features')
 
@@ -56,5 +57,5 @@ else
     install : false,
     include_directories : loader_inc,
     link_with : loader_lib,
-    dependencies : [sdk_dep, hooks_dep, render_dep, features_dep])
+    dependencies : [sdk_dep, hooks_dep, game_dep, render_dep, features_dep])
 endif
