@@ -63,25 +63,31 @@ std::uint32_t find_pid(const char* name) {
   return pid;
 }
 
+std::optional<std::uintptr_t> peb_module_base(HANDLE process, const char* name);
+
 std::optional<std::uintptr_t> remote_module_base(HANDLE process, const char* name) {
   const DWORD pid = GetProcessId(process);
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-  if (snapshot == INVALID_HANDLE_VALUE) {
-    return std::nullopt;
+  if (snapshot != INVALID_HANDLE_VALUE) {
+    MODULEENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    std::optional<std::uintptr_t> base;
+    if (Module32First(snapshot, &entry)) {
+      do {
+        if (_stricmp(entry.szModule, name) == 0) {
+          base = reinterpret_cast<std::uintptr_t>(entry.modBaseAddr);
+          break;
+        }
+      } while (Module32Next(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    if (base.has_value()) {
+      return base;
+    }
   }
-  MODULEENTRY32 entry{};
-  entry.dwSize = sizeof(entry);
-  std::optional<std::uintptr_t> base;
-  if (Module32First(snapshot, &entry)) {
-    do {
-      if (_stricmp(entry.szModule, name) == 0) {
-        base = reinterpret_cast<std::uintptr_t>(entry.modBaseAddr);
-        break;
-      }
-    } while (Module32Next(snapshot, &entry));
-  }
-  CloseHandle(snapshot);
-  return base;
+  // Wine's toolhelp module snapshot is unreliable (it can fail outright or
+  // return an empty list); walk the target's PEB loader list instead.
+  return peb_module_base(process, name);
 }
 
 bool read_remote(HANDLE process, std::uintptr_t address, void* buffer, std::size_t size) {
@@ -132,6 +138,111 @@ constexpr std::size_t k_ldr_entry_point = 0x38;
 constexpr std::size_t k_ldr_size_of_image = 0x40;
 constexpr std::size_t k_ldr_full_name = 0x48;
 constexpr std::size_t k_ldr_base_name = 0x58;
+
+std::uintptr_t remote_peb(HANDLE process) {
+  using NtQueryInformationProcessFn = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+  const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  auto nt_query = reinterpret_cast<NtQueryInformationProcessFn>(
+      GetProcAddress(ntdll, "NtQueryInformationProcess"));
+  if (nt_query == nullptr) {
+    return 0;
+  }
+  struct ProcessBasicInformation {
+    PVOID reserved1;
+    PVOID peb_base_address;
+    PVOID reserved2[2];
+    ULONG_PTR unique_process_id;
+    PVOID reserved3;
+  } pbi{};
+  if (nt_query(process, 0 /* ProcessBasicInformation */, &pbi, sizeof(pbi), nullptr) != 0) {
+    return 0;
+  }
+  return reinterpret_cast<std::uintptr_t>(pbi.peb_base_address);
+}
+
+/// Find a loaded module by walking the target's PEB `InLoadOrderModuleList`.
+std::optional<std::uintptr_t> peb_module_base(HANDLE process, const char* name) {
+  const std::uintptr_t peb = remote_peb(process);
+  if (peb == 0) {
+    return std::nullopt;
+  }
+  const std::uint64_t ldr = read_u64(process, peb + k_peb_ldr);
+  if (ldr == 0) {
+    return std::nullopt;
+  }
+  const std::uintptr_t head = ldr + k_ldr_in_load_order;
+  std::uintptr_t node = read_u64(process, head);
+  for (int guard = 0; node != 0 && node != head && guard < 4096; ++guard) {
+    const std::uintptr_t entry = node - k_ldr_in_load_order;
+    const std::uint16_t length =
+        static_cast<std::uint16_t>(read_u64(process, entry + k_ldr_base_name) & 0xffff);
+    const std::uintptr_t buffer = read_u64(process, entry + k_ldr_base_name + 8);
+    if (buffer != 0 && length >= 2 && length < 512) {
+      std::wstring wide(static_cast<std::size_t>(length / 2), L'\0');
+      if (read_remote(process, buffer, wide.data(), length)) {
+        std::string narrow;
+        narrow.reserve(wide.size());
+        for (const wchar_t c : wide) {
+          narrow.push_back(static_cast<char>(c));
+        }
+        if (_stricmp(narrow.c_str(), name) == 0) {
+          return static_cast<std::uintptr_t>(read_u64(process, entry + k_ldr_dll_base));
+        }
+      }
+    }
+    node = read_u64(process, node);
+  }
+  return std::nullopt;
+}
+
+/// Diagnostic: print the target's modules via toolhelp and the PEB walk.
+void dump_target_modules(HANDLE process) {
+  const DWORD pid = GetProcessId(process);
+  std::printf("injector: --- toolhelp ---\n");
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+  if (snapshot == INVALID_HANDLE_VALUE) {
+    std::printf("  snapshot FAILED (err %lu)\n", GetLastError());
+  } else {
+    MODULEENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    if (Module32First(snapshot, &entry)) {
+      int count = 0;
+      do {
+        std::printf("  %-32s 0x%llx\n", entry.szModule,
+                    static_cast<unsigned long long>(
+                        reinterpret_cast<std::uintptr_t>(entry.modBaseAddr)));
+      } while (Module32Next(snapshot, &entry) && ++count < 80);
+    } else {
+      std::printf("  Module32First FAILED (err %lu)\n", GetLastError());
+    }
+    CloseHandle(snapshot);
+  }
+  std::printf("injector: --- peb ---\n");
+  const std::uintptr_t peb = remote_peb(process);
+  std::printf("  peb = 0x%llx\n", static_cast<unsigned long long>(peb));
+  if (peb == 0) return;
+  const std::uint64_t ldr = read_u64(process, peb + k_peb_ldr);
+  std::printf("  ldr = 0x%llx\n", static_cast<unsigned long long>(ldr));
+  if (ldr == 0) return;
+  const std::uintptr_t head = ldr + k_ldr_in_load_order;
+  std::uintptr_t node = read_u64(process, head);
+  for (int guard = 0; node != 0 && node != head && guard < 80; ++guard) {
+    const std::uintptr_t entry = node - k_ldr_in_load_order;
+    const std::uint16_t length =
+        static_cast<std::uint16_t>(read_u64(process, entry + k_ldr_base_name) & 0xffff);
+    const std::uintptr_t buffer = read_u64(process, entry + k_ldr_base_name + 8);
+    std::string narrow;
+    if (buffer != 0 && length >= 2 && length < 512) {
+      std::wstring wide(static_cast<std::size_t>(length / 2), L'\0');
+      if (read_remote(process, buffer, wide.data(), length)) {
+        for (const wchar_t c : wide) narrow.push_back(static_cast<char>(c));
+      }
+    }
+    std::printf("  %-32s 0x%llx\n", narrow.c_str(),
+                static_cast<unsigned long long>(read_u64(process, entry + k_ldr_dll_base)));
+    node = read_u64(process, node);
+  }
+}
 
 /// Insert an LDR_DATA_TABLE_ENTRY for the mapped image into the target's PEB
 /// loader list, so loader-dependent CRT init (RtlPcToFileHeader,
@@ -454,11 +565,30 @@ std::vector<std::byte> make_entry_stub(std::uintptr_t base, std::uintptr_t entry
 
 void print_usage() {
   std::puts("usage: injector.exe <process-name|pid> <payload.dll> [--no-call] [--load-missing]");
+  std::puts("       injector.exe <process-name|pid> <ignored> --modules   # list target modules");
+  std::puts("       injector.exe --procs                                   # list processes");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc > 1 && std::strcmp(argv[1], "--procs") == 0) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+      std::printf("injector: process snapshot FAILED (err %lu)\n", GetLastError());
+      return 1;
+    }
+    PROCESSENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    if (Process32First(snapshot, &entry)) {
+      do {
+        std::printf("  pid %-6u ppid %-6u %s\n", entry.th32ProcessID, entry.th32ParentProcessID,
+                    entry.szExeFile);
+      } while (Process32Next(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return 0;
+  }
   if (argc < 3) {
     print_usage();
     return 2;
@@ -491,6 +621,11 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::printf("injector: target pid %u\n", pid);
+
+  if (argc > 3 && std::strcmp(argv[3], "--modules") == 0) {
+    dump_target_modules(process);
+    return 0;
+  }
 
   const std::vector<std::byte> raw = read_file(dll_path.c_str());
   if (raw.empty()) {
