@@ -20,8 +20,10 @@ class UiBackend {
   // Called once when the render surface is ready. Returns false on failure.
   [[nodiscard]] virtual bool initialize(const RenderContext& context) = 0;
 
-  // Called every frame (from the Present hook).
-  virtual void render() = 0;
+  // Called every frame (from the Present hook) with the live render surface.
+  // The surface may be recreated between frames, so callers pass it each time
+  // rather than the backend caching it.
+  virtual void render(const RenderContext& context) = 0;
 
   // Called before unload.
   virtual void shutdown() = 0;

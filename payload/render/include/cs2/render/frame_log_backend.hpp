@@ -11,7 +11,7 @@ namespace cs2::render {
 class FrameLogBackend final : public UiBackend {
  public:
   [[nodiscard]] bool initialize(const RenderContext& context) override;
-  void render() override;
+  void render(const RenderContext& context) override;
   void shutdown() override;
 
   [[nodiscard]] std::uint64_t frames() const noexcept { return frames_; }

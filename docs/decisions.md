@@ -104,3 +104,20 @@ A **local patch** to the installed `rea-agents` package adds a Ghidra project
 cache (one project per target digest, reused with `-process -noanalysis`) so
 large targets are not re-analyzed on every open; upstream REA only offers
 exact-query snapshot replay. See `docs/rea-project-cache.md`.
+
+## ADR-0013 — Swapchain hooking: kiero + MinHook
+**Status:** accepted
+
+`IDXGISwapChain::Present` is discovered with **kiero** and installed as a
+**MinHook inline hook** (`kiero::bind(8, ...)`), following a known-working
+reference overlay (Aspasia). Earlier revisions patched the shared `dxgi.dll`
+vtable slot directly with the project's own `VtableHook`; that worked but the
+overlay could stall the game on window/UI state changes. The inline-hook
+approach is the tested one and is kept even though that stall is not yet fully
+resolved (see `docs/roadmap.md`, Phase 3).
+
+Vendored under `payload/third_party/kiero` (kiero 1.2.6 + MinHook). Notes for the
+cross build: the payload project must declare `c` (MinHook is C), and MinHook's
+`__movsb` needs `<intrin.h>` under clang-cl. The ImGui backend uses the Win32
+platform backend plus a `WndProc` hook for input, and caches the back-buffer
+render target.

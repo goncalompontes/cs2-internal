@@ -6,6 +6,8 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <windows.h>
+
+#include "kiero.h"
 #endif
 
 namespace cs2::features {
@@ -13,13 +15,12 @@ namespace {
 
 using PresentFn = long(__stdcall*)(void*, unsigned, unsigned);
 
-// Append a line to a log file next to the drive root, so hook activity is
-// observable from outside the target process. Uses Win32 file I/O rather than
-// the CRT: a manually mapped payload only has its static-CRT per-thread state
-// initialized on the injector's entry thread, so the hook-install thread (and
-// the target's render thread) must not depend on the CRT here.
-void log_line(const char* text) noexcept {
 #if defined(_WIN32)
+// Append a line to a log file next to the drive root so hook activity is
+// observable from outside the target. Uses Win32 file I/O, not the CRT (a
+// manually mapped module only has static-CRT per-thread state on the injector's
+// entry thread).
+void log_line(const char* text) noexcept {
   using CreateFileAFn = HANDLE(__stdcall*)(const char*, unsigned long, unsigned long, void*,
                                            unsigned long, unsigned long, HANDLE);
   static CreateFileAFn create_file = nullptr;
@@ -33,8 +34,8 @@ void log_line(const char* text) noexcept {
   constexpr unsigned long k_file_share_read = 0x1;
   constexpr unsigned long k_open_always = 0x4;
   constexpr unsigned long k_file_attribute_normal = 0x80;
-  HANDLE file = create_file("C:\\cs2-payload.log", k_file_append_data, k_file_share_read,
-                            nullptr, k_open_always, k_file_attribute_normal, nullptr);
+  HANDLE file = create_file("C:\\cs2-payload.log", k_file_append_data, k_file_share_read, nullptr,
+                            k_open_always, k_file_attribute_normal, nullptr);
   if (file == nullptr || file == INVALID_HANDLE_VALUE) return;
   std::size_t length = 0;
   while (text[length] != '\0') ++length;
@@ -42,15 +43,11 @@ void log_line(const char* text) noexcept {
   WriteFile(file, text, static_cast<unsigned long>(length), &written, nullptr);
   WriteFile(file, "\n", 1, &written, nullptr);
   CloseHandle(file);
-#else
-  (void)text;
-#endif
 }
+#endif
 
-// Single registration point for the C-style hook callback. The detour needs to
-// reach the owning instance; this is the one place a module-static is used (the
-// alternative is threading a context through the hook engine, which is heavier
-// than warranted here).
+// Single registration point for the C-style hook callback: the detour needs to
+// reach the owning instance.
 PresentHook* g_active = nullptr;
 PresentFn g_original_present = nullptr;
 
@@ -61,88 +58,7 @@ long __stdcall present_detour(void* swapchain, unsigned sync_interval, unsigned 
   return g_original_present(swapchain, sync_interval, flags);
 }
 
-#if defined(_WIN32)
 constexpr std::size_t k_present_index = 8;
-
-// Create a throwaway device + swapchain to obtain the swapchain vtable. The
-// vtable lives in dxgi.dll's read-only data, so the pointer stays valid after
-// the dummy objects are released. Window/D3D entry points are resolved at
-// runtime (not imported) so the payload stays import-light and can be mapped
-// into any target.
-void** find_present_vtable() noexcept {
-  using RegisterClassExWFn = unsigned short(__stdcall*)(const WNDCLASSEXW*);
-  using CreateWindowExWFn = HWND(__stdcall*)(unsigned long, const wchar_t*, const wchar_t*,
-                                             unsigned long, int, int, int, int, HWND, HMENU,
-                                             HINSTANCE, void*);
-  using DestroyWindowFn = int(__stdcall*)(HWND);
-  using UnregisterClassWFn = int(__stdcall*)(const wchar_t*, HINSTANCE);
-  using DefWindowProcWFn = long long(__stdcall*)(HWND, unsigned, unsigned long long, long long);
-  using CreateDeviceFn = long(__stdcall*)(void*, int, void*, unsigned, const void*, unsigned,
-                                          unsigned, const void*, void**, void**, int*, void**);
-
-  HMODULE user32 = GetModuleHandleW(L"user32.dll");
-  HMODULE d3d11 = GetModuleHandleW(L"d3d11.dll");
-  if (user32 == nullptr || d3d11 == nullptr) {
-    return nullptr;
-  }
-
-  const auto register_class =
-      reinterpret_cast<RegisterClassExWFn>(GetProcAddress(user32, "RegisterClassExW"));
-  const auto create_window =
-      reinterpret_cast<CreateWindowExWFn>(GetProcAddress(user32, "CreateWindowExW"));
-  const auto destroy_window =
-      reinterpret_cast<DestroyWindowFn>(GetProcAddress(user32, "DestroyWindow"));
-  const auto unregister_class =
-      reinterpret_cast<UnregisterClassWFn>(GetProcAddress(user32, "UnregisterClassW"));
-  const auto def_window_proc =
-      reinterpret_cast<DefWindowProcWFn>(GetProcAddress(user32, "DefWindowProcW"));
-  const auto create = reinterpret_cast<CreateDeviceFn>(
-      GetProcAddress(d3d11, "D3D11CreateDeviceAndSwapChain"));
-  if (register_class == nullptr || create_window == nullptr || destroy_window == nullptr ||
-      unregister_class == nullptr || def_window_proc == nullptr || create == nullptr) {
-    return nullptr;
-  }
-
-  WNDCLASSEXW window_class{};
-  window_class.cbSize = sizeof(window_class);
-  window_class.lpfnWndProc = reinterpret_cast<WNDPROC>(def_window_proc);
-  window_class.hInstance = GetModuleHandleW(nullptr);
-  window_class.lpszClassName = L"cs2_present_probe";
-  register_class(&window_class);
-  HWND window = create_window(0, window_class.lpszClassName, L"", WS_OVERLAPPEDWINDOW, 0, 0, 8, 8,
-                              nullptr, nullptr, window_class.hInstance, nullptr);
-
-  DXGI_SWAP_CHAIN_DESC desc{};
-  desc.BufferCount = 1;
-  desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-  desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-  desc.OutputWindow = window;
-  desc.SampleDesc.Count = 1;
-  desc.Windowed = TRUE;
-  desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-
-  IDXGISwapChain* swapchain = nullptr;
-  ID3D11Device* device = nullptr;
-  ID3D11DeviceContext* context = nullptr;
-  D3D_FEATURE_LEVEL level{};
-  const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1};
-  const long result =
-      create(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 2, D3D11_SDK_VERSION, &desc,
-             reinterpret_cast<void**>(&swapchain), reinterpret_cast<void**>(&device),
-             reinterpret_cast<int*>(&level), reinterpret_cast<void**>(&context));
-
-  void** vtable = nullptr;
-  if (result >= 0 && swapchain != nullptr) {
-    vtable = *reinterpret_cast<void***>(swapchain);
-  }
-  if (swapchain != nullptr) swapchain->Release();
-  if (context != nullptr) context->Release();
-  if (device != nullptr) device->Release();
-  if (window != nullptr) destroy_window(window);
-  unregister_class(window_class.lpszClassName, window_class.hInstance);
-  return vtable;
-}
-#endif
 
 }  // namespace
 
@@ -154,31 +70,35 @@ bool PresentHook::install() noexcept {
   if (installed_) {
     return true;
   }
-  log_line("present hook: install begin");
 #if defined(_WIN32)
-  // Only hook when the graphics stack is already present (the game). This keeps
-  // the payload safe to map into non-graphical targets.
+  log_line("present hook: install begin");
+  // Only hook when the graphics stack is already present (the game). Keeps the
+  // payload safe to map into non-graphical targets.
   if (GetModuleHandleW(L"dxgi.dll") == nullptr || GetModuleHandleW(L"d3d11.dll") == nullptr) {
     std::puts("[cs2-features] dxgi/d3d11 not loaded; skipping Present hook");
     return false;
   }
-  void** vtable = find_present_vtable();
-  if (vtable == nullptr) {
-    std::puts("[cs2-features] could not obtain the swapchain vtable");
-    log_line("present hook: vtable not found");
+
+  // kiero builds a throwaway D3D11 device + swapchain to read the swapchain
+  // method table, then binds Present with a MinHook inline hook (not a shared
+  // vtable-slot patch).
+  const auto init_status = kiero::init(kiero::RenderType::D3D11);
+  log_line(init_status == kiero::Status::Success ? "kiero::init ok" : "kiero::init FAILED");
+  if (init_status != kiero::Status::Success) {
+    std::puts("[cs2-features] kiero::init failed");
     return false;
   }
-  g_original_present = reinterpret_cast<PresentFn>(vtable[k_present_index]);
-  hook_ = std::make_unique<hooks::VtableHook>(vtable, k_present_index,
-                                              reinterpret_cast<void*>(&present_detour));
-  if (!hook_->installed()) {
-    hook_.reset();
+  const auto bind_status = kiero::bind(k_present_index, reinterpret_cast<void**>(&g_original_present),
+                                       reinterpret_cast<void*>(&present_detour));
+  log_line(bind_status == kiero::Status::Success ? "kiero::bind ok" : "kiero::bind FAILED");
+  if (bind_status != kiero::Status::Success) {
+    std::puts("[cs2-features] kiero::bind failed");
     return false;
   }
   g_active = this;
   installed_ = true;
-  std::puts("[cs2-features] IDXGISwapChain::Present hooked");
-  log_line("present hook installed");
+  std::puts("[cs2-features] IDXGISwapChain::Present hooked (kiero)");
+  log_line("present hook installed (kiero)");
   return true;
 #else
   return false;
@@ -194,38 +114,65 @@ void PresentHook::uninstall() noexcept {
     backend_ready_ = false;
   }
   g_active = nullptr;
-  hook_.reset();
+#if defined(_WIN32)
+  kiero::unbind(k_present_index);
+#endif
   installed_ = false;
 }
 
 void PresentHook::on_present(void* swapchain) noexcept {
   ++frames_;
 #if defined(_WIN32)
-  if (!backend_ready_ && swapchain != nullptr) {
-    auto* chain = static_cast<IDXGISwapChain*>(swapchain);
-    ID3D11Device* device = nullptr;
-    if (chain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)) >= 0 &&
-        device != nullptr) {
-      ID3D11DeviceContext* device_context = nullptr;
-      device->GetImmediateContext(&device_context);
-      DXGI_SWAP_CHAIN_DESC desc{};
-      chain->GetDesc(&desc);
-      context_.device = device;
-      context_.device_context = device_context;
-      context_.hwnd = desc.OutputWindow;
-      context_.swapchain = swapchain;
-      backend_ready_ = backend_ != nullptr && backend_->initialize(context_);
-      if (!backend_ready_) {
-        std::puts("[cs2-features] UI backend initialization failed");
-        log_line("ui backend init failed");
-      } else {
-        log_line("ui backend initialized (device/context/hwnd acquired)");
-      }
+  if (swapchain == nullptr) {
+    return;
+  }
+  auto* chain = static_cast<IDXGISwapChain*>(swapchain);
+  ID3D11Device* device = nullptr;
+  if (chain->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device)) < 0 ||
+      device == nullptr) {
+    return;
+  }
+  ID3D11DeviceContext* device_context = nullptr;
+  device->GetImmediateContext(&device_context);
+  DXGI_SWAP_CHAIN_DESC desc{};
+  chain->GetDesc(&desc);
+
+  // The game can recreate the device on a mode change; rebuild the backend on
+  // the new device instead of using a stale one.
+  if (backend_ready_ && context_.device != nullptr && context_.device != device) {
+    backend_->shutdown();
+    backend_ready_ = false;
+  }
+
+  // Keep exactly one reference to the device and its immediate context.
+  if (context_.device == device) {
+    device->Release();
+    device = static_cast<ID3D11Device*>(context_.device);
+  } else {
+    if (context_.device != nullptr) {
+      static_cast<ID3D11Device*>(context_.device)->Release();
     }
+    context_.device = device;
+  }
+  if (context_.device_context == device_context) {
+    device_context->Release();
+    device_context = static_cast<ID3D11DeviceContext*>(context_.device_context);
+  } else {
+    if (context_.device_context != nullptr) {
+      static_cast<ID3D11DeviceContext*>(context_.device_context)->Release();
+    }
+    context_.device_context = device_context;
+  }
+  context_.hwnd = desc.OutputWindow;
+  context_.swapchain = swapchain;
+
+  if (!backend_ready_) {
+    backend_ready_ = backend_ != nullptr && backend_->initialize(context_);
+    log_line(backend_ready_ ? "ui backend initialized" : "ui backend init FAILED");
   }
 #endif
   if (backend_ready_ && backend_ != nullptr) {
-    backend_->render();
+    backend_->render(context_);
     if (frames_ % 300 == 0) {
       log_line("presenting frames");
     }

@@ -8,7 +8,7 @@
 #
 # See docs/architecture.md and toolchain/README.md.
 
-project('cs2-payload', 'cpp',
+project('cs2-payload', 'c', 'cpp',
   version : '0.1.0',
   meson_version : '>=1.3',
   default_options : [
@@ -45,6 +45,7 @@ if host_machine.system() != 'windows'
     'Use --cross-file toolchain/windows-msvc.ini to build the DLL.')
 else
   subdir('third_party/imgui')
+  subdir('third_party/kiero')
   subdir('hooks')
   subdir('render')
   subdir('features')

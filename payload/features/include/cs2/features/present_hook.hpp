@@ -1,16 +1,16 @@
 #pragma once
 
 #include <cstdint>
-#include <memory>
 
-#include "cs2/hooks/vtable.hpp"
 #include "cs2/render/ui_backend.hpp"
 
 namespace cs2::features {
 
-// Hooks `IDXGISwapChain::Present` (vtable index 8) and drives a `UiBackend`
-// every frame. The swapchain vtable is discovered via a throwaway D3D11 device;
-// hooking that vtable slot affects every swapchain of the class.
+// Hooks `IDXGISwapChain::Present` and drives a `UiBackend` every frame.
+//
+// The swapchain method table is discovered by kiero, and the Present entry is
+// hooked with a MinHook inline hook (kiero::bind), matching the reference
+// overlay's approach rather than patching the shared vtable slot.
 class PresentHook {
  public:
   explicit PresentHook(render::UiBackend& backend) noexcept;
@@ -32,7 +32,6 @@ class PresentHook {
   render::UiBackend* backend_;
   render::RenderContext context_{};
   bool backend_ready_ = false;
-  std::unique_ptr<hooks::VtableHook> hook_;
   std::uint64_t frames_ = 0;
   bool installed_ = false;
 };

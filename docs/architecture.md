@@ -42,12 +42,14 @@ meson compile -C build-payload
   so standalone payload builds work).
 - `payload/hooks` — hook engine: vtable + inline (prologue) hooks with
   executable-memory/protection helpers (host-tested).
-- `payload/features` — `PresentHook` (`IDXGISwapChain::Present`, vtable index 8,
-  swapchain vtable discovered via a throwaway D3D11 device) that derives the
-  device/context/HWND from the swapchain and drives the UI backend.
+- `payload/features` — `PresentHook`: discovers the `IDXGISwapChain` method
+  table via **kiero** and installs `Present` (index 8) as a **MinHook inline
+  hook**, derives the device/context/HWND from the swapchain, and drives the UI
+  backend each frame.
 - `payload/render` — `UiBackend` abstraction (ADR-0007) with an **ImGui** backend
-  (vendored `payload/third_party/imgui` + dx11/win32 backends) and a frame-log
-  stand-in; **RmlUi** pending.
+  (vendored `payload/third_party/imgui` + dx11/win32 backends; cached back-buffer
+  render target and a `WndProc` hook for input) and a frame-log stand-in;
+  **RmlUi** pending.
 - `injector` — manual-map injector (`injector.exe`, Windows x64) run inside the
   same Proton prefix: parse the payload, map sections + apply relocations into a
   local buffer, resolve imports by reading the target's module export tables,

@@ -41,16 +41,22 @@
 
 ## Phase 3 — Hook engine + overlay
 - [x] Hook engine — vtable + inline (both host-tested)
-- [x] `IDXGISwapChain::Present` hook (vtable index 8; swapchain vtable via a
-      throwaway D3D11 device; engages only when DXGI is loaded)
-- [~] `UiBackend` abstraction + overlay — ImGui backend renders a window into
-      the game's device and is **live-validated** (the "cs2-internal" window
-      draws over a running target). **Open:** interacting with the overlay
-      (clicking) freezes the game — `Present` stops completing, and it only
-      reproduces with the payload mapped. Next: hook
-      `IDXGISwapChain::ResizeBuffers` to release/recreate the overlay target
-      around a resize, and add a `WndProc` hook so clicks are consumed by the
-      overlay instead of reaching the game. RmlUi pending.
+- [x] `IDXGISwapChain::Present` hook — discovered via **kiero** and installed as
+      a **MinHook inline hook** (`kiero::bind`, index 8), matching a known-working
+      reference overlay rather than patching the shared vtable slot. Engages only
+      when DXGI is loaded.
+- [~] `UiBackend` abstraction + overlay — ImGui backend (DX11 + Win32 platform
+      backends, cached back-buffer RTV, `WndProc` hook for input) renders a window
+      into the game's device and is **live-validated**. **Known quirk (accepted
+      for now):** a window/UI state change (resize, fullscreen toggle, opening
+      some menu panels) can stall the game — `Present` stops being reached. It
+      reproduces with the payload mapped and has been observed even with the
+      draw disabled and with a pure pass-through detour, so it is not the ImGui
+      draw itself; the render thread ends up blocked inside DXVK's Present while
+      CS2's main thread waits in `CRenderContextBase::Present` /
+      `CSwapChainBase::QueuePresentAndWait`. Next: keep working the swapchain
+      lifecycle (recreation/`ResizeBuffers`) or move the overlay off the present
+      path. RmlUi pending.
 
 ## Phase 4 — State introspection
 - [ ] Local player fields via schema offsets
