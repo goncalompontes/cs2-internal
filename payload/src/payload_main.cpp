@@ -94,6 +94,14 @@ void boot() {
   std::puts("[cs2-payload] boot (no SDK headers)");
 #endif
 
+  // A native Windows build is not yet validated on a real Windows host. Make
+  // that unmistakable in the log so no result is mistaken for tested.
+#if defined(CS2_NATIVE_WINDOWS_BUILD)
+  std::puts("[cs2-payload] *** NATIVE WINDOWS BUILD - NOT YET TESTED ON WINDOWS ***");
+#elif defined(CS2_CROSS_WINDOWS_BUILD)
+  std::puts("[cs2-payload] cross-built Windows payload (msvc-wine)");
+#endif
+
 #if defined(CS2_PAYLOAD_HAVE_SCHEMAS) && __has_include("schemas/client_dll.hpp")
   const auto* controller = cs2::sdk::schemas::client_dll::find_class_by_target("CBasePlayerController");
   const auto local_flag =
@@ -109,8 +117,15 @@ void boot() {
 #if defined(_WIN32)
   std::FILE* file = nullptr;
   if (fopen_s(&file, "C:\\cs2-payload-boot.txt", "a") == 0 && file != nullptr) {
-    std::fprintf(file, "[cs2-payload] booted (pid %lu)\n",
-                 static_cast<unsigned long>(GetCurrentProcessId()));
+#if defined(CS2_NATIVE_WINDOWS_BUILD)
+    const char* build_kind = "native-windows-UNTESTED";
+#elif defined(CS2_CROSS_WINDOWS_BUILD)
+    const char* build_kind = "cross-windows";
+#else
+    const char* build_kind = "windows";
+#endif
+    std::fprintf(file, "[cs2-payload] booted (pid %lu, build=%s)\n",
+                 static_cast<unsigned long>(GetCurrentProcessId()), build_kind);
     std::fclose(file);
   }
 #endif

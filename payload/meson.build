@@ -17,6 +17,21 @@ project('cs2-payload', 'c', 'cpp',
     'buildtype=debugoptimized',
   ])
 
+# --- Build provenance -----------------------------------------------------
+# Distinguish a *native* Windows build (host == build == windows) from a cross
+# build produced on Linux with msvc-wine. Native Windows builds are UNTESTED:
+# the payload has not been validated on a real Windows host yet — see
+# docs/handoff.md. The define is consumed by src/payload_main.cpp (boot banner +
+# marker file) and features/src/overlay.cpp (HUD title).
+native_windows = host_machine.system() == 'windows' and build_machine.system() == 'windows'
+if native_windows
+  add_project_arguments('-DCS2_NATIVE_WINDOWS_BUILD=1', language : ['c', 'cpp'])
+  message('*** cs2-internal: NATIVE WINDOWS build — UNTESTED ON WINDOWS ***')
+elif host_machine.system() == 'windows'
+  add_project_arguments('-DCS2_CROSS_WINDOWS_BUILD=1', language : ['c', 'cpp'])
+  message('cs2-internal: cross Windows build (build machine: ' + build_machine.system() + ')')
+endif
+
 subdir('loader')
 
 # --- Generated SDK headers ------------------------------------------------

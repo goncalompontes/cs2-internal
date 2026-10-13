@@ -1,5 +1,10 @@
 # Hand-off — resume from a native Windows box
 
+> **Untested marker:** native Windows builds self-identify as untested (build
+> define, boot banner, `C:\cs2-payload-boot.txt`, and the HUD title). See
+> [docs/windows-untested.md](windows-untested.md). Remove the marker only after
+> the payload has actually run on Windows.
+
 This note records where the overlay work stands and what to try next from a
 Windows machine. Read alongside `decisions.md` **ADR-0015/0016/0017**.
 
