@@ -157,7 +157,11 @@ pub fn dump<R: MemoryRead>(
                 if let Ok(class) = reader.read_ptr(node + layout.scope_node_class_offset) {
                     if class != 0 {
                         if let Some(c) = read_class(reader, class, &scope_name, layout) {
-                            if seen.insert(c.name.clone()) {
+                            // Dedup per (module, name): the same schema name can be
+                            // registered by more than one module (e.g. client.dll
+                            // and server.dll both register CCSPlayerController with
+                            // different layouts), and both must survive.
+                            if seen.insert(format!("{}::{}", c.module, c.name)) {
                                 classes.push(c);
                                 if classes.len() >= MAX_CLASSES {
                                     return Ok(classes);
