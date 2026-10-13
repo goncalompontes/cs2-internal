@@ -19,6 +19,13 @@ subdir('payload/loader')
 # Hook engine (built natively here for its tests).
 subdir('payload/hooks')
 
+# World-to-screen projection math (header-only, platform-independent), built
+# natively so the matrix convention has a host regression test.
+game_matrix_test = executable('game_matrix_test', 'payload/game/tests/test_matrix.cpp',
+  include_directories : include_directories('payload/game/include'),
+)
+test('game-matrix', game_matrix_test)
+
 # --- Generated C++ SDK headers -------------------------------------------
 # Render payload/sdk/*.hpp from the calibration dumps in calibration/. The
 # generator is the Rust dumper, built on demand by scripts/gen-sdk.sh. With

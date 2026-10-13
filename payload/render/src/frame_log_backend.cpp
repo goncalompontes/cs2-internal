@@ -10,7 +10,7 @@ bool FrameLogBackend::initialize(const RenderContext& context) {
   return true;
 }
 
-void FrameLogBackend::render(const RenderContext& context, const HudModel& model) {
+void FrameLogBackend::render(const RenderContext& context, const OverlayModel& model) {
   (void)context;
   (void)model;
   ++frames_;

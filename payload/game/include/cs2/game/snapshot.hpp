@@ -11,7 +11,7 @@
 
 namespace cs2::game {
 
-// One player (local or enemy), captured from its pawn + controller.
+// One player (local or enemy), captured from its controller + pawn.
 struct PlayerSnapshot {
   int index = -1;          // entity index
   std::uintptr_t pawn = 0;
@@ -25,10 +25,21 @@ struct PlayerSnapshot {
   int life_state = 0;      // 0 = alive
   int clip = 0;            // rounds in the active weapon
   int reserve = 0;         // reserve rounds
+  int ping = 0;            // ms
+  int money = 0;           // account balance
+  float flash = 0.0F;      // remaining flash duration (seconds)
   bool alive = false;
   bool is_local = false;
-  Vec3 origin{};
-  Vec3 eye_origin{};
+  bool helmet = false;
+  bool defuser = false;
+  bool scoped = false;
+  bool defusing = false;
+  bool in_buy_zone = false;
+  bool has_bomb = false;
+  Vec3 origin{};           // world origin (feet)
+  Vec3 eye_origin{};       // origin + view offset
+  Vec3 mins{-16.0F, -16.0F, 0.0F};  // local collision bounds
+  Vec3 maxs{16.0F, 16.0F, 72.0F};
   Vec3 velocity{};
   Angle eye_angles{};
   float distance = 0.0F;   // distance from the local player (0 for local)

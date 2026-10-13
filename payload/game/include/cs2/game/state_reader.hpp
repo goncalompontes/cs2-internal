@@ -6,6 +6,7 @@
 #include <optional>
 
 #include "cs2/game/entity_system.hpp"
+#include "cs2/game/matrix.hpp"
 #include "cs2/game/snapshot.hpp"
 
 namespace cs2::game {
@@ -25,6 +26,10 @@ class StateReader {
   // Read the current state.
   [[nodiscard]] Snapshot snapshot() const;
 
+  // World-to-screen (P x V) matrix for a player slot (stride 0x40). Slot 0 is
+  // the primary view. Returns a zero matrix when unavailable.
+  [[nodiscard]] Matrix4x4 view_matrix(int slot = 0) const;
+
   [[nodiscard]] std::uintptr_t client_base() const noexcept { return client_base_; }
   [[nodiscard]] bool ready() const noexcept { return client_base_ != 0 && entities_.valid(); }
 
@@ -37,12 +42,21 @@ class StateReader {
     std::uint32_t life_state = 0x354;
     std::uint32_t team = 0x3e7;
     std::uint32_t scene_node = 0x330;
+    std::uint32_t collision = 0x340;
     std::uint32_t velocity = 0x3f8;
+    // CCollisionProperty (m_pCollision ->)
+    std::uint32_t collision_mins = 0x40;
+    std::uint32_t collision_maxs = 0x4c;
     // C_BaseModelEntity
     std::uint32_t view_offset = 0xf60;
     // C_CSPlayerPawn
     std::uint32_t eye_angles = 0x3600;
     std::uint32_t armor = 0x1ecc;
+    std::uint32_t scoped = 0x1ea0;
+    std::uint32_t defusing = 0x1ea2;
+    std::uint32_t in_buy_zone = 0x15e0;
+    // C_CSPlayerPawnBase
+    std::uint32_t flash_duration = 0x1510;
     // C_BasePlayerPawn
     std::uint32_t weapon_services = 0x12f0;
     std::uint32_t controller = 0x14bc;
@@ -50,8 +64,14 @@ class StateReader {
     std::uint32_t is_local_controller = 0x790;
     std::uint32_t pawn = 0x6bc;
     std::uint32_t player_name = 0x6fc;
+    std::uint32_t ping = 0x838;
     // CCSPlayerController
     std::uint32_t player_pawn = 0x92c;
+    std::uint32_t pawn_has_defuser = 0x940;
+    std::uint32_t pawn_has_helmet = 0x941;
+    std::uint32_t money_services = 0x818;
+    // CCSPlayerController_InGameMoneyServices (m_pInGameMoneyServices ->)
+    std::uint32_t account = 0x40;
     // CPlayer_WeaponServices
     std::uint32_t active_weapon = 0x60;
     // C_BasePlayerWeapon

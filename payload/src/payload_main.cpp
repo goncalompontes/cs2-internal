@@ -4,7 +4,7 @@
 // ImGui debug HUD, which reads local-player/player state via `payload/game`.
 #include <cstdio>
 
-#include "cs2/features/debug_hud.hpp"
+#include "cs2/features/overlay.hpp"
 #include "cs2/features/present_hook.hpp"
 #include "cs2/render/imgui_backend.hpp"
 
@@ -32,8 +32,8 @@ namespace {
 // a manually mapped module.
 struct Runtime {
   render::ImGuiBackend backend;
-  features::DebugHud hud;
-  features::PresentHook present{backend, hud};
+  features::Overlay overlay;
+  features::PresentHook present{backend, overlay};
 };
 
 Runtime g_runtime;
@@ -48,7 +48,7 @@ Runtime& runtime() {
 DWORD WINAPI install_thread(void*) {
   // Install off the loader lock: device creation loads DLLs and would deadlock
   // if done from DllMain.
-  cs2::payload::runtime().hud.initialize();
+  cs2::payload::runtime().overlay.initialize();
   cs2::payload::runtime().present.install();
   return 0;
 }

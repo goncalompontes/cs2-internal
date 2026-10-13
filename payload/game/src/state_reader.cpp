@@ -36,6 +36,15 @@ std::uintptr_t global(std::uintptr_t client_base, std::string_view name) {
   return pointer;
 }
 
+// Address of a resolved global (e.g. a data array like "view_matrix").
+std::uintptr_t global_address(std::uintptr_t client_base, std::string_view name) {
+  const OffsetInfo* info = find_offset(name);
+  if (info == nullptr || info->module != "client.dll") {
+    return 0;
+  }
+  return client_base + info->rva;
+}
+
 template <typename T>
 [[nodiscard]] T read_or(std::uintptr_t address, T fallback) noexcept {
   T value = fallback;
@@ -54,17 +63,30 @@ StateReader::FieldOffsets StateReader::FieldOffsets::resolve() {
   o.life_state = field("C_BaseEntity", "m_lifeState", o.life_state);
   o.team = field("C_BaseEntity", "m_iTeamNum", o.team);
   o.scene_node = field("C_BaseEntity", "m_pGameSceneNode", o.scene_node);
+  o.collision = field("C_BaseEntity", "m_pCollision", o.collision);
   o.velocity = field("C_BaseEntity", "m_vecAbsVelocity", o.velocity);
+  o.collision_mins = field("CCollisionProperty", "m_vecMins", o.collision_mins);
+  o.collision_maxs = field("CCollisionProperty", "m_vecMaxs", o.collision_maxs);
   o.view_offset = field("C_BaseModelEntity", "m_vecViewOffset", o.view_offset);
   o.eye_angles = field("C_CSPlayerPawn", "m_angEyeAngles", o.eye_angles);
   o.armor = field("C_CSPlayerPawn", "m_ArmorValue", o.armor);
+  o.scoped = field("C_CSPlayerPawn", "m_bIsScoped", o.scoped);
+  o.defusing = field("C_CSPlayerPawn", "m_bIsDefusing", o.defusing);
+  o.in_buy_zone = field("C_CSPlayerPawn", "m_bInBuyZone", o.in_buy_zone);
+  o.flash_duration = field("C_CSPlayerPawnBase", "m_flFlashDuration", o.flash_duration);
   o.weapon_services = field("C_BasePlayerPawn", "m_pWeaponServices", o.weapon_services);
   o.controller = field("C_BasePlayerPawn", "m_hController", o.controller);
   o.is_local_controller =
       field("CBasePlayerController", "m_bIsLocalPlayerController", o.is_local_controller);
   o.pawn = field("CBasePlayerController", "m_hPawn", o.pawn);
   o.player_name = field("CBasePlayerController", "m_iszPlayerName", o.player_name);
+  o.ping = field("CCSPlayerController", "m_iPing", o.ping);
   o.player_pawn = field("CCSPlayerController", "m_hPlayerPawn", o.player_pawn);
+  o.pawn_has_defuser = field("CCSPlayerController", "m_bPawnHasDefuser", o.pawn_has_defuser);
+  o.pawn_has_helmet = field("CCSPlayerController", "m_bPawnHasHelmet", o.pawn_has_helmet);
+  o.money_services = field("CCSPlayerController", "m_pInGameMoneyServices", o.money_services);
+  o.account =
+      field("CCSPlayerController_InGameMoneyServices", "m_iAccount", o.account);
   o.active_weapon = field("CPlayer_WeaponServices", "m_hActiveWeapon", o.active_weapon);
   o.clip1 = field("C_BasePlayerWeapon", "m_iClip1", o.clip1);
   o.reserve_ammo = field("C_BasePlayerWeapon", "m_pReserveAmmo", o.reserve_ammo);
@@ -85,14 +107,25 @@ std::optional<StateReader> StateReader::attach() noexcept {
   return reader;
 }
 
+Matrix4x4 StateReader::view_matrix(int slot) const {
+  Matrix4x4 matrix;
+  const std::uintptr_t base = global_address(client_base_, "view_matrix");
+  if (base == 0 || slot < 0) {
+    return matrix;
+  }
+  (void)read_bytes(base + static_cast<std::uintptr_t>(slot) * 0x40, matrix.m.data(),
+                   matrix.m.size() * sizeof(float));
+  return matrix;
+}
+
 PlayerSnapshot StateReader::read_player(int index, std::uintptr_t controller) const {
   const FieldOffsets& o = offsets_;
   PlayerSnapshot player;
   player.index = index;
   player.controller = controller;
 
-  // Controller first: it carries the identity (name, team, local flag) even
-  // when the pawn is dead or not yet spawned.
+  // Controller first: it carries the identity (name, team, flags, local flag)
+  // even when the pawn is dead or not yet spawned.
   player.name = read_inline_string(controller + o.player_name, 128);
   std::uint8_t team = 0;
   (void)read(controller + o.team, team);
@@ -100,6 +133,18 @@ PlayerSnapshot StateReader::read_player(int index, std::uintptr_t controller) co
   std::uint8_t is_local = 0;
   (void)read(controller + o.is_local_controller, is_local);
   player.is_local = is_local != 0;
+
+  std::uint8_t defuser = 0;
+  std::uint8_t helmet = 0;
+  (void)read(controller + o.pawn_has_defuser, defuser);
+  (void)read(controller + o.pawn_has_helmet, helmet);
+  player.defuser = defuser != 0;
+  player.helmet = helmet != 0;
+  player.ping = static_cast<int>(read_or<std::uint32_t>(controller + o.ping, 0));
+  const std::uintptr_t money = read_or<std::uintptr_t>(controller + o.money_services, 0);
+  if (money != 0) {
+    player.money = read_or<std::int32_t>(money + o.account, 0);
+  }
 
   std::uint32_t handle = read_or<std::uint32_t>(controller + o.player_pawn, 0);
   if (handle == 0) {
@@ -117,7 +162,18 @@ PlayerSnapshot StateReader::read_player(int index, std::uintptr_t controller) co
   player.health = read_or<std::int32_t>(pawn + o.health, 0);
   player.max_health = read_or<std::int32_t>(pawn + o.max_health, 0);
   player.armor = read_or<std::int32_t>(pawn + o.armor, 0);
+  player.flash = read_or<float>(pawn + o.flash_duration, 0.0F);
   player.alive = life_state == 0 && player.health > 0;
+
+  std::uint8_t scoped = 0;
+  std::uint8_t defusing = 0;
+  std::uint8_t in_buy_zone = 0;
+  (void)read(pawn + o.scoped, scoped);
+  (void)read(pawn + o.defusing, defusing);
+  (void)read(pawn + o.in_buy_zone, in_buy_zone);
+  player.scoped = scoped != 0;
+  player.defusing = defusing != 0;
+  player.in_buy_zone = in_buy_zone != 0;
 
   (void)read(pawn + o.eye_angles, player.eye_angles);
   (void)read(pawn + o.velocity, player.velocity);
@@ -130,6 +186,13 @@ PlayerSnapshot StateReader::read_player(int index, std::uintptr_t controller) co
   (void)read(pawn + o.view_offset, view_offset);
   player.eye_origin = player.origin + view_offset;
 
+  // Collision bounds (local space; the ESP projects origin + bounds).
+  const std::uintptr_t collision = read_or<std::uintptr_t>(pawn + o.collision, 0);
+  if (collision != 0) {
+    (void)read(collision + o.collision_mins, player.mins);
+    (void)read(collision + o.collision_maxs, player.maxs);
+  }
+
   // Active weapon: name + ammo.
   const std::uintptr_t services = read_or<std::uintptr_t>(pawn + o.weapon_services, 0);
   if (services != 0) {
@@ -139,6 +202,7 @@ PlayerSnapshot StateReader::read_player(int index, std::uintptr_t controller) co
       player.clip = read_or<std::int32_t>(weapon + o.clip1, 0);
       player.reserve = read_or<std::int32_t>(weapon + o.reserve_ammo, 0);
       player.weapon = entities_.designer_name(static_cast<int>(weapon_handle & 0x7fffU));
+      player.has_bomb = player.weapon == "weapon_c4";
     }
   }
   return player;

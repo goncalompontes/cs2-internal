@@ -3,7 +3,7 @@
 // UI backend abstraction (ADR-0007): the renderer (RmlUi primary, ImGui
 // fallback) sits behind this so the hook layer stays UI-agnostic.
 
-#include "cs2/render/hud_model.hpp"
+#include "cs2/render/overlay_model.hpp"
 
 namespace cs2::render {
 
@@ -25,7 +25,7 @@ class UiBackend {
   // Called every frame (from the Present hook) with the live render surface and
   // the model to draw. The surface may be recreated between frames, so callers
   // pass it each time rather than the backend caching it.
-  virtual void render(const RenderContext& context, const HudModel& model) = 0;
+  virtual void render(const RenderContext& context, const OverlayModel& model) = 0;
 
   // Called before unload.
   virtual void shutdown() = 0;

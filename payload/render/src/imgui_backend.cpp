@@ -1,6 +1,11 @@
 #include "cs2/render/imgui_backend.hpp"
 
+#include <cfloat>
 #include <cstdio>
+#include <type_traits>
+#include <variant>
+
+#include "cs2/render/esp_font.hpp"
 
 #if defined(_WIN32)
 #include <d3d11.h>
@@ -28,9 +33,33 @@ LRESULT __stdcall wndproc_detour(HWND hwnd, UINT message, WPARAM wparam, LPARAM 
   }
   return CallWindowProc(g_original_wndproc, hwnd, message, wparam, lparam);
 }
+
+ImU32 to_u32(const Color& color) {
+  return IM_COL32(color.r, color.g, color.b, color.a);
+}
+
+// Pixel size the embedded pixel font is rasterized at (Silkscreen is designed
+// on an 8px grid, so 16 keeps the scaling integral).
+constexpr float k_esp_font_size = 16.0F;
 #endif
 
 }  // namespace
+
+void ImGuiBackend::load_fonts() {
+#if defined(_WIN32)
+  ImFontConfig config;
+  config.FontDataOwnedByAtlas = false;  // the byte array is static
+  config.PixelSnapH = true;
+  config.OversampleH = 1;
+  config.OversampleV = 1;
+  pixel_font_ = ImGui::GetIO().Fonts->AddFontFromMemoryTTF(
+      const_cast<unsigned char*>(k_esp_font_ttf), static_cast<int>(k_esp_font_ttf_size),
+      k_esp_font_size, &config);
+  if (pixel_font_ == nullptr) {
+    std::puts("[cs2-render] failed to load the ESP pixel font");
+  }
+#endif
+}
 
 bool ImGuiBackend::initialize(const RenderContext& context) {
 #if defined(_WIN32)
@@ -45,6 +74,7 @@ bool ImGuiBackend::initialize(const RenderContext& context) {
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGui::StyleColorsDark();
+  load_fonts();
 
   ImGui_ImplWin32_Init(context.hwnd);
   if (!ImGui_ImplDX11_Init(static_cast<ID3D11Device*>(context.device),
@@ -86,7 +116,70 @@ bool ImGuiBackend::initialize(const RenderContext& context) {
 #endif
 }
 
-void ImGuiBackend::render(const RenderContext& context, const HudModel& model) {
+void ImGuiBackend::draw_commands(const DrawList& draw) {
+#if defined(_WIN32)
+  if (draw.empty()) {
+    return;
+  }
+  ImDrawList* list = ImGui::GetBackgroundDrawList();
+  for (const DrawCommand& command : draw.commands) {
+    std::visit(
+        [&](const auto& item) {
+          using T = std::decay_t<decltype(item)>;
+          if constexpr (std::is_same_v<T, Rect>) {
+            list->AddRect(ImVec2(item.x0, item.y0), ImVec2(item.x1, item.y1), to_u32(item.color),
+                          0.0F, 0, item.thickness);
+          } else if constexpr (std::is_same_v<T, FilledRect>) {
+            list->AddRectFilled(ImVec2(item.x0, item.y0), ImVec2(item.x1, item.y1),
+                                to_u32(item.color));
+          } else if constexpr (std::is_same_v<T, Line>) {
+            list->AddLine(ImVec2(item.x0, item.y0), ImVec2(item.x1, item.y1), to_u32(item.color),
+                          item.thickness);
+          } else if constexpr (std::is_same_v<T, Text>) {
+            ImFont* font = (item.font == Font::pixel && pixel_font_ != nullptr)
+                               ? static_cast<ImFont*>(pixel_font_)
+                               : ImGui::GetFont();
+            const float size = font->FontSize;
+            ImVec2 pos(item.x, item.y);
+            if (item.centered) {
+              const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.0F, item.value.c_str());
+              pos.x -= extent.x * 0.5F;
+            }
+            if (item.shadow) {
+              list->AddText(font, size, ImVec2(pos.x + 1.0F, pos.y + 1.0F),
+                            to_u32(Color{0, 0, 0, item.color.a}), item.value.c_str());
+            }
+            list->AddText(font, size, pos, to_u32(item.color), item.value.c_str());
+          }
+        },
+        command);
+  }
+#endif
+}
+
+void ImGuiBackend::draw_hud(const HudModel& hud) {
+#if defined(_WIN32)
+  ImGui::SetNextWindowSize(ImVec2(460, 560), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin(hud.title.empty() ? "cs2-internal" : hud.title.c_str())) {
+    for (const HudSection& section : hud.sections) {
+      if (section.title.empty()) {
+        for (const HudLine& line : section.lines) {
+          ImGui::Text("%s: %s", line.label.c_str(), line.value.c_str());
+        }
+        continue;
+      }
+      if (ImGui::CollapsingHeader(section.title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (const HudLine& line : section.lines) {
+          ImGui::Text("%s: %s", line.label.c_str(), line.value.c_str());
+        }
+      }
+    }
+  }
+  ImGui::End();
+#endif
+}
+
+void ImGuiBackend::render(const RenderContext& context, const OverlayModel& model) {
 #if defined(_WIN32)
   if (!initialized_ || render_target_ == nullptr) {
     return;
@@ -107,23 +200,8 @@ void ImGuiBackend::render(const RenderContext& context, const HudModel& model) {
   ImGui_ImplWin32_NewFrame();
   ImGui::NewFrame();
 
-  ImGui::SetNextWindowSize(ImVec2(460, 560), ImGuiCond_FirstUseEver);
-  if (ImGui::Begin(model.title.empty() ? "cs2-internal" : model.title.c_str())) {
-    for (const HudSection& section : model.sections) {
-      if (section.title.empty()) {
-        for (const HudLine& line : section.lines) {
-          ImGui::Text("%s: %s", line.label.c_str(), line.value.c_str());
-        }
-        continue;
-      }
-      if (ImGui::CollapsingHeader(section.title.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
-        for (const HudLine& line : section.lines) {
-          ImGui::Text("%s: %s", line.label.c_str(), line.value.c_str());
-        }
-      }
-    }
-  }
-  ImGui::End();
+  draw_commands(model.draw);
+  draw_hud(model.hud);
 
   ImGui::Render();
 
@@ -145,6 +223,7 @@ void ImGuiBackend::shutdown() {
       static_cast<ID3D11RenderTargetView*>(render_target_)->Release();
       render_target_ = nullptr;
     }
+    pixel_font_ = nullptr;
     initialized_ = false;
   }
 #endif

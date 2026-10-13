@@ -68,9 +68,19 @@
       per-build vtable RVA is hard-coded) with the same fields, plus name and
       distance from the local player
 - [x] Debug HUD — ImGui window rendering the snapshot
-      (`payload/game` → `render::HudModel` → `UiBackend`), refreshed at ~10 Hz;
+      (`payload/game` → `render::HudModel` → `UiBackend`), refreshed at ~30 Hz;
       the snapshot is also appended to `C:\cs2-payload.log` for headless
       verification
+- [x] World-to-screen — per-slot P×V matrix (`client.dll + 0x2561cd0`), row-major
+      with a **column-vector** multiply (`clip = M · world`); verified live
+      (`matrix@view_matrix == matrix@projection · matrix@view`) and covered by
+      the host `game-matrix` test
+- [x] ESP overlay — UI-agnostic `render::DrawList` (boxes, filled rects, lines,
+      text) rendered by the ImGui backend: bounding box, health bar (left), ammo
+      bar (bottom), player name (top), weapon name (bottom) and right-side flags
+      (money, armor, helmet, kit, scoped, defusing, bomb, flash, ping, distance).
+      Flags/names/weapons use an embedded pixel font (Silkscreen, OFL), embedded
+      at build time by `scripts/gen-font.py`
 - [ ] Control channel (IPC) + scenario runner
 
 ## Phase 5 — Interfaces, events, deeper introspection

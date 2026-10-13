@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "cs2/features/debug_hud.hpp"
+#include "cs2/features/overlay.hpp"
 #include "cs2/render/ui_backend.hpp"
 
 namespace cs2::features {
@@ -14,7 +14,7 @@ namespace cs2::features {
 // overlay's approach rather than patching the shared vtable slot.
 class PresentHook {
  public:
-  PresentHook(render::UiBackend& backend, DebugHud& hud) noexcept;
+  PresentHook(render::UiBackend& backend, Overlay& overlay) noexcept;
   ~PresentHook();
 
   PresentHook(const PresentHook&) = delete;
@@ -31,7 +31,7 @@ class PresentHook {
 
  private:
   render::UiBackend* backend_;
-  DebugHud* hud_;
+  Overlay* overlay_;
   render::RenderContext context_{};
   bool backend_ready_ = false;
   std::uint64_t frames_ = 0;

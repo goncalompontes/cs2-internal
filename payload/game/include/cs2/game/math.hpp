@@ -6,6 +6,11 @@
 
 namespace cs2::game {
 
+struct Vec2 {
+  float x = 0.0F;
+  float y = 0.0F;
+};
+
 struct Vec3 {
   float x = 0.0F;
   float y = 0.0F;

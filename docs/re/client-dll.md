@@ -216,6 +216,13 @@ must be re-cut — is:
 - **Invariant:** `matrix@view_matrix == matrix@(view_matrix-0x40) ×
   matrix@(view_matrix-0x80)` (projection × view). Only populated with an active
   in-map camera.
+- **Convention:** the matrix is row-major and applied to a **column vector**
+  (`clip = M · world`, `clip.i = Σ_j m[i*4+j]·world.j`). Verified live:
+  `matrix@view_matrix == matrix@projection · matrix@view` (row-major multiply,
+  max element error `6e-5`), the camera eye maps to `clip ≈ (0, 0, 0)`, and a
+  point `d` units ahead maps to `clip.w ≈ d`. Screen mapping:
+  `sx = (ndc.x·0.5 + 0.5)·W`, `sy = (0.5 − ndc.y·0.5)·H`.
+  (A row-vector form, `clip = world · M`, does **not** satisfy the invariant.)
 
 ### Regenerating the SDK offsets
 
