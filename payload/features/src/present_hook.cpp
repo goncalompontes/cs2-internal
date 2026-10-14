@@ -63,7 +63,7 @@ void PresentHook::resize_callback(void* user) noexcept {
   static_cast<PresentHook*>(user)->on_resize();
 }
 
-bool PresentHook::install() noexcept {
+auto PresentHook::install() noexcept -> bool {
   if (installed_) {
     return true;
   }
@@ -165,8 +165,8 @@ void PresentHook::on_present(void* swapchain) noexcept {
   }
 
   if (backend_ready_ && backend_ != nullptr) {
-    const float screen_width = static_cast<float>(desc.BufferDesc.Width);
-    const float screen_height = static_cast<float>(desc.BufferDesc.Height);
+    const auto screen_width = static_cast<float>(desc.BufferDesc.Width);
+    const auto screen_height = static_cast<float>(desc.BufferDesc.Height);
     const render::OverlayModel& model = overlay_->update(screen_width, screen_height);
     backend_->render(context_, model);
     if (frames_ % 300 == 0) {

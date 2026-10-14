@@ -17,16 +17,18 @@ __attribute__((noinline, optnone))
 #elif defined(__GNUC__)
 __attribute__((noinline, optimize("O0")))
 #endif
-int target(int a, int b) {
-  volatile int sum = a + b;
+auto target(int a, int b) -> int {
+  const volatile int sum = a + b;
   return sum * 2;
 }
 
-int detour(int a, int b) { return g_original(a, b) + 1000; }
+auto detour(int a, int b) -> int {
+  return g_original(a, b) + 1000;
+}
 
 }  // namespace
 
-int main() {
+auto main() -> int {
   assert(target(2, 3) == 10);
 
   cs2::hooks::InlineHook hook;

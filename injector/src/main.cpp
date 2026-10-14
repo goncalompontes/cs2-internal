@@ -33,19 +33,19 @@ namespace {
 
 using Bytes = std::span<const std::byte>;
 
-std::uint16_t rd16(const std::byte* p) {
+auto rd16(const std::byte* p) -> std::uint16_t {
   std::uint16_t v = 0;
   std::memcpy(&v, p, 2);
   return v;
 }
 
-std::uint32_t rd32(const std::byte* p) {
+auto rd32(const std::byte* p) -> std::uint32_t {
   std::uint32_t v = 0;
   std::memcpy(&v, p, 4);
   return v;
 }
 
-std::uint32_t find_pid(const char* name) {
+auto find_pid(const char* name) -> std::uint32_t {
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snapshot == INVALID_HANDLE_VALUE) {
     return 0;
@@ -65,9 +65,9 @@ std::uint32_t find_pid(const char* name) {
   return pid;
 }
 
-std::optional<std::uintptr_t> peb_module_base(HANDLE process, const char* name);
+auto peb_module_base(HANDLE process, const char* name) -> std::optional<std::uintptr_t>;
 
-std::optional<std::uintptr_t> remote_module_base(HANDLE process, const char* name) {
+auto remote_module_base(HANDLE process, const char* name) -> std::optional<std::uintptr_t> {
   const DWORD pid = GetProcessId(process);
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
   if (snapshot != INVALID_HANDLE_VALUE) {
@@ -92,19 +92,20 @@ std::optional<std::uintptr_t> remote_module_base(HANDLE process, const char* nam
   return peb_module_base(process, name);
 }
 
-bool read_remote(HANDLE process, std::uintptr_t address, void* buffer, std::size_t size) {
+auto read_remote(HANDLE process, std::uintptr_t address, void* buffer, std::size_t size) -> bool {
   SIZE_T got = 0;
   return ReadProcessMemory(process, reinterpret_cast<LPCVOID>(address), buffer, size, &got) != 0 &&
          got == size;
 }
 
-bool write_remote(HANDLE process, std::uintptr_t address, const void* buffer, std::size_t size) {
+auto write_remote(HANDLE process, std::uintptr_t address, const void* buffer, std::size_t size)
+    -> bool {
   SIZE_T wrote = 0;
   return WriteProcessMemory(process, reinterpret_cast<LPVOID>(address), buffer, size, &wrote) != 0 &&
          wrote == size;
 }
 
-std::string read_remote_string(HANDLE process, std::uintptr_t address, std::size_t max) {
+auto read_remote_string(HANDLE process, std::uintptr_t address, std::size_t max) -> std::string {
   std::vector<char> buffer(max, '\0');
   SIZE_T got = 0;
   if (!ReadProcessMemory(process, reinterpret_cast<LPCVOID>(address), buffer.data(), max, &got)) {
@@ -113,21 +114,21 @@ std::string read_remote_string(HANDLE process, std::uintptr_t address, std::size
   return std::string(buffer.data());  // stops at NUL
 }
 
-std::uint64_t read_u64(HANDLE process, std::uintptr_t address) {
+auto read_u64(HANDLE process, std::uintptr_t address) -> std::uint64_t {
   std::uint64_t value = 0;
   read_remote(process, address, &value, sizeof(value));
   return value;
 }
 
-bool write_u16(HANDLE process, std::uintptr_t address, std::uint16_t value) {
+auto write_u16(HANDLE process, std::uintptr_t address, std::uint16_t value) -> bool {
   return write_remote(process, address, &value, sizeof(value));
 }
 
-bool write_u32(HANDLE process, std::uintptr_t address, std::uint32_t value) {
+auto write_u32(HANDLE process, std::uintptr_t address, std::uint32_t value) -> bool {
   return write_remote(process, address, &value, sizeof(value));
 }
 
-bool write_u64(HANDLE process, std::uintptr_t address, std::uint64_t value) {
+auto write_u64(HANDLE process, std::uintptr_t address, std::uint64_t value) -> bool {
   return write_remote(process, address, &value, sizeof(value));
 }
 
@@ -141,7 +142,7 @@ constexpr std::size_t k_ldr_size_of_image = 0x40;
 constexpr std::size_t k_ldr_full_name = 0x48;
 constexpr std::size_t k_ldr_base_name = 0x58;
 
-std::uintptr_t remote_peb(HANDLE process) {
+auto remote_peb(HANDLE process) -> std::uintptr_t {
   using NtQueryInformationProcessFn = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
   const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
   auto nt_query = reinterpret_cast<NtQueryInformationProcessFn>(
@@ -163,7 +164,7 @@ std::uintptr_t remote_peb(HANDLE process) {
 }
 
 /// Find a loaded module by walking the target's PEB `InLoadOrderModuleList`.
-std::optional<std::uintptr_t> peb_module_base(HANDLE process, const char* name) {
+auto peb_module_base(HANDLE process, const char* name) -> std::optional<std::uintptr_t> {
   const std::uintptr_t peb = remote_peb(process);
   if (peb == 0) {
     return std::nullopt;
@@ -176,7 +177,7 @@ std::optional<std::uintptr_t> peb_module_base(HANDLE process, const char* name) 
   std::uintptr_t node = read_u64(process, head);
   for (int guard = 0; node != 0 && node != head && guard < 4096; ++guard) {
     const std::uintptr_t entry = node - k_ldr_in_load_order;
-    const std::uint16_t length =
+    const auto length =
         static_cast<std::uint16_t>(read_u64(process, entry + k_ldr_base_name) & 0xffff);
     const std::uintptr_t buffer = read_u64(process, entry + k_ldr_base_name + 8);
     if (buffer != 0 && length >= 2 && length < 512) {
@@ -230,7 +231,7 @@ void dump_target_modules(HANDLE process) {
   std::uintptr_t node = read_u64(process, head);
   for (int guard = 0; node != 0 && node != head && guard < 80; ++guard) {
     const std::uintptr_t entry = node - k_ldr_in_load_order;
-    const std::uint16_t length =
+    const auto length =
         static_cast<std::uint16_t>(read_u64(process, entry + k_ldr_base_name) & 0xffff);
     const std::uintptr_t buffer = read_u64(process, entry + k_ldr_base_name + 8);
     std::string narrow;
@@ -249,8 +250,8 @@ void dump_target_modules(HANDLE process) {
 /// Insert an LDR_DATA_TABLE_ENTRY for the mapped image into the target's PEB
 /// loader list, so loader-dependent CRT init (RtlPcToFileHeader,
 /// GetModuleHandle, ...) can find it.
-bool register_module(HANDLE process, std::uintptr_t base, std::uint32_t size_of_image,
-                     std::uint32_t entry_rva, const wchar_t* dll_name) {
+auto register_module(HANDLE process, std::uintptr_t base, std::uint32_t size_of_image,
+                     std::uint32_t entry_rva, const wchar_t* dll_name) -> bool {
   using NtQueryInformationProcessFn = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
   HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
   auto nt_query = reinterpret_cast<NtQueryInformationProcessFn>(
@@ -270,23 +271,24 @@ bool register_module(HANDLE process, std::uintptr_t base, std::uint32_t size_of_
     return false;
   }
 
-  const std::uintptr_t peb = reinterpret_cast<std::uintptr_t>(pbi.peb_base_address);
+  const auto peb = reinterpret_cast<std::uintptr_t>(pbi.peb_base_address);
   const std::uint64_t ldr = read_u64(process, peb + k_peb_ldr);
   if (ldr == 0) {
     return false;
   }
 
-  void* memory = VirtualAllocEx(process, nullptr, 0x400, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  const void* memory =
+      VirtualAllocEx(process, nullptr, 0x400, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
   if (memory == nullptr) {
     return false;
   }
-  const std::uintptr_t entry = reinterpret_cast<std::uintptr_t>(memory);
+  const auto entry = reinterpret_cast<std::uintptr_t>(memory);
   const std::size_t name_length = std::wcslen(dll_name);
 
   // Name buffers, then the UNICODE_STRINGs that point at them.
   write_remote(process, entry + 0x100, dll_name, (name_length + 1) * sizeof(wchar_t));
   write_remote(process, entry + 0x140, dll_name, (name_length + 1) * sizeof(wchar_t));
-  const auto write_unicode_string = [&](std::size_t offset, std::uintptr_t buffer) {
+  const auto write_unicode_string = [&](std::size_t offset, std::uintptr_t buffer) -> void {
     write_u16(process, entry + offset, static_cast<std::uint16_t>(name_length * 2));
     write_u16(process, entry + offset + 2, static_cast<std::uint16_t>((name_length + 1) * 2));
     write_u64(process, entry + offset + 8, buffer);
@@ -298,7 +300,7 @@ bool register_module(HANDLE process, std::uintptr_t base, std::uint32_t size_of_
   write_u64(process, entry + k_ldr_entry_point, base + entry_rva);
   write_u32(process, entry + k_ldr_size_of_image, size_of_image);
 
-  const auto link = [&](std::size_t list_offset, std::size_t links_offset) {
+  const auto link = [&](std::size_t list_offset, std::size_t links_offset) -> void {
     const std::uintptr_t head = ldr + list_offset;
     const std::uint64_t first = read_u64(process, head);
     write_u64(process, entry + links_offset, first);
@@ -313,9 +315,9 @@ bool register_module(HANDLE process, std::uintptr_t base, std::uint32_t size_of_
 
 /// Resolve an exported symbol in a loaded module by reading its export table
 /// out of the target process. Handles forwarders (e.g. kernel32 -> kernelbase).
-std::optional<std::uintptr_t> resolve_export(HANDLE process, std::uintptr_t module_base,
-                                             const std::string& name, std::uint16_t ordinal,
-                                             bool by_ordinal, int depth = 0) {
+auto resolve_export(HANDLE process, std::uintptr_t module_base, const std::string& name,
+                    std::uint16_t ordinal, bool by_ordinal, int depth = 0)
+    -> std::optional<std::uintptr_t> {
   if (depth > 4) {
     return std::nullopt;
   }
@@ -419,8 +421,8 @@ struct TlsSlot {
 /// Initialize TLS for the mapped image: allocate a slot in the target, point
 /// `_tls_index` at it, and build a per-thread block from the image's raw data.
 /// The block is set on the entry thread by the stub before `DllMain` runs.
-TlsSlot setup_tls(HANDLE process, std::uintptr_t remote_base,
-                  const cs2::loader::pe::ImageInfo& image, std::span<const std::byte> mapped) {
+auto setup_tls(HANDLE process, std::uintptr_t remote_base, const cs2::loader::pe::ImageInfo& image,
+               std::span<const std::byte> mapped) -> TlsSlot {
   TlsSlot slot;
   if (!image.tls.present) {
     return slot;
@@ -455,13 +457,13 @@ TlsSlot setup_tls(HANDLE process, std::uintptr_t remote_base,
     return slot;
   }
 
-  void* block = VirtualAllocEx(process, nullptr, block_size, MEM_COMMIT | MEM_RESERVE,
-                               PAGE_READWRITE);
+  const void* block =
+      VirtualAllocEx(process, nullptr, block_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
   if (block == nullptr) {
     return slot;
   }
   std::vector<std::byte> local(block_size, std::byte{0});
-  const std::size_t raw_offset =
+  const auto raw_offset =
       static_cast<std::size_t>(image.tls.start_address_of_raw_data - image.image_base);
   if (raw_size != 0 && raw_offset + raw_size <= mapped.size()) {
     std::memcpy(local.data(), mapped.data() + raw_offset, static_cast<std::size_t>(raw_size));
@@ -481,7 +483,7 @@ TlsSlot setup_tls(HANDLE process, std::uintptr_t remote_base,
 
 /// Return the target's base for `name`, loading it into the target if needed
 /// (via a remote `LoadLibraryW` call).
-std::optional<std::uintptr_t> ensure_module(HANDLE process, const std::string& name) {
+auto ensure_module(HANDLE process, const std::string& name) -> std::optional<std::uintptr_t> {
   if (const auto base = remote_module_base(process, name.c_str())) {
     return base;
   }
@@ -522,15 +524,15 @@ std::optional<std::uintptr_t> ensure_module(HANDLE process, const std::string& n
 /// target's module list, so a plain module lookup fails. Likewise the
 /// `api-ms-win-core-*` sets are backed by `kernelbase.dll`. Rewrite the name to
 /// the host module so import resolution walks a real export table.
-std::string resolve_import_module(const std::string& name) {
+auto resolve_import_module(const std::string& name) -> std::string {
   std::string lower = name;
   std::transform(lower.begin(), lower.end(), lower.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  if (lower.rfind("api-ms-win-crt-", 0) == 0 || lower.rfind("ext-ms-win-crt-", 0) == 0) {
+                 [](unsigned char c) -> char { return static_cast<char>(std::tolower(c)); });
+  if (lower.starts_with("api-ms-win-crt-") || lower.starts_with("ext-ms-win-crt-")) {
     return "ucrtbase.dll";
   }
-  if (lower.rfind("api-ms-win-core-", 0) == 0 || lower.rfind("ext-ms-win-core-", 0) == 0 ||
-      lower.rfind("api-ms-win-service-", 0) == 0) {
+  if (lower.starts_with("api-ms-win-core-") || lower.starts_with("ext-ms-win-core-") ||
+      lower.starts_with("api-ms-win-service-")) {
     return "kernelbase.dll";
   }
   return name;
@@ -539,12 +541,12 @@ std::string resolve_import_module(const std::string& name) {
 /// True when running under Wine/Proton. Native Windows has no `wine_get_version`
 /// export in ntdll; the synthetic loader-list entry (register_module) is needed
 /// there under Wine but faults `LdrpInitializeThread` on native Windows.
-bool running_under_wine() {
+auto running_under_wine() -> bool {
   HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
   return ntdll != nullptr && GetProcAddress(ntdll, "wine_get_version") != nullptr;
 }
 
-std::vector<std::byte> read_file(const char* path) {
+auto read_file(const char* path) -> std::vector<std::byte> {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
     return {};
@@ -558,15 +560,15 @@ std::vector<std::byte> read_file(const char* path) {
 
 /// x64 stub that (optionally) sets the thread's TLS slot directly via
 /// `gs:[0x58]`, then calls `entry(base, DLL_PROCESS_ATTACH, 0)` and returns 0.
-std::vector<std::byte> make_entry_stub(std::uintptr_t base, std::uintptr_t entry, bool set_tls,
-                                       std::uint32_t tls_index, std::uintptr_t tls_block) {
+auto make_entry_stub(std::uintptr_t base, std::uintptr_t entry, bool set_tls,
+                     std::uint32_t tls_index, std::uintptr_t tls_block) -> std::vector<std::byte> {
   std::vector<std::byte> code;
-  const auto push = [&](std::initializer_list<std::uint8_t> bytes) {
+  const auto push = [&](std::initializer_list<std::uint8_t> bytes) -> void {
     for (std::uint8_t b : bytes) {
       code.push_back(static_cast<std::byte>(b));
     }
   };
-  const auto push_imm64 = [&](std::uintptr_t value) {
+  const auto push_imm64 = [&](std::uintptr_t value) -> void {
     for (int i = 0; i < 8; ++i) {
       code.push_back(static_cast<std::byte>((value >> (8 * i)) & 0xFF));
     }
@@ -596,14 +598,14 @@ std::vector<std::byte> make_entry_stub(std::uintptr_t base, std::uintptr_t entry
 }
 
 /// x64 stub that calls `target(a0, a1, a2)` (SysV->Win64: rcx/rdx/r8) and
-/// returns its result in eax (used for RtlAddFunctionTable). 
-std::vector<std::byte> make_call3_stub(std::uintptr_t target, std::uintptr_t a0, std::uint32_t a1,
-                                       std::uintptr_t a2) {
+/// returns its result in eax (used for RtlAddFunctionTable).
+auto make_call3_stub(std::uintptr_t target, std::uintptr_t a0, std::uint32_t a1, std::uintptr_t a2)
+    -> std::vector<std::byte> {
   std::vector<std::byte> code;
-  const auto push = [&](std::initializer_list<std::uint8_t> bytes) {
+  const auto push = [&](std::initializer_list<std::uint8_t> bytes) -> void {
     for (std::uint8_t b : bytes) code.push_back(static_cast<std::byte>(b));
   };
-  const auto push_imm64 = [&](std::uintptr_t value) {
+  const auto push_imm64 = [&](std::uintptr_t value) -> void {
     for (int i = 0; i < 8; ++i) code.push_back(static_cast<std::byte>((value >> (8 * i)) & 0xFF));
   };
   push({0x48, 0xB9});  // mov rcx, a0
@@ -624,8 +626,8 @@ std::vector<std::byte> make_call3_stub(std::uintptr_t target, std::uintptr_t a0,
 /// Register the image's `.pdata` unwind tables in the target via
 /// `RtlAddFunctionTable`, so exceptions/SEH inside the mapped payload unwind
 /// correctly. Returns true if the target reported success.
-bool register_exception_table(HANDLE process, std::uintptr_t remote_base,
-                              const cs2::loader::pe::ImageInfo& image) {
+auto register_exception_table(HANDLE process, std::uintptr_t remote_base,
+                              const cs2::loader::pe::ImageInfo& image) -> bool {
   if (image.exception_directory_rva == 0 || image.exception_directory_size < 12) {
     return false;
   }
@@ -663,7 +665,7 @@ void print_usage() {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+auto main(int argc, char** argv) -> int {
   if (argc > 1 && std::strcmp(argv[1], "--procs") == 0) {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) {
@@ -735,13 +737,13 @@ int main(int argc, char** argv) {
   }
   const cs2::loader::pe::ImageInfo& image = *parsed;
 
-  void* remote = VirtualAllocEx(process, nullptr, image.size_of_image,
-                                MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+  const void* remote = VirtualAllocEx(process, nullptr, image.size_of_image,
+                                      MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
   if (remote == nullptr) {
     std::printf("injector: VirtualAllocEx failed: %lu\n", GetLastError());
     return 1;
   }
-  const std::uintptr_t remote_base = reinterpret_cast<std::uintptr_t>(remote);
+  const auto remote_base = reinterpret_cast<std::uintptr_t>(remote);
   std::printf("injector: mapped image at 0x%llx (size 0x%x)\n",
               static_cast<unsigned long long>(remote_base), image.size_of_image);
 

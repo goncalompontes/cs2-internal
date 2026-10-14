@@ -12,7 +12,7 @@ namespace cs2::overlay {
 
 inline void overlay_log(const char* format, ...) noexcept {
   static std::mutex log_mutex;
-  std::lock_guard<std::mutex> lock(log_mutex);
+  const std::lock_guard<std::mutex> lock(log_mutex);
   const char* path = std::getenv("CS2_OVERLAY_LOG");
   static char fallback[512];
   if (path == nullptr) {

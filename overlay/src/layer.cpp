@@ -49,7 +49,7 @@ unsigned g_present_count = 0;
 // the host, overridable with CS2_OVERLAY_LOG.
 void log_line(const char* format, ...) noexcept {
   static std::mutex log_mutex;
-  std::lock_guard<std::mutex> lock(log_mutex);
+  const std::lock_guard<std::mutex> lock(log_mutex);
   const char* path = std::getenv("CS2_OVERLAY_LOG");
   static char fallback[512];
   if (path == nullptr) {
@@ -70,34 +70,32 @@ void log_line(const char* format, ...) noexcept {
   std::fclose(file);
 }
 
-VkLayerInstanceCreateInfo* find_instance_link(VkInstanceCreateInfo* create_info) noexcept {
+auto find_instance_link(VkInstanceCreateInfo* create_info) noexcept -> VkLayerInstanceCreateInfo* {
   auto* chain = reinterpret_cast<VkLayerInstanceCreateInfo*>(const_cast<void*>(create_info->pNext));
-  while (chain != nullptr &&
-         !(chain->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO &&
-           chain->function == VK_LAYER_LINK_INFO)) {
+  while (chain != nullptr && (chain->sType != VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO ||
+                              chain->function != VK_LAYER_LINK_INFO)) {
     chain = reinterpret_cast<VkLayerInstanceCreateInfo*>(const_cast<void*>(chain->pNext));
   }
   return chain;
 }
 
-VkLayerDeviceCreateInfo* find_device_link(VkDeviceCreateInfo* create_info) noexcept {
+auto find_device_link(VkDeviceCreateInfo* create_info) noexcept -> VkLayerDeviceCreateInfo* {
   auto* chain = reinterpret_cast<VkLayerDeviceCreateInfo*>(const_cast<void*>(create_info->pNext));
-  while (chain != nullptr &&
-         !(chain->sType == VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO &&
-           chain->function == VK_LAYER_LINK_INFO)) {
+  while (chain != nullptr && (chain->sType != VK_STRUCTURE_TYPE_LOADER_DEVICE_CREATE_INFO ||
+                              chain->function != VK_LAYER_LINK_INFO)) {
     chain = reinterpret_cast<VkLayerDeviceCreateInfo*>(const_cast<void*>(chain->pNext));
   }
   return chain;
 }
 
 PFN_vkGetInstanceProcAddr instance_gipa(VkInstance instance) noexcept {
-  std::lock_guard<std::mutex> lock(g_lock);
+  const std::lock_guard<std::mutex> lock(g_lock);
   const auto it = g_instance_gipa.find(instance);
   return it == g_instance_gipa.end() ? nullptr : it->second;
 }
 
 PFN_vkGetDeviceProcAddr device_gdpa(VkDevice device) noexcept {
-  std::lock_guard<std::mutex> lock(g_lock);
+  const std::lock_guard<std::mutex> lock(g_lock);
   const auto it = g_device_gdpa.find(device);
   return it == g_device_gdpa.end() ? nullptr : it->second;
 }
@@ -117,7 +115,7 @@ VKAPI_ATTR VkResult VKAPI_CALL layer_create_instance(const VkInstanceCreateInfo*
   const auto next = reinterpret_cast<PFN_vkCreateInstance>(next_get(nullptr, "vkCreateInstance"));
   const VkResult result = next(create_info, allocator, instance);
   if (result == VK_SUCCESS) {
-    std::lock_guard<std::mutex> lock(g_lock);
+    const std::lock_guard<std::mutex> lock(g_lock);
     g_instance_gipa[*instance] = next_get;
     g_instance_pdpa[*instance] = next_pdpa;
     log_line("cs2-overlay: vkCreateInstance ok instance=%p", static_cast<void*>(*instance));
@@ -129,7 +127,7 @@ VKAPI_ATTR void VKAPI_CALL layer_destroy_instance(VkInstance instance,
                                                   const VkAllocationCallbacks* allocator) noexcept {
   PFN_vkGetInstanceProcAddr get = nullptr;
   {
-    std::lock_guard<std::mutex> lock(g_lock);
+    const std::lock_guard<std::mutex> lock(g_lock);
     const auto it = g_instance_gipa.find(instance);
     if (it != g_instance_gipa.end()) {
       get = it->second;
@@ -151,7 +149,7 @@ VKAPI_ATTR VkResult VKAPI_CALL layer_enumerate_physical_devices(VkInstance insta
       get(instance, "vkEnumeratePhysicalDevices"));
   const VkResult result = next(instance, count, devices);
   if (result == VK_SUCCESS && devices != nullptr) {
-    std::lock_guard<std::mutex> lock(g_lock);
+    const std::lock_guard<std::mutex> lock(g_lock);
     for (uint32_t i = 0; i < *count; ++i) g_physdev_instance[devices[i]] = instance;
   }
   return result;
@@ -169,7 +167,7 @@ VKAPI_ATTR VkResult VKAPI_CALL layer_create_device(VkPhysicalDevice gpu,
 
   VkInstance instance = VK_NULL_HANDLE;
   {
-    std::lock_guard<std::mutex> lock(g_lock);
+    const std::lock_guard<std::mutex> lock(g_lock);
     const auto it = g_physdev_instance.find(gpu);
     if (it != g_physdev_instance.end()) instance = it->second;
   }
@@ -177,7 +175,7 @@ VKAPI_ATTR VkResult VKAPI_CALL layer_create_device(VkPhysicalDevice gpu,
   const auto next = reinterpret_cast<PFN_vkCreateDevice>(next_get(instance, "vkCreateDevice"));
   const VkResult result = next(gpu, create_info, allocator, device);
   if (result == VK_SUCCESS) {
-    std::lock_guard<std::mutex> lock(g_lock);
+    const std::lock_guard<std::mutex> lock(g_lock);
     g_device_gdpa[*device] = next_device_get;
     g_device_present[*device] =
         reinterpret_cast<PFN_vkQueuePresentKHR>(next_device_get(*device, "vkQueuePresentKHR"));
@@ -195,7 +193,7 @@ VKAPI_ATTR void VKAPI_CALL layer_destroy_device(VkDevice device,
   cs2::overlay::device_destroyed(device);
   PFN_vkGetDeviceProcAddr get = nullptr;
   {
-    std::lock_guard<std::mutex> lock(g_lock);
+    const std::lock_guard<std::mutex> lock(g_lock);
     const auto it = g_device_gdpa.find(device);
     if (it != g_device_gdpa.end()) {
       get = it->second;
@@ -214,7 +212,7 @@ VKAPI_ATTR void VKAPI_CALL layer_get_device_queue(VkDevice device, uint32_t fami
   if (get == nullptr) return;
   reinterpret_cast<PFN_vkGetDeviceQueue>(get(device, "vkGetDeviceQueue"))(device, family_index,
                                                                           queue_index, queue);
-  std::lock_guard<std::mutex> lock(g_lock);
+  const std::lock_guard<std::mutex> lock(g_lock);
   g_queue_device[*queue] = device;
   g_queue_family[*queue] = family_index;
 }
@@ -254,7 +252,7 @@ VKAPI_ATTR VkResult VKAPI_CALL layer_queue_present(VkQueue queue,
   PFN_vkQueuePresentKHR next = nullptr;
   unsigned count = 0;
   {
-    std::lock_guard<std::mutex> lock(g_lock);
+    const std::lock_guard<std::mutex> lock(g_lock);
     count = ++g_present_count;
     const auto q = g_queue_device.find(queue);
     if (q != g_queue_device.end()) {
@@ -336,7 +334,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL layer_get_physical_device_proc_addr(
     VkInstance instance, const char* name) noexcept {
   PFN_GetPhysicalDeviceProcAddr next = nullptr;
   {
-    std::lock_guard<std::mutex> lock(g_lock);
+    const std::lock_guard<std::mutex> lock(g_lock);
     const auto it = g_instance_pdpa.find(instance);
     if (it != g_instance_pdpa.end()) next = it->second;
   }

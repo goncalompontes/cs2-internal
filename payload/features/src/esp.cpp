@@ -31,7 +31,7 @@ constexpr Color k_color_border{0, 0, 0, 200};
 constexpr float k_text_height = 16.0F;
 
 // "weapon_ak47" -> "ak47"
-std::string weapon_label(std::string_view designer) {
+auto weapon_label(std::string_view designer) -> std::string {
   constexpr std::string_view prefix = "weapon_";
   if (designer.starts_with(prefix)) {
     return std::string(designer.substr(prefix.size()));
@@ -41,14 +41,14 @@ std::string weapon_label(std::string_view designer) {
 
 // Project the player's world AABB (origin + collision extents) to a screen box.
 // Uses extents so it works whether the collision bounds are local or absolute.
-bool project_box(const game::Matrix4x4& view, const PlayerSnapshot& player, float width,
-                 float height, Vec2& min, Vec2& max) {
+auto project_box(const game::Matrix4x4& view, const PlayerSnapshot& player, float width,
+                 float height, Vec2& min, Vec2& max) -> bool {
   float half_x = (player.maxs.x - player.mins.x) * 0.5F;
   float half_y = (player.maxs.y - player.mins.y) * 0.5F;
   float box_height = player.maxs.z - player.mins.z;
-  if (!(half_x > 0.5F && half_x < 200.0F)) half_x = 16.0F;
-  if (!(half_y > 0.5F && half_y < 200.0F)) half_y = 16.0F;
-  if (!(box_height > 1.0F && box_height < 200.0F)) box_height = 72.0F;
+  if (half_x <= 0.5F || half_x >= 200.0F) half_x = 16.0F;
+  if (half_y <= 0.5F || half_y >= 200.0F) half_y = 16.0F;
+  if (box_height <= 1.0F || box_height >= 200.0F) box_height = 72.0F;
 
   min = Vec2{FLT_MAX, FLT_MAX};
   max = Vec2{-FLT_MAX, -FLT_MAX};
@@ -68,7 +68,7 @@ bool project_box(const game::Matrix4x4& view, const PlayerSnapshot& player, floa
   return max.x > min.x && max.y > min.y;
 }
 
-Color health_color(float fraction) {
+auto health_color(float fraction) -> Color {
   if (fraction > 0.5F) return k_color_health_high;
   if (fraction > 0.25F) return k_color_health_mid;
   return k_color_health_low;
@@ -151,7 +151,7 @@ void Esp::build(const game::Snapshot& snapshot, const game::Matrix4x4& view, flo
 
     if (config_.flags) {
       float y = min.y;
-      const auto flag = [&](std::string value, Color color) {
+      const auto flag = [&](std::string value, Color color) -> void {
         out.text(max.x + 4.0F, y, color, std::move(value));
         y += k_text_height;
       };

@@ -17,6 +17,6 @@ void write_extent(uint32_t width, uint32_t height) noexcept;
 
 // Copy the latest model into `out`. Returns false if the segment is not mapped
 // yet or a write was in progress (caller keeps its previous copy).
-[[nodiscard]] bool read_model(wire::Model& out) noexcept;
+[[nodiscard]] auto read_model(wire::Model& out) noexcept -> bool;
 
 }  // namespace cs2::overlay::transport

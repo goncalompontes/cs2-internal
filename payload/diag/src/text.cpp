@@ -19,7 +19,7 @@ int g_module_count = 0;
 
 void capture_modules() noexcept {
   g_module_count = 0;
-  const auto add = [](const char* name, const char* file) {
+  const auto add = [](const char* name, const char* file) -> void {
     if (g_module_count >= k_max_modules) {
       return;
     }
@@ -35,7 +35,7 @@ void capture_modules() noexcept {
   add("cs2", "cs2.exe");
 }
 
-TextBuffer& TextBuffer::operator+=(std::string_view text) noexcept {
+auto TextBuffer::operator+=(std::string_view text) noexcept -> TextBuffer& {
   for (const char character : text) {
     if (size_ + 1 >= capacity_) {
       break;
@@ -46,7 +46,7 @@ TextBuffer& TextBuffer::operator+=(std::string_view text) noexcept {
   return *this;
 }
 
-TextBuffer& TextBuffer::operator+=(char character) noexcept {
+auto TextBuffer::operator+=(char character) noexcept -> TextBuffer& {
   if (size_ + 1 < capacity_) {
     data_[size_++] = character;
     data_[size_] = '\0';
@@ -54,7 +54,7 @@ TextBuffer& TextBuffer::operator+=(char character) noexcept {
   return *this;
 }
 
-TextBuffer& TextBuffer::hex(std::uintptr_t value) noexcept {
+auto TextBuffer::hex(std::uintptr_t value) noexcept -> TextBuffer& {
   if (value == 0) {
     return *this += '0';
   }
@@ -71,7 +71,7 @@ TextBuffer& TextBuffer::hex(std::uintptr_t value) noexcept {
   return *this;
 }
 
-TextBuffer& TextBuffer::dec(unsigned long long value) noexcept {
+auto TextBuffer::dec(unsigned long long value) noexcept -> TextBuffer& {
   if (value == 0) {
     return *this += '0';
   }
@@ -87,7 +87,7 @@ TextBuffer& TextBuffer::dec(unsigned long long value) noexcept {
   return *this;
 }
 
-TextBuffer& TextBuffer::address(std::uintptr_t value) noexcept {
+auto TextBuffer::address(std::uintptr_t value) noexcept -> TextBuffer& {
   for (int i = 0; i < g_module_count; ++i) {
     if (value >= g_modules[i].base && value < g_modules[i].end) {
       *this += g_modules[i].name;

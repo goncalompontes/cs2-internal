@@ -16,7 +16,7 @@ namespace {
 // Medium integrity, so it cannot create files in `C:\` root; use the user's
 // local app data instead. `CS2_PAYLOAD_DIR` overrides the directory. The
 // directory is created on demand (idempotent).
-bool resolve_data_dir(char* out, std::size_t size) noexcept {
+auto resolve_data_dir(char* out, std::size_t size) noexcept -> bool {
   if (const char* override_dir = std::getenv("CS2_PAYLOAD_DIR")) {
     if (override_dir[0] != '\0') {
       const int written = std::snprintf(out, size, "%s", override_dir);
@@ -40,7 +40,7 @@ bool resolve_data_dir(char* out, std::size_t size) noexcept {
 
 }  // namespace
 
-bool data_file_path(const char* name, char* out, std::size_t size) noexcept {
+auto data_file_path(const char* name, char* out, std::size_t size) noexcept -> bool {
 #if defined(_WIN32)
   char dir[MAX_PATH];
   if (!resolve_data_dir(dir, sizeof(dir))) return false;

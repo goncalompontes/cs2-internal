@@ -21,13 +21,13 @@ void expect(bool condition, const char* what) {
   }
 }
 
-bool near(float a, float b, float tolerance = 1e-3F) {
+auto near(float a, float b, float tolerance = 1e-3F) -> bool {
   return std::fabs(a - b) <= tolerance;
 }
 
 }  // namespace
 
-int main() {
+auto main() -> int {
   using cs2::game::Matrix4x4;
   using cs2::game::Vec3;
 

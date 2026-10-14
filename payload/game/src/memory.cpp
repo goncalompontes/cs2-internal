@@ -10,7 +10,7 @@
 
 namespace cs2::game {
 
-bool read_bytes(std::uintptr_t address, void* out, std::size_t count) noexcept {
+auto read_bytes(std::uintptr_t address, void* out, std::size_t count) noexcept -> bool {
   if (address == 0 || out == nullptr || count == 0) {
     return false;
   }
@@ -26,7 +26,7 @@ bool read_bytes(std::uintptr_t address, void* out, std::size_t count) noexcept {
 #endif
 }
 
-std::string read_cstring(std::uintptr_t address, std::size_t max_length) {
+auto read_cstring(std::uintptr_t address, std::size_t max_length) -> std::string {
   std::string result;
   if (address == 0 || max_length == 0) {
     return result;
@@ -48,7 +48,7 @@ std::string read_cstring(std::uintptr_t address, std::size_t max_length) {
   return result;
 }
 
-std::string read_inline_string(std::uintptr_t address, std::size_t capacity) {
+auto read_inline_string(std::uintptr_t address, std::size_t capacity) -> std::string {
   if (address == 0 || capacity == 0) {
     return {};
   }

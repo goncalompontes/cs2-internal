@@ -19,7 +19,7 @@ namespace cs2::render {
 namespace {
 
 #if defined(_WIN32)
-ImU32 to_u32(const Color& color) {
+auto to_u32(const Color& color) -> ImU32 {
   return IM_COL32(color.r, color.g, color.b, color.a);
 }
 
@@ -46,7 +46,7 @@ void ImGuiBackend::load_fonts() {
 #endif
 }
 
-bool ImGuiBackend::initialize(const RenderContext& context) {
+auto ImGuiBackend::initialize(const RenderContext& context) -> bool {
 #if defined(_WIN32)
   if (context.device == nullptr || context.device_context == nullptr) {
     std::puts("[cs2-render] ImGui backend: missing device/context");
@@ -91,7 +91,7 @@ void ImGuiBackend::release_render_target() {
 
 // Recreate the back-buffer render target when the swapchain size changes (or
 // after a resize). Returning a non-null `render_target_` means it is current.
-bool ImGuiBackend::ensure_render_target(const RenderContext& context) {
+auto ImGuiBackend::ensure_render_target(const RenderContext& context) -> bool {
 #if defined(_WIN32)
   if (context.swapchain == nullptr || context.device == nullptr) {
     return render_target_ != nullptr;
@@ -141,7 +141,7 @@ void ImGuiBackend::draw_commands(const DrawList& draw) {
   ImDrawList* list = ImGui::GetBackgroundDrawList();
   for (const DrawCommand& command : draw.commands) {
     std::visit(
-        [&](const auto& item) {
+        [&](const auto& item) -> auto {
           using T = std::decay_t<decltype(item)>;
           if constexpr (std::is_same_v<T, Rect>) {
             list->AddRect(ImVec2(item.x0, item.y0), ImVec2(item.x1, item.y1), to_u32(item.color),

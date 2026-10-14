@@ -32,8 +32,8 @@ struct Decoded {
   bool relative = false;                                // relative branch
 };
 
-bool parse_modrm(const unsigned char* code, std::size_t& pos, std::size_t max,
-                 std::size_t& rip_disp) {
+auto parse_modrm(const unsigned char* code, std::size_t& pos, std::size_t max,
+                 std::size_t& rip_disp) -> bool {
   if (pos >= max) {
     return false;
   }
@@ -68,7 +68,7 @@ bool parse_modrm(const unsigned char* code, std::size_t& pos, std::size_t max,
 }
 
 // A focused x64 length decoder: enough for typical function prologues.
-std::optional<Decoded> decode_one(const unsigned char* code, std::size_t max) {
+auto decode_one(const unsigned char* code, std::size_t max) -> std::optional<Decoded> {
   std::size_t pos = 0;
   bool opsize16 = false;
   bool rex_w = false;
@@ -101,7 +101,7 @@ std::optional<Decoded> decode_one(const unsigned char* code, std::size_t max) {
 
   const unsigned char op = code[pos++];
   Decoded decoded;
-  std::size_t rip = static_cast<std::size_t>(-1);
+  auto rip = static_cast<std::size_t>(-1);
   const auto finish = [&]() -> std::optional<Decoded> {
     if (pos > max) return std::nullopt;
     decoded.length = pos;
@@ -269,7 +269,7 @@ std::optional<Decoded> decode_one(const unsigned char* code, std::size_t max) {
 
 }  // namespace
 
-const char* to_string(InlineError error) noexcept {
+auto to_string(InlineError error) noexcept -> const char* {
   switch (error) {
     case InlineError::too_short: return "too_short";
     case InlineError::unsupported_instruction: return "unsupported_instruction";
@@ -281,7 +281,7 @@ const char* to_string(InlineError error) noexcept {
 
 InlineHook::~InlineHook() { uninstall(); }
 
-std::optional<InlineError> InlineHook::install(void* target, void* detour) noexcept {
+auto InlineHook::install(void* target, void* detour) noexcept -> std::optional<InlineError> {
   if (installed_ || target == nullptr || detour == nullptr) {
     return InlineError::unsupported_instruction;
   }
@@ -321,7 +321,7 @@ std::optional<InlineError> InlineHook::install(void* target, void* detour) noexc
       free_executable(trampoline, trampoline_size);
       return InlineError::unsupported_instruction;
     }
-    const std::int32_t relocated = static_cast<std::int32_t>(fixed);
+    const auto relocated = static_cast<std::int32_t>(fixed);
     std::memcpy(trampoline + disp_off, &relocated, sizeof(relocated));
   }
   write_abs_jmp(trampoline + total, reinterpret_cast<std::uintptr_t>(code + total));

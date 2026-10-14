@@ -35,7 +35,7 @@ void swapchain_destroyed(VkDevice device, VkSwapchainKHR swapchain) noexcept;
 // Draw the overlay into the image about to be presented. Returns a semaphore
 // the real present must wait on (the caller replaces the app's wait list with
 // it), or VK_NULL_HANDLE if nothing was drawn.
-[[nodiscard]] VkSemaphore present(VkDevice device, VkQueue queue, uint32_t queue_family,
-                                  const VkPresentInfoKHR* present_info) noexcept;
+[[nodiscard]] auto present(VkDevice device, VkQueue queue, uint32_t queue_family,
+                           const VkPresentInfoKHR* present_info) noexcept -> VkSemaphore;
 
 }  // namespace cs2::overlay

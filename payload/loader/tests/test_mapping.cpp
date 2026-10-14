@@ -18,7 +18,7 @@
 
 namespace {
 
-std::vector<std::byte> read_file(const std::string& path) {
+auto read_file(const std::string& path) -> std::vector<std::byte> {
   std::ifstream in(path, std::ios::binary);
   std::vector<char> raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   std::vector<std::byte> out(raw.size());
@@ -28,9 +28,9 @@ std::vector<std::byte> read_file(const std::string& path) {
 
 }  // namespace
 
-int main() {
+auto main() -> int {
   int failures = 0;
-  const auto check = [&](bool cond, const char* what) {
+  const auto check = [&](bool cond, const char* what) -> void {
     if (!cond) {
       std::cerr << "FAIL: " << what << "\n";
       ++failures;

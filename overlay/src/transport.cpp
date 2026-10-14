@@ -37,7 +37,7 @@ int g_fd = -1;
 // game process cannot create files in `C:\` root. `CS2_PAYLOAD_DIR` overrides
 // the directory; `CS2_OVERLAY_SHM` overrides the whole path. See payload
 // ModelPublisher::map.
-const char* resolve_path() {
+auto resolve_path() -> const char* {
   if (const char* explicit_path = std::getenv("CS2_OVERLAY_SHM")) return explicit_path;
   if (const char* dir = std::getenv("CS2_PAYLOAD_DIR")) {
     std::snprintf(g_path_buffer, sizeof(g_path_buffer), "%s\\cs2-overlay.shm", dir);
@@ -52,7 +52,7 @@ const char* resolve_path() {
   return g_path_buffer;
 }
 
-bool ensure_mapped() {
+auto ensure_mapped() -> bool {
   if (g_shared != nullptr) return true;
   if (g_path == nullptr) g_path = resolve_path();
   if (g_path == nullptr) return false;
@@ -163,14 +163,14 @@ bool ensure_mapped() {
 }  // namespace
 
 void write_extent(uint32_t width, uint32_t height) noexcept {
-  std::lock_guard<std::mutex> lock(g_lock);
+  const std::lock_guard<std::mutex> lock(g_lock);
   if (g_shared == nullptr && !ensure_mapped()) return;
   g_shared->screen_width.store(width, std::memory_order_relaxed);
   g_shared->screen_height.store(height, std::memory_order_relaxed);
 }
 
-bool read_model(wire::Model& out) noexcept {
-  std::lock_guard<std::mutex> lock(g_lock);
+auto read_model(wire::Model& out) noexcept -> bool {
+  const std::lock_guard<std::mutex> lock(g_lock);
   if (g_shared == nullptr && !ensure_mapped()) return false;
   const uint32_t first = g_shared->sequence.load(std::memory_order_acquire);
   if ((first & 1u) != 0u) return false;  // a write is in progress

@@ -47,7 +47,7 @@ struct Runtime {
 
 Runtime g_runtime;
 
-Runtime& runtime() {
+auto runtime() -> Runtime& {
   return g_runtime;
 }
 

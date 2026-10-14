@@ -31,7 +31,7 @@ class ImGuiBackend final : public UiBackend {
   void release_render_target();
   [[nodiscard]] bool ensure_render_target(const RenderContext& context);
   void draw_commands(const DrawList& draw);
-  void draw_hud(const HudModel& hud);
+  static void draw_hud(const HudModel& hud);
 
   bool initialized_ = false;
   std::uint64_t frames_ = 0;

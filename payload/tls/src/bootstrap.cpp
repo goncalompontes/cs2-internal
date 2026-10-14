@@ -43,7 +43,7 @@ void ensure_thread_tls() noexcept {
   auto* tls_array = reinterpret_cast<std::uint64_t*>(__readgsqword(k_teb_tls_pointer));
   if (tls_array == nullptr || tls_array[index] != 0) return;  // already installed
 
-  const std::size_t raw_size =
+  const auto raw_size =
       static_cast<std::size_t>(tls->EndAddressOfRawData - tls->StartAddressOfRawData);
   const std::size_t block_size = raw_size + tls->SizeOfZeroFill;
   if (block_size == 0) return;
@@ -72,7 +72,7 @@ using NtCreateThreadExFn = long(__stdcall*)(void** thread_handle, unsigned long 
 
 }  // namespace
 
-void* create_thread_no_attach(void* (*start)(void*), void* parameter) noexcept {
+auto create_thread_no_attach(void* (*start)(void*), void* parameter) noexcept -> void* {
   const HMODULE ntdll = GetModuleHandleA("ntdll.dll");
   if (ntdll == nullptr) return nullptr;
   const auto nt_create_thread_ex =

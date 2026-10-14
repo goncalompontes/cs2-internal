@@ -14,20 +14,24 @@ using Fn = int (*)(int);
 
 Fn g_original = nullptr;
 
-int add_one(int value) { return value + 1; }
-int detour(int value) { return g_original(value) * 10; }
+auto add_one(int value) -> int {
+  return value + 1;
+}
+auto detour(int value) -> int {
+  return g_original(value) * 10;
+}
 
 }  // namespace
 
-int main() {
+auto main() -> int {
   auto* table = static_cast<Fn*>(cs2::hooks::allocate_executable(sizeof(Fn) * 2));
   assert(table != nullptr);
   table[0] = add_one;
   table[1] = add_one;
 
   {
-    cs2::hooks::VtableHook hook(reinterpret_cast<void**>(table), 1,
-                                reinterpret_cast<void*>(&detour));
+    const cs2::hooks::VtableHook hook(reinterpret_cast<void**>(table), 1,
+                                      reinterpret_cast<void*>(&detour));
     assert(hook.installed());
     g_original = reinterpret_cast<Fn>(hook.original());
     assert(table[1] == &detour);
@@ -39,7 +43,7 @@ int main() {
   assert(table[1] == add_one);  // restored
 
   // A null vtable / detour is rejected without crashing.
-  cs2::hooks::VtableHook none(nullptr, 0, nullptr);
+  const cs2::hooks::VtableHook none(nullptr, 0, nullptr);
   assert(!none.installed());
 
   cs2::hooks::free_executable(table, sizeof(Fn) * 2);

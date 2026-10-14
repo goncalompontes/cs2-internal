@@ -43,7 +43,7 @@ void resolve_unwind() noexcept {
       reinterpret_cast<VirtualUnwindFn>(GetProcAddress(ntdll, "RtlVirtualUnwind"));
 }
 
-bool read_memory(std::uintptr_t address, void* out, std::size_t size) noexcept {
+auto read_memory(std::uintptr_t address, void* out, std::size_t size) noexcept -> bool {
   SIZE_T got = 0;
   return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), out, size,
                            &got) != 0 &&

@@ -20,8 +20,8 @@ using namespace cs2::sdk;
 // Resolve a field offset from the generated client schema (ADR-0001). The
 // fallback covers a build whose schema dump is older than the field, and a
 // fresh checkout with no schema dump at all.
-std::uint32_t field(std::string_view class_target, std::string_view field_target,
-                    std::uint32_t fallback) {
+auto field(std::string_view class_target, std::string_view field_target, std::uint32_t fallback)
+    -> std::uint32_t {
 #if defined(CS2_GAME_HAVE_CLIENT_SCHEMA)
   const std::uint32_t offset =
       schemas::client_dll::field_offset_by_target(class_target, field_target);
@@ -34,7 +34,7 @@ std::uint32_t field(std::string_view class_target, std::string_view field_target
 }
 
 // Read a resolved global pointer by offset name (e.g. "entity_list").
-std::uintptr_t global(std::uintptr_t client_base, std::string_view name) {
+auto global(std::uintptr_t client_base, std::string_view name) -> std::uintptr_t {
   const OffsetInfo* info = find_offset(name);
   if (info == nullptr || info->module != "client.dll") {
     return 0;
@@ -47,7 +47,7 @@ std::uintptr_t global(std::uintptr_t client_base, std::string_view name) {
 }
 
 // Address of a resolved global (e.g. a data array like "view_matrix").
-std::uintptr_t global_address(std::uintptr_t client_base, std::string_view name) {
+auto global_address(std::uintptr_t client_base, std::string_view name) -> std::uintptr_t {
   const OffsetInfo* info = find_offset(name);
   if (info == nullptr || info->module != "client.dll") {
     return 0;
@@ -56,7 +56,7 @@ std::uintptr_t global_address(std::uintptr_t client_base, std::string_view name)
 }
 
 template <typename T>
-[[nodiscard]] T read_or(std::uintptr_t address, T fallback) noexcept {
+[[nodiscard]] auto read_or(std::uintptr_t address, T fallback) noexcept -> T {
   T value = fallback;
   if (!read(address, value)) {
     return fallback;
@@ -66,7 +66,7 @@ template <typename T>
 
 }  // namespace
 
-StateReader::FieldOffsets StateReader::FieldOffsets::resolve() {
+auto StateReader::FieldOffsets::resolve() -> StateReader::FieldOffsets {
   FieldOffsets o;
   o.health = field("C_BaseEntity", "m_iHealth", o.health);
   o.max_health = field("C_BaseEntity", "m_iMaxHealth", o.max_health);
@@ -105,7 +105,7 @@ StateReader::FieldOffsets StateReader::FieldOffsets::resolve() {
   return o;
 }
 
-std::optional<StateReader> StateReader::attach() noexcept {
+auto StateReader::attach() noexcept -> std::optional<StateReader> {
   const ModuleInfo client = find_module("client.dll");
   if (!client.valid()) {
     return std::nullopt;
@@ -117,7 +117,7 @@ std::optional<StateReader> StateReader::attach() noexcept {
   return reader;
 }
 
-Matrix4x4 StateReader::view_matrix(int slot) const {
+auto StateReader::view_matrix(int slot) const -> Matrix4x4 {
   Matrix4x4 matrix;
   const std::uintptr_t base = global_address(client_base_, "view_matrix");
   if (base == 0 || slot < 0) {
@@ -128,7 +128,7 @@ Matrix4x4 StateReader::view_matrix(int slot) const {
   return matrix;
 }
 
-PlayerSnapshot StateReader::read_player(int index, std::uintptr_t controller) const {
+auto StateReader::read_player(int index, std::uintptr_t controller) const -> PlayerSnapshot {
   const FieldOffsets& o = offsets_;
   PlayerSnapshot player;
   player.index = index;
@@ -151,12 +151,12 @@ PlayerSnapshot StateReader::read_player(int index, std::uintptr_t controller) co
   player.defuser = defuser != 0;
   player.helmet = helmet != 0;
   player.ping = static_cast<int>(read_or<std::uint32_t>(controller + o.ping, 0));
-  const std::uintptr_t money = read_or<std::uintptr_t>(controller + o.money_services, 0);
+  const auto money = read_or<std::uintptr_t>(controller + o.money_services, 0);
   if (money != 0) {
     player.money = read_or<std::int32_t>(money + o.account, 0);
   }
 
-  std::uint32_t handle = read_or<std::uint32_t>(controller + o.player_pawn, 0);
+  auto handle = read_or<std::uint32_t>(controller + o.player_pawn, 0);
   if (handle == 0) {
     handle = read_or<std::uint32_t>(controller + o.pawn, 0);
   }
@@ -188,7 +188,7 @@ PlayerSnapshot StateReader::read_player(int index, std::uintptr_t controller) co
   (void)read(pawn + o.eye_angles, player.eye_angles);
   (void)read(pawn + o.velocity, player.velocity);
 
-  const std::uintptr_t scene = read_or<std::uintptr_t>(pawn + o.scene_node, 0);
+  const auto scene = read_or<std::uintptr_t>(pawn + o.scene_node, 0);
   Vec3 view_offset{};
   if (scene != 0) {
     (void)read(scene + o.abs_origin, player.origin);
@@ -197,16 +197,16 @@ PlayerSnapshot StateReader::read_player(int index, std::uintptr_t controller) co
   player.eye_origin = player.origin + view_offset;
 
   // Collision bounds (local space; the ESP projects origin + bounds).
-  const std::uintptr_t collision = read_or<std::uintptr_t>(pawn + o.collision, 0);
+  const auto collision = read_or<std::uintptr_t>(pawn + o.collision, 0);
   if (collision != 0) {
     (void)read(collision + o.collision_mins, player.mins);
     (void)read(collision + o.collision_maxs, player.maxs);
   }
 
   // Active weapon: name + ammo.
-  const std::uintptr_t services = read_or<std::uintptr_t>(pawn + o.weapon_services, 0);
+  const auto services = read_or<std::uintptr_t>(pawn + o.weapon_services, 0);
   if (services != 0) {
-    const std::uint32_t weapon_handle = read_or<std::uint32_t>(services + o.active_weapon, 0);
+    const auto weapon_handle = read_or<std::uint32_t>(services + o.active_weapon, 0);
     const std::uintptr_t weapon = entities_.resolve(weapon_handle);
     if (weapon != 0) {
       player.clip = read_or<std::int32_t>(weapon + o.clip1, 0);
@@ -218,7 +218,7 @@ PlayerSnapshot StateReader::read_player(int index, std::uintptr_t controller) co
   return player;
 }
 
-Snapshot StateReader::snapshot() const {
+auto StateReader::snapshot() const -> Snapshot {
   Snapshot snapshot;
   if (!ready()) {
     return snapshot;
@@ -233,7 +233,7 @@ Snapshot StateReader::snapshot() const {
   // All player controllers share the local controller's vtable; enumerate them
   // from the entity table by matching it (no per-build vtable RVA is
   // hard-coded).
-  const std::uintptr_t controller_vtable = read_or<std::uintptr_t>(local_controller, 0);
+  const auto controller_vtable = read_or<std::uintptr_t>(local_controller, 0);
   for (int page = 0; controller_vtable != 0 && page < EntitySystem::k_page_count; ++page) {
     const std::uintptr_t page_base = entities_.page(page);
     if (page_base == 0) {
@@ -242,7 +242,7 @@ Snapshot StateReader::snapshot() const {
     for (int slot = 0; slot < EntitySystem::k_slots_per_page; ++slot) {
       const std::uintptr_t entry =
           page_base + EntitySystem::k_identity_stride * static_cast<std::uintptr_t>(slot);
-      const std::uintptr_t controller = read_or<std::uintptr_t>(entry, 0);
+      const auto controller = read_or<std::uintptr_t>(entry, 0);
       if (controller == 0 || read_or<std::uintptr_t>(controller, 0) != controller_vtable) {
         continue;
       }

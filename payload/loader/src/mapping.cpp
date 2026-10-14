@@ -5,7 +5,7 @@
 
 namespace cs2::loader::mapping {
 
-const char* to_string(Error error) noexcept {
+auto to_string(Error error) noexcept -> const char* {
   switch (error) {
     case Error::size_mismatch: return "size_mismatch";
     case Error::bad_section: return "bad_section";
@@ -14,8 +14,8 @@ const char* to_string(Error error) noexcept {
   return "unknown";
 }
 
-std::expected<void, Error> map_sections(const pe::ImageInfo& image,
-                                        std::span<const std::byte> raw, ImageSink& sink) {
+auto map_sections(const pe::ImageInfo& image, std::span<const std::byte> raw, ImageSink& sink)
+    -> std::expected<void, Error> {
   auto view = sink.view();
   if (view.size() < image.size_of_image) {
     return std::unexpected(Error::size_mismatch);
@@ -40,8 +40,8 @@ std::expected<void, Error> map_sections(const pe::ImageInfo& image,
   return {};
 }
 
-std::expected<void, Error> apply_relocations(const pe::ImageInfo& image, ImageSink& sink,
-                                             std::int64_t delta) {
+auto apply_relocations(const pe::ImageInfo& image, ImageSink& sink, std::int64_t delta)
+    -> std::expected<void, Error> {
   auto view = sink.view();
   for (const auto& block : image.relocations) {
     for (const std::uint16_t entry : block.entries) {
@@ -73,8 +73,8 @@ std::expected<void, Error> apply_relocations(const pe::ImageInfo& image, ImageSi
   return {};
 }
 
-std::expected<void, Error> map_image(const pe::ImageInfo& image,
-                                     std::span<const std::byte> raw, ImageSink& sink) {
+auto map_image(const pe::ImageInfo& image, std::span<const std::byte> raw, ImageSink& sink)
+    -> std::expected<void, Error> {
   if (auto result = map_sections(image, raw, sink); !result) {
     return result;
   }

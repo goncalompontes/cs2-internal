@@ -63,7 +63,7 @@ long __stdcall create_swapchain_detour(void* factory, void* device, void* desc,
   if (result >= 0 && out_chain != nullptr && *out_chain != nullptr) {
     // Every swapchain of this class shares the table we already patched. Warn
     // (once per call is too noisy, so just report) if that assumption breaks.
-    void** method_table = *reinterpret_cast<void***>(*out_chain);
+    void* const* method_table = *reinterpret_cast<void***>(*out_chain);
     if (method_table[k_swapchain_present] != reinterpret_cast<void*>(&present_detour)) {
       std::puts("[cs2-dxgi] swapchain method table differs from the discovered one");
     }
@@ -87,7 +87,7 @@ struct MethodTables {
 };
 
 // Create a hidden window (no message pump required) to host the probe device.
-HWND create_probe_window(HINSTANCE instance) noexcept {
+auto create_probe_window(HINSTANCE instance) noexcept -> HWND {
   constexpr wchar_t k_class_name[] = L"cs2-dxgi-probe";
   WNDCLASSEXW window_class{};
   window_class.cbSize = sizeof(window_class);
@@ -107,7 +107,7 @@ void destroy_probe_window(HINSTANCE instance, HWND window) noexcept {
   UnregisterClassW(L"cs2-dxgi-probe", instance);
 }
 
-bool discover_method_tables(MethodTables& out) noexcept {
+auto discover_method_tables(MethodTables& out) noexcept -> bool {
   HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
   HMODULE d3d11 = GetModuleHandleW(L"d3d11.dll");
   if (dxgi == nullptr || d3d11 == nullptr) {
@@ -187,8 +187,8 @@ cleanup:
 
 DxgiInterposer::~DxgiInterposer() { uninstall(); }
 
-bool DxgiInterposer::install(PresentCallback on_present, ResizeCallback on_resize,
-                             void* user) noexcept {
+auto DxgiInterposer::install(PresentCallback on_present, ResizeCallback on_resize,
+                             void* user) noexcept -> bool {
   if (installed_) {
     return true;
   }

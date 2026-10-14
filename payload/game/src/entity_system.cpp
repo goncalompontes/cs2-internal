@@ -11,7 +11,7 @@ constexpr std::uintptr_t k_designer_offset = 0x20;  // m_designerName (const cha
 
 }  // namespace
 
-std::uintptr_t EntitySystem::page(int page_index) const noexcept {
+auto EntitySystem::page(int page_index) const noexcept -> std::uintptr_t {
   if (blocks_ == 0 || page_index < 0 || page_index >= k_page_count) {
     return 0;
   }
@@ -22,7 +22,7 @@ std::uintptr_t EntitySystem::page(int page_index) const noexcept {
   return page_base;
 }
 
-std::uintptr_t EntitySystem::identity(int index) const noexcept {
+auto EntitySystem::identity(int index) const noexcept -> std::uintptr_t {
   if (index < 0) {
     return 0;
   }
@@ -33,7 +33,7 @@ std::uintptr_t EntitySystem::identity(int index) const noexcept {
   return page_base + k_identity_stride * static_cast<std::uintptr_t>(index & k_slot_mask);
 }
 
-std::uintptr_t EntitySystem::instance(int index) const noexcept {
+auto EntitySystem::instance(int index) const noexcept -> std::uintptr_t {
   const std::uintptr_t entry = identity(index);
   if (entry == 0) {
     return 0;
@@ -45,14 +45,14 @@ std::uintptr_t EntitySystem::instance(int index) const noexcept {
   return entity;
 }
 
-std::uintptr_t EntitySystem::resolve(std::uint32_t handle) const noexcept {
+auto EntitySystem::resolve(std::uint32_t handle) const noexcept -> std::uintptr_t {
   if (handle == 0 || handle == 0xffffffffU) {
     return 0;
   }
   return instance(static_cast<int>(handle & 0x7fffU));
 }
 
-std::string EntitySystem::designer_name(int index) const {
+auto EntitySystem::designer_name(int index) const -> std::string {
   const std::uintptr_t entry = identity(index);
   if (entry == 0) {
     return {};

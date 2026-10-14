@@ -45,7 +45,7 @@ GamePresentHook::GamePresentHook(ModelPublisher& publisher) noexcept : publisher
 
 GamePresentHook::~GamePresentHook() { uninstall(); }
 
-bool GamePresentHook::install() noexcept {
+auto GamePresentHook::install() noexcept -> bool {
   if (installed_) return true;
 #if defined(_WIN32)
   HMODULE module = GetModuleHandleA("rendersystemdx11.dll");

@@ -14,33 +14,33 @@
 namespace cs2::features {
 namespace {
 
-std::string format_vec3(const game::Vec3& value) {
+auto format_vec3(const game::Vec3& value) -> std::string {
   char buffer[80];
   std::snprintf(buffer, sizeof(buffer), "%.1f %.1f %.1f", static_cast<double>(value.x),
                 static_cast<double>(value.y), static_cast<double>(value.z));
   return buffer;
 }
 
-std::string format_angle(const game::Angle& value) {
+auto format_angle(const game::Angle& value) -> std::string {
   char buffer[80];
   std::snprintf(buffer, sizeof(buffer), "pitch %.1f yaw %.1f", static_cast<double>(value.pitch),
                 static_cast<double>(value.yaw));
   return buffer;
 }
 
-std::string format_long(long long value) {
+auto format_long(long long value) -> std::string {
   char buffer[32];
   std::snprintf(buffer, sizeof(buffer), "%lld", value);
   return buffer;
 }
 
-std::string format_float(double value) {
+auto format_float(double value) -> std::string {
   char buffer[32];
   std::snprintf(buffer, sizeof(buffer), "%.2f", value);
   return buffer;
 }
 
-std::string team_name(int team) {
+auto team_name(int team) -> std::string {
   switch (team) {
     case 2:
       return "T";
@@ -53,7 +53,7 @@ std::string team_name(int team) {
   }
 }
 
-std::uint64_t now_ms() noexcept {
+auto now_ms() noexcept -> std::uint64_t {
 #if defined(_WIN32)
   return GetTickCount64();
 #else
@@ -61,7 +61,7 @@ std::uint64_t now_ms() noexcept {
 #endif
 }
 
-render::HudSection local_section(const game::Snapshot& snapshot) {
+auto local_section(const game::Snapshot& snapshot) -> render::HudSection {
   render::HudSection section;
   section.title = "Local player";
   if (!snapshot.local.has_value()) {
@@ -85,7 +85,7 @@ render::HudSection local_section(const game::Snapshot& snapshot) {
   return section;
 }
 
-render::HudSection players_section(const game::Snapshot& snapshot) {
+auto players_section(const game::Snapshot& snapshot) -> render::HudSection {
   render::HudSection section;
   section.title =
       "Players (" + format_long(static_cast<long long>(snapshot.players.size())) + ")";
@@ -116,7 +116,7 @@ void Overlay::initialize() {
   update(0.0F, 0.0F);
 }
 
-const render::OverlayModel& Overlay::update(float screen_width, float screen_height) {
+auto Overlay::update(float screen_width, float screen_height) -> const render::OverlayModel& {
   if (!initialized_) {
     initialize();
   }

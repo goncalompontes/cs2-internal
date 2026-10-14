@@ -6,7 +6,7 @@
 
 namespace cs2::hooks {
 
-void* allocate_executable(std::size_t size) noexcept {
+auto allocate_executable(std::size_t size) noexcept -> void* {
   return VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 }
 
@@ -16,7 +16,7 @@ void free_executable(void* address, std::size_t /*size*/) noexcept {
   }
 }
 
-bool make_writable(void* address, std::size_t size) noexcept {
+auto make_writable(void* address, std::size_t size) noexcept -> bool {
   DWORD previous = 0;
   return VirtualProtect(address, size, PAGE_EXECUTE_READWRITE, &previous) != 0;
 }

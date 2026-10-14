@@ -17,30 +17,30 @@ constexpr std::size_t k_coff_size = 20;
 constexpr std::size_t k_section_size = 40;
 constexpr std::size_t k_import_descriptor_size = 20;
 
-bool has(Bytes bytes, std::size_t offset, std::size_t count) {
+auto has(Bytes bytes, std::size_t offset, std::size_t count) -> bool {
   return offset <= bytes.size() && count <= bytes.size() - offset;
 }
 
-std::uint8_t rd8(Bytes bytes, std::size_t offset) {
+auto rd8(Bytes bytes, std::size_t offset) -> std::uint8_t {
   return std::to_integer<std::uint8_t>(bytes[offset]);
 }
 
-std::uint16_t rd16(Bytes bytes, std::size_t offset) {
+auto rd16(Bytes bytes, std::size_t offset) -> std::uint16_t {
   return static_cast<std::uint16_t>(rd8(bytes, offset) |
                                     (rd8(bytes, offset + 1) << 8));
 }
 
-std::uint32_t rd32(Bytes bytes, std::size_t offset) {
+auto rd32(Bytes bytes, std::size_t offset) -> std::uint32_t {
   return static_cast<std::uint32_t>(rd16(bytes, offset) |
                                     (static_cast<std::uint32_t>(rd16(bytes, offset + 2)) << 16));
 }
 
-std::uint64_t rd64(Bytes bytes, std::size_t offset) {
+auto rd64(Bytes bytes, std::size_t offset) -> std::uint64_t {
   return static_cast<std::uint64_t>(rd32(bytes, offset)) |
          (static_cast<std::uint64_t>(rd32(bytes, offset + 4)) << 32);
 }
 
-std::string cstring(Bytes bytes, std::size_t offset) {
+auto cstring(Bytes bytes, std::size_t offset) -> std::string {
   std::string out;
   while (offset < bytes.size() && bytes[offset] != std::byte{0}) {
     out.push_back(static_cast<char>(rd8(bytes, offset)));
@@ -52,8 +52,8 @@ std::string cstring(Bytes bytes, std::size_t offset) {
   return out;
 }
 
-std::expected<std::uint32_t, Error> rva_to_offset_inner(const ImageInfo& image, Bytes bytes,
-                                                        std::uint32_t rva) {
+auto rva_to_offset_inner(const ImageInfo& image, Bytes bytes, std::uint32_t rva)
+    -> std::expected<std::uint32_t, Error> {
   if (rva < image.size_of_headers) {
     return rva;
   }
@@ -75,8 +75,8 @@ std::expected<std::uint32_t, Error> rva_to_offset_inner(const ImageInfo& image, 
   return std::unexpected(Error::bad_directory);
 }
 
-std::expected<std::size_t, Error> directory_offset(const ImageInfo& image, Bytes bytes,
-                                                   std::uint32_t dir_rva) {
+auto directory_offset(const ImageInfo& image, Bytes bytes, std::uint32_t dir_rva)
+    -> std::expected<std::size_t, Error> {
   if (dir_rva == 0) {
     return std::unexpected(Error::bad_directory);
   }
@@ -245,7 +245,7 @@ void parse_tls(const ImageInfo& image, Bytes bytes, std::uint32_t dir_rva, TlsIn
 
 }  // namespace
 
-const char* to_string(Error error) noexcept {
+auto to_string(Error error) noexcept -> const char* {
   switch (error) {
     case Error::truncated: return "truncated";
     case Error::bad_dos_magic: return "bad_dos_magic";
@@ -256,7 +256,7 @@ const char* to_string(Error error) noexcept {
   return "unknown";
 }
 
-std::expected<ImageInfo, Error> parse_image(Bytes image) {
+auto parse_image(Bytes image) -> std::expected<ImageInfo, Error> {
   if (!has(image, 0, k_e_lfanew + 4)) {
     return std::unexpected(Error::truncated);
   }

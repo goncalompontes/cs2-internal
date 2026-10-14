@@ -16,7 +16,7 @@
 #define CS2_HAVE_SCHEMAS 1
 #endif
 
-int main() {
+auto main() -> int {
 #ifdef CS2_HAVE_INTERFACES
   std::printf("sdk-consumer: %zu interface(s)\n", cs2::sdk::INTERFACES.size());
   if (!cs2::sdk::INTERFACES.empty() && cs2::sdk::find_interface_by_target("Source2Client002") == nullptr) {

@@ -120,7 +120,7 @@ ImFont* g_pixel_font = nullptr;
 std::uint64_t g_frame = 0;
 
 template <typename T>
-T load(PFN_vkGetDeviceProcAddr gdpa, VkDevice device, const char* name) {
+auto load(PFN_vkGetDeviceProcAddr gdpa, VkDevice device, const char* name) -> T {
   return reinterpret_cast<T>(gdpa(device, name));
 }
 
@@ -130,7 +130,7 @@ void check(VkResult result, const char* what) noexcept {
   }
 }
 
-Functions load_functions(PFN_vkGetDeviceProcAddr gdpa, VkDevice device) {
+auto load_functions(PFN_vkGetDeviceProcAddr gdpa, VkDevice device) -> Functions {
   Functions fn;
   fn.get_swapchain_images = load<PFN_vkGetSwapchainImagesKHR>(gdpa, device, "vkGetSwapchainImagesKHR");
   fn.create_image_view = load<PFN_vkCreateImageView>(gdpa, device, "vkCreateImageView");
@@ -166,7 +166,7 @@ Functions load_functions(PFN_vkGetDeviceProcAddr gdpa, VkDevice device) {
   return fn;
 }
 
-VkRenderPass create_render_pass(const Functions& fn, VkDevice device, VkFormat format) {
+auto create_render_pass(const Functions& fn, VkDevice device, VkFormat format) -> VkRenderPass {
   VkAttachmentDescription color{};
   color.format = format;
   color.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -177,7 +177,7 @@ VkRenderPass create_render_pass(const Functions& fn, VkDevice device, VkFormat f
   color.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   color.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-  VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  const VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
   VkSubpassDescription subpass{};
   subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
   subpass.colorAttachmentCount = 1;
@@ -205,7 +205,7 @@ VkRenderPass create_render_pass(const Functions& fn, VkDevice device, VkFormat f
   return pass;
 }
 
-bool ensure_command_pool(Device& device, uint32_t queue_family) {
+auto ensure_command_pool(Device& device, uint32_t queue_family) -> bool {
   if (device.command_pool != VK_NULL_HANDLE) return true;
   VkCommandPoolCreateInfo info{};
   info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -216,7 +216,7 @@ bool ensure_command_pool(Device& device, uint32_t queue_family) {
   return device.command_pool != VK_NULL_HANDLE;
 }
 
-VkRenderPass ensure_render_pass(Device& device, VkFormat format) {
+auto ensure_render_pass(Device& device, VkFormat format) -> VkRenderPass {
   if (device.render_pass != VK_NULL_HANDLE && device.render_pass_format == format) {
     return device.render_pass;
   }
@@ -236,7 +236,7 @@ VkRenderPass ensure_render_pass(Device& device, VkFormat format) {
   return device.render_pass;
 }
 
-SwapchainData* ensure_swapchain(Device& device, VkSwapchainKHR swapchain) {
+auto ensure_swapchain(Device& device, VkSwapchainKHR swapchain) -> SwapchainData* {
   const auto found = g_swapchains.find(swapchain);
   if (found != g_swapchains.end()) return &found->second;
 
@@ -303,7 +303,7 @@ SwapchainData* ensure_swapchain(Device& device, VkSwapchainKHR swapchain) {
   return &g_swapchains.emplace(swapchain, std::move(data)).first->second;
 }
 
-bool ensure_imgui(Device& device, VkQueue queue, uint32_t queue_family, VkRenderPass pass) {
+auto ensure_imgui(Device& device, VkQueue queue, uint32_t queue_family, VkRenderPass pass) -> bool {
   if (device.imgui_ready) return true;
   if (g_imgui_device != VK_NULL_HANDLE) return false;  // one ImGui context per process
 
@@ -459,7 +459,7 @@ void draw_overlay_model(const wire::Model& model) {
 
 void device_created(const DeviceContext& context) noexcept {
   if (context.device == VK_NULL_HANDLE || context.get_device_proc_addr == nullptr) return;
-  std::lock_guard lock(g_lock);
+  const std::lock_guard lock(g_lock);
   Device device{};
   device.context = context;
   device.fn = load_functions(context.get_device_proc_addr, context.device);
@@ -467,7 +467,7 @@ void device_created(const DeviceContext& context) noexcept {
 }
 
 void device_destroyed(VkDevice device) noexcept {
-  std::lock_guard lock(g_lock);
+  const std::lock_guard lock(g_lock);
   const auto it = g_devices.find(device);
   if (it == g_devices.end()) return;
   Device& dev = it->second;
@@ -486,7 +486,7 @@ void device_destroyed(VkDevice device) noexcept {
 void swapchain_created(VkDevice device, VkSwapchainKHR swapchain, VkFormat format,
                        VkExtent2D extent) noexcept {
   (void)swapchain;
-  std::lock_guard lock(g_lock);
+  const std::lock_guard lock(g_lock);
   const auto it = g_devices.find(device);
   if (it == g_devices.end()) return;
   it->second.swapchain_hint_format = format;
@@ -495,7 +495,7 @@ void swapchain_created(VkDevice device, VkSwapchainKHR swapchain, VkFormat forma
 
 void swapchain_destroyed(VkDevice device, VkSwapchainKHR swapchain) noexcept {
   (void)device;
-  std::lock_guard lock(g_lock);
+  const std::lock_guard lock(g_lock);
   const auto sc = g_swapchains.find(swapchain);
   if (sc == g_swapchains.end()) return;
   // Do not destroy the framebuffers/views here: our in-flight draw may still
@@ -505,13 +505,13 @@ void swapchain_destroyed(VkDevice device, VkSwapchainKHR swapchain) noexcept {
   g_swapchains.erase(sc);
 }
 
-VkSemaphore present(VkDevice vk_device, VkQueue queue, uint32_t queue_family,
-                    const VkPresentInfoKHR* present_info) noexcept {
+auto present(VkDevice vk_device, VkQueue queue, uint32_t queue_family,
+             const VkPresentInfoKHR* present_info) noexcept -> VkSemaphore {
   if (present_info == nullptr || present_info->swapchainCount == 0) return VK_NULL_HANDLE;
   const VkSwapchainKHR swapchain_handle = present_info->pSwapchains[0];
   const uint32_t image_index = present_info->pImageIndices != nullptr ? present_info->pImageIndices[0] : 0;
 
-  std::lock_guard lock(g_lock);
+  const std::lock_guard lock(g_lock);
   const auto it = g_devices.find(vk_device);
   if (it == g_devices.end()) return VK_NULL_HANDLE;
   Device& device = it->second;

@@ -10,7 +10,7 @@
 
 namespace cs2::game {
 
-ModuleInfo find_module(std::string_view name) noexcept {
+auto find_module(std::string_view name) noexcept -> ModuleInfo {
 #if defined(_WIN32)
   if (name.empty()) {
     return {};

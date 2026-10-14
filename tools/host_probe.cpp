@@ -13,7 +13,7 @@ namespace cs2 {
 enum class ParseError { Empty, BadHex, Overflow };
 
 // "parse, don't validate": raw text -> typed value, or a tagged error.
-std::expected<std::uint64_t, ParseError> parse_hex(std::string_view text) {
+auto parse_hex(std::string_view text) -> std::expected<std::uint64_t, ParseError> {
   if (text.empty()) return std::unexpected(ParseError::Empty);
   if (text.starts_with("0x") || text.starts_with("0X")) text.remove_prefix(2);
 
@@ -35,7 +35,7 @@ using ModuleId = std::variant<std::monostate, std::string, std::uint32_t>;
 
 }  // namespace cs2
 
-int main() {
+auto main() -> int {
   int failures = 0;
 
   if (auto v = cs2::parse_hex("0x2A"); v && *v == 42) {
@@ -53,15 +53,17 @@ int main() {
   }
 
   const cs2::ModuleId by_name = std::string{"client.dll"};
-  std::visit([](const auto& m) {
-    using T = std::decay_t<decltype(m)>;
-    if constexpr (std::is_same_v<T, std::string>)
-      std::cout << "module: " << m << "\n";
-    else if constexpr (std::is_same_v<T, std::uint32_t>)
-      std::cout << "module id: " << m << "\n";
-    else
-      std::cout << "module: <none>\n";
-  }, by_name);
+  std::visit(
+      [](const auto& m) -> auto {
+        using T = std::decay_t<decltype(m)>;
+        if constexpr (std::is_same_v<T, std::string>)
+          std::cout << "module: " << m << "\n";
+        else if constexpr (std::is_same_v<T, std::uint32_t>)
+          std::cout << "module id: " << m << "\n";
+        else
+          std::cout << "module: <none>\n";
+      },
+      by_name);
 
   return failures == 0 ? 0 : 1;
 }

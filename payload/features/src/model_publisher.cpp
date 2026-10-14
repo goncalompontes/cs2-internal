@@ -76,7 +76,7 @@ void ModelPublisher::run() noexcept {
     if (no_state) {
       // Stack object (not a function-local static): a static here would use the
       // CRT's thread-safe-init TLS, which is unreliable in a mapped image.
-      render::OverlayModel empty;
+      const render::OverlayModel empty;
       publish(empty, width, height);
     } else {
       const render::OverlayModel& model = overlay_->update(width, height);
@@ -120,7 +120,7 @@ void ModelPublisher::publish(const render::OverlayModel& source, float /*width*/
     wire::Draw& target = out.draws[i];
     target = wire::Draw{};
     std::visit(
-        [&](const auto& command) {
+        [&](const auto& command) -> auto {
           using T = std::decay_t<decltype(command)>;
           if constexpr (std::is_same_v<T, render::Rect>) {
             target.kind = DrawKind::rect;
@@ -162,7 +162,7 @@ void ModelPublisher::publish(const render::OverlayModel& source, float /*width*/
   shared->sequence.store(sequence + 2, std::memory_order_release);  // even: stable
 }
 
-bool ModelPublisher::map() noexcept {
+auto ModelPublisher::map() noexcept -> bool {
   if (shared_ != nullptr) return true;
   // Isolation switch: skip the shared-memory mapping (diagnostics only).
   if (std::getenv("CS2_PAYLOAD_PUB_NOSHM") != nullptr) return false;
@@ -208,13 +208,13 @@ void ModelPublisher::publish_now() noexcept {
   // Runs on the game's own thread (present hook); no payload thread exists.
   if (shared_ == nullptr && !map()) return;
   auto* shared = static_cast<wire::Shared*>(shared_);
-  const float width = static_cast<float>(shared->screen_width.load(std::memory_order_relaxed));
-  const float height = static_cast<float>(shared->screen_height.load(std::memory_order_relaxed));
+  const auto width = static_cast<float>(shared->screen_width.load(std::memory_order_relaxed));
+  const auto height = static_cast<float>(shared->screen_height.load(std::memory_order_relaxed));
   const render::OverlayModel& model = overlay_->update(width, height);
   publish(model, width, height);
 }
 
-bool ModelPublisher::start() noexcept {
+auto ModelPublisher::start() noexcept -> bool {
   if (running_.load()) return true;
   map();
   running_.store(true);
