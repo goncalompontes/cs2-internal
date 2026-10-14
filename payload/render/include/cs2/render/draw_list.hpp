@@ -19,11 +19,6 @@ struct Color {
   std::uint8_t a = 255;
 };
 
-enum class Font {
-  regular,  // backend default
-  pixel,    // embedded pixel font (ESP text)
-};
-
 struct Rect {  // outline
   float x0 = 0.0F;
   float y0 = 0.0F;
@@ -54,10 +49,10 @@ struct Text {
   float x = 0.0F;
   float y = 0.0F;
   Color color{};
-  Font font = Font::pixel;
   std::string value;
   bool centered = false;  // center horizontally on `x`
-  bool shadow = true;     // draw a 1px drop shadow for readability
+  bool shadow = true;     // 1px drop shadow (readability fallback)
+  bool outline = false;   // 1px black outline on every side (ESP labels)
 };
 
 using DrawCommand = std::variant<Rect, FilledRect, Line, Text>;
@@ -74,8 +69,10 @@ struct DrawList {
   void line(float x0, float y0, float x1, float y1, Color color, float thickness = 1.0F) {
     commands.push_back(Line{x0, y0, x1, y1, color, thickness});
   }
-  void text(float x, float y, Color color, std::string value, bool centered = false) {
-    commands.push_back(Text{x, y, color, Font::pixel, std::move(value), centered, true});
+  void text(float x, float y, Color color, std::string value, bool centered = false,
+            bool outline = false) {
+    commands.push_back(
+        Text{x, y, color, std::move(value), centered, !outline, outline});
   }
 
   void clear() { commands.clear(); }

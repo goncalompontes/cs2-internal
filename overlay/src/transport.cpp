@@ -197,4 +197,29 @@ auto read_model(wire::Model& out) noexcept -> bool {
   return first == second;
 }
 
+auto read_settings(wire::Settings& out) noexcept -> bool {
+  const std::scoped_lock lock(g_lock);
+  if (g_shared == nullptr && !ensure_mapped()) {
+    return false;
+  }
+  const uint32_t first = g_shared->settings_sequence.load(std::memory_order_acquire);
+  if ((first & 1U) != 0U) {
+    return false;
+  }
+  std::memcpy(&out, &g_shared->settings, sizeof(wire::Settings));
+  const uint32_t second = g_shared->settings_sequence.load(std::memory_order_acquire);
+  return first == second;
+}
+
+void write_settings(const wire::Settings& in) noexcept {
+  const std::scoped_lock lock(g_lock);
+  if (g_shared == nullptr && !ensure_mapped()) {
+    return;
+  }
+  const uint32_t sequence = g_shared->settings_sequence.load(std::memory_order_relaxed);
+  g_shared->settings_sequence.store(sequence + 1, std::memory_order_relaxed);  // odd
+  std::memcpy(&g_shared->settings, &in, sizeof(wire::Settings));
+  g_shared->settings_sequence.store(sequence + 2, std::memory_order_release);  // even
+}
+
 }  // namespace cs2::overlay::transport

@@ -86,14 +86,23 @@
 - [x] ESP overlay — UI-agnostic `render::DrawList` (boxes, filled rects, lines,
       text): bounding box, health bar (left), ammo bar (bottom), player name
       (top), weapon name (bottom) and right-side flags (money, armor, helmet,
-      kit, scoped, defusing, bomb, flash, ping, distance). Flags/names/weapons
-      use an embedded pixel font (Silkscreen, OFL), embedded at build time by
-      `scripts/gen-font.py`.
-- [~] Control channel (IPC) + scenario runner — **designed** (ADR-0020); see
-      `docs/control-harness.md`. RE of the console `exec` primitive is **done**
-      (`docs/re/engine2.md`): in-process `Cbuf_AddText` (`FUN_1801b8790`,
-      RVA `0x1b8790`) is the primary path; `-concommandpipe` is the
-      no-injection fallback (input-only). Implemented: none yet.
+      kit, scoped, defusing, bomb, flash, ping, distance). All text uses the
+      stock Dear ImGui font with antialiasing off; every ESP element except the
+      player name is outlined.
+- [x] In-game menu — `Insert` (or `Delete`, for keyboards where Insert needs Fn)
+      opens a tabbed Dear ImGui window (ESP / Interface /
+      About) with toggles for the ESP elements; the settings round-trip through
+      the shared segment to the payload (**ADR-0021**).
+- [~] Control channel (IPC) + scenario runner — **control core + input
+      implemented and validated live** (ADR-0020). `payload/control/`
+      (`ping`/`state`/`exec`/`wait_for`/`quit` over a named pipe) +
+      `scripts/scenario/` Python runner with `look`/`press`/`noclip`/`teleport`
+      (engine `setang` + button commands through `exec`; no OS input, no hooks).
+      `exec` uses the in-process `Cbuf_AddText` (`FUN_1801b8790`, RVA `0x1b8790`;
+      see `docs/re/engine2.md`). Scenarios `join-bot-match` and `move-and-aim`
+      run end to end; host test `control-core` is green. Remaining: game events
+      (`GameEventSystemClientV001`) and console-output capture.
+      See `docs/control-harness.md`.
 
 ## Phase 5 — Interfaces, events, deeper introspection
 - [ ] `Source2Client002`, `GameEventSystemClientV001`

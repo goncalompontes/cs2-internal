@@ -16,9 +16,17 @@ inline void overlay_log(const char* format, ...) noexcept {
   const char* path = std::getenv("CS2_OVERLAY_LOG");
   static char fallback[512];
   if (path == nullptr) {
-    const char* home = std::getenv("HOME");
-    std::snprintf(fallback, sizeof(fallback), "%s/cs2-overlay-layer.log",
-                  home != nullptr ? home : "/tmp");
+    // Native Windows: default next to the payload's other output (the env var
+    // may be absent when the game inherits Steam's cached environment).
+    const char* local_app_data = std::getenv("LOCALAPPDATA");
+    if (local_app_data != nullptr) {
+      std::snprintf(fallback, sizeof(fallback), "%s\\cs2-internal\\cs2-overlay-layer.log",
+                    local_app_data);
+    } else {
+      const char* home = std::getenv("HOME");
+      std::snprintf(fallback, sizeof(fallback), "%s/cs2-overlay-layer.log",
+                    home != nullptr ? home : "/tmp");
+    }
     path = fallback;
   }
   std::FILE* file = std::fopen(path, "a");

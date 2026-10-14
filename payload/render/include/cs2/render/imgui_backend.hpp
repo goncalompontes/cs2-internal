@@ -15,8 +15,8 @@ namespace cs2::render {
 // its window/mouse calls from the render thread deadlock under Wine, and the
 // overlay is display-only (ADR-0015).
 //
-// Two fonts are used: the ImGui default (debug window) and an embedded pixel
-// font (ESP text).
+// One font is used everywhere (menu/UI and ESP labels): the stock Dear ImGui
+// default. Its atlas is thresholded so glyphs render without antialiasing.
 class ImGuiBackend final : public UiBackend {
  public:
   [[nodiscard]] bool initialize(const RenderContext& context) override;
@@ -38,7 +38,6 @@ class ImGuiBackend final : public UiBackend {
   void* device_ = nullptr;          // ID3D11Device*
   void* device_context_ = nullptr;  // ID3D11DeviceContext*
   void* render_target_ = nullptr;   // ID3D11RenderTargetView* (back buffer)
-  void* pixel_font_ = nullptr;      // ImFont* (embedded ESP pixel font)
   unsigned render_target_width_ = 0;
   unsigned render_target_height_ = 0;
 };

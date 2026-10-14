@@ -19,7 +19,6 @@ namespace {
 namespace wire = ::cs2::overlay::wire;
 
 using wire::DrawKind;
-using wire::Font;
 
 void copy_string(char* out, std::size_t size, const std::string& value) noexcept {
   if (size == 0) {
@@ -35,6 +34,34 @@ void store_color(wire::Draw& out, const render::Color& color) noexcept {
   out.g = color.g;
   out.b = color.b;
   out.a = color.a;
+}
+
+// Bridge between the ESP toggles and the menu's shared settings (ADR-0021).
+auto to_wire_settings(const EspConfig& config) -> wire::Settings {
+  wire::Settings settings{};
+  settings.box = config.box ? 1 : 0;
+  settings.health_bar = config.health_bar ? 1 : 0;
+  settings.ammo_bar = config.ammo_bar ? 1 : 0;
+  settings.name = config.name ? 1 : 0;
+  settings.weapon = config.weapon ? 1 : 0;
+  settings.flags = config.flags ? 1 : 0;
+  settings.only_enemies = config.only_enemies ? 1 : 0;
+  settings.show_dead = config.show_dead ? 1 : 0;
+  settings.show_hud = 1;
+  return settings;
+}
+
+auto from_wire_settings(const wire::Settings& settings) -> EspConfig {
+  EspConfig config;
+  config.box = settings.box != 0;
+  config.health_bar = settings.health_bar != 0;
+  config.ammo_bar = settings.ammo_bar != 0;
+  config.name = settings.name != 0;
+  config.weapon = settings.weapon != 0;
+  config.flags = settings.flags != 0;
+  config.only_enemies = settings.only_enemies != 0;
+  config.show_dead = settings.show_dead != 0;
+  return config;
 }
 
 }  // namespace
@@ -83,6 +110,7 @@ void ModelPublisher::run() noexcept {
       const render::OverlayModel empty;
       publish(empty, width, height);
     } else {
+      apply_settings();
       const render::OverlayModel& model = overlay_->update(width, height);
       publish(model, width, height);
     }
@@ -103,6 +131,7 @@ void ModelPublisher::publish(const render::OverlayModel& source, float /*width*/
   wire::Model& out = shared->model;
 
   copy_string(out.title, sizeof(out.title), source.hud.title);
+  out.in_game = source.in_game ? 1 : 0;
   const std::size_t section_count =
       (std::min)(source.hud.sections.size(), static_cast<std::size_t>(wire::k_max_sections));
   out.section_count = static_cast<uint32_t>(section_count);
@@ -155,9 +184,9 @@ void ModelPublisher::publish(const render::OverlayModel& source, float /*width*/
             target.kind = DrawKind::text;
             target.x0 = command.x;
             target.y0 = command.y;
-            target.font = command.font == render::Font::pixel ? 1 : 0;
             target.centered = command.centered ? 1 : 0;
             target.shadow = command.shadow ? 1 : 0;
+            target.outline = command.outline ? 1 : 0;
             store_color(target, command.color);
             copy_string(target.text, sizeof(target.text), command.value);
           }
@@ -166,6 +195,38 @@ void ModelPublisher::publish(const render::OverlayModel& source, float /*width*/
   }
 
   shared->sequence.store(sequence + 2, std::memory_order_release);  // even: stable
+}
+
+void ModelPublisher::publish_settings() noexcept {
+  auto* shared = static_cast<wire::Shared*>(shared_);
+  if (shared == nullptr) {
+    return;
+  }
+  const wire::Settings defaults = to_wire_settings(overlay_->esp_config());
+  const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_relaxed);
+  shared->settings_sequence.store(sequence + 1, std::memory_order_relaxed);  // odd: writing
+  std::memcpy(&shared->settings, &defaults, sizeof(defaults));
+  shared->settings_sequence.store(sequence + 2, std::memory_order_release);  // even: stable
+  settings_sequence_ = sequence + 2;
+}
+
+void ModelPublisher::apply_settings() noexcept {
+  auto* shared = static_cast<wire::Shared*>(shared_);
+  if (shared == nullptr) {
+    return;
+  }
+  const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_acquire);
+  if ((sequence & 1U) != 0U || sequence == settings_sequence_) {
+    return;  // mid-write, or nothing new
+  }
+  wire::Settings copy{};
+  std::memcpy(&copy, &shared->settings, sizeof(copy));
+  const std::uint32_t confirmed = shared->settings_sequence.load(std::memory_order_acquire);
+  if (confirmed != sequence) {
+    return;  // raced a write; retry on the next frame
+  }
+  settings_sequence_ = sequence;
+  overlay_->set_esp_config(from_wire_settings(copy));
 }
 
 auto ModelPublisher::map() noexcept -> bool {
@@ -208,13 +269,17 @@ auto ModelPublisher::map() noexcept -> bool {
   mapping_ = mapping;
   shared_ = view;
   auto* shared = static_cast<wire::Shared*>(view);
-  if (shared->magic != wire::k_magic) {
+  if (shared->magic != wire::k_magic || shared->version != wire::k_version) {
     shared->magic = wire::k_magic;
     shared->version = wire::k_version;
     shared->sequence.store(0, std::memory_order_relaxed);
+    shared->settings_sequence.store(0, std::memory_order_relaxed);
     shared->screen_width.store(0, std::memory_order_relaxed);
     shared->screen_height.store(0, std::memory_order_relaxed);
   }
+  // Publish the default ESP toggles so the layer's menu starts in sync with the
+  // payload's configuration.
+  publish_settings();
   return true;
 }
 
@@ -226,6 +291,7 @@ void ModelPublisher::publish_now() noexcept {
   auto* shared = static_cast<wire::Shared*>(shared_);
   const auto width = static_cast<float>(shared->screen_width.load(std::memory_order_relaxed));
   const auto height = static_cast<float>(shared->screen_height.load(std::memory_order_relaxed));
+  apply_settings();
   const render::OverlayModel& model = overlay_->update(width, height);
   publish(model, width, height);
 }

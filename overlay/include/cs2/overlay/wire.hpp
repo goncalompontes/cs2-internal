@@ -20,7 +20,7 @@
 namespace cs2::overlay::wire {
 
 inline constexpr uint32_t k_magic = 0x324F5343U;  // 'CSO2'
-inline constexpr uint32_t k_version = 2;
+inline constexpr uint32_t k_version = 3;
 
 inline constexpr int k_max_sections = 16;
 inline constexpr int k_max_lines = 64;
@@ -52,11 +52,6 @@ enum class DrawKind : uint32_t {
   text = 3,
 };
 
-enum class Font : uint32_t {
-  regular = 0,
-  pixel = 1,
-};
-
 struct Draw {
   DrawKind kind;
   float x0;
@@ -68,11 +63,28 @@ struct Draw {
   uint8_t g;
   uint8_t b;
   uint8_t a;
-  uint8_t font;      // Font
   uint8_t centered;
-  uint8_t shadow;
+  uint8_t shadow;   // 1px drop shadow
+  uint8_t outline;  // 1px outline on every side
   uint8_t reserved;
   char text[k_max_text];
+};
+
+// Menu-editable configuration (ADR-0021). Written by the layer's menu, read by
+// the payload that builds the ESP, under `settings_sequence` (seqlock, same
+// convention as `model`).
+struct Settings {
+  uint8_t box;
+  uint8_t health_bar;
+  uint8_t ammo_bar;
+  uint8_t name;
+  uint8_t weapon;
+  uint8_t flags;
+  uint8_t only_enemies;
+  uint8_t show_dead;
+  uint8_t show_hud;   // draw the debug HUD window
+  uint8_t menu_open;  // written by the layer; the payload may suppress input
+  uint8_t reserved[6];
 };
 
 struct Model {
@@ -81,6 +93,7 @@ struct Model {
   Section sections[k_max_sections];
   uint32_t draw_count;
   Draw draws[k_max_draws];
+  uint32_t in_game;  // 1 when a local player is present (menu may interact)
 };
 
 struct Shared {
@@ -89,6 +102,8 @@ struct Shared {
   std::atomic<uint32_t> screen_width;   // written by the layer
   std::atomic<uint32_t> screen_height;  // written by the layer
   std::atomic<uint32_t> sequence;       // seqlock, written by the payload
+  std::atomic<uint32_t> settings_sequence;  // seqlock, written by both sides
+  Settings settings;
   Model model;
 };
 

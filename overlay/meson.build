@@ -32,8 +32,6 @@ on_windows = host_machine.system() == 'windows'
 
 vulkan_headers = include_directories('../external/Vulkan-Headers/include')
 overlay_inc = include_directories('include')
-# For the shared payload header (esp_font.hpp) used by the renderer.
-render_inc = include_directories('../payload/render/include')
 
 # The vendored ImGui is shared with the payload. Reference the payload copy
 # directly: the in-tree `overlay/third_party/imgui` is a git symlink, which does
@@ -46,14 +44,6 @@ imgui_sources = files(
   imgui_dir / 'imgui_tables.cpp',
   imgui_dir / 'imgui_widgets.cpp',
   imgui_dir / 'backends' / 'imgui_impl_vulkan.cpp',
-)
-
-# Embed the ESP pixel font (shared with the payload's render backend).
-gen_font = find_program(meson.project_source_root() / '..' / 'scripts' / 'gen-font.py')
-esp_font_src = custom_target('esp-font',
-  input : meson.project_source_root() / '..' / 'payload' / 'third_party' / 'fonts' / 'Silkscreen-Regular.ttf',
-  output : 'esp_font.cpp',
-  command : [gen_font, '@INPUT@', '@OUTPUT@'],
 )
 
 # The layer resolves Vulkan entry points through the loader chain, so it does
@@ -83,10 +73,10 @@ endif
 overlay_layer = shared_library('cs2_overlay_layer',
   'src/layer.cpp',
   'src/renderer.cpp',
+  'src/menu.cpp',
   'src/transport.cpp',
   imgui_sources,
-  esp_font_src,
-  include_directories : [vulkan_headers, overlay_inc, render_inc, imgui_inc],
+  include_directories : [vulkan_headers, overlay_inc, imgui_inc],
   dependencies : overlay_deps,
   # ImGui must resolve Vulkan entry points via the layer chain, not the loader's
   # global exports (see renderer.cpp).

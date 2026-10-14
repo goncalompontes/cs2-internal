@@ -57,7 +57,7 @@ SOURCE_SUFFIXES = (".cpp", ".cc", ".cxx", ".c", ".hpp", ".hh", ".h", ".hxx", ".i
 # Vendored / generated / toolchain trees that must never be auto-fixed.
 EXCLUDE_PARTS = ("third_party", "external", "toolchain", "subprojects", "meson-private")
 EXCLUDE_PREFIXES = (("payload", "sdk"),)  # generated SDK headers
-# Build trees hold generated sources (e.g. build-*/esp_font.cpp); skip them.
+# Build trees hold generated sources; skip them.
 EXCLUDE_ROOT_NAMES = ("build", "_install")
 
 # check groups -> clang-tidy checks. Every check listed here is auto-fixable

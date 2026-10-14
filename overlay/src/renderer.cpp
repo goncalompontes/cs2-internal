@@ -3,6 +3,7 @@
 #include <imgui.h>
 #include <imgui_impl_vulkan.h>
 
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -13,8 +14,8 @@
 #include <vector>
 
 #include "cs2/overlay/wire.hpp"
-#include "cs2/render/esp_font.hpp"
 #include "log.hpp"
+#include "menu.hpp"
 #include "transport.hpp"
 
 namespace cs2::overlay {
@@ -116,7 +117,6 @@ std::recursive_mutex g_lock;
 std::unordered_map<VkDevice, Device> g_devices;
 std::unordered_map<VkSwapchainKHR, SwapchainData> g_swapchains;
 VkDevice g_imgui_device = VK_NULL_HANDLE;
-ImFont* g_pixel_font = nullptr;
 std::uint64_t g_frame = 0;
 
 template <typename T>
@@ -225,6 +225,7 @@ auto ensure_render_pass(Device& device, VkFormat format) -> VkRenderPass {
   }
   // A format change invalidates ImGui's pipeline (built against the render pass).
   if (device.imgui_ready) {
+    menu::shutdown();
     ImGui_ImplVulkan_Shutdown();
     ImGui::DestroyContext();
     device.imgui_ready = false;
@@ -316,6 +317,25 @@ auto ensure_swapchain(Device& device, VkSwapchainKHR swapchain) -> SwapchainData
   return &g_swapchains.emplace(swapchain, std::move(data)).first->second;
 }
 
+// Dear ImGui's atlas is anti-aliased; the overlay wants hard-edged text, so the
+// glyph coverage is thresholded to full/zero alpha before it is uploaded. RGB is
+// forced white so the glyph is tinted purely by the vertex colour.
+void harden_font_atlas_alpha() {
+  ImFontAtlas& atlas = *ImGui::GetIO().Fonts;
+  if (!atlas.Build() || atlas.TexPixelsRGBA32 == nullptr) {
+    return;
+  }
+  auto* pixels = reinterpret_cast<unsigned char*>(atlas.TexPixelsRGBA32);
+  const int count = atlas.TexWidth * atlas.TexHeight;
+  for (int i = 0; i < count; ++i) {
+    const unsigned char alpha = pixels[i * 4 + 3];
+    pixels[i * 4 + 0] = 255;
+    pixels[i * 4 + 1] = 255;
+    pixels[i * 4 + 2] = 255;
+    pixels[i * 4 + 3] = alpha >= 128 ? 255 : 0;
+  }
+}
+
 auto ensure_imgui(Device& device, VkQueue queue, uint32_t queue_family, VkRenderPass pass) -> bool {
   if (device.imgui_ready) {
     return true;
@@ -345,14 +365,12 @@ auto ensure_imgui(Device& device, VkQueue queue, uint32_t queue_family, VkRender
   ImGui::StyleColorsDark();
   ImGui::GetIO().IniFilename = nullptr;
 
+  // One font everywhere: the stock Dear ImGui font (13 px ProggyClean), for both
+  // the menu/UI and the ESP labels.
   ImFontConfig font_config;
-  font_config.FontDataOwnedByAtlas = false;
   font_config.PixelSnapH = true;
-  font_config.OversampleH = 1;
-  font_config.OversampleV = 1;
-  g_pixel_font = ImGui::GetIO().Fonts->AddFontFromMemoryTTF(
-      const_cast<unsigned char*>(cs2::render::k_esp_font_ttf),
-      static_cast<int>(cs2::render::k_esp_font_ttf_size), 16.0F, &font_config);
+  ImGui::GetIO().Fonts->AddFontDefault(&font_config);
+  harden_font_atlas_alpha();
 
   std::fprintf(stderr,
                "[cs2-overlay] imgui init instance=%p physdev=%p device=%p queue=%p family=%u pass=%p\n",
@@ -413,7 +431,23 @@ void image_barrier(const Functions& fn, VkCommandBuffer command_buffer, VkImage 
                           &barrier);
 }
 
-void draw_overlay_model(const wire::Model& model) {
+// Defaults match `features::EspConfig` so a fresh segment renders the same ESP
+// as before the menu existed.
+auto default_ui_settings() -> wire::Settings {
+  wire::Settings settings{};
+  settings.box = 1;
+  settings.health_bar = 1;
+  settings.ammo_bar = 1;
+  settings.name = 1;
+  settings.weapon = 1;
+  settings.flags = 1;
+  settings.only_enemies = 1;
+  settings.show_dead = 0;
+  settings.show_hud = 1;
+  return settings;
+}
+
+void draw_overlay_model(const wire::Model& model, const wire::Settings& settings) {
   ImDrawList* draw = ImGui::GetBackgroundDrawList();
   const uint32_t draw_count = model.draw_count < static_cast<uint32_t>(wire::k_max_draws)
                                   ? model.draw_count
@@ -434,17 +468,32 @@ void draw_overlay_model(const wire::Model& model) {
         draw->AddLine(p0, p1, color, command.thickness);
         break;
       case wire::DrawKind::text: {
-        ImFont* font =
-            (command.font == 1 && g_pixel_font != nullptr) ? g_pixel_font : ImGui::GetFont();
+        ImFont* font = ImGui::GetFont();
         const float size = font->FontSize;
         ImVec2 position(command.x0, command.y0);
         if (command.centered != 0) {
           const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.0F, command.text);
           position.x -= extent.x * 0.5F;
         }
-        if (command.shadow != 0) {
-          draw->AddText(font, size, ImVec2(position.x + 1.0F, position.y + 1.0F),
-                        IM_COL32(0, 0, 0, command.a), command.text);
+        // Integer positions keep the non-antialiased glyphs pixel-exact.
+        position.x = std::floor(position.x);
+        position.y = std::floor(position.y);
+        const ImU32 black = IM_COL32(0, 0, 0, command.a);
+        if (command.outline != 0) {
+          for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+              if (dx == 0 && dy == 0) {
+                continue;
+              }
+              draw->AddText(font, size,
+                            ImVec2(position.x + static_cast<float>(dx),
+                                   position.y + static_cast<float>(dy)),
+                            black, command.text);
+            }
+          }
+        } else if (command.shadow != 0) {
+          draw->AddText(font, size, ImVec2(position.x + 1.0F, position.y + 1.0F), black,
+                        command.text);
         }
         draw->AddText(font, size, position, color, command.text);
         break;
@@ -452,6 +501,9 @@ void draw_overlay_model(const wire::Model& model) {
     }
   }
 
+  if (settings.show_hud == 0) {
+    return;
+  }
   const uint32_t section_count = model.section_count < static_cast<uint32_t>(wire::k_max_sections)
                                      ? model.section_count
                                      : static_cast<uint32_t>(wire::k_max_sections);
@@ -503,6 +555,7 @@ void device_destroyed(VkDevice device) noexcept {
     sc = g_swapchains.erase(sc);  // per-device teardown happens with the device
   }
   if (dev.imgui_ready) {
+    menu::shutdown();
     ImGui_ImplVulkan_Shutdown();
     ImGui::DestroyContext();
     g_imgui_device = VK_NULL_HANDLE;
@@ -602,16 +655,34 @@ auto present(VkDevice vk_device, VkQueue queue, uint32_t queue_family,
   io.DeltaTime = 1.0F / 60.0F;
   ImGui_ImplVulkan_NewFrame();
   ImGui::NewFrame();
-  draw_overlay_model(model);
+
+  // Menu settings: the payload publishes the defaults with the segment, the
+  // menu edits them here, and any change is written back for the payload's ESP.
+  static wire::Settings settings = default_ui_settings();
+  static bool settings_loaded = false;
+  if (!settings_loaded) {
+    wire::Settings published{};
+    if (transport::read_settings(published)) {
+      settings = published;
+      settings_loaded = true;
+    }
+  }
+  const wire::Settings before_menu = settings;
+  menu::frame(settings, model.in_game != 0);
+  if (std::memcmp(&before_menu, &settings, sizeof(settings)) != 0) {
+    transport::write_settings(settings);
+  }
+
+  draw_overlay_model(model, settings);
   ImGui::Render();
 
   const ImDrawData* draw_data = ImGui::GetDrawData();
   if (g_frame < 3 || g_frame % 300 == 0) {
-    overlay_log("cs2-overlay: drew frame %llu vtx=%d idx=%d sec=%u draws=%u",
+    overlay_log("cs2-overlay: drew frame %llu vtx=%d idx=%d sec=%u draws=%u in_game=%u menu=%u",
                 static_cast<unsigned long long>(g_frame),
                 draw_data != nullptr ? draw_data->TotalVtxCount : -1,
                 draw_data != nullptr ? draw_data->TotalIdxCount : -1, model.section_count,
-                model.draw_count);
+                model.draw_count, model.in_game, settings.menu_open);
   }
 
   VkRenderPassBeginInfo render_pass{};

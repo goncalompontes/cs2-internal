@@ -29,6 +29,10 @@ class Overlay {
   }
   [[nodiscard]] const render::OverlayModel& model() const noexcept { return model_; }
 
+  // ESP toggles, applied from the menu's shared settings (ADR-0021).
+  [[nodiscard]] const EspConfig& esp_config() const noexcept { return esp_.config(); }
+  void set_esp_config(const EspConfig& config) noexcept { esp_.config() = config; }
+
  private:
   std::optional<game::StateReader> reader_;
   render::OverlayModel model_;

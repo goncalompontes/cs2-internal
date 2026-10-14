@@ -1,11 +1,10 @@
 #include "cs2/render/imgui_backend.hpp"
 
 #include <cfloat>
+#include <cmath>
 #include <cstdio>
 #include <type_traits>
 #include <variant>
-
-#include "cs2/render/esp_font.hpp"
 
 #if defined(_WIN32)
 #include <d3d11.h>
@@ -22,10 +21,6 @@ namespace {
 auto to_u32(const Color& color) -> ImU32 {
   return IM_COL32(color.r, color.g, color.b, color.a);
 }
-
-// Pixel size the embedded pixel font is rasterized at (Silkscreen is designed
-// on an 8px grid, so 16 keeps the scaling integral).
-constexpr float k_esp_font_size = 16.0F;
 #endif
 
 }  // namespace
@@ -33,15 +28,20 @@ constexpr float k_esp_font_size = 16.0F;
 void ImGuiBackend::load_fonts() {
 #if defined(_WIN32)
   ImFontConfig config;
-  config.FontDataOwnedByAtlas = false;  // the byte array is static
   config.PixelSnapH = true;
-  config.OversampleH = 1;
-  config.OversampleV = 1;
-  pixel_font_ = ImGui::GetIO().Fonts->AddFontFromMemoryTTF(
-      const_cast<unsigned char*>(k_esp_font_ttf), static_cast<int>(k_esp_font_ttf_size),
-      k_esp_font_size, &config);
-  if (pixel_font_ == nullptr) {
-    std::puts("[cs2-render] failed to load the ESP pixel font");
+  ImGui::GetIO().Fonts->AddFontDefault(&config);
+  // Dear ImGui's atlas is antialiased; threshold the coverage so text renders
+  // with hard edges.
+  ImFontAtlas& atlas = *ImGui::GetIO().Fonts;
+  if (atlas.Build() && atlas.TexPixelsRGBA32 != nullptr) {
+    auto* pixels = reinterpret_cast<unsigned char*>(atlas.TexPixelsRGBA32);
+    for (int i = 0; i < atlas.TexWidth * atlas.TexHeight; ++i) {
+      const unsigned char alpha = pixels[i * 4 + 3];
+      pixels[i * 4 + 0] = 255;
+      pixels[i * 4 + 1] = 255;
+      pixels[i * 4 + 2] = 255;
+      pixels[i * 4 + 3] = alpha >= 128 ? 255 : 0;
+    }
   }
 #endif
 }
@@ -153,18 +153,30 @@ void ImGuiBackend::draw_commands(const DrawList& draw) {
             list->AddLine(ImVec2(item.x0, item.y0), ImVec2(item.x1, item.y1), to_u32(item.color),
                           item.thickness);
           } else if constexpr (std::is_same_v<T, Text>) {
-            ImFont* font = (item.font == Font::pixel && pixel_font_ != nullptr)
-                               ? static_cast<ImFont*>(pixel_font_)
-                               : ImGui::GetFont();
+            ImFont* font = ImGui::GetFont();
             const float size = font->FontSize;
             ImVec2 pos(item.x, item.y);
             if (item.centered) {
               const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.0F, item.value.c_str());
               pos.x -= extent.x * 0.5F;
             }
-            if (item.shadow) {
-              list->AddText(font, size, ImVec2(pos.x + 1.0F, pos.y + 1.0F),
-                            to_u32(Color{0, 0, 0, item.color.a}), item.value.c_str());
+            pos.x = std::floor(pos.x);
+            pos.y = std::floor(pos.y);
+            const ImU32 black = to_u32(Color{0, 0, 0, item.color.a});
+            if (item.outline) {
+              for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                  if (dx == 0 && dy == 0) {
+                    continue;
+                  }
+                  list->AddText(font, size,
+                                ImVec2(pos.x + static_cast<float>(dx), pos.y + static_cast<float>(dy)),
+                                black, item.value.c_str());
+                }
+              }
+            } else if (item.shadow) {
+              list->AddText(font, size, ImVec2(pos.x + 1.0F, pos.y + 1.0F), black,
+                            item.value.c_str());
             }
             list->AddText(font, size, pos, to_u32(item.color), item.value.c_str());
           }
@@ -246,7 +258,6 @@ void ImGuiBackend::shutdown() {
     ImGui_ImplDX11_Shutdown();
     ImGui::DestroyContext();
     release_render_target();
-    pixel_font_ = nullptr;
     initialized_ = false;
   }
 #endif

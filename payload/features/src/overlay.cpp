@@ -146,6 +146,7 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
     model_.hud.title += "  [no local player]";
     return model_;
   }
+  model_.in_game = true;  // a local player exists: the menu may take input
 
   model_.hud.sections.push_back(local_section(snapshot));
   model_.hud.sections.push_back(players_section(snapshot));

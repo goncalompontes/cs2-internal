@@ -135,6 +135,8 @@ void Esp::build(const game::Snapshot& snapshot, const game::Matrix4x4& view, flo
         (local_team != 0 && player.team != local_team) ? k_color_enemy : k_color_team;
 
     if (config_.box) {
+      // 1px black border so the box reads against any background.
+      out.outline(min.x - 1.0F, min.y - 1.0F, max.x + 1.0F, max.y + 1.0F, k_color_border, 1.0F);
       out.outline(min.x, min.y, max.x, max.y, accent, 1.5F);
     }
 
@@ -157,22 +159,24 @@ void Esp::build(const game::Snapshot& snapshot, const game::Matrix4x4& view, flo
       const float y0 = max.y + 3.0F;
       out.fill(min.x, y0, max.x, y0 + bar_h, k_color_track);
       out.fill(min.x, y0, min.x + box_w * fraction, y0 + bar_h, k_color_ammo);
+      out.outline(min.x - 1.0F, y0 - 1.0F, max.x + 1.0F, y0 + bar_h + 1.0F, k_color_border, 1.0F);
     }
 
     if (config_.name && !player.name.empty()) {
+      // The name is the one ESP label that is *not* outlined.
       out.text((min.x + max.x) * 0.5F, min.y - k_text_height - 2.0F, k_color_text, player.name,
                true);
     }
 
     if (config_.weapon && !player.weapon.empty()) {
       out.text((min.x + max.x) * 0.5F, max.y + 8.0F, k_color_text, weapon_label(player.weapon),
-               true);
+               true, true);
     }
 
     if (config_.flags) {
       float y = min.y;
       const auto flag = [&](std::string value, Color color) -> void {
-        out.text(max.x + 4.0F, y, color, std::move(value));
+        out.text(max.x + 4.0F, y, color, std::move(value), false, true);
         y += k_text_height;
       };
       if (player.money > 0) {

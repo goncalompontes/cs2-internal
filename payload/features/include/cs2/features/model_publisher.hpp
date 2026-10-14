@@ -49,6 +49,10 @@ class ModelPublisher {
   static unsigned long __stdcall thread_entry(void* self) noexcept;
   void run() noexcept;
   void publish(const render::OverlayModel& model, float width, float height) noexcept;
+  // Menu settings (ADR-0021): publish the defaults with the segment, then adopt
+  // whatever the layer's menu writes back.
+  void publish_settings() noexcept;
+  void apply_settings() noexcept;
 #endif
 
   Overlay* overlay_;
@@ -56,6 +60,7 @@ class ModelPublisher {
   void* mapping_ = nullptr;  // HANDLE
   void* shared_ = nullptr;   // wire::Shared*
   void* thread_ = nullptr;   // HANDLE
+  std::uint32_t settings_sequence_ = 0xFFFFFFFFU;
 #endif
   std::atomic<bool> running_{false};
 };

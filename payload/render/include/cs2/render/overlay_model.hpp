@@ -10,6 +10,9 @@ namespace cs2::render {
 struct OverlayModel {
   HudModel hud;
   DrawList draw;
+  // True when a local player is present. The layer uses it to decide whether the
+  // menu may take input (never during engine boot).
+  bool in_game = false;
 };
 
 }  // namespace cs2::render
