@@ -37,9 +37,23 @@ starting a RE session: it saves the trial-and-error that produced it.
 
 ### Two ways in
 
-**MCP tools (preferred for interactive work).** The tool list is huge and
-discovered dynamically: the catalog is partial, so page it once and keep the
-names you need.
+> **Use the integrated MCP tools. Always.** They are exposed to the agent as
+> `tools.rea.*` (call them from the Code Mode `execute` runtime, e.g.
+> `tools.rea.procedure_pseudo_code({ procedure: "0x1801bfe00" })`). They are
+> already wired to the running server — bound target, provider profile, auth,
+> response budget — return **normalized, confidence-annotated** results, and
+> keep the analysis loaded between calls.
+>
+> Do **not** shell out to the `rea` shim (or spawn/talk to the MCP server
+> yourself) to "get the same thing": a shell call starts a fresh process, pays a
+> cold import when no warm project matches, returns raw provider JSON instead of
+> normalized results, and cannot reuse the session you are already working in.
+> The CLI box below exists only for what the tools cannot express (producing a
+> dump for `--gen`, reproducing a finding for a doc) — treat it as the last
+> resort, not the default.
+
+**MCP tools (the default).** The tool list is huge and discovered dynamically:
+the catalog is partial, so page it once and keep the names you need.
 
 ```js
 // inside execute(): list every REA tool (~194)
@@ -63,8 +77,9 @@ A session holds **one bound target**. `list_documents` says which one;
 `client.dll` is ~40 MB and can take tens of minutes — start it in the background
 with `analyzeHeadless`, see §8).
 
-**CLI (scripted/batch).** With the warm project env set, the same analysis is
-available per call:
+**CLI (last resort: batch/reproduce).** With the warm project env set, the same
+analysis is available per call — use this only when a tool cannot express what
+you need (or to reproduce a result in a doc), never as the normal path:
 
 ```powershell
 $env:GHIDRA_INSTALL_DIR          = "C:\Users\gpmpo\ghidra\ghidra_12.1.4_PUBLIC"

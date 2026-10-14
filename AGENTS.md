@@ -59,6 +59,11 @@ on native Windows — see `docs/handoff.md` and `docs/windows-validation.md`.
   config's `mcp.rea` entry (`C:\Users\gpmpo\.config\opencode\opencode.jsonc`).
 - The running `rea` MCP server **hot-reloads** config edits; do **not** run
   `opencode service restart` (it kills the agent session).
+- **Prefer the integrated MCP tools** (`tools.rea.*`, called from the Code Mode
+  `execute` runtime) over shelling out to the `rea` shim or driving the MCP
+  server by hand: the tools reuse the bound session and return normalized,
+  confidence-annotated results, while a shell call starts a fresh process and
+  pays a cold import. See `docs/re/README.md`.
 - Fast iteration uses the pre-imported project
   `C:\Users\gpmpo\ghidra-analysis\rea-project` (program `engine2.dll`) via
   `REA_GHIDRA_EXISTING_PROJECT` / `REA_GHIDRA_EXISTING_PROGRAM` (~13 s vs ~4 min
