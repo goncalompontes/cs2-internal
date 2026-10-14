@@ -22,10 +22,10 @@ starting a RE session: it saves the trial-and-error that produced it.
 
 | What | Where |
 |---|---|
-| REA (MCP + CLI) | `C:\Users\gpmpo\rea-src` (upstream PR #2358, branch `pr-2358`), `npm link`ed as `rea` |
+| REA (MCP + CLI) | installed build: `C:\Users\gpmpo\rea-src-install` (v6.4.0 + persistent Ghidra project cache), `npm link`ed as `rea`; PR source: `C:\Users\gpmpo\rea-src` (branch `feat/ghidra-project-cache`) |
 | Ghidra | `C:\Users\gpmpo\ghidra\ghidra_12.1.4_PUBLIC` (12.1.4) |
 | Java | `C:\Program Files\Java\jdk-21` |
-| MCP config | `C:\Users\gpmpo\.config\opencode\opencode.jsonc` → `mcp.rea` (`REA_ANALYSIS_PROVIDER=ghidra`, `GHIDRA_INSTALL_DIR`, `JAVA_HOME`, `REA_GHIDRA_STARTUP_TIMEOUT_MS=1800000`) |
+| MCP config | `C:\Users\gpmpo\.config\opencode\opencode.jsonc` → `mcp.rea` (`REA_ANALYSIS_PROVIDER=ghidra`, `GHIDRA_INSTALL_DIR`, `JAVA_HOME`, `REA_GHIDRA_STARTUP_TIMEOUT_MS=1800000`, `REA_GHIDRA_PROJECT_CACHE=on`) |
 
 - The MCP server is already running and **hot-reloads** config edits. **Do not run
   `opencode service restart`** — it kills the agent session.
@@ -105,7 +105,18 @@ rea xrefs     "C:\Users\gpmpo\ghidra-analysis\engine2.dll" 0x18057b850 --format 
    approximate; `procedure_assembly` (or `inspect_native_instruction`) shows what
    actually happens (`MOV/LEA`, register use, the `this` pointer, stack args).
    Read argument *usage*, not the decompiler's signature.
-4. **Only then** write it down (§5) and, if the payload needs it, make a
+4. **Cross-check against the community reverse — always.** Game-internal RE is
+   heavily co-developed: UnknownCheats (esp. the CS2 *Reversal, Structs and
+   Offsets* thread), GitHub CS2 internal/cheat sources, and `cs2-dumper` all
+   publish the same class names, vtable slots, struct offsets and prologue
+   patterns. Search them for the symbol you are working on and use their findings
+   to (a) *predict* the answer before you decompile, (b) confirm your offset is
+   the same field they mean, and (c) catch a wrong "looks like" match. Treat it
+   as a hypothesis, not authority: their build differs from ours, so always
+   re-derive on the current binary — but a mismatch with several independent
+   sources is a strong signal you have the wrong function/field. Record the
+   sources you used (thread URL + build/date) in the doc, per §5.
+5. **Only then** write it down (§5) and, if the payload needs it, make a
    signature (§4).
 
 Worked example (`engine2.dll`, the `exec` primitive):
@@ -205,25 +216,63 @@ Source of the copies: the Steam depot
 (`…\game\bin\win64\engine2.dll`, `…\game\csgo\bin\win64\client.dll`). Copy to the
 `ghidra-analysis` directory before importing.
 
-## 8. Warm projects (fast iteration)
+## 8. Warm analysis (the persistent Ghidra project cache)
 
-Warm pre-imported Ghidra projects make opens ~13 s instead of a full cold
-analysis. Create/replace one with Ghidra's own headless importer (run it in the
-background — a 40 MB DLL can take tens of minutes):
+REA keeps a **persistent Ghidra project cache**: a target is imported and
+analyzed once, stored, and reused by later sessions (CLI and MCP) instead of
+being re-imported. The MCP entry enables it (`REA_GHIDRA_PROJECT_CACHE=on`,
+`off | read | on`), so **agents get warm opens automatically** — no env edit and
+no per-module switch.
+
+- A **miss** imports writable and stores the analyzed project under
+  `C:\Users\gpmpo\.rea\cache\ghidra-projects\<key>`; the key is the target
+  sha256 + provider + JVM + platform + import profile. A **hit** opens the stored
+  copy with `-process -noanalysis -readOnly`. Measured here: `engine2.dll` first
+  open **256.8 s → hit ~31 s**; `client.dll` first open **~21 min → hit ~49 s**
+  (the copy is 100 MB / 617 MB, so a hit is dominated by the project copy).
+- **Switching targets needs no config edit** — the key is derived from the
+  target, so `engine2.dll` and `client.dll` coexist. The cache is off by default
+  and cannot be combined with `REA_GHIDRA_EXISTING_PROJECT`.
+- Inspect/maintain it with the CLI (`rea cache-…`):
+  `cache-list` (key, program, target sha256, size, created), `cache-verify`
+  (`--repair` drops corrupt entries), `cache-prune` (byte/age ceiling),
+  `cache-remove <key>`. Bound it with `REA_GHIDRA_PROJECT_CACHE_MAX_BYTES`
+  (default 10 GiB) and `REA_GHIDRA_PROJECT_CACHE_MAX_AGE_DAYS`.
+- **Verify warm vs cold:** `rea cache-list` shows what is warm; a hit's Evidence
+  carries the limitation *"Ghidra analysis was reused from a local project
+  cache…"*, while a cold run has no such line and takes minutes.
+
+**Where REA is installed.** `C:\Users\gpmpo\rea-src` tracks the PR branch
+`feat/ghidra-project-cache` (merged with `main`), but **Windows cannot run the
+merged build**: `main` added a native-loader requirement
+(`privateBridgeDescriptorAccess`) the prebuilt native addon (v6.4.0) does not
+report, and the addon build lane is Linux + MinGW only. The installed build is
+the pre-merge worktree **`C:\Users\gpmpo\rea-src-install`** (v6.4.0, native addon
+matches, full cache feature); both the MCP entry and the global `rea` shim point
+at it. Rebuild with `npm run compile` there. (Its `native/windows/build/manifest.json`
+is a local, gitignored version binding — do not commit it.)
+
+**Seeding from an operator project** (no re-analysis). Upstream `rea cache
+import` does not exist yet, so `scripts/seed-rea-project-cache.mjs` computes the
+identity REA resolves and publishes an existing headless project under it:
 
 ```powershell
-$env:JAVA_HOME = "C:\Program Files\Java\jdk-21"
-& "C:\Users\gpmpo\ghidra\ghidra_12.1.4_PUBLIC\support\analyzeHeadless.bat" `
-    "C:\Users\gpmpo\ghidra-analysis" client-project -import "C:\Users\gpmpo\ghidra-analysis\client.dll"
+$env:GHIDRA_INSTALL_DIR = "C:\Users\gpmpo\ghidra\ghidra_12.1.4_PUBLIC"
+$env:JAVA_HOME          = "C:\Program Files\Java\jdk-21"
+$env:REA_SRC            = "C:\Users\gpmpo\rea-src-install"
+node scripts/seed-rea-project-cache.mjs `
+  --target  C:\Users\gpmpo\ghidra-analysis\client.dll `
+  --project C:\Users\gpmpo\ghidra-analysis\client-warm --program client.dll
 ```
 
-Then point REA at it (`REA_GHIDRA_EXISTING_PROJECT` + `REA_GHIDRA_EXISTING_PROGRAM`
-= the program name, i.e. the DLL file name). Current projects:
+Seeded here: `engine2.dll` (from `ghidra-analysis\rea-project`) and `client.dll`
+(from `ghidra-analysis\client-warm`). The old `REA_GHIDRA_EXISTING_PROJECT` pair
+still exists for a one-off manual project, but it binds the session to that one
+program — prefer the cache.
 
-| Project | Program | Status |
-|---|---|---|
-| `C:\Users\gpmpo\ghidra-analysis\rea-project` | `engine2.dll` | warm, in use |
-| `C:\Users\gpmpo\ghidra-analysis\client-project` | `client.dll` | **stub** — the import was cancelled; re-run §8 |
+**One program per session.** A headless Ghidra session holds exactly one
+program, and one cache entry is one analyzed program. `rea cache-list` shows
+every warm target.
 
 ## 9. Current RE map (what is done, what is not)
 
@@ -231,14 +280,37 @@ Then point REA at it (`REA_GHIDRA_EXISTING_PROJECT` + `REA_GHIDRA_EXISTING_PROGR
   (`0x8dbf20`), `Cbuf_AddText` wrapper (`0x1b8790`), `-concommandpipe`
   (`0x1bfe00`/`0x1b9770`/`0x1c7310`). Game event system: interface located
   (singleton `0x91c9e0`, vtable `0x58ae38`, dispatch `+0x90`,
-  `IGameEvent::GetName` at `+0x18`, add/remove `+0x60`/`+0x68`); the
-  `AddListener` **calling convention and `IGameEventListener2` shape still need
-  client.dll call sites**.
+  `IGameEvent::GetName` at `+0x18`, add/remove `+0x60`/`+0x68`); the engine
+  listener is a `{ctx, fn}` delegate. The client-facing
+  `IGameEventListener2`/`AddListener` API lives in client.dll (see above) and is
+  what the harness uses.
 - **`client.dll`** — entity system / local player / view matrix documented
-  (`docs/re/client-dll.md`). Open: the `CUserCmd` input path (a hook to write
-  view angles / buttons per tick), and the game-event call sites. Anchors from a
-  string scan: `CreateMove` `0x1c9c334`, `CCSGOInput` `0x2320304`,
-  `usercmd` `0x1b26ed2`, `m_nButtons` `0x1c338a8`, `round_start` `0x1b27fc8`,
-  `player_death` `0x1b27fe8`.
+  (`docs/re/client-dll.md`). **Game events resolved:** the harness patches the
+  `CGameEventManager` dispatch vtable slots (`FireEvent` `+0x38`,
+  `FireEventClientSide` `+0x40`); `IGameEvent::GetName` and
+  `IGameEventListener2::FireGameEvent` are both at vtable `+0x8`; the field
+  getters are `GetBool` 6, `GetInt` 7, `GetFloat` 9, `GetString` 10,
+  `GetPlayerIndex` 15, keyed by
+  `MurmurHash2_casefolded(name, len, 0x31415926 ^ len)`. Signatures:
+  `game_event_manager` (the manager global `+0x2542908`) and `event_key_hash`
+  (the field-name hash); the event name/field lists come from
+  `scripts/extract-gameevents.py`.
+- **`client.dll` — input path (`CUserCmd`) done** (`docs/re/client-dll.md`
+  §"Input path"). `CCSGOInput` singleton object `+0x2572460` (vtable
+  `+0x1c97b28`; handle `+0x2233d10` = `dwCSGOInput`). `CreateMove` = vtable slot 5
+  (`+0xb64e60`, `(CCSGOInput*, int slot, bool active)`); slot 25 (`+0xd01610`)
+  receives the `CUserCmd*` directly. `CUserCmd` stride `0x98`, 150 per
+  `CUserCmdArray` (`+0x221bd10`); command number `+0x8`, `CSGOUserCmdPB` `+0x10`,
+  `InButtonState` `+0x58`, button masks `+0x60/+0x68/+0x70` (`IN_JUMP = 1<<1`).
+  `GetUserCmd` chain: `get_user_cmd_tick` `+0x15d9b20`,
+  `get_user_cmd_array` `+0x943800`, `get_user_cmd_by_sequence` `+0x9435e0`. All
+  covered by signatures in `analysis.rs`; the payload implements the hook in
+  `payload/control/input.{hpp,cpp}` (`usercmd` backend). The old
+  `CreateMove 0x1c9c334` / `CCSGOInput 0x2320304` / `m_nButtons 0x1c338a8`
+  anchors were **strings**.
 
 When you finish a subsystem, update this map and the per-module doc.
+
+Warm analysis is automatic now (see §8): a later session reuses the stored
+project instead of re-importing. Re-derive addresses from the curated signatures
+(`external/dumper/src/analysis.rs`) rather than memorising them.

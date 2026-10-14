@@ -52,20 +52,26 @@ on native Windows — see `docs/handoff.md` and `docs/windows-validation.md`.
 > RTTI, turning findings into dumper signatures, gotchas, warm projects, and the
 > current RE map).
 
-- REA is built from upstream **PR #2358** at `C:\Users\gpmpo\rea-src`
-  (branch `pr-2358`, HEAD `9adad2c23`), `npm link`ed to the global `rea`.
-  Provider: **Ghidra 12.1.4** at `C:\Users\gpmpo\ghidra\ghidra_12.1.4_PUBLIC`
-  (Java 21 at `C:\Program Files\Java\jdk-21`). Configured in the global OpenCode
-  config's `mcp.rea` entry (`C:\Users\gpmpo\.config\opencode\opencode.jsonc`).
+- REA is installed from the local checkout at `C:\Users\gpmpo\rea-src-install`
+  (v6.4.0 + the persistent Ghidra project cache), `npm link`ed to the global
+  `rea`. The PR source is `C:\Users\gpmpo\rea-src` (branch
+  `feat/ghidra-project-cache`, merged with `main`); **Windows cannot run the
+  merged build** because its native loader requires an addon field the prebuilt
+  v6.4.0 artifact lacks (the addon lane is Linux + MinGW only). Provider:
+  **Ghidra 12.1.4** at `C:\Users\gpmpo\ghidra\ghidra_12.1.4_PUBLIC` (Java 21 at
+  `C:\Program Files\Java\jdk-21`). Configured in the global OpenCode config's
+  `mcp.rea` entry (`C:\Users\gpmpo\.config\opencode\opencode.jsonc`).
+- **Warm analysis is automatic.** The MCP entry sets
+  `REA_GHIDRA_PROJECT_CACHE=on`, so a target analyzed once is reused by later
+  sessions: a hit opens the stored project with `-process -noanalysis` (seconds
+  vs minutes) and switching targets needs no config edit. `rea cache-list` shows
+  what is warm. Setup, seeding and the switch policy are in
+  `docs/re/README.md` §8.
 - The running `rea` MCP server **hot-reloads** config edits; do **not** run
   `opencode service restart` (it kills the agent session).
 - **Prefer the integrated MCP tools** (`tools.rea.*`, called from the Code Mode
   `execute` runtime) over shelling out to the `rea` shim or driving the MCP
   server by hand: the tools reuse the bound session and return normalized,
-  confidence-annotated results, while a shell call starts a fresh process and
-  pays a cold import. See `docs/re/README.md`.
-- Fast iteration uses the pre-imported project
-  `C:\Users\gpmpo\ghidra-analysis\rea-project` (program `engine2.dll`) via
-  `REA_GHIDRA_EXISTING_PROJECT` / `REA_GHIDRA_EXISTING_PROGRAM` (~13 s vs ~4 min
-  cold). Exact env/commands are in `docs/control-harness.md`.
+  confidence-annotated results, while a shell call starts a fresh process. See
+  `docs/re/README.md`.
 - Windows Ghidra is **read-only** (no annotation).
