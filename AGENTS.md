@@ -47,6 +47,11 @@ on native Windows — see `docs/handoff.md` and `docs/windows-validation.md`.
 
 ## Static RE tooling (REA + Ghidra)
 
+> **Start here: [`docs/re/README.md`](docs/re/README.md)** — the agent guide for
+> doing RE with REA (tool discovery, the string → xref → decompile loop, vtables/
+> RTTI, turning findings into dumper signatures, gotchas, warm projects, and the
+> current RE map).
+
 - REA is built from upstream **PR #2358** at `C:\Users\gpmpo\rea-src`
   (branch `pr-2358`, HEAD `9adad2c23`), `npm link`ed to the global `rea`.
   Provider: **Ghidra 12.1.4** at `C:\Users\gpmpo\ghidra\ghidra_12.1.4_PUBLIC`
