@@ -177,7 +177,8 @@ auto create_render_pass(const Functions& fn, VkDevice device, VkFormat format) -
   color.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   color.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-  const VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  const VkAttachmentReference reference{.attachment = 0,
+                                        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
   VkSubpassDescription subpass{};
   subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
   subpass.colorAttachmentCount = 1;
@@ -206,7 +207,9 @@ auto create_render_pass(const Functions& fn, VkDevice device, VkFormat format) -
 }
 
 auto ensure_command_pool(Device& device, uint32_t queue_family) -> bool {
-  if (device.command_pool != VK_NULL_HANDLE) return true;
+  if (device.command_pool != VK_NULL_HANDLE) {
+    return true;
+  }
   VkCommandPoolCreateInfo info{};
   info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
   info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -238,18 +241,24 @@ auto ensure_render_pass(Device& device, VkFormat format) -> VkRenderPass {
 
 auto ensure_swapchain(Device& device, VkSwapchainKHR swapchain) -> SwapchainData* {
   const auto found = g_swapchains.find(swapchain);
-  if (found != g_swapchains.end()) return &found->second;
+  if (found != g_swapchains.end()) {
+    return &found->second;
+  }
 
   const Functions& fn = device.fn;
   const VkDevice vk_device = device.context.device;
   SwapchainData data{};
   data.format = device.swapchain_hint_format;
   data.extent = device.swapchain_hint_extent;
-  if (data.format == VK_FORMAT_UNDEFINED) return nullptr;
+  if (data.format == VK_FORMAT_UNDEFINED) {
+    return nullptr;
+  }
 
   uint32_t image_count = 0;
   check(fn.get_swapchain_images(vk_device, swapchain, &image_count, nullptr), "vkGetSwapchainImagesKHR");
-  if (image_count == 0) return nullptr;
+  if (image_count == 0) {
+    return nullptr;
+  }
   data.images.resize(image_count);
   check(fn.get_swapchain_images(vk_device, swapchain, &image_count, data.images.data()),
         "vkGetSwapchainImagesKHR");
@@ -263,7 +272,11 @@ auto ensure_swapchain(Device& device, VkSwapchainKHR swapchain) -> SwapchainData
     view.image = data.images[i];
     view.viewType = VK_IMAGE_VIEW_TYPE_2D;
     view.format = data.format;
-    view.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    view.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                             .baseMipLevel = 0,
+                             .levelCount = 1,
+                             .baseArrayLayer = 0,
+                             .layerCount = 1};
     check(fn.create_image_view(vk_device, &view, nullptr, &data.views[i]), "vkCreateImageView");
 
     VkFramebufferCreateInfo framebuffer{};
@@ -304,8 +317,12 @@ auto ensure_swapchain(Device& device, VkSwapchainKHR swapchain) -> SwapchainData
 }
 
 auto ensure_imgui(Device& device, VkQueue queue, uint32_t queue_family, VkRenderPass pass) -> bool {
-  if (device.imgui_ready) return true;
-  if (g_imgui_device != VK_NULL_HANDLE) return false;  // one ImGui context per process
+  if (device.imgui_ready) {
+    return true;
+  }
+  if (g_imgui_device != VK_NULL_HANDLE) {
+    return false;  // one ImGui context per process
+  }
 
   device.queue = queue;
   device.queue_family = queue_family;
@@ -344,9 +361,10 @@ auto ensure_imgui(Device& device, VkQueue queue, uint32_t queue_family, VkRender
                static_cast<void*>(device.context.device), static_cast<void*>(queue), queue_family,
                static_cast<void*>(pass));
 
-  device.loader = LoaderContext{device.context.instance, device.context.device,
-                                device.context.get_instance_proc_addr,
-                                device.context.get_device_proc_addr};
+  device.loader = LoaderContext{.instance = device.context.instance,
+                                .device = device.context.device,
+                                .get_instance_proc_addr = device.context.get_instance_proc_addr,
+                                .get_device_proc_addr = device.context.get_device_proc_addr};
   ImGui_ImplVulkan_LoadFunctions(vulkan_loader, &device.loader);
 
   ImGui_ImplVulkan_InitInfo init{};
@@ -385,7 +403,11 @@ void image_barrier(const Functions& fn, VkCommandBuffer command_buffer, VkImage 
   barrier.srcQueueFamilyIndex = family;
   barrier.dstQueueFamilyIndex = family;
   barrier.image = image;
-  barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  barrier.subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                              .baseMipLevel = 0,
+                              .levelCount = 1,
+                              .baseArrayLayer = 0,
+                              .layerCount = 1};
   fn.cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1,
                           &barrier);
@@ -433,7 +455,9 @@ void draw_overlay_model(const wire::Model& model) {
   const uint32_t section_count = model.section_count < static_cast<uint32_t>(wire::k_max_sections)
                                      ? model.section_count
                                      : static_cast<uint32_t>(wire::k_max_sections);
-  if (section_count == 0 && model.title[0] == '\0') return;
+  if (section_count == 0 && model.title[0] == '\0') {
+    return;
+  }
 
   ImGui::SetNextWindowSize(ImVec2(460, 560), ImGuiCond_FirstUseEver);
   if (ImGui::Begin(model.title[0] != '\0' ? model.title : "cs2-internal")) {
@@ -458,8 +482,10 @@ void draw_overlay_model(const wire::Model& model) {
 }  // namespace
 
 void device_created(const DeviceContext& context) noexcept {
-  if (context.device == VK_NULL_HANDLE || context.get_device_proc_addr == nullptr) return;
-  const std::lock_guard lock(g_lock);
+  if (context.device == VK_NULL_HANDLE || context.get_device_proc_addr == nullptr) {
+    return;
+  }
+  const std::scoped_lock lock(g_lock);
   Device device{};
   device.context = context;
   device.fn = load_functions(context.get_device_proc_addr, context.device);
@@ -467,9 +493,11 @@ void device_created(const DeviceContext& context) noexcept {
 }
 
 void device_destroyed(VkDevice device) noexcept {
-  const std::lock_guard lock(g_lock);
+  const std::scoped_lock lock(g_lock);
   const auto it = g_devices.find(device);
-  if (it == g_devices.end()) return;
+  if (it == g_devices.end()) {
+    return;
+  }
   Device& dev = it->second;
   for (auto sc = g_swapchains.begin(); sc != g_swapchains.end();) {
     sc = g_swapchains.erase(sc);  // per-device teardown happens with the device
@@ -486,18 +514,22 @@ void device_destroyed(VkDevice device) noexcept {
 void swapchain_created(VkDevice device, VkSwapchainKHR swapchain, VkFormat format,
                        VkExtent2D extent) noexcept {
   (void)swapchain;
-  const std::lock_guard lock(g_lock);
+  const std::scoped_lock lock(g_lock);
   const auto it = g_devices.find(device);
-  if (it == g_devices.end()) return;
+  if (it == g_devices.end()) {
+    return;
+  }
   it->second.swapchain_hint_format = format;
   it->second.swapchain_hint_extent = extent;
 }
 
 void swapchain_destroyed(VkDevice device, VkSwapchainKHR swapchain) noexcept {
   (void)device;
-  const std::lock_guard lock(g_lock);
+  const std::scoped_lock lock(g_lock);
   const auto sc = g_swapchains.find(swapchain);
-  if (sc == g_swapchains.end()) return;
+  if (sc == g_swapchains.end()) {
+    return;
+  }
   // Do not destroy the framebuffers/views here: our in-flight draw may still
   // reference them, and waiting for idle re-enters DXVK while it holds its
   // swapchain lock. Keep the render pass (format-keyed, reused); the driver
@@ -507,13 +539,17 @@ void swapchain_destroyed(VkDevice device, VkSwapchainKHR swapchain) noexcept {
 
 auto present(VkDevice vk_device, VkQueue queue, uint32_t queue_family,
              const VkPresentInfoKHR* present_info) noexcept -> VkSemaphore {
-  if (present_info == nullptr || present_info->swapchainCount == 0) return VK_NULL_HANDLE;
+  if (present_info == nullptr || present_info->swapchainCount == 0) {
+    return VK_NULL_HANDLE;
+  }
   const VkSwapchainKHR swapchain_handle = present_info->pSwapchains[0];
   const uint32_t image_index = present_info->pImageIndices != nullptr ? present_info->pImageIndices[0] : 0;
 
-  const std::lock_guard lock(g_lock);
+  const std::scoped_lock lock(g_lock);
   const auto it = g_devices.find(vk_device);
-  if (it == g_devices.end()) return VK_NULL_HANDLE;
+  if (it == g_devices.end()) {
+    return VK_NULL_HANDLE;
+  }
   Device& device = it->second;
   const Functions& fn = device.fn;
 
@@ -563,7 +599,7 @@ auto present(VkDevice vk_device, VkQueue queue, uint32_t queue_family,
   ImGuiIO& io = ImGui::GetIO();
   io.DisplaySize = ImVec2(static_cast<float>(swapchain->extent.width),
                           static_cast<float>(swapchain->extent.height));
-  io.DeltaTime = 1.0f / 60.0f;
+  io.DeltaTime = 1.0F / 60.0F;
   ImGui_ImplVulkan_NewFrame();
   ImGui::NewFrame();
   draw_overlay_model(model);
@@ -582,7 +618,7 @@ auto present(VkDevice vk_device, VkQueue queue, uint32_t queue_family,
   render_pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
   render_pass.renderPass = device.render_pass;
   render_pass.framebuffer = swapchain->framebuffers[image_index];
-  render_pass.renderArea = {{0, 0}, swapchain->extent};
+  render_pass.renderArea = {.offset = {.x = 0, .y = 0}, .extent = swapchain->extent};
   fn.cmd_begin_render_pass(command_buffer, &render_pass, VK_SUBPASS_CONTENTS_INLINE);
   ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), command_buffer);
   fn.cmd_end_render_pass(command_buffer);
@@ -617,7 +653,9 @@ auto present(VkDevice vk_device, VkQueue queue, uint32_t queue_family,
 
   ++g_frame;
   // Isolation switch: submit but do not chain into the present's wait list.
-  if (std::getenv("CS2_OVERLAY_NO_CHAIN") != nullptr) return VK_NULL_HANDLE;
+  if (std::getenv("CS2_OVERLAY_NO_CHAIN") != nullptr) {
+    return VK_NULL_HANDLE;
+  }
   return render_semaphore;
 }
 

@@ -57,8 +57,12 @@ auto main() -> int {
   bool has_add = false;
   bool has_ptr = false;
   for (const auto& symbol : image.exports) {
-    if (symbol.name == "cs2_tiny_add") has_add = true;
-    if (symbol.name == "cs2_tiny_ptr") has_ptr = true;
+    if (symbol.name == "cs2_tiny_add") {
+      has_add = true;
+    }
+    if (symbol.name == "cs2_tiny_ptr") {
+      has_ptr = true;
+    }
   }
   check(has_add, "export cs2_tiny_add");
   check(has_ptr, "export cs2_tiny_ptr");

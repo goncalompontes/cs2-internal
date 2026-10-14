@@ -122,12 +122,12 @@ void report_freeze(unsigned long long stalled_ms) noexcept {
   const DWORD current = GetCurrentThreadId();
   THREADENTRY32 entry{};
   entry.dwSize = sizeof(entry);
-  if (Thread32First(snapshot, &entry)) {
+  if (Thread32First(snapshot, &entry) != 0) {
     do {
       if (entry.th32OwnerProcessID == self && entry.th32ThreadID != current) {
         log_thread(entry);
       }
-    } while (Thread32Next(snapshot, &entry));
+    } while (Thread32Next(snapshot, &entry) != 0);
   }
   CloseHandle(snapshot);
 }

@@ -22,7 +22,9 @@ using wire::DrawKind;
 using wire::Font;
 
 void copy_string(char* out, std::size_t size, const std::string& value) noexcept {
-  if (size == 0) return;
+  if (size == 0) {
+    return;
+  }
   const std::size_t count = (std::min)(value.size(), size - 1);
   std::memcpy(out, value.data(), count);
   out[count] = '\0';
@@ -54,7 +56,9 @@ void ModelPublisher::run() noexcept {
   unsigned interval_ms = 16;
   if (const char* interval = std::getenv("CS2_PAYLOAD_PUB_INTERVAL_MS")) {
     interval_ms = static_cast<unsigned>(std::atoi(interval));
-    if (interval_ms == 0) interval_ms = 16;
+    if (interval_ms == 0) {
+      interval_ms = 16;
+    }
   }
   while (running_.load(std::memory_order_relaxed)) {
     // The publish loop is the payload's frame source now that the Present hook
@@ -89,7 +93,9 @@ void ModelPublisher::run() noexcept {
 void ModelPublisher::publish(const render::OverlayModel& source, float /*width*/,
                              float /*height*/) noexcept {
   auto* shared = static_cast<wire::Shared*>(shared_);
-  if (shared == nullptr || shared->magic != wire::k_magic) return;
+  if (shared == nullptr || shared->magic != wire::k_magic) {
+    return;
+  }
 
   const uint32_t sequence = shared->sequence.load(std::memory_order_relaxed);
   shared->sequence.store(sequence + 1, std::memory_order_relaxed);  // odd: writing
@@ -163,9 +169,13 @@ void ModelPublisher::publish(const render::OverlayModel& source, float /*width*/
 }
 
 auto ModelPublisher::map() noexcept -> bool {
-  if (shared_ != nullptr) return true;
+  if (shared_ != nullptr) {
+    return true;
+  }
   // Isolation switch: skip the shared-memory mapping (diagnostics only).
-  if (std::getenv("CS2_PAYLOAD_PUB_NOSHM") != nullptr) return false;
+  if (std::getenv("CS2_PAYLOAD_PUB_NOSHM") != nullptr) {
+    return false;
+  }
   // The segment lives in the payload's writable data dir (%LOCALAPPDATA%), not
   // `C:\` root: a Medium-integrity game process cannot create files there.
   char path_buffer[MAX_PATH];
@@ -179,13 +189,17 @@ auto ModelPublisher::map() noexcept -> bool {
   HANDLE file = CreateFileA(shm_path, GENERIC_READ | GENERIC_WRITE,
                             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE) return false;
+  if (file == INVALID_HANDLE_VALUE) {
+    return false;
+  }
   SetFilePointer(file, static_cast<LONG>(sizeof(wire::Shared)), nullptr, FILE_BEGIN);
   SetEndOfFile(file);
   HANDLE mapping = CreateFileMappingA(file, nullptr, PAGE_READWRITE, 0,
                                       static_cast<DWORD>(sizeof(wire::Shared)), nullptr);
   CloseHandle(file);
-  if (mapping == nullptr) return false;
+  if (mapping == nullptr) {
+    return false;
+  }
   void* view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(wire::Shared));
   if (view == nullptr) {
     CloseHandle(mapping);
@@ -206,7 +220,9 @@ auto ModelPublisher::map() noexcept -> bool {
 
 void ModelPublisher::publish_now() noexcept {
   // Runs on the game's own thread (present hook); no payload thread exists.
-  if (shared_ == nullptr && !map()) return;
+  if (shared_ == nullptr && !map()) {
+    return;
+  }
   auto* shared = static_cast<wire::Shared*>(shared_);
   const auto width = static_cast<float>(shared->screen_width.load(std::memory_order_relaxed));
   const auto height = static_cast<float>(shared->screen_height.load(std::memory_order_relaxed));
@@ -215,7 +231,9 @@ void ModelPublisher::publish_now() noexcept {
 }
 
 auto ModelPublisher::start() noexcept -> bool {
-  if (running_.load()) return true;
+  if (running_.load()) {
+    return true;
+  }
   map();
   running_.store(true);
   // Skip LdrpInitializeThread: a normal thread runs the game's TLS callbacks and

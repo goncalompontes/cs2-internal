@@ -14,8 +14,12 @@ enum class ParseError { Empty, BadHex, Overflow };
 
 // "parse, don't validate": raw text -> typed value, or a tagged error.
 auto parse_hex(std::string_view text) -> std::expected<std::uint64_t, ParseError> {
-  if (text.empty()) return std::unexpected(ParseError::Empty);
-  if (text.starts_with("0x") || text.starts_with("0X")) text.remove_prefix(2);
+  if (text.empty()) {
+    return std::unexpected(ParseError::Empty);
+  }
+  if (text.starts_with("0x") || text.starts_with("0X")) {
+    text.remove_prefix(2);
+  }
 
   std::uint64_t value = 0;
   for (const char c : text) {
@@ -23,9 +27,12 @@ auto parse_hex(std::string_view text) -> std::expected<std::uint64_t, ParseError
                       : (c >= 'a' && c <= 'f') ? c - 'a' + 10
                       : (c >= 'A' && c <= 'F') ? c - 'A' + 10
                                                : -1;
-    if (digit < 0) return std::unexpected(ParseError::BadHex);
-    if (value > (UINT64_MAX - static_cast<std::uint64_t>(digit)) / 16)
+    if (digit < 0) {
+      return std::unexpected(ParseError::BadHex);
+    }
+    if (value > (UINT64_MAX - static_cast<std::uint64_t>(digit)) / 16) {
       return std::unexpected(ParseError::Overflow);
+    }
     value = value * 16 + static_cast<std::uint64_t>(digit);
   }
   return value;
@@ -56,12 +63,13 @@ auto main() -> int {
   std::visit(
       [](const auto& m) -> auto {
         using T = std::decay_t<decltype(m)>;
-        if constexpr (std::is_same_v<T, std::string>)
+        if constexpr (std::is_same_v<T, std::string>) {
           std::cout << "module: " << m << "\n";
-        else if constexpr (std::is_same_v<T, std::uint32_t>)
+        } else if constexpr (std::is_same_v<T, std::uint32_t>) {
           std::cout << "module id: " << m << "\n";
-        else
+        } else {
           std::cout << "module: <none>\n";
+        }
       },
       by_name);
 

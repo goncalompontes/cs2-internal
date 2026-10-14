@@ -12,7 +12,7 @@ namespace cs2::overlay {
 
 inline void overlay_log(const char* format, ...) noexcept {
   static std::mutex log_mutex;
-  const std::lock_guard<std::mutex> lock(log_mutex);
+  const std::scoped_lock lock(log_mutex);
   const char* path = std::getenv("CS2_OVERLAY_LOG");
   static char fallback[512];
   if (path == nullptr) {
@@ -22,7 +22,9 @@ inline void overlay_log(const char* format, ...) noexcept {
     path = fallback;
   }
   std::FILE* file = std::fopen(path, "a");
-  if (file == nullptr) return;
+  if (file == nullptr) {
+    return;
+  }
   va_list args;
   va_start(args, format);
   std::vfprintf(file, format, args);

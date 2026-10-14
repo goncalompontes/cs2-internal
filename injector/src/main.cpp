@@ -53,13 +53,13 @@ auto find_pid(const char* name) -> std::uint32_t {
   PROCESSENTRY32 entry{};
   entry.dwSize = sizeof(entry);
   std::uint32_t pid = 0;
-  if (Process32First(snapshot, &entry)) {
+  if (Process32First(snapshot, &entry) != 0) {
     do {
       if (_stricmp(entry.szExeFile, name) == 0) {
         pid = entry.th32ProcessID;
         break;
       }
-    } while (Process32Next(snapshot, &entry));
+    } while (Process32Next(snapshot, &entry) != 0);
   }
   CloseHandle(snapshot);
   return pid;
@@ -74,13 +74,13 @@ auto remote_module_base(HANDLE process, const char* name) -> std::optional<std::
     MODULEENTRY32 entry{};
     entry.dwSize = sizeof(entry);
     std::optional<std::uintptr_t> base;
-    if (Module32First(snapshot, &entry)) {
+    if (Module32First(snapshot, &entry) != 0) {
       do {
         if (_stricmp(entry.szModule, name) == 0) {
           base = reinterpret_cast<std::uintptr_t>(entry.modBaseAddr);
           break;
         }
-      } while (Module32Next(snapshot, &entry));
+      } while (Module32Next(snapshot, &entry) != 0);
     }
     CloseHandle(snapshot);
     if (base.has_value()) {
@@ -108,7 +108,8 @@ auto write_remote(HANDLE process, std::uintptr_t address, const void* buffer, st
 auto read_remote_string(HANDLE process, std::uintptr_t address, std::size_t max) -> std::string {
   std::vector<char> buffer(max, '\0');
   SIZE_T got = 0;
-  if (!ReadProcessMemory(process, reinterpret_cast<LPCVOID>(address), buffer.data(), max, &got)) {
+  if (ReadProcessMemory(process, reinterpret_cast<LPCVOID>(address), buffer.data(), max, &got) ==
+      0) {
     return {};
   }
   return std::string(buffer.data());  // stops at NUL
@@ -208,13 +209,13 @@ void dump_target_modules(HANDLE process) {
   } else {
     MODULEENTRY32 entry{};
     entry.dwSize = sizeof(entry);
-    if (Module32First(snapshot, &entry)) {
+    if (Module32First(snapshot, &entry) != 0) {
       int count = 0;
       do {
         std::printf("  %-32s 0x%llx\n", entry.szModule,
                     static_cast<unsigned long long>(
                         reinterpret_cast<std::uintptr_t>(entry.modBaseAddr)));
-      } while (Module32Next(snapshot, &entry) && ++count < 80);
+      } while ((Module32Next(snapshot, &entry) != 0) && ++count < 80);
     } else {
       std::printf("  Module32First FAILED (err %lu)\n", GetLastError());
     }
@@ -223,10 +224,14 @@ void dump_target_modules(HANDLE process) {
   std::printf("injector: --- peb ---\n");
   const std::uintptr_t peb = remote_peb(process);
   std::printf("  peb = 0x%llx\n", static_cast<unsigned long long>(peb));
-  if (peb == 0) return;
+  if (peb == 0) {
+    return;
+  }
   const std::uint64_t ldr = read_u64(process, peb + k_peb_ldr);
   std::printf("  ldr = 0x%llx\n", static_cast<unsigned long long>(ldr));
-  if (ldr == 0) return;
+  if (ldr == 0) {
+    return;
+  }
   const std::uintptr_t head = ldr + k_ldr_in_load_order;
   std::uintptr_t node = read_u64(process, head);
   for (int guard = 0; node != 0 && node != head && guard < 80; ++guard) {
@@ -238,7 +243,9 @@ void dump_target_modules(HANDLE process) {
     if (buffer != 0 && length >= 2 && length < 512) {
       std::wstring wide(static_cast<std::size_t>(length / 2), L'\0');
       if (read_remote(process, buffer, wide.data(), length)) {
-        for (const wchar_t c : wide) narrow.push_back(static_cast<char>(c));
+        for (const wchar_t c : wide) {
+          narrow.push_back(static_cast<char>(c));
+        }
       }
     }
     std::printf("  %-32s 0x%llx\n", narrow.c_str(),
@@ -394,7 +401,7 @@ auto resolve_export(HANDLE process, std::uintptr_t module_base, const std::strin
     }
     std::string dll = forwarder.substr(0, dot);
     const std::string symbol = forwarder.substr(dot + 1);
-    if (dll.find(".dll") == std::string::npos && dll.find(".DLL") == std::string::npos) {
+    if (!dll.contains(".dll") && !dll.contains(".DLL")) {
       dll += ".dll";
     }
     const auto forward_base = remote_module_base(process, dll.c_str());
@@ -526,8 +533,9 @@ auto ensure_module(HANDLE process, const std::string& name) -> std::optional<std
 /// the host module so import resolution walks a real export table.
 auto resolve_import_module(const std::string& name) -> std::string {
   std::string lower = name;
-  std::transform(lower.begin(), lower.end(), lower.begin(),
-                 [](unsigned char c) -> char { return static_cast<char>(std::tolower(c)); });
+  std::ranges::transform(lower, lower.begin(), [](unsigned char c) -> char {
+    return static_cast<char>(std::tolower(c));
+  });
   if (lower.starts_with("api-ms-win-crt-") || lower.starts_with("ext-ms-win-crt-")) {
     return "ucrtbase.dll";
   }
@@ -603,15 +611,21 @@ auto make_call3_stub(std::uintptr_t target, std::uintptr_t a0, std::uint32_t a1,
     -> std::vector<std::byte> {
   std::vector<std::byte> code;
   const auto push = [&](std::initializer_list<std::uint8_t> bytes) -> void {
-    for (std::uint8_t b : bytes) code.push_back(static_cast<std::byte>(b));
+    for (std::uint8_t b : bytes) {
+      code.push_back(static_cast<std::byte>(b));
+    }
   };
   const auto push_imm64 = [&](std::uintptr_t value) -> void {
-    for (int i = 0; i < 8; ++i) code.push_back(static_cast<std::byte>((value >> (8 * i)) & 0xFF));
+    for (int i = 0; i < 8; ++i) {
+      code.push_back(static_cast<std::byte>((value >> (8 * i)) & 0xFF));
+    }
   };
   push({0x48, 0xB9});  // mov rcx, a0
   push_imm64(a0);
   push({0xBA});  // mov edx, a1
-  for (int i = 0; i < 4; ++i) code.push_back(static_cast<std::byte>((a1 >> (8 * i)) & 0xFF));
+  for (int i = 0; i < 4; ++i) {
+    code.push_back(static_cast<std::byte>((a1 >> (8 * i)) & 0xFF));
+  }
   push({0x49, 0xB8});  // mov r8, a2
   push_imm64(a2);
   push({0x48, 0xB8});  // mov rax, target
@@ -632,9 +646,13 @@ auto register_exception_table(HANDLE process, std::uintptr_t remote_base,
     return false;
   }
   const auto ntdll = remote_module_base(process, "ntdll.dll");
-  if (!ntdll) return false;
+  if (!ntdll) {
+    return false;
+  }
   const auto add_function_table = resolve_export(process, *ntdll, "RtlAddFunctionTable", 0, false);
-  if (!add_function_table) return false;
+  if (!add_function_table) {
+    return false;
+  }
 
   const std::uint32_t count = image.exception_directory_size / 12;  // sizeof(RUNTIME_FUNCTION)
   const std::vector<std::byte> stub =
@@ -649,7 +667,9 @@ auto register_exception_table(HANDLE process, std::uintptr_t remote_base,
   HANDLE thread = CreateRemoteThread(process, nullptr, 0,
                                      reinterpret_cast<LPTHREAD_START_ROUTINE>(memory), nullptr, 0,
                                      nullptr);
-  if (thread == nullptr) return false;
+  if (thread == nullptr) {
+    return false;
+  }
   WaitForSingleObject(thread, 5000);
   DWORD exit_code = 0;
   GetExitCodeThread(thread, &exit_code);
@@ -674,11 +694,11 @@ auto main(int argc, char** argv) -> int {
     }
     PROCESSENTRY32 entry{};
     entry.dwSize = sizeof(entry);
-    if (Process32First(snapshot, &entry)) {
+    if (Process32First(snapshot, &entry) != 0) {
       do {
         std::printf("  pid %-6u ppid %-6u %s\n", entry.th32ProcessID, entry.th32ParentProcessID,
                     entry.szExeFile);
-      } while (Process32Next(snapshot, &entry));
+      } while (Process32Next(snapshot, &entry) != 0);
     }
     CloseHandle(snapshot);
     return 0;
@@ -693,10 +713,18 @@ auto main(int argc, char** argv) -> int {
   bool load_missing = false;
   bool register_loader = running_under_wine();
   for (int i = 3; i < argc; ++i) {
-    if (std::strcmp(argv[i], "--no-call") == 0) call_entry = false;
-    if (std::strcmp(argv[i], "--load-missing") == 0) load_missing = true;
-    if (std::strcmp(argv[i], "--register") == 0) register_loader = true;
-    if (std::strcmp(argv[i], "--no-register") == 0) register_loader = false;
+    if (std::strcmp(argv[i], "--no-call") == 0) {
+      call_entry = false;
+    }
+    if (std::strcmp(argv[i], "--load-missing") == 0) {
+      load_missing = true;
+    }
+    if (std::strcmp(argv[i], "--register") == 0) {
+      register_loader = true;
+    }
+    if (std::strcmp(argv[i], "--no-register") == 0) {
+      register_loader = false;
+    }
   }
 
   std::uint32_t pid = 0;

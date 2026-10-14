@@ -45,7 +45,7 @@ auto main() -> int {
   };
 
   // A point on the view axis projects to the screen centre.
-  const auto centre = view.project(Vec3{0.0F, 100.0F, 0.0F}, k_width, k_height);
+  const auto centre = view.project(Vec3{.x = 0.0F, .y = 100.0F, .z = 0.0F}, k_width, k_height);
   expect(centre.has_value(), "on-axis point projects");
   if (centre.has_value()) {
     expect(near(centre->x, k_width * 0.5F), "on-axis x == centre");
@@ -53,7 +53,7 @@ auto main() -> int {
   }
 
   // An offset point maps to the expected pixel.
-  const auto right_up = view.project(Vec3{10.0F, 100.0F, 20.0F}, k_width, k_height);
+  const auto right_up = view.project(Vec3{.x = 10.0F, .y = 100.0F, .z = 20.0F}, k_width, k_height);
   expect(right_up.has_value(), "offset point projects");
   if (right_up.has_value()) {
     expect(near(right_up->x, 845.0F), "offset x");
@@ -61,9 +61,9 @@ auto main() -> int {
   }
 
   // Points at or behind the camera are rejected.
-  expect(!view.project(Vec3{0.0F, -1.0F, 0.0F}, k_width, k_height).has_value(),
+  expect(!view.project(Vec3{.x = 0.0F, .y = -1.0F, .z = 0.0F}, k_width, k_height).has_value(),
          "behind-camera point rejected");
-  expect(!view.project(Vec3{0.0F, 0.0F, 0.0F}, k_width, k_height).has_value(),
+  expect(!view.project(Vec3{.x = 0.0F, .y = 0.0F, .z = 0.0F}, k_width, k_height).has_value(),
          "zero-depth point rejected");
 
   if (failures == 0) {

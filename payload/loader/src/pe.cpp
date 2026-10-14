@@ -308,12 +308,16 @@ auto parse_image(Bytes image) -> std::expected<ImageInfo, Error> {
   const std::uint32_t number_of_rva_and_sizes =
       has(image, num_dirs_offset, 4) ? rd32(image, num_dirs_offset) : 0;
   const auto dir_rva = [&](std::uint32_t index) -> std::uint32_t {
-    if (index >= number_of_rva_and_sizes) return 0;
+    if (index >= number_of_rva_and_sizes) {
+      return 0;
+    }
     const std::size_t at = dirs_offset + index * 8;
     return has(image, at, 4) ? rd32(image, at) : 0;
   };
   const auto dir_size = [&](std::uint32_t index) -> std::uint32_t {
-    if (index >= number_of_rva_and_sizes) return 0;
+    if (index >= number_of_rva_and_sizes) {
+      return 0;
+    }
     const std::size_t at = dirs_offset + index * 8 + 4;
     return has(image, at, 4) ? rd32(image, at) : 0;
   };

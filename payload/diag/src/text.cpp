@@ -27,7 +27,7 @@ void capture_modules() noexcept {
     if (!info.valid() || info.size == 0) {
       return;
     }
-    g_modules[g_module_count++] = {name, info.base, info.base + info.size};
+    g_modules[g_module_count++] = {.name = name, .base = info.base, .end = info.base + info.size};
   };
   add("payload", "payload.dll");
   add("client", "client.dll");

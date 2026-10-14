@@ -104,6 +104,59 @@ GROUPS: dict[str, list[str]] = {
         "readability-static-accessed-through-instance",
         "readability-use-anyofallof",
     ],
+    # --- wider stylistic / modernisation groups ---------------------------
+    # NOTE: modernize-use-std-print is deliberately excluded: this payload is
+    # mapped into the game process and the code avoids CRT/iostream machinery and
+    # static initializers (see model_publisher.cpp / payload_main.cpp), which
+    # <print> would reintroduce. Run it explicitly with --checks if wanted.
+    # modernize-avoid-c-arrays / -variadic-functions have no fix-it and are
+    # omitted to keep the counts meaningful.
+    # NOTE: modernize-use-integer-sign-comparison is deliberately excluded. Its
+    # fix rewrites `x != static_cast<std::size_t>(-1)` (a "no value" sentinel)
+    # into `std::cmp_not_equal(x, -1)`, which is *always true* for unsigned x, so
+    # the sentinel is never recognised. That silently corrupted the inline-hook
+    # displacement handling (hooks-inline crashed with 0xC0000005). Run it via
+    # --checks only if you review every hunk.
+    "modernize-extra": [
+        "modernize-use-scoped-lock",
+        "modernize-use-ranges",
+        "modernize-use-designated-initializers",
+        "modernize-macro-to-enum",
+        "modernize-use-constraints",
+    ],
+    "readability-extra": [
+        "readability-braces-around-statements",
+        "readability-isolate-declaration",
+        "readability-implicit-bool-conversion",
+        "readability-const-return-type",
+        "readability-non-const-parameter",
+        "readability-avoid-const-params-in-decls",
+        "readability-container-contains",
+        "readability-container-data-pointer",
+        "readability-delete-null-pointer",
+        "readability-duplicate-include",
+        "readability-redundant-casting",
+        "readability-redundant-declaration",
+        "readability-redundant-member-init",
+        "readability-redundant-preprocessor",
+        "readability-redundant-smartptr-get",
+        "readability-redundant-string-init",
+        "readability-simplify-subscript-expr",
+        "readability-static-definition-in-anonymous-namespace",
+        "readability-uppercase-literal-suffix",
+        "readability-use-std-min-max",
+        "readability-misleading-indentation",
+        "readability-avoid-nested-conditional-operator",
+    ],
+    "misc-extra": [
+        "misc-unused-using-decls",
+        "misc-unused-alias-decls",
+        "misc-uniqueptr-reset-release",
+        "misc-throw-by-value-catch-by-reference",
+        "misc-redundant-expression",
+        "misc-unconventional-assign-operator",
+        "misc-definitions-in-headers",
+    ],
 }
 
 GROUP_DOCS: dict[str, str] = {
@@ -114,6 +167,9 @@ GROUP_DOCS: dict[str, str] = {
     "const": "const-correctness (misc-const-correctness, readability-qualified-auto)",
     "performance": "avoid copies (value params, copy-init, range-for)",
     "readability": "curated cosmetic cleanups",
+    "modernize-extra": "further modernisations (scoped-lock, ranges, designated-init, std::print, ...)",
+    "readability-extra": "broader style rewrites (braces, bool conversion, redundant-*, ...)",
+    "misc-extra": "misc cleanups (unused using/alias decls, uniqueptr reset/release, ...)",
 }
 
 # Applied when neither --group nor --checks is given: the conservative,

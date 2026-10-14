@@ -45,7 +45,7 @@ auto main() -> int {
 
     cs2::loader::pe::RelocationBlock block;
     block.page_rva = 0;
-    block.entries.push_back(static_cast<std::uint16_t>((10u << 12) | 0x100u));  // DIR64 @ +0x100
+    block.entries.push_back(static_cast<std::uint16_t>((10U << 12) | 0x100U));  // DIR64 @ +0x100
     image.relocations.push_back(block);
 
     cs2::loader::mapping::BufferSink sink(0x2'0000'0000ULL, 0x1000);

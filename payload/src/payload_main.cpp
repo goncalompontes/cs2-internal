@@ -151,7 +151,9 @@ void boot() {
 
 #if defined(_WIN32)
 BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
-  if (reason == DLL_PROCESS_ATTACH) cs2::payload::boot();
+  if (reason == DLL_PROCESS_ATTACH) {
+    cs2::payload::boot();
+  }
   return TRUE;
 }
 #endif

@@ -38,7 +38,9 @@ int g_fd = -1;
 // the directory; `CS2_OVERLAY_SHM` overrides the whole path. See payload
 // ModelPublisher::map.
 auto resolve_path() -> const char* {
-  if (const char* explicit_path = std::getenv("CS2_OVERLAY_SHM")) return explicit_path;
+  if (const char* explicit_path = std::getenv("CS2_OVERLAY_SHM")) {
+    return explicit_path;
+  }
   if (const char* dir = std::getenv("CS2_PAYLOAD_DIR")) {
     std::snprintf(g_path_buffer, sizeof(g_path_buffer), "%s\\cs2-overlay.shm", dir);
     return g_path_buffer;
@@ -53,18 +55,28 @@ auto resolve_path() -> const char* {
 }
 
 auto ensure_mapped() -> bool {
-  if (g_shared != nullptr) return true;
-  if (g_path == nullptr) g_path = resolve_path();
-  if (g_path == nullptr) return false;
+  if (g_shared != nullptr) {
+    return true;
+  }
+  if (g_path == nullptr) {
+    g_path = resolve_path();
+  }
+  if (g_path == nullptr) {
+    return false;
+  }
 
   HANDLE file = CreateFileA(g_path, GENERIC_READ | GENERIC_WRITE,
                             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                             FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE) return false;
+  if (file == INVALID_HANDLE_VALUE) {
+    return false;
+  }
   HANDLE mapping = CreateFileMappingA(file, nullptr, PAGE_READWRITE, 0,
                                       static_cast<DWORD>(sizeof(wire::Shared)), nullptr);
   CloseHandle(file);
-  if (mapping == nullptr) return false;
+  if (mapping == nullptr) {
+    return false;
+  }
   void* view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(wire::Shared));
   if (view == nullptr) {
     CloseHandle(mapping);
@@ -163,17 +175,23 @@ bool ensure_mapped() {
 }  // namespace
 
 void write_extent(uint32_t width, uint32_t height) noexcept {
-  const std::lock_guard<std::mutex> lock(g_lock);
-  if (g_shared == nullptr && !ensure_mapped()) return;
+  const std::scoped_lock lock(g_lock);
+  if (g_shared == nullptr && !ensure_mapped()) {
+    return;
+  }
   g_shared->screen_width.store(width, std::memory_order_relaxed);
   g_shared->screen_height.store(height, std::memory_order_relaxed);
 }
 
 auto read_model(wire::Model& out) noexcept -> bool {
-  const std::lock_guard<std::mutex> lock(g_lock);
-  if (g_shared == nullptr && !ensure_mapped()) return false;
+  const std::scoped_lock lock(g_lock);
+  if (g_shared == nullptr && !ensure_mapped()) {
+    return false;
+  }
   const uint32_t first = g_shared->sequence.load(std::memory_order_acquire);
-  if ((first & 1u) != 0u) return false;  // a write is in progress
+  if ((first & 1U) != 0U) {
+    return false;  // a write is in progress
+  }
   std::memcpy(&out, &g_shared->model, sizeof(wire::Model));
   const uint32_t second = g_shared->sequence.load(std::memory_order_acquire);
   return first == second;

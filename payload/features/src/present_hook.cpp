@@ -25,12 +25,18 @@ void log_line(const char* text) noexcept {
   static CreateFileAFn create_file = nullptr;
   if (create_file == nullptr) {
     HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
-    if (kernel32 == nullptr) return;
+    if (kernel32 == nullptr) {
+      return;
+    }
     create_file = reinterpret_cast<CreateFileAFn>(GetProcAddress(kernel32, "CreateFileA"));
-    if (create_file == nullptr) return;
+    if (create_file == nullptr) {
+      return;
+    }
   }
   char path[MAX_PATH];
-  if (!cs2::game::data_file_path("cs2-payload.log", path, sizeof(path))) return;
+  if (!cs2::game::data_file_path("cs2-payload.log", path, sizeof(path))) {
+    return;
+  }
 
   constexpr unsigned long k_file_append_data = 0x4;
   constexpr unsigned long k_file_share_read = 0x1;
@@ -38,9 +44,13 @@ void log_line(const char* text) noexcept {
   constexpr unsigned long k_file_attribute_normal = 0x80;
   HANDLE file = create_file(path, k_file_append_data, k_file_share_read, nullptr,
                             k_open_always, k_file_attribute_normal, nullptr);
-  if (file == nullptr || file == INVALID_HANDLE_VALUE) return;
+  if (file == nullptr || file == INVALID_HANDLE_VALUE) {
+    return;
+  }
   std::size_t length = 0;
-  while (text[length] != '\0') ++length;
+  while (text[length] != '\0') {
+    ++length;
+  }
   unsigned long written = 0;
   WriteFile(file, text, static_cast<unsigned long>(length), &written, nullptr);
   WriteFile(file, "\n", 1, &written, nullptr);

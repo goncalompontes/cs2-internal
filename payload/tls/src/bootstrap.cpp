@@ -27,29 +27,45 @@ constexpr uint32_t k_inline_tls_slots = 64;
 void ensure_thread_tls() noexcept {
   const auto* base = reinterpret_cast<const std::byte*>(&__ImageBase);
   const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-  if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE) {
+    return;
+  }
   const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-  if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+  if (nt->Signature != IMAGE_NT_SIGNATURE) {
+    return;
+  }
 
   const IMAGE_DATA_DIRECTORY& directory =
       nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
-  if (directory.VirtualAddress == 0) return;  // image has no TLS
+  if (directory.VirtualAddress == 0) {
+    return;  // image has no TLS
+  }
   const auto* tls = reinterpret_cast<const IMAGE_TLS_DIRECTORY*>(base + directory.VirtualAddress);
-  if (tls->AddressOfIndex == 0) return;
+  if (tls->AddressOfIndex == 0) {
+    return;
+  }
 
   const uint32_t index = *reinterpret_cast<const uint32_t*>(tls->AddressOfIndex);
-  if (index == 0xFFFFFFFFu || index >= k_inline_tls_slots) return;
+  if (index == 0xFFFFFFFFU || index >= k_inline_tls_slots) {
+    return;
+  }
 
   auto* tls_array = reinterpret_cast<std::uint64_t*>(__readgsqword(k_teb_tls_pointer));
-  if (tls_array == nullptr || tls_array[index] != 0) return;  // already installed
+  if (tls_array == nullptr || tls_array[index] != 0) {
+    return;  // already installed
+  }
 
   const auto raw_size =
       static_cast<std::size_t>(tls->EndAddressOfRawData - tls->StartAddressOfRawData);
   const std::size_t block_size = raw_size + tls->SizeOfZeroFill;
-  if (block_size == 0) return;
+  if (block_size == 0) {
+    return;
+  }
 
   void* block = VirtualAlloc(nullptr, block_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-  if (block == nullptr) return;
+  if (block == nullptr) {
+    return;
+  }
   if (raw_size != 0) {
     std::memcpy(block, reinterpret_cast<const void*>(tls->StartAddressOfRawData), raw_size);
   }
@@ -74,10 +90,14 @@ using NtCreateThreadExFn = long(__stdcall*)(void** thread_handle, unsigned long 
 
 auto create_thread_no_attach(void* (*start)(void*), void* parameter) noexcept -> void* {
   const HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-  if (ntdll == nullptr) return nullptr;
+  if (ntdll == nullptr) {
+    return nullptr;
+  }
   const auto nt_create_thread_ex =
       reinterpret_cast<NtCreateThreadExFn>(GetProcAddress(ntdll, "NtCreateThreadEx"));
-  if (nt_create_thread_ex == nullptr) return nullptr;
+  if (nt_create_thread_ex == nullptr) {
+    return nullptr;
+  }
 
   void* thread = nullptr;
   const long status =

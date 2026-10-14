@@ -65,23 +65,23 @@ auto local_section(const game::Snapshot& snapshot) -> render::HudSection {
   render::HudSection section;
   section.title = "Local player";
   if (!snapshot.local.has_value()) {
-    section.lines.push_back({"status", "not found"});
+    section.lines.push_back({.label = "status", .value = "not found"});
     return section;
   }
   const game::PlayerSnapshot& p = *snapshot.local;
-  section.lines.push_back({"name", p.name.empty() ? "(unknown)" : p.name});
-  section.lines.push_back({"team", team_name(p.team)});
-  section.lines.push_back({"health / armor",
-                           format_long(p.health) + " / " + format_long(p.armor)});
-  section.lines.push_back({"alive", p.alive ? "yes" : "no"});
-  section.lines.push_back({"weapon", p.weapon.empty() ? "(unknown)" : p.weapon});
+  section.lines.push_back({.label = "name", .value = p.name.empty() ? "(unknown)" : p.name});
+  section.lines.push_back({.label = "team", .value = team_name(p.team)});
   section.lines.push_back(
-      {"ammo (clip / reserve)", format_long(p.clip) + " / " + format_long(p.reserve)});
-  section.lines.push_back({"origin", format_vec3(p.origin)});
-  section.lines.push_back({"eye origin", format_vec3(p.eye_origin)});
-  section.lines.push_back({"velocity", format_vec3(p.velocity)});
-  section.lines.push_back({"eye angles", format_angle(p.eye_angles)});
-  section.lines.push_back({"entity index", format_long(p.index)});
+      {.label = "health / armor", .value = format_long(p.health) + " / " + format_long(p.armor)});
+  section.lines.push_back({.label = "alive", .value = p.alive ? "yes" : "no"});
+  section.lines.push_back({.label = "weapon", .value = p.weapon.empty() ? "(unknown)" : p.weapon});
+  section.lines.push_back({.label = "ammo (clip / reserve)",
+                           .value = format_long(p.clip) + " / " + format_long(p.reserve)});
+  section.lines.push_back({.label = "origin", .value = format_vec3(p.origin)});
+  section.lines.push_back({.label = "eye origin", .value = format_vec3(p.eye_origin)});
+  section.lines.push_back({.label = "velocity", .value = format_vec3(p.velocity)});
+  section.lines.push_back({.label = "eye angles", .value = format_angle(p.eye_angles)});
+  section.lines.push_back({.label = "entity index", .value = format_long(p.index)});
   return section;
 }
 
@@ -98,7 +98,8 @@ auto players_section(const game::Snapshot& snapshot) -> render::HudSection {
       value += "  d " + format_float(static_cast<double>(p.distance));
     }
     value += "  " + format_vec3(p.origin);
-    section.lines.push_back({p.name.empty() ? "(unknown)" : p.name, std::move(value)});
+    section.lines.push_back(
+        {.label = p.name.empty() ? "(unknown)" : p.name, .value = std::move(value)});
   }
   return section;
 }

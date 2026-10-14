@@ -49,19 +49,27 @@ auto parse_modrm(const unsigned char* code, std::size_t& pos, std::size_t max,
     }
     const unsigned char sib = code[pos++];
     if (mod == 0 && (sib & 7) == 5) {
-      if (pos + 4 > max) return false;
+      if (pos + 4 > max) {
+        return false;
+      }
       pos += 4;
     }
   } else if (mod == 0 && rm == 5) {  // RIP-relative
     rip_disp = pos;
-    if (pos + 4 > max) return false;
+    if (pos + 4 > max) {
+      return false;
+    }
     pos += 4;
   }
   if (mod == 1) {
-    if (pos + 1 > max) return false;
+    if (pos + 1 > max) {
+      return false;
+    }
     pos += 1;
   } else if (mod == 2) {
-    if (pos + 4 > max) return false;
+    if (pos + 4 > max) {
+      return false;
+    }
     pos += 4;
   }
   return true;
@@ -103,7 +111,9 @@ auto decode_one(const unsigned char* code, std::size_t max) -> std::optional<Dec
   Decoded decoded;
   auto rip = static_cast<std::size_t>(-1);
   const auto finish = [&]() -> std::optional<Decoded> {
-    if (pos > max) return std::nullopt;
+    if (pos > max) {
+      return std::nullopt;
+    }
     decoded.length = pos;
     decoded.rip_disp = rip;
     return decoded;
@@ -111,13 +121,17 @@ auto decode_one(const unsigned char* code, std::size_t max) -> std::optional<Dec
   const auto imm_size = [&]() -> std::size_t { return opsize16 ? 2 : 4; };
 
   if (op == 0x0F) {
-    if (pos >= max) return std::nullopt;
+    if (pos >= max) {
+      return std::nullopt;
+    }
     const unsigned char op2 = code[pos++];
     if (op2 == 0x05 || op2 == 0x0B || op2 == 0x0E || op2 == 0x77 || op2 == 0x31 || op2 == 0xA2) {
       return finish();  // syscall / ud2 / femms / emms / rdtsc / cpuid
     }
     if (op2 >= 0x80 && op2 <= 0x8F) {  // jcc rel32
-      if (pos + 4 > max) return std::nullopt;
+      if (pos + 4 > max) {
+        return std::nullopt;
+      }
       pos += 4;
       decoded.relative = true;
       return finish();
@@ -127,7 +141,9 @@ auto decode_one(const unsigned char* code, std::size_t max) -> std::optional<Dec
         (op2 >= 0x90 && op2 <= 0x9F) || op2 == 0x1E || op2 == 0x1F || op2 == 0x6E || op2 == 0x6F ||
         op2 == 0x7E || op2 == 0x7F || op2 == 0xAF || op2 == 0xB6 || op2 == 0xB7 || op2 == 0xBE ||
         op2 == 0xBF || op2 == 0xC0 || op2 == 0xC1 || op2 == 0xD6 || op2 == 0xEF) {
-      if (!parse_modrm(code, pos, max, rip)) return std::nullopt;
+      if (!parse_modrm(code, pos, max, rip)) {
+        return std::nullopt;
+      }
       return finish();
     }
     return std::nullopt;
@@ -144,31 +160,45 @@ auto decode_one(const unsigned char* code, std::size_t max) -> std::optional<Dec
     default:
       break;
   }
-  if (op >= 0x50 && op <= 0x5F) return finish();  // push/pop
-  if (op >= 0x91 && op <= 0x97) return finish();  // xchg eax, reg
+  if (op >= 0x50 && op <= 0x5F) {
+    return finish();  // push/pop
+  }
+  if (op >= 0x91 && op <= 0x97) {
+    return finish();  // xchg eax, reg
+  }
   if (op >= 0x70 && op <= 0x7F) {                 // jcc rel8
-    if (pos + 1 > max) return std::nullopt;
+    if (pos + 1 > max) {
+      return std::nullopt;
+    }
     pos += 1;
     decoded.relative = true;
     return finish();
   }
   if (op >= 0xB0 && op <= 0xB7) {  // mov r8, imm8
-    if (pos + 1 > max) return std::nullopt;
+    if (pos + 1 > max) {
+      return std::nullopt;
+    }
     pos += 1;
     return finish();
   }
   if (op >= 0xB8 && op <= 0xBF) {  // mov r, imm
     const std::size_t imm = rex_w ? 8 : imm_size();
-    if (pos + imm > max) return std::nullopt;
+    if (pos + imm > max) {
+      return std::nullopt;
+    }
     pos += imm;
     return finish();
   }
   if (op >= 0xD8 && op <= 0xDF) {  // x87
-    if (!parse_modrm(code, pos, max, rip)) return std::nullopt;
+    if (!parse_modrm(code, pos, max, rip)) {
+      return std::nullopt;
+    }
     return finish();
   }
   if (op >= 0xE0 && op <= 0xE3) {  // loop/jcxz rel8
-    if (pos + 1 > max) return std::nullopt;
+    if (pos + 1 > max) {
+      return std::nullopt;
+    }
     pos += 1;
     decoded.relative = true;
     return finish();
@@ -176,79 +206,119 @@ auto decode_one(const unsigned char* code, std::size_t max) -> std::optional<Dec
 
   switch (op) {
     case 0x6A:
-      if (pos + 1 > max) return std::nullopt;
+      if (pos + 1 > max) {
+        return std::nullopt;
+      }
       pos += 1;
       return finish();
     case 0x68: {
       const std::size_t imm = opsize16 ? 2 : 4;
-      if (pos + imm > max) return std::nullopt;
+      if (pos + imm > max) {
+        return std::nullopt;
+      }
       pos += imm;
       return finish();
     }
     case 0xE8: case 0xE9:
-      if (pos + 4 > max) return std::nullopt;
+      if (pos + 4 > max) {
+        return std::nullopt;
+      }
       pos += 4;
       decoded.relative = true;
       return finish();
     case 0xEB:
-      if (pos + 1 > max) return std::nullopt;
+      if (pos + 1 > max) {
+        return std::nullopt;
+      }
       pos += 1;
       decoded.relative = true;
       return finish();
     case 0xC2: case 0xCA:
-      if (pos + 2 > max) return std::nullopt;
+      if (pos + 2 > max) {
+        return std::nullopt;
+      }
       pos += 2;
       return finish();
     case 0xCD:
-      if (pos + 1 > max) return std::nullopt;
+      if (pos + 1 > max) {
+        return std::nullopt;
+      }
       pos += 1;
       return finish();
     case 0x04: case 0x0C: case 0x14: case 0x1C: case 0x24: case 0x2C: case 0x34: case 0x3C:
     case 0xA8:
-      if (pos + 1 > max) return std::nullopt;
+      if (pos + 1 > max) {
+        return std::nullopt;
+      }
       pos += 1;
       return finish();
     case 0x05: case 0x0D: case 0x15: case 0x1D: case 0x25: case 0x2D: case 0x35: case 0x3D:
     case 0xA9: {
       const std::size_t imm = imm_size();
-      if (pos + imm > max) return std::nullopt;
+      if (pos + imm > max) {
+        return std::nullopt;
+      }
       pos += imm;
       return finish();
     }
     case 0x80: case 0x83: case 0xC0: case 0xC1: case 0x6B:
-      if (!parse_modrm(code, pos, max, rip)) return std::nullopt;
-      if (pos + 1 > max) return std::nullopt;
+      if (!parse_modrm(code, pos, max, rip)) {
+        return std::nullopt;
+      }
+      if (pos + 1 > max) {
+        return std::nullopt;
+      }
       pos += 1;
       return finish();
     case 0x81: case 0x69: case 0xC7: {
-      if (!parse_modrm(code, pos, max, rip)) return std::nullopt;
+      if (!parse_modrm(code, pos, max, rip)) {
+        return std::nullopt;
+      }
       const std::size_t imm = imm_size();
-      if (pos + imm > max) return std::nullopt;
+      if (pos + imm > max) {
+        return std::nullopt;
+      }
       pos += imm;
       return finish();
     }
     case 0xC6:
-      if (!parse_modrm(code, pos, max, rip)) return std::nullopt;
-      if (pos + 1 > max) return std::nullopt;
+      if (!parse_modrm(code, pos, max, rip)) {
+        return std::nullopt;
+      }
+      if (pos + 1 > max) {
+        return std::nullopt;
+      }
       pos += 1;
       return finish();
     case 0xF6: {
-      if (pos >= max) return std::nullopt;
+      if (pos >= max) {
+        return std::nullopt;
+      }
       const unsigned char reg = (code[pos] >> 3) & 7;
-      if (!parse_modrm(code, pos, max, rip)) return std::nullopt;
+      if (!parse_modrm(code, pos, max, rip)) {
+        return std::nullopt;
+      }
       if (reg == 0) {
-        if (pos + 1 > max) return std::nullopt;
+        if (pos + 1 > max) {
+          return std::nullopt;
+        }
         pos += 1;
       }
       return finish();
     }
     case 0xF7: {
-      if (pos >= max) return std::nullopt;
+      if (pos >= max) {
+        return std::nullopt;
+      }
       const unsigned char reg = (code[pos] >> 3) & 7;
-      if (!parse_modrm(code, pos, max, rip)) return std::nullopt;
+      if (!parse_modrm(code, pos, max, rip)) {
+        return std::nullopt;
+      }
       if (reg == 0) {
         const std::size_t imm = imm_size();
-        if (pos + imm > max) return std::nullopt;
+        if (pos + imm > max) {
+          return std::nullopt;
+        }
         pos += imm;
       }
       return finish();
@@ -261,7 +331,9 @@ auto decode_one(const unsigned char* code, std::size_t max) -> std::optional<Dec
   // group5 (FE/FF), movsxd (63).
   if (op <= 0x3F || (op >= 0x84 && op <= 0x8F) || op == 0x63 || (op >= 0xD0 && op <= 0xD3) ||
       op == 0xFE || op == 0xFF) {
-    if (!parse_modrm(code, pos, max, rip)) return std::nullopt;
+    if (!parse_modrm(code, pos, max, rip)) {
+      return std::nullopt;
+    }
     return finish();
   }
   return std::nullopt;

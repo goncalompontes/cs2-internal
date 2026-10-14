@@ -172,11 +172,21 @@ auto discover_method_tables(MethodTables& out) noexcept -> bool {
   ok = out.factory != nullptr && out.swapchain != nullptr;
 
 cleanup:
-  if (swapchain != nullptr) swapchain->Release();
-  if (context != nullptr) context->Release();
-  if (device != nullptr) device->Release();
-  if (factory2 != nullptr) factory2->Release();
-  if (factory != nullptr) factory->Release();
+  if (swapchain != nullptr) {
+    swapchain->Release();
+  }
+  if (context != nullptr) {
+    context->Release();
+  }
+  if (device != nullptr) {
+    device->Release();
+  }
+  if (factory2 != nullptr) {
+    factory2->Release();
+  }
+  if (factory != nullptr) {
+    factory->Release();
+  }
   destroy_probe_window(instance, window);
   return ok;
 }

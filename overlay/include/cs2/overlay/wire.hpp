@@ -19,7 +19,7 @@
 
 namespace cs2::overlay::wire {
 
-inline constexpr uint32_t k_magic = 0x324F5343u;  // 'CSO2'
+inline constexpr uint32_t k_magic = 0x324F5343U;  // 'CSO2'
 inline constexpr uint32_t k_version = 2;
 
 inline constexpr int k_max_sections = 16;
