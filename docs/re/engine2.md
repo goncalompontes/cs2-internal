@@ -208,6 +208,51 @@ object built on the stack in `FUN_1801c5910` which captures the console output
 lines produced while a command runs and **re-executes** each captured line as a
 concommand/convar (`FUN_1801c54e0`). It does not touch the pipe.
 
+## Game event system (`GameEventSystemClientV001`) — RE in progress
+
+The harness wants a listener so scenarios can await/assert on game events
+(`player_death`, `round_start`, …) instead of polling state. The interface is an
+**engine2** interface (not client.dll) and is reachable from the generated SDK.
+
+| What | VA | RVA |
+|---|---|---|
+| `GameEventSystemClientV001` create thunk (`create()`) | `0x180216a80` | `0x216a80` |
+| `GameEventSystemServerV001` create thunk | `0x180216a90` | `0x216a90` |
+| **`CGameEventSystem` singleton** (`create()` returns `&object`) | `0x18091c9e0` | `0x91c9e0` |
+| `CGameEventSystem` constructor | `0x180216aa0` | `0x216aa0` |
+| singleton vtable (RTTI `.?AVCGameEventSystem@@`) | `0x18058ae38` | `0x58ae38` |
+| event **name → definition** registry global | `0x180696960` | `0x696960` |
+| dispatch / service-events (`vtable + 0x90`) | `0x1802180c0` | `0x2180c0` |
+| add-listener path (`vtable + 0x60`) | `0x1802170b0` | `0x2170b0` |
+| remove-listener path (`vtable + 0x68`) | `0x1802171d0` | `0x2171d0` |
+
+Verified from the code:
+
+- `create()` is a 7-byte thunk: `LEA RAX, [singleton]; RET` — the singleton is a
+  **static object** (its vtable pointer is written by `FUN_180216aa0` at runtime;
+  the file image is zeroed).
+- The dispatch pump (`FUN_1802180c0`) walks the queued events, calls
+  **`IGameEvent::GetName` at vtable offset `0x18`** on each event to identify it,
+  resolves the definition through `DAT_180696960->vtable[0x60]`, then invokes the
+  listeners registered in the `CEventDispatcher_Base` embedded at
+  `singleton + 0x70`.
+- Add/remove log on the game-event channel:
+  `"GameEvent:  Event %s (id:%d group:'%s') added listener."` (`0x18058b3c8`) /
+  `…removed listener.` (`0x18058b310`), and
+  `"Error trying to register a handler for an unknown game event type!"`
+  (`0x18058b380`).
+- `gameevents_showeventlisteners` is a console command that prints the current
+  listeners — a cheap live check.
+
+**Not yet resolved:** the registration entry observed at `vtable + 0x60` has the
+shape `(this, listener, void* ctx16, const char* eventName, bool)`, which does not
+match the public `IGameEventSystem::AddListener(listener, name, bServer)` — the
+thin wrapper was not located in engine2 (the slot has **no direct callers**, i.e.
+it is only reached through the vtable). The exact slot/calling convention will be
+pinned from **client.dll** call sites (`player_death` etc. live in the game
+module). Likewise the `IGameEventListener2` vtable shape (what the dispatcher
+calls on the listener) is still to be recovered.
+
 ## Still to recover
 
 1. **Console-output capture** for the harness (which of `-condebug` / a payload

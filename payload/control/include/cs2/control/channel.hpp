@@ -24,7 +24,9 @@ class Channel {
   // the name is already taken by a live instance).
   [[nodiscard]] bool open(std::string_view name) noexcept;
   void close() noexcept;
-  [[nodiscard]] bool valid() const noexcept { return handle_ != nullptr; }
+  [[nodiscard]] bool valid() const noexcept {
+    return handle_ != nullptr;
+  }
 
   // Block until a client connects. Returns false when the pipe is closed or the
   // wait failed.

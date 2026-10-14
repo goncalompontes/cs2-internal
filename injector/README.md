@@ -64,3 +64,8 @@ entry stub sets the thread's slot via `gs:[0x58]` before `DllMain`.
 
 > **Windows Defender** quarantines `injector.exe` after it runs (the heuristic
 > flags manual-map injectors). Add a folder exclusion if you need to re-run it.
+
+> **Terminating target.** Injecting into a process that is still exiting fails
+> `CreateRemoteThread` with `ACCESS_DENIED (5)`. Make sure the target is fully
+> gone before relaunching (the scenario runner waits for `cs2.exe` to disappear
+> and injects the exact PID it launched).

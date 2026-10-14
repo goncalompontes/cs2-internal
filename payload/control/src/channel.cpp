@@ -14,19 +14,20 @@ constexpr unsigned long k_pipe_buffer = 64UL * 1024UL;
 
 }  // namespace
 
-Channel::~Channel() { close(); }
+Channel::~Channel() {
+  close();
+}
 
 #if defined(_WIN32)
 
-bool Channel::open(std::string_view name) noexcept {
+auto Channel::open(std::string_view name) noexcept -> bool {
   if (handle_ != nullptr) {
     return true;
   }
   const std::string path(name);
   const HANDLE pipe = CreateNamedPipeA(
-      path.c_str(), PIPE_ACCESS_DUPLEX,
-      PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, PIPE_UNLIMITED_INSTANCES,
-      k_pipe_buffer, k_pipe_buffer, 0, nullptr);
+      path.c_str(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+      PIPE_UNLIMITED_INSTANCES, k_pipe_buffer, k_pipe_buffer, 0, nullptr);
   if (pipe == INVALID_HANDLE_VALUE) {
     return false;
   }
@@ -43,7 +44,7 @@ void Channel::close() noexcept {
   pending_.clear();
 }
 
-bool Channel::accept() noexcept {
+auto Channel::accept() noexcept -> bool {
   if (handle_ == nullptr) {
     return false;
   }
@@ -62,7 +63,7 @@ void Channel::disconnect() noexcept {
   pending_.clear();
 }
 
-bool Channel::read_line(std::string& out) noexcept {
+auto Channel::read_line(std::string& out) noexcept -> bool {
   if (handle_ == nullptr) {
     return false;
   }
@@ -86,7 +87,7 @@ bool Channel::read_line(std::string& out) noexcept {
   }
 }
 
-bool Channel::write_line(std::string_view bytes) noexcept {
+auto Channel::write_line(std::string_view bytes) noexcept -> bool {
   if (handle_ == nullptr) {
     return false;
   }
@@ -95,8 +96,7 @@ bool Channel::write_line(std::string_view bytes) noexcept {
   const char* data = payload.data();
   std::size_t remaining = payload.size();
   while (remaining > 0) {
-    const DWORD chunk =
-        static_cast<DWORD>(remaining > k_pipe_buffer ? k_pipe_buffer : remaining);
+    const DWORD chunk = static_cast<DWORD>(remaining > k_pipe_buffer ? k_pipe_buffer : remaining);
     DWORD written = 0;
     if (WriteFile(static_cast<HANDLE>(handle_), data, chunk, &written, nullptr) == FALSE) {
       return false;
@@ -112,12 +112,20 @@ bool Channel::write_line(std::string_view bytes) noexcept {
 
 #else
 
-bool Channel::open(std::string_view /*name*/) noexcept { return false; }
+auto Channel::open(std::string_view /*name*/) noexcept -> bool {
+  return false;
+}
 void Channel::close() noexcept {}
-bool Channel::accept() noexcept { return false; }
+auto Channel::accept() noexcept -> bool {
+  return false;
+}
 void Channel::disconnect() noexcept {}
-bool Channel::read_line(std::string& /*out*/) noexcept { return false; }
-bool Channel::write_line(std::string_view /*bytes*/) noexcept { return false; }
+auto Channel::read_line(std::string& /*out*/) noexcept -> bool {
+  return false;
+}
+auto Channel::write_line(std::string_view /*bytes*/) noexcept -> bool {
+  return false;
+}
 
 #endif
 

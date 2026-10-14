@@ -6,17 +6,17 @@
 namespace cs2::control {
 namespace {
 
-[[nodiscard]] bool local_alive(const game::Snapshot& snapshot) noexcept {
+[[nodiscard]] auto local_alive(const game::Snapshot& snapshot) noexcept -> bool {
   return snapshot.local.has_value() && snapshot.local->alive;
 }
 
-[[nodiscard]] std::int64_t alive_count(const game::Snapshot& snapshot) noexcept {
+[[nodiscard]] auto alive_count(const game::Snapshot& snapshot) noexcept -> std::int64_t {
   return static_cast<std::int64_t>(
       std::count_if(snapshot.players.begin(), snapshot.players.end(),
                     [](const game::PlayerSnapshot& player) { return player.alive; }));
 }
 
-[[nodiscard]] int team_from_json(const Json& value) noexcept {
+[[nodiscard]] auto team_from_json(const Json& value) noexcept -> int {
   if (value.is_number()) {
     return static_cast<int>(value.as_int());
   }
@@ -32,7 +32,9 @@ namespace {
 
 }  // namespace
 
-Predicate Predicate::always_true() noexcept { return Predicate{}; }
+auto Predicate::always_true() noexcept -> Predicate {
+  return Predicate{};
+}
 
 auto Predicate::from_json(const Json& value) -> std::optional<Predicate> {
   return parse_object(value);
@@ -50,28 +52,28 @@ auto Predicate::parse_object(const Json& value) -> std::optional<Predicate> {
       if (!member.is_bool()) {
         return std::nullopt;
       }
-      node.kind_ = (key == "in_map") ? Kind::kInMap : Kind::kLocalAlive;
+      node.kind_ = (key == "in_map") ? Kind::in_map : Kind::local_alive;
       node.expected_ = member.as_bool();
     } else if (key == "players_gte" || key == "alive_gte" || key == "local_hp_gte") {
       if (!member.is_number()) {
         return std::nullopt;
       }
       node.kind_ = (key == "players_gte")
-                       ? Kind::kPlayersGte
-                       : (key == "alive_gte" ? Kind::kAliveGte : Kind::kLocalHpGte);
+                       ? Kind::players_gte
+                       : (key == "alive_gte" ? Kind::alive_gte : Kind::local_hp_gte);
       node.threshold_ = member.as_int();
     } else if (key == "team") {
       const int team = team_from_json(member);
       if (team == 0) {
         return std::nullopt;
       }
-      node.kind_ = Kind::kTeam;
+      node.kind_ = Kind::team;
       node.team_ = team;
     } else if (key == "all" || key == "any") {
       if (!member.is_array()) {
         return std::nullopt;
       }
-      node.kind_ = (key == "all") ? Kind::kAll : Kind::kAny;
+      node.kind_ = (key == "all") ? Kind::all : Kind::any;
       for (const Json& element : member.items()) {
         std::optional<Predicate> nested = parse_object(element);
         if (!nested.has_value()) {
@@ -84,7 +86,7 @@ auto Predicate::parse_object(const Json& value) -> std::optional<Predicate> {
       if (!nested.has_value()) {
         return std::nullopt;
       }
-      node.kind_ = Kind::kNot;
+      node.kind_ = Kind::negated;
       node.children_.push_back(std::move(*nested));
     } else {
       return std::nullopt;  // unknown key
@@ -95,34 +97,34 @@ auto Predicate::parse_object(const Json& value) -> std::optional<Predicate> {
     return std::move(children.front());
   }
   Predicate conjunction;
-  conjunction.kind_ = Kind::kAll;
+  conjunction.kind_ = Kind::all;
   conjunction.children_ = std::move(children);
   return conjunction;
 }
 
-bool Predicate::matches(const game::Snapshot& snapshot) const noexcept {
+auto Predicate::matches(const game::Snapshot& snapshot) const noexcept -> bool {
   switch (kind_) {
-    case Kind::kTrue:
+    case Kind::always:
       return true;
-    case Kind::kInMap:
+    case Kind::in_map:
       return (snapshot.valid && snapshot.local.has_value()) == expected_;
-    case Kind::kLocalAlive:
+    case Kind::local_alive:
       return local_alive(snapshot) == expected_;
-    case Kind::kPlayersGte:
+    case Kind::players_gte:
       return static_cast<std::int64_t>(snapshot.players.size()) >= threshold_;
-    case Kind::kAliveGte:
+    case Kind::alive_gte:
       return alive_count(snapshot) >= threshold_;
-    case Kind::kLocalHpGte:
+    case Kind::local_hp_gte:
       return snapshot.local.has_value() && snapshot.local->health >= threshold_;
-    case Kind::kTeam:
+    case Kind::team:
       return snapshot.local.has_value() && snapshot.local->team == team_;
-    case Kind::kAll:
+    case Kind::all:
       return std::all_of(children_.begin(), children_.end(),
                          [&](const Predicate& child) { return child.matches(snapshot); });
-    case Kind::kAny:
+    case Kind::any:
       return std::any_of(children_.begin(), children_.end(),
                          [&](const Predicate& child) { return child.matches(snapshot); });
-    case Kind::kNot:
+    case Kind::negated:
       return children_.empty() || !children_.front().matches(snapshot);
   }
   return false;

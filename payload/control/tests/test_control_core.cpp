@@ -1,7 +1,8 @@
 // Unit tests for the control-channel core (ADR-0020): the JSON value, the
-// `wait_for` predicate, and snapshot serialization. These are the parts of
-// `payload/control` that are platform-independent, so they run host-side.
+// `wait_for` predicate, and snapshot serialization. These are the
+// platform-independent parts of `payload/control`, so they run host-side.
 
+#include <cassert>
 #include <cstdio>
 #include <string>
 
@@ -11,52 +12,42 @@
 
 namespace {
 
-int failures = 0;
-
-void expect(bool condition, const char* what) {
-  if (!condition) {
-    std::printf("FAIL: %s\n", what);
-    ++failures;
-  }
-}
-
 void test_json_round_trip() {
   using cs2::control::Json;
 
   const auto parsed = Json::parse(R"({"id":1,"cmd":"exec","args":{"line":"sv_cheats 1"}})");
-  expect(parsed.has_value(), "object parses");
-  expect(parsed->is_object(), "is object");
+  assert(parsed.has_value());
+  assert(parsed->is_object());
   const Json* cmd = parsed->find("cmd");
-  expect(cmd != nullptr && cmd->as_string() == "exec", "cmd is exec");
+  assert(cmd != nullptr && cmd->as_string() == "exec");
   const Json* args = parsed->find("args");
-  expect(args != nullptr && args->find("line") != nullptr, "nested args.line");
-  expect(parsed->dump() == R"({"id":1,"cmd":"exec","args":{"line":"sv_cheats 1"}})",
-         "compact round-trip is stable");
+  assert(args != nullptr && args->find("line") != nullptr);
+  assert(parsed->dump() == R"({"id":1,"cmd":"exec","args":{"line":"sv_cheats 1"}})");
 }
 
 void test_json_arrays_and_types() {
   using cs2::control::Json;
 
   const auto parsed = Json::parse(R"([1,2.5,true,false,null,"a\"b\n\u0041"])");
-  expect(parsed.has_value() && parsed->is_array(), "array parses");
-  expect(parsed->items().size() == 6, "array length");
-  expect(parsed->items()[0].as_int(-1) == 1, "integer");
-  expect(parsed->items()[1].as_number() == 2.5, "float");
-  expect(parsed->items()[2].as_bool(false), "true");
-  expect(!parsed->items()[3].as_bool(true), "false");
-  expect(parsed->items()[4].is_null(), "null");
-  expect(parsed->items()[5].as_string() == "a\"b\nA", "escapes decoded");
+  assert(parsed.has_value() && parsed->is_array());
+  assert(parsed->items().size() == 6);
+  assert(parsed->items()[0].as_int(-1) == 1);
+  assert(parsed->items()[1].as_number() == 2.5);
+  assert(parsed->items()[2].as_bool(false));
+  assert(!parsed->items()[3].as_bool(true));
+  assert(parsed->items()[4].is_null());
+  assert(parsed->items()[5].as_string() == "a\"b\nA");
 }
 
 void test_json_rejects_malformed() {
   using cs2::control::Json;
 
-  expect(!Json::parse("").has_value(), "empty rejected");
-  expect(!Json::parse("{").has_value(), "unterminated object rejected");
-  expect(!Json::parse("{\"a\":1,}").has_value(), "trailing comma rejected");
-  expect(!Json::parse("01").has_value(), "leading zero number rejected");
-  expect(!Json::parse("{} extra").has_value(), "trailing bytes rejected");
-  expect(!Json::parse("\"\\uD800\"").has_value(), "lone surrogate rejected");
+  assert(!Json::parse("").has_value());
+  assert(!Json::parse("{").has_value());
+  assert(!Json::parse("{\"a\":1,}").has_value());
+  assert(!Json::parse("01").has_value());  // leading zero
+  assert(!Json::parse("{} extra").has_value());
+  assert(!Json::parse("\"\\uD800\"").has_value());  // lone surrogate
 }
 
 void test_predicate_matching() {
@@ -80,31 +71,18 @@ void test_predicate_matching() {
   bot.team = 3;
   snapshot.players.push_back(bot);
 
-  const auto local_alive = Predicate::from_json(*Json::parse(R"({"local_alive":true})"));
-  expect(local_alive.has_value() && local_alive->matches(snapshot), "local_alive true");
+  assert(Predicate::from_json(*Json::parse(R"({"local_alive":true})"))->matches(snapshot));
+  assert(Predicate::from_json(*Json::parse(R"({"players_gte":2})"))->matches(snapshot));
+  assert(!Predicate::from_json(*Json::parse(R"({"players_gte":3})"))->matches(snapshot));
+  assert(Predicate::from_json(*Json::parse(R"({"alive_gte":1})"))->matches(snapshot));
+  assert(Predicate::from_json(*Json::parse(R"({"team":"T"})"))->matches(snapshot));
+  assert(Predicate::from_json(
+             *Json::parse(R"({"all":[{"in_map":true},{"team":"T"},{"local_hp_gte":50}]})"))
+             ->matches(snapshot));
+  assert(Predicate::from_json(*Json::parse(R"({"not":{"local_alive":false}})"))->matches(snapshot));
 
-  const auto players = Predicate::from_json(*Json::parse(R"({"players_gte":2})"));
-  expect(players.has_value() && players->matches(snapshot), "players_gte 2");
-  expect(!Predicate::from_json(*Json::parse(R"({"players_gte":3})"))->matches(snapshot),
-         "players_gte 3 fails");
-
-  const auto alive = Predicate::from_json(*Json::parse(R"({"alive_gte":1})"));
-  expect(alive.has_value() && alive->matches(snapshot), "alive_gte 1");
-
-  const auto team = Predicate::from_json(*Json::parse(R"({"team":"T"})"));
-  expect(team.has_value() && team->matches(snapshot), "team T");
-
-  const auto compound = Predicate::from_json(
-      *Json::parse(R"({"all":[{"in_map":true},{"team":"T"},{"local_hp_gte":50}]})"));
-  expect(compound.has_value() && compound->matches(snapshot), "all[] matches");
-
-  const auto negated =
-      Predicate::from_json(*Json::parse(R"({"not":{"local_alive":false}})"));
-  expect(negated.has_value() && negated->matches(snapshot), "not{} matches");
-
-  expect(!Predicate::from_json(*Json::parse(R"({"unknown_key":1})")).has_value(),
-         "unknown key rejected");
-  expect(!Predicate::from_json(*Json::parse(R"({})")).has_value(), "empty object rejected");
+  assert(!Predicate::from_json(*Json::parse(R"({"unknown_key":1})")).has_value());
+  assert(!Predicate::from_json(*Json::parse(R"({})")).has_value());
 }
 
 void test_snapshot_serialization() {
@@ -126,22 +104,20 @@ void test_snapshot_serialization() {
   snapshot.players = {local};
 
   const Json json = cs2::control::to_json(snapshot);
-  expect(json.find("valid") != nullptr && json.find("valid")->as_bool(), "snapshot valid");
-  expect(json.find("in_map") != nullptr && json.find("in_map")->as_bool(), "in_map true");
+  assert(json.find("valid") != nullptr && json.find("valid")->as_bool());
+  assert(json.find("in_map") != nullptr && json.find("in_map")->as_bool());
   const Json* players = json.find("players");
-  expect(players != nullptr && players->is_array() && players->items().size() == 1,
-         "one player serialized");
+  assert(players != nullptr && players->items().size() == 1);
   const Json* player = &players->items()[0];
-  expect(player->find("health")->as_int() == 42, "player health");
-  expect(player->find("team")->as_int() == 3, "player team");
-  expect(player->find("name")->as_string() == "me", "player name");
-  expect(player->find("origin")->find("z")->as_number() == 3.0, "player origin z");
+  assert(player->find("health")->as_int() == 42);
+  assert(player->find("team")->as_int() == 3);
+  assert(player->find("name")->as_string() == "me");
+  assert(player->find("origin")->find("z")->as_number() == 3.0);
 
   // An empty/unattached snapshot is still well-formed.
   const Json empty = cs2::control::to_json(Snapshot{});
-  expect(empty.find("valid") != nullptr && !empty.find("valid")->as_bool(),
-         "default snapshot invalid");
-  expect(empty.find("players")->items().empty(), "default snapshot has no players");
+  assert(empty.find("valid") != nullptr && !empty.find("valid")->as_bool());
+  assert(empty.find("players")->items().empty());
 }
 
 }  // namespace
@@ -152,10 +128,6 @@ auto main() -> int {
   test_json_rejects_malformed();
   test_predicate_matching();
   test_snapshot_serialization();
-  if (failures != 0) {
-    std::printf("%d check(s) failed\n", failures);
-    return 1;
-  }
-  std::printf("control-core: all checks passed\n");
+  std::puts("control-core: ok");
   return 0;
 }

@@ -18,7 +18,7 @@ namespace cs2::control {
 
 class Json {
  public:
-  enum class Type { kNull, kBool, kNumber, kString, kArray, kObject };
+  enum class Type { null_value, bool_value, number, string_value, array, object };
 
   Json() = default;
 
@@ -29,13 +29,27 @@ class Json {
   [[nodiscard]] static Json array();
   [[nodiscard]] static Json object();
 
-  [[nodiscard]] Type type() const noexcept { return type_; }
-  [[nodiscard]] bool is_null() const noexcept { return type_ == Type::kNull; }
-  [[nodiscard]] bool is_bool() const noexcept { return type_ == Type::kBool; }
-  [[nodiscard]] bool is_number() const noexcept { return type_ == Type::kNumber; }
-  [[nodiscard]] bool is_string() const noexcept { return type_ == Type::kString; }
-  [[nodiscard]] bool is_array() const noexcept { return type_ == Type::kArray; }
-  [[nodiscard]] bool is_object() const noexcept { return type_ == Type::kObject; }
+  [[nodiscard]] Type type() const noexcept {
+    return type_;
+  }
+  [[nodiscard]] bool is_null() const noexcept {
+    return type_ == Type::null_value;
+  }
+  [[nodiscard]] bool is_bool() const noexcept {
+    return type_ == Type::bool_value;
+  }
+  [[nodiscard]] bool is_number() const noexcept {
+    return type_ == Type::number;
+  }
+  [[nodiscard]] bool is_string() const noexcept {
+    return type_ == Type::string_value;
+  }
+  [[nodiscard]] bool is_array() const noexcept {
+    return type_ == Type::array;
+  }
+  [[nodiscard]] bool is_object() const noexcept {
+    return type_ == Type::object;
+  }
 
   [[nodiscard]] bool as_bool(bool fallback = false) const noexcept;
   [[nodiscard]] double as_number(double fallback = 0.0) const noexcept;
@@ -52,7 +66,9 @@ class Json {
   void set(std::string key, Json value);
 
   // Array access; empty when this is not an array.
-  [[nodiscard]] const std::vector<Json>& items() const noexcept { return array_; }
+  [[nodiscard]] const std::vector<Json>& items() const noexcept {
+    return array_;
+  }
   void push_back(Json value);
 
   // Serialize compactly (no insignificant whitespace).
@@ -63,7 +79,7 @@ class Json {
   [[nodiscard]] static std::optional<Json> parse(std::string_view text);
 
  private:
-  Type type_ = Type::kNull;
+  Type type_ = Type::null_value;
   bool bool_ = false;
   double number_ = 0.0;
   std::string string_;

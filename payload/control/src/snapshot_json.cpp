@@ -5,7 +5,7 @@
 namespace cs2::control {
 namespace {
 
-[[nodiscard]] Json player_to_json(const game::PlayerSnapshot& player) {
+[[nodiscard]] auto player_to_json(const game::PlayerSnapshot& player) -> Json {
   Json out = Json::object();
   out.set("index", Json::integer(player.index));
   out.set("name", Json::string(player.name));
@@ -38,7 +38,7 @@ namespace {
 
 }  // namespace
 
-Json to_json(const game::Vec3& value) {
+auto to_json(const game::Vec3& value) -> Json {
   Json out = Json::object();
   out.set("x", Json::number(value.x));
   out.set("y", Json::number(value.y));
@@ -46,7 +46,7 @@ Json to_json(const game::Vec3& value) {
   return out;
 }
 
-Json to_json(const game::Angle& value) {
+auto to_json(const game::Angle& value) -> Json {
   Json out = Json::object();
   out.set("pitch", Json::number(value.pitch));
   out.set("yaw", Json::number(value.yaw));
@@ -54,9 +54,11 @@ Json to_json(const game::Angle& value) {
   return out;
 }
 
-Json to_json(const game::PlayerSnapshot& player) { return player_to_json(player); }
+auto to_json(const game::PlayerSnapshot& player) -> Json {
+  return player_to_json(player);
+}
 
-Json to_json(const game::Snapshot& snapshot) {
+auto to_json(const game::Snapshot& snapshot) -> Json {
   Json out = Json::object();
   out.set("valid", Json::boolean(snapshot.valid));
   out.set("in_map", Json::boolean(snapshot.valid && snapshot.local.has_value()));

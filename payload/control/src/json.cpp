@@ -3,7 +3,6 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <limits>
 
 namespace cs2::control {
 namespace {
@@ -33,7 +32,7 @@ class Parser {
  public:
   explicit Parser(std::string_view text) noexcept : text_(text) {}
 
-  [[nodiscard]] std::optional<Json> parse_document() {
+  auto parse_document() -> std::optional<Json> {
     skip_whitespace();
     std::optional<Json> value = parse_value();
     if (!value.has_value()) {
@@ -49,8 +48,12 @@ class Parser {
  private:
   static constexpr int k_max_depth = 64;
 
-  [[nodiscard]] bool at_end() const noexcept { return pos_ >= text_.size(); }
-  [[nodiscard]] char peek() const noexcept { return at_end() ? '\0' : text_[pos_]; }
+  auto at_end() const noexcept -> bool {
+    return pos_ >= text_.size();
+  }
+  auto peek() const noexcept -> char {
+    return at_end() ? '\0' : text_[pos_];
+  }
 
   void skip_whitespace() noexcept {
     while (!at_end()) {
@@ -63,7 +66,7 @@ class Parser {
     }
   }
 
-  [[nodiscard]] bool consume(std::string_view word) noexcept {
+  auto consume(std::string_view word) noexcept -> bool {
     if (text_.compare(pos_, word.size(), word) == 0) {
       pos_ += word.size();
       return true;
@@ -71,7 +74,7 @@ class Parser {
     return false;
   }
 
-  [[nodiscard]] std::optional<Json> parse_value() {
+  auto parse_value() -> std::optional<Json> {
     if (++depth_ > k_max_depth) {
       return std::nullopt;
     }
@@ -104,7 +107,7 @@ class Parser {
     return result;
   }
 
-  [[nodiscard]] std::optional<Json> parse_object() {
+  auto parse_object() -> std::optional<Json> {
     ++pos_;  // '{'
     Json object = Json::object();
     skip_whitespace();
@@ -145,7 +148,7 @@ class Parser {
     }
   }
 
-  [[nodiscard]] std::optional<Json> parse_array() {
+  auto parse_array() -> std::optional<Json> {
     ++pos_;  // '['
     Json array = Json::array();
     skip_whitespace();
@@ -173,7 +176,7 @@ class Parser {
     }
   }
 
-  [[nodiscard]] std::optional<Json> parse_string_value() {
+  auto parse_string_value() -> std::optional<Json> {
     std::optional<std::string> value = parse_string();
     if (!value.has_value()) {
       return std::nullopt;
@@ -181,7 +184,7 @@ class Parser {
     return Json::string(std::move(*value));
   }
 
-  [[nodiscard]] std::optional<std::string> parse_string() {
+  auto parse_string() -> std::optional<std::string> {
     ++pos_;  // opening quote
     std::string out;
     while (!at_end()) {
@@ -255,7 +258,7 @@ class Parser {
     return std::nullopt;  // unterminated string
   }
 
-  [[nodiscard]] std::optional<std::uint32_t> parse_hex4() {
+  auto parse_hex4() -> std::optional<std::uint32_t> {
     if (text_.size() - pos_ < 4) {
       return std::nullopt;
     }
@@ -276,7 +279,7 @@ class Parser {
     return value;
   }
 
-  [[nodiscard]] std::optional<Json> parse_number() {
+  auto parse_number() -> std::optional<Json> {
     const std::size_t start = pos_;
     if (peek() == '-') {
       ++pos_;
@@ -326,19 +329,17 @@ class Parser {
 
 void dump_into(const Json& value, std::string& out) {
   switch (value.type()) {
-    case Json::Type::kNull:
+    case Json::Type::null_value:
       out += "null";
       return;
-    case Json::Type::kBool:
+    case Json::Type::bool_value:
       out += value.as_bool() ? "true" : "false";
       return;
-    case Json::Type::kNumber: {
+    case Json::Type::number: {
       const double number = value.as_number();
-      if (std::isfinite(number) && std::floor(number) == number &&
-          std::abs(number) < 9.0e15) {
+      if (std::isfinite(number) && std::floor(number) == number && std::abs(number) < 9.0e15) {
         char buffer[32];
-        std::snprintf(buffer, sizeof(buffer), "%lld",
-                      static_cast<long long>(number));
+        std::snprintf(buffer, sizeof(buffer), "%lld", static_cast<long long>(number));
         out += buffer;
       } else {
         char buffer[32];
@@ -347,7 +348,7 @@ void dump_into(const Json& value, std::string& out) {
       }
       return;
     }
-    case Json::Type::kString: {
+    case Json::Type::string_value: {
       out.push_back('"');
       for (const char c : value.as_string()) {
         switch (c) {
@@ -387,7 +388,7 @@ void dump_into(const Json& value, std::string& out) {
       out.push_back('"');
       return;
     }
-    case Json::Type::kArray: {
+    case Json::Type::array: {
       out.push_back('[');
       bool first = true;
       for (const Json& item : value.items()) {
@@ -400,7 +401,7 @@ void dump_into(const Json& value, std::string& out) {
       out.push_back(']');
       return;
     }
-    case Json::Type::kObject: {
+    case Json::Type::object: {
       out.push_back('{');
       bool first = true;
       for (const auto& [name, member] : value.members()) {
@@ -420,62 +421,64 @@ void dump_into(const Json& value, std::string& out) {
 
 }  // namespace
 
-Json Json::boolean(bool value) {
+auto Json::boolean(bool value) -> Json {
   Json json;
-  json.type_ = Type::kBool;
+  json.type_ = Type::bool_value;
   json.bool_ = value;
   return json;
 }
 
-Json Json::number(double value) {
+auto Json::number(double value) -> Json {
   Json json;
-  json.type_ = Type::kNumber;
+  json.type_ = Type::number;
   json.number_ = value;
   return json;
 }
 
-Json Json::integer(std::int64_t value) { return number(static_cast<double>(value)); }
+auto Json::integer(std::int64_t value) -> Json {
+  return number(static_cast<double>(value));
+}
 
-Json Json::string(std::string value) {
+auto Json::string(std::string value) -> Json {
   Json json;
-  json.type_ = Type::kString;
+  json.type_ = Type::string_value;
   json.string_ = std::move(value);
   return json;
 }
 
-Json Json::array() {
+auto Json::array() -> Json {
   Json json;
-  json.type_ = Type::kArray;
+  json.type_ = Type::array;
   return json;
 }
 
-Json Json::object() {
+auto Json::object() -> Json {
   Json json;
-  json.type_ = Type::kObject;
+  json.type_ = Type::object;
   return json;
 }
 
-bool Json::as_bool(bool fallback) const noexcept {
-  return type_ == Type::kBool ? bool_ : fallback;
+auto Json::as_bool(bool fallback) const noexcept -> bool {
+  return type_ == Type::bool_value ? bool_ : fallback;
 }
 
-double Json::as_number(double fallback) const noexcept {
-  return type_ == Type::kNumber ? number_ : fallback;
+auto Json::as_number(double fallback) const noexcept -> double {
+  return type_ == Type::number ? number_ : fallback;
 }
 
-std::int64_t Json::as_int(std::int64_t fallback) const noexcept {
-  if (type_ != Type::kNumber) {
+auto Json::as_int(std::int64_t fallback) const noexcept -> std::int64_t {
+  if (type_ != Type::number) {
     return fallback;
   }
   return static_cast<std::int64_t>(number_);
 }
 
-std::string_view Json::as_string(std::string_view fallback) const noexcept {
-  return type_ == Type::kString ? std::string_view(string_) : fallback;
+auto Json::as_string(std::string_view fallback) const noexcept -> std::string_view {
+  return type_ == Type::string_value ? std::string_view(string_) : fallback;
 }
 
-const Json* Json::find(std::string_view key) const noexcept {
-  if (type_ != Type::kObject) {
+auto Json::find(std::string_view key) const noexcept -> const Json* {
+  if (type_ != Type::object) {
     return nullptr;
   }
   for (const auto& [name, value] : object_) {
@@ -487,7 +490,7 @@ const Json* Json::find(std::string_view key) const noexcept {
 }
 
 void Json::set(std::string key, Json value) {
-  if (type_ != Type::kObject) {
+  if (type_ != Type::object) {
     return;
   }
   for (auto& [name, existing] : object_) {
@@ -500,18 +503,18 @@ void Json::set(std::string key, Json value) {
 }
 
 void Json::push_back(Json value) {
-  if (type_ == Type::kArray) {
+  if (type_ == Type::array) {
     array_.push_back(std::move(value));
   }
 }
 
-std::string Json::dump() const {
+auto Json::dump() const -> std::string {
   std::string out;
   dump_into(*this, out);
   return out;
 }
 
-std::optional<Json> Json::parse(std::string_view text) {
+auto Json::parse(std::string_view text) -> std::optional<Json> {
   Parser parser(text);
   return parser.parse_document();
 }

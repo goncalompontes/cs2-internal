@@ -39,24 +39,24 @@ class Predicate {
 
  private:
   enum class Kind {
-    kTrue,
-    kInMap,
-    kLocalAlive,
-    kPlayersGte,
-    kAliveGte,
-    kLocalHpGte,
-    kTeam,
-    kAll,
-    kAny,
-    kNot,
+    always,
+    in_map,
+    local_alive,
+    players_gte,
+    alive_gte,
+    local_hp_gte,
+    team,
+    all,
+    any,
+    negated,
   };
 
   [[nodiscard]] static std::optional<Predicate> parse_object(const Json& value);
 
-  Kind kind_ = Kind::kTrue;
-  bool expected_ = false;     // kInMap / kLocalAlive
+  Kind kind_ = Kind::always;
+  bool expected_ = false;       // in_map / local_alive
   std::int64_t threshold_ = 0;  // *_gte
-  int team_ = 0;              // kTeam (2 = T, 3 = CT)
+  int team_ = 0;                // team (2 = T, 3 = CT)
   std::vector<Predicate> children_;
 };
 

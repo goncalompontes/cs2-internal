@@ -9,10 +9,13 @@
 
 Read alongside `decisions.md` **ADR-0015/0016/0017/0018/0019/0020**.
 
-> **Active feature:** the programmatic scenario/control harness. Resume from
-> [`docs/control-harness.md`](control-harness.md) (design, decisions, next
-> actions) and [`docs/re/engine2.md`](re/engine2.md) (RE of the engine
-> console-command path).
+> **Active feature:** the programmatic scenario/control harness. The RE is done
+> and the **control core is implemented and validated live** (`payload/control/`
+> + `scripts/scenario/`; the `join-bot-match` scenario drove a real game).
+> Resume from [`docs/control-harness.md`](control-harness.md) (design, decisions,
+> validation notes, next actions) and [`docs/re/engine2.md`](re/engine2.md) (RE of
+> the engine console-command path). Next: console-output capture, then
+> `look`/`press`.
 
 ## One-line summary
 

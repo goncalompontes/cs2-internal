@@ -30,7 +30,9 @@ class Service {
   // the pipe name. Returns false when the pipe cannot be created.
   [[nodiscard]] bool start() noexcept;
   void stop() noexcept;
-  [[nodiscard]] bool running() const noexcept { return running_.load(); }
+  [[nodiscard]] bool running() const noexcept {
+    return running_.load();
+  }
 
  private:
 #if defined(_WIN32)

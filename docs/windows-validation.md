@@ -25,6 +25,12 @@ payload with `injector.exe`:
 - **Display-mode change** — toggling windowed/fullscreen did **not** freeze the
   game (no `[freeze]` reports; the layer kept presenting). The ADR-0017 freeze
   did not reproduce on native Windows.
+- **Control channel (2026-10)** — the payload's named-pipe control channel
+  (`payload/control/`, ADR-0020) answered `ping`/`state`/`exec`/`wait_for` over
+  `\\.\pipe\cs2-internal-control`, and the `scripts/run-scenario.py
+  join-bot-match` scenario drove a full offline bot match end to end (launch via
+  `CS2Launch` → inject → `map de_dust2` → add bots → assert state). See
+  `docs/control-harness.md`.
 
 ## Issues found and fixed
 
@@ -38,6 +44,15 @@ payload with `injector.exe`:
   elevated processes can). They now live under the payload's writable data dir
   `%LOCALAPPDATA%\cs2-internal` (override `CS2_PAYLOAD_DIR`); the overlay layer
   resolves the same path on Windows and under Proton.
+- **`IMM32.dll` import (2026-10).** Dear ImGui's default Win32 IME/clipboard/shell
+  handlers pulled `IMM32.dll` (and clipboard `USER32`/`SHELL32` symbols) into the
+  payload's import table; the game does not load `IMM32` at boot, so the injector
+  could not resolve it. They are disabled in
+  `payload/third_party/imgui/imconfig.h` (the overlay builds no Win32 platform
+  backend). The injector also runs with `--load-missing` for robustness.
+- **`injector.exe` quarantined.** Windows Defender quarantines the manual-map
+  injector *after* it runs, so a second run fails with "injector not built".
+  Rebuild it, or add a folder exclusion (environmental, not a build issue).
 
 See `docs/handoff.md` for the current state and `docs/decisions.md` (ADR-0018,
 ADR-0019).

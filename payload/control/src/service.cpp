@@ -18,7 +18,9 @@
 
 namespace cs2::control {
 
-Service::~Service() { stop(); }
+Service::~Service() {
+  stop();
+}
 
 #if defined(_WIN32)
 namespace {
@@ -73,7 +75,7 @@ void Service::run() noexcept {
   }
 }
 
-bool Service::handle(const std::string& line, std::string& response) noexcept {
+auto Service::handle(const std::string& line, std::string& response) noexcept -> bool {
   Json out = Json::object();
   const std::optional<Json> request = Json::parse(line);
   if (!request.has_value() || !request->is_object()) {
@@ -116,7 +118,7 @@ bool Service::handle(const std::string& line, std::string& response) noexcept {
   return true;
 }
 
-Json Service::ping_result() noexcept {
+auto Service::ping_result() noexcept -> Json {
   console_.refresh();
   Json result = Json::object();
   result.set("pong", Json::boolean(true));
@@ -189,8 +191,7 @@ void Service::do_wait_for(const Json& args, Json& out) noexcept {
     timeout_ms = 0;
   }
 
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   bool matched = false;
   Json snapshot = Json();
   for (;;) {
@@ -207,8 +208,7 @@ void Service::do_wait_for(const Json& args, Json& out) noexcept {
         break;
       }
     }
-    if (!running_.load(std::memory_order_relaxed) ||
-        std::chrono::steady_clock::now() >= deadline) {
+    if (!running_.load(std::memory_order_relaxed) || std::chrono::steady_clock::now() >= deadline) {
       break;
     }
     Sleep(k_poll_ms);
@@ -220,7 +220,7 @@ void Service::do_wait_for(const Json& args, Json& out) noexcept {
   set_ok(out, std::move(result));
 }
 
-bool Service::start() noexcept {
+auto Service::start() noexcept -> bool {
   if (running_.load(std::memory_order_relaxed)) {
     return true;
   }
@@ -242,8 +242,7 @@ bool Service::start() noexcept {
     return false;
   }
   thread_ = thread;
-  cs2::game::append_log("[cs2-payload] control: listening on " +
-                        std::string(name));
+  cs2::game::append_log("[cs2-payload] control: listening on " + std::string(name));
   return true;
 }
 
@@ -260,7 +259,9 @@ void Service::stop() noexcept {
 
 #else
 
-bool Service::start() noexcept { return false; }
+auto Service::start() noexcept -> bool {
+  return false;
+}
 void Service::stop() noexcept {}
 
 #endif

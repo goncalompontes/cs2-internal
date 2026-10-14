@@ -21,7 +21,9 @@ class Console {
   // Idempotent; safe to call on every request.
   void refresh() noexcept;
 
-  [[nodiscard]] bool ready() const noexcept { return add_text_ != nullptr; }
+  [[nodiscard]] bool ready() const noexcept {
+    return add_text_ != nullptr;
+  }
 
   // Queue `line` (may contain `;`-separated commands). Returns false when the
   // engine addresses are not resolved yet.

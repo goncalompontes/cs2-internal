@@ -29,6 +29,14 @@
 
 //---- Don't define obsolete functions/enums/behaviors. Consider enabling from time to time after updating to clean your code of obsolete function/names.
 #define IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+//---- The overlay is display-only and does not build the Win32 platform backend
+// (see third_party/imgui/meson.build): no widgets, clipboard, IME or shell
+// integration. Disabling the default Win32 handlers keeps imm32/shell32 out of
+// the mapped payload's import table (IMM32 is not loaded in cs2.exe at boot, so
+// the injector could not resolve it).
+#define IMGUI_DISABLE_WIN32_DEFAULT_CLIPBOARD_FUNCTIONS
+#define IMGUI_DISABLE_WIN32_DEFAULT_IME_FUNCTIONS
+#define IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS
 
 //---- Disable all of Dear ImGui or don't implement standard windows/tools.
 // It is very strongly recommended to NOT disable the demo windows and debug tool during development. They are extremely useful in day to day work. Please read comments in imgui_demo.cpp.
