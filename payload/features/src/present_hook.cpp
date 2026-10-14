@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include "cs2/diag/watchdog.hpp"
+#include "cs2/game/log.hpp"
 
 #if defined(_WIN32)
 #include <d3d11.h>
@@ -14,10 +15,10 @@ namespace cs2::features {
 namespace {
 
 #if defined(_WIN32)
-// Append a line to a log file next to the drive root so hook activity is
-// observable from outside the target. Uses Win32 file I/O, not the CRT (a
-// manually mapped module only has static-CRT per-thread state on the injector's
-// entry thread).
+// Append a line to the payload log (under the payload's writable data dir) so
+// hook activity is observable from outside the target. Uses Win32 file I/O, not
+// the CRT (a manually mapped module only has static-CRT per-thread state on the
+// injector's entry thread).
 void log_line(const char* text) noexcept {
   using CreateFileAFn = HANDLE(__stdcall*)(const char*, unsigned long, unsigned long, void*,
                                            unsigned long, unsigned long, HANDLE);
@@ -28,11 +29,14 @@ void log_line(const char* text) noexcept {
     create_file = reinterpret_cast<CreateFileAFn>(GetProcAddress(kernel32, "CreateFileA"));
     if (create_file == nullptr) return;
   }
+  char path[MAX_PATH];
+  if (!cs2::game::data_file_path("cs2-payload.log", path, sizeof(path))) return;
+
   constexpr unsigned long k_file_append_data = 0x4;
   constexpr unsigned long k_file_share_read = 0x1;
   constexpr unsigned long k_open_always = 0x4;
   constexpr unsigned long k_file_attribute_normal = 0x80;
-  HANDLE file = create_file("C:\\cs2-payload.log", k_file_append_data, k_file_share_read, nullptr,
+  HANDLE file = create_file(path, k_file_append_data, k_file_share_read, nullptr,
                             k_open_always, k_file_attribute_normal, nullptr);
   if (file == nullptr || file == INVALID_HANDLE_VALUE) return;
   std::size_t length = 0;

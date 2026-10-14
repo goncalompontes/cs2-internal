@@ -26,6 +26,45 @@ meson compile -C build
 meson test -C build
 ```
 
+## Native Windows (clang-cl)
+
+The same Meson projects build natively on Windows. The C++23 dialect is selected
+per compiler in each `meson.build` (GNU-like `-std=c++23`; MSVC/clang-cl
+`/std:c++latest`, which is what Meson exposes for those drivers), and SDK header
+generation uses `scripts/gen-sdk.py` (cross-platform Python) so no POSIX shell
+is required.
+
+From a VS Developer (or `vcvars64.bat`) environment with LLVM on `PATH`:
+
+```bat
+set CC=clang-cl
+set CXX=clang-cl
+meson setup build
+meson compile -C build
+meson test -C build
+
+:: payload + injector (native Windows targets)
+meson setup build-payload payload
+meson compile -C build-payload
+meson setup build-injector injector
+meson compile -C build-injector
+```
+
+Notes:
+
+- The Rust dumper builds on Windows and now has a native live-memory backend
+  (`ReadProcessMemory` + `VirtualQueryEx` + toolhelp), so `--process`/`--pid`
+  work there too; only the `--mcp` server is Unix-only (`/proc`).
+- The injector's synthetic PEB loader-list entry is skipped by default on native
+  Windows (it faults `LdrpInitializeThread`); it is kept for Wine/Proton. See
+  `--register` / `--no-register`.
+- The `overlay/` project builds a native Windows `cs2_overlay_layer.dll` as well
+  as the Linux `.so`; register the generated manifest under
+  `HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers` (see `overlay/README.md`).
+- Windows Defender quarantines `injector.exe` after it runs (a manual-map
+  injector trips the heuristic). Add a folder exclusion if you need to re-run
+  it; this is environmental, not a build issue.
+
 ## Cross file
 
 `windows-msvc.ini` targets `x86_64-pc-windows-msvc`. `msvcenv-native.sh`

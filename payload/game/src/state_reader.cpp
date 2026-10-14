@@ -7,7 +7,10 @@
 #include "cs2/game/memory.hpp"
 #include "cs2/game/module.hpp"
 #include "offsets.hpp"
+#if __has_include("schemas/client_dll.hpp")
 #include "schemas/client_dll.hpp"
+#define CS2_GAME_HAVE_CLIENT_SCHEMA 1
+#endif
 
 namespace cs2::game {
 namespace {
@@ -15,12 +18,19 @@ namespace {
 using namespace cs2::sdk;
 
 // Resolve a field offset from the generated client schema (ADR-0001). The
-// fallback covers a build whose schema dump is older than the field.
+// fallback covers a build whose schema dump is older than the field, and a
+// fresh checkout with no schema dump at all.
 std::uint32_t field(std::string_view class_target, std::string_view field_target,
                     std::uint32_t fallback) {
+#if defined(CS2_GAME_HAVE_CLIENT_SCHEMA)
   const std::uint32_t offset =
       schemas::client_dll::field_offset_by_target(class_target, field_target);
   return offset != 0 ? offset : fallback;
+#else
+  (void)class_target;
+  (void)field_target;
+  return fallback;
+#endif
 }
 
 // Read a resolved global pointer by offset name (e.g. "entity_list").

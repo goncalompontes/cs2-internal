@@ -1,8 +1,10 @@
 #pragma once
 
 // Layer-side transport for the shared overlay model (ADR-0016): maps the
-// payload's `C:\cs2-overlay.shm` segment, publishes the presented extent for
-// the payload, and reads the model it writes.
+// payload's shared segment (under the payload's writable data dir — on native
+// Windows `%LOCALAPPDATA%\cs2-internal\cs2-overlay.shm`; under Proton the
+// prefix's `drive_c`), publishes the presented extent for the payload, and
+// reads the model it writes.
 
 #include <cstdint>
 

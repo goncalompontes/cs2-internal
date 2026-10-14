@@ -1,0 +1,47 @@
+# clang-format configuration for cs2-internal.
+#
+# This file is the project's single source of truth for C++ formatting. It is
+# consumed by:
+#   * scripts/clang-tidy-fix.py (FormatStyle: file in .clang-tidy reformats the
+#     lines clang-tidy rewrites, so fixes land already formatted);
+#   * CLion - Settings | Editor | Code Style | C/C++ : either pick the
+#     "Clang-Format" formatting engine, or keep the CLion formatter and enable
+#     "Read code style from .clang-format files".
+#
+# BasedOnStyle: Google is the closest published preset to the existing house
+# style; the deltas below capture what is actually in the tree.
+---
+Language: Cpp
+BasedOnStyle: Google
+
+# The project is C++23 (see meson.build). The bundled clang-format (LLVM 22) does
+# not accept the `c++23` spelling and `Latest` resolves to it, so that is used.
+# This only affects which trailing-comma and braced-init rules are emitted.
+Standard: Latest
+
+# --- Layout ---------------------------------------------------------------
+IndentWidth: 2
+ColumnLimit: 100
+NamespaceIndentation: None
+FixNamespaceComments: true          # emits `}  // namespace cs2::loader::pe`
+BreakBeforeBraces: Attach
+
+# --- Pointers / qualifiers ------------------------------------------------
+PointerAlignment: Left              # `const char* p`, not `const char *p`
+DerivePointerAlignment: false
+QualifierAlignment: Left            # `const T x`, not `T const x`
+
+# --- Short blocks ---------------------------------------------------------
+# Matches the tree: `void f() noexcept {}` stays on one line, non-empty bodies
+# expand, and single-statement `if (...) return ...;` is kept on one line.
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AllowShortLoopsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: Empty
+
+# --- Includes -------------------------------------------------------------
+# Sort within each existing block but never regroup them: include *order* is
+# load-bearing here (e.g. <windows.h> must precede <intrin.h>), so the author's
+# grouping is preserved rather than flattened into system/project buckets.
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
+...

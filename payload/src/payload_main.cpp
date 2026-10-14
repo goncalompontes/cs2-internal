@@ -11,6 +11,7 @@
 #include "cs2/features/model_publisher.hpp"
 #include "cs2/features/overlay.hpp"
 #include "cs2/features/present_hook.hpp"
+#include "cs2/game/log.hpp"
 #include "cs2/render/imgui_backend.hpp"
 #include "cs2/tls/bootstrap.hpp"
 
@@ -94,10 +95,10 @@ void boot() {
   std::puts("[cs2-payload] boot (no SDK headers)");
 #endif
 
-  // A native Windows build is not yet validated on a real Windows host. Make
-  // that unmistakable in the log so no result is mistaken for tested.
+  // Native Windows builds are distinguishable in the log from the msvc-wine
+  // cross build (both target Windows).
 #if defined(CS2_NATIVE_WINDOWS_BUILD)
-  std::puts("[cs2-payload] *** NATIVE WINDOWS BUILD - NOT YET TESTED ON WINDOWS ***");
+  std::puts("[cs2-payload] native Windows build");
 #elif defined(CS2_CROSS_WINDOWS_BUILD)
   std::puts("[cs2-payload] cross-built Windows payload (msvc-wine)");
 #endif
@@ -115,10 +116,12 @@ void boot() {
 
   // Marker file so injection is observable from outside the target process.
 #if defined(_WIN32)
+  char marker_path[MAX_PATH];
   std::FILE* file = nullptr;
-  if (fopen_s(&file, "C:\\cs2-payload-boot.txt", "a") == 0 && file != nullptr) {
+  if (cs2::game::data_file_path("cs2-payload-boot.txt", marker_path, sizeof(marker_path)) &&
+      fopen_s(&file, marker_path, "a") == 0 && file != nullptr) {
 #if defined(CS2_NATIVE_WINDOWS_BUILD)
-    const char* build_kind = "native-windows-UNTESTED";
+    const char* build_kind = "native-windows";
 #elif defined(CS2_CROSS_WINDOWS_BUILD)
     const char* build_kind = "cross-windows";
 #else

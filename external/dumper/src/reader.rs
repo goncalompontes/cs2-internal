@@ -6,7 +6,11 @@
 
 use anyhow::{anyhow, Result};
 
-use crate::memory::{LinuxProcMemory, ProcessMemory};
+use crate::memory::ProcessMemory;
+#[cfg(unix)]
+use crate::memory::LinuxProcMemory;
+#[cfg(windows)]
+use crate::memory::WindowsMemory;
 
 pub trait MemoryRead {
     fn read_bytes(&self, addr: usize, len: usize) -> Result<Vec<u8>>;
@@ -64,7 +68,15 @@ pub trait MemoryRead {
     }
 }
 
+#[cfg(unix)]
 impl MemoryRead for LinuxProcMemory {
+    fn read_bytes(&self, addr: usize, len: usize) -> Result<Vec<u8>> {
+        ProcessMemory::read_vec(self, addr, len).map_err(|e| anyhow!(e.to_string()))
+    }
+}
+
+#[cfg(windows)]
+impl MemoryRead for WindowsMemory {
     fn read_bytes(&self, addr: usize, len: usize) -> Result<Vec<u8>> {
         ProcessMemory::read_vec(self, addr, len).map_err(|e| anyhow!(e.to_string()))
     }

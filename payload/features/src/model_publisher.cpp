@@ -9,6 +9,7 @@
 
 #include "cs2/overlay/wire.hpp"
 #include "cs2/diag/watchdog.hpp"
+#include "cs2/game/log.hpp"
 #include "cs2/render/draw_list.hpp"
 #include "cs2/tls/bootstrap.hpp"
 
@@ -165,7 +166,17 @@ bool ModelPublisher::map() noexcept {
   if (shared_ != nullptr) return true;
   // Isolation switch: skip the shared-memory mapping (diagnostics only).
   if (std::getenv("CS2_PAYLOAD_PUB_NOSHM") != nullptr) return false;
-  HANDLE file = CreateFileA("C:\\cs2-overlay.shm", GENERIC_READ | GENERIC_WRITE,
+  // The segment lives in the payload's writable data dir (%LOCALAPPDATA%), not
+  // `C:\` root: a Medium-integrity game process cannot create files there.
+  char path_buffer[MAX_PATH];
+  const char* shm_path = std::getenv("CS2_OVERLAY_SHM");
+  if (shm_path == nullptr) {
+    if (!cs2::game::data_file_path("cs2-overlay.shm", path_buffer, sizeof(path_buffer))) {
+      return false;
+    }
+    shm_path = path_buffer;
+  }
+  HANDLE file = CreateFileA(shm_path, GENERIC_READ | GENERIC_WRITE,
                             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
                             FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) return false;

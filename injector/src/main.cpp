@@ -14,6 +14,8 @@
 #include <windows.h>
 #include <tlhelp32.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -512,6 +514,36 @@ std::optional<std::uintptr_t> ensure_module(HANDLE process, const std::string& n
   return remote_module_base(process, name.c_str());
 }
 
+/// Map a PE import module name onto the DLL that actually backs its exports.
+///
+/// User-mode code compiled with the UCRT links against the **API-set** stubs
+/// `api-ms-win-crt-*.dll`. Those are virtual: the loader resolves them to a
+/// host DLL (the UCRT lives in `ucrtbase.dll`), but they never appear in the
+/// target's module list, so a plain module lookup fails. Likewise the
+/// `api-ms-win-core-*` sets are backed by `kernelbase.dll`. Rewrite the name to
+/// the host module so import resolution walks a real export table.
+std::string resolve_import_module(const std::string& name) {
+  std::string lower = name;
+  std::transform(lower.begin(), lower.end(), lower.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (lower.rfind("api-ms-win-crt-", 0) == 0 || lower.rfind("ext-ms-win-crt-", 0) == 0) {
+    return "ucrtbase.dll";
+  }
+  if (lower.rfind("api-ms-win-core-", 0) == 0 || lower.rfind("ext-ms-win-core-", 0) == 0 ||
+      lower.rfind("api-ms-win-service-", 0) == 0) {
+    return "kernelbase.dll";
+  }
+  return name;
+}
+
+/// True when running under Wine/Proton. Native Windows has no `wine_get_version`
+/// export in ntdll; the synthetic loader-list entry (register_module) is needed
+/// there under Wine but faults `LdrpInitializeThread` on native Windows.
+bool running_under_wine() {
+  HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+  return ntdll != nullptr && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+}
+
 std::vector<std::byte> read_file(const char* path) {
   std::ifstream file(path, std::ios::binary);
   if (!file) {
@@ -624,7 +656,7 @@ bool register_exception_table(HANDLE process, std::uintptr_t remote_base,
 }
 
 void print_usage() {
-  std::puts("usage: injector.exe <process-name|pid> <payload.dll> [--no-call] [--load-missing]");
+  std::puts("usage: injector.exe <process-name|pid> <payload.dll> [--no-call] [--load-missing] [--register|--no-register]");
   std::puts("       injector.exe <process-name|pid> <ignored> --modules   # list target modules");
   std::puts("       injector.exe --procs                                   # list processes");
 }
@@ -657,9 +689,12 @@ int main(int argc, char** argv) {
   const std::string dll_path = argv[2];
   bool call_entry = true;
   bool load_missing = false;
+  bool register_loader = running_under_wine();
   for (int i = 3; i < argc; ++i) {
     if (std::strcmp(argv[i], "--no-call") == 0) call_entry = false;
     if (std::strcmp(argv[i], "--load-missing") == 0) load_missing = true;
+    if (std::strcmp(argv[i], "--register") == 0) register_loader = true;
+    if (std::strcmp(argv[i], "--no-register") == 0) register_loader = false;
   }
 
   std::uint32_t pid = 0;
@@ -720,9 +755,12 @@ int main(int argc, char** argv) {
 
   auto* bytes = sink.view().data();
   for (const auto& module : image.imports) {
-    std::optional<std::uintptr_t> module_base = remote_module_base(process, module.name.c_str());
+    // API-set stubs (api-ms-win-crt-*) are virtual; resolve them against the
+    // host DLL that backs the exports (see resolve_import_module).
+    const std::string host_name = resolve_import_module(module.name);
+    std::optional<std::uintptr_t> module_base = remote_module_base(process, host_name.c_str());
     if (!module_base && load_missing) {
-      module_base = ensure_module(process, module.name);
+      module_base = ensure_module(process, host_name);
     }
     if (!module_base) {
       std::printf("injector: import module %s not found in target\n", module.name.c_str());
@@ -739,8 +777,13 @@ int main(int argc, char** argv) {
       const std::uint64_t value = *resolved;
       std::memcpy(bytes + symbol.iat_rva, &value, sizeof(value));
     }
-    std::printf("injector: resolved %zu import(s) from %s\n", module.symbols.size(),
-                module.name.c_str());
+    if (host_name != module.name) {
+      std::printf("injector: resolved %zu import(s) from %s (via %s)\n", module.symbols.size(),
+                  module.name.c_str(), host_name.c_str());
+    } else {
+      std::printf("injector: resolved %zu import(s) from %s\n", module.symbols.size(),
+                  module.name.c_str());
+    }
   }
 
   if (!write_remote(process, remote_base, sink.bytes().data(), image.size_of_image)) {
@@ -748,8 +791,12 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Register the image in the target's PEB loader list so CRT init can find it.
-  {
+  // Register the image in the target's PEB loader list so loader-dependent CRT
+  // init can find it. Under Wine/Proton this is required; on native Windows the
+  // synthetic (partially populated) LDR_DATA_TABLE_ENTRY faults
+  // LdrpInitializeThread when a thread attaches to the process, so it is skipped
+  // by default there. Override with --register / --no-register.
+  if (register_loader) {
     const std::size_t slash = dll_path.find_last_of("\\/");
     const std::string base_name = slash == std::string::npos ? dll_path : dll_path.substr(slash + 1);
     const std::wstring wide_name(base_name.begin(), base_name.end());
@@ -759,6 +806,8 @@ int main(int argc, char** argv) {
     } else {
       std::puts("injector: warning: could not register module in the loader list");
     }
+  } else {
+    std::puts("injector: skipping loader-list registration (--no-register)");
   }
 
   // Register the image's exception (.pdata) tables so exceptions/SEH inside the

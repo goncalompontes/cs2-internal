@@ -8,8 +8,8 @@
 - [x] MCP servers (treesitter + rea connected)
 - [x] Offline run loop documented (docs/architecture.md)
 - [x] Live-analysis MCP server (`cs2-live`) + build-time SDK generation
-- [ ] Install the Windows (Proton) build of the target
-- [ ] Verify offline `-insecure` run
+- [x] Install the Windows (Proton) build of the target
+- [x] Verify offline `-insecure` run
 
 ## Phase 1 — External dumper (no injection)
 - [x] Module enumeration + fingerprinting
@@ -24,6 +24,9 @@
       reference in the image), so cross-checking needs a current dump.
 - [x] Header generation (`interfaces.hpp`, `schemas/*.hpp`, `offsets.hpp`) from JSON
 - [x] Calibrate `SchemaLayout` + resolve schema-system address against the live build
+- [x] Native Windows live memory backend (`WindowsMemory`:
+      `ReadProcessMemory` + `VirtualQueryEx` + toolhelp snapshots); the dumper
+      builds and reads a live target on Windows
 - [ ] Optional `memflow` backend behind `ProcessMemory`
 
 ## Phase 2 — Manual-map loader
@@ -49,17 +52,20 @@
 - [x] Portable Vulkan present layer — `overlay/` (`libcs2_overlay_layer.so` +
       manifest, `CS2_OVERLAY=1`) intercepts `vkQueuePresentKHR` under DXVK and
       renders the shared-memory model with ImGui+Vulkan. Validated in CS2 **with
-      no payload** (draws, survives resize stress). See **ADR-0016**.
+      no payload** (draws, survives resize stress). See **ADR-0016**. The same
+      sources now build a native Windows `cs2_overlay_layer.dll` (registry
+      implicit-layer registration; see `overlay/README.md`).
 - [~] `UiBackend` abstraction + overlay — the ImGui DX11 backend is retained but
       no longer the default; rendering moved to the Vulkan layer. The Win32
       platform backend/`WndProc` hook are not used (deadlock under Wine).
-- [~] **Present-path injection freeze (blocked on Wine/Proton)** — any injected
-      payload doing work in the render/present path stalls the game on a DXVK
-      swapchain/display-mode change (no frame of ours is ever on the stuck
-      stacks). Reproduced with DXGI/kiero inline hooks, method-table interposition,
-      a dedicated publish thread, and a game-present hook. See **ADR-0017**.
-      Next: validate the payload on **native Windows** (native D3D11/DXGI, no
-      DXVK); or go payload-free and have the layer read `client.dll` itself.
+- [x] **Present-path injection freeze (Wine/DXVK-specific)** — under
+      Wine/Proton, any injected payload doing work in the render/present path
+      stalled the game on a DXVK swapchain/display-mode change (no frame of ours
+      on the stuck stacks); reproduced with DXGI/kiero inline hooks, method-table
+      interposition, a dedicated publish thread, and a game-present hook. See
+      **ADR-0017**. On **native Windows** (D3D11/DXGI, no DXVK) the payload +
+      Vulkan layer ran cleanly and a windowed/fullscreen toggle did not freeze
+      the game — see **docs/windows-validation.md**.
 
 ## Phase 4 — State introspection
 - [x] Entity-system walk — paged identity table (`CGameEntitySystem + 0x10`),

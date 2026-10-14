@@ -10,6 +10,7 @@
 pub mod analysis;
 pub mod interfaces;
 pub mod live;
+#[cfg(unix)]
 pub mod mcp;
 pub mod memory;
 pub mod output;

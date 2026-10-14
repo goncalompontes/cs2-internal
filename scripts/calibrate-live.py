@@ -61,10 +61,11 @@ def main():
 
     root = pathlib.Path(__file__).resolve().parent.parent
     dump_dir = pathlib.Path(args.dump_dir) if args.dump_dir else root / "calibration"
-    binary = args.binary or str(root / "external/dumper/target/release/cs2-dumper")
+    exe = "cs2-dumper.exe" if os.name == "nt" else "cs2-dumper"
+    binary = args.binary or str(root / "external" / "dumper" / "target" / "release" / exe)
     dump_dir.mkdir(parents=True, exist_ok=True)
 
-    if not os.access(binary, os.X_OK):
+    if not os.path.exists(binary):
         print("calibrate-live: building cs2-dumper (release)", file=sys.stderr)
         subprocess.run(
             ["cargo", "build", "--release", "--manifest-path", str(root / "external/dumper/Cargo.toml")],
@@ -80,23 +81,38 @@ def main():
 
     bases = module_bases(binary, args.process)
 
-    # --- interfaces (authoritative linked-list walk) ------------------------
+    # --- interfaces ---------------------------------------------------------
+    # Preferred: walk the authoritative registration list from each module's
+    # head global (config/interfaces-heads.json). Those VAs are build-specific,
+    # so when the head walk comes back empty we fall back to seed-based
+    # discovery, which locates the InterfaceReg nodes from known name strings.
     interfaces = []
     heads = load_heads(root / "config" / "interfaces-heads.json")
-    for module, va in heads.items():
+    for module in ("client.dll", "engine2.dll", "schemasystem.dll"):
         base = bases.get(module)
         if base is None:
             continue
-        addr = base + (va - IMAGE_BASE)
-        out = run(
-            binary, "--process", args.process, "--interfaces", "--json",
-            "--module", module, "--interfaces-global", hex(addr),
-        ).stdout
-        items = json.loads(out)
+        items = []
+        source = "head"
+        va = heads.get(module)
+        if va is not None:
+            addr = base + (va - IMAGE_BASE)
+            out = run(
+                binary, "--process", args.process, "--interfaces", "--json",
+                "--module", module, "--interfaces-global", hex(addr),
+            ).stdout
+            items = json.loads(out)
+        if not items:
+            source = "seed"
+            out = run(
+                binary, "--process", args.process, "--interfaces", "--json",
+                "--interface-seed", "SchemaSystem_001", "--module", module,
+            ).stdout
+            items = json.loads(out)
         for it in items:
             it["module"] = module
         interfaces.extend(items)
-        print(f"calibrate-live: {module}: {len(items)} interface(s)", file=sys.stderr)
+        print(f"calibrate-live: {module}: {len(items)} interface(s) [{source}]", file=sys.stderr)
     (dump_dir / "interfaces.json").write_text(json.dumps(interfaces, indent=2))
 
     # --- schema system pointer ---------------------------------------------
@@ -126,6 +142,28 @@ def main():
             pass
     else:
         print("calibrate-live: no CSchemaSystem resolved; skipping schema", file=sys.stderr)
+
+    # --- curated global offsets --------------------------------------------
+    # Re-resolve the target globals from their signatures (client.dll). A
+    # signature that no longer matches is reported on stderr ("unresolved: …")
+    # so a global that moved across builds is visible rather than silent.
+    offsets = []
+    for module in ("client.dll",):
+        if module not in bases:
+            continue
+        proc = subprocess.run(
+            [binary, "--process", args.process, "--resolve-offsets", "--json", "--module", module],
+            capture_output=True, text=True, check=True,
+        )
+        for line in proc.stderr.splitlines():
+            if line.strip():
+                print("calibrate-live: " + line.strip(), file=sys.stderr)
+        items = json.loads(proc.stdout)
+        for it in items:
+            it["module"] = module
+        offsets.extend(items)
+        print(f"calibrate-live: {module}: {len(items)} offset(s)", file=sys.stderr)
+    (dump_dir / "offsets.json").write_text(json.dumps(offsets, indent=2))
 
     print(f"calibrate-live: wrote dumps to {dump_dir}", file=sys.stderr)
     return 0

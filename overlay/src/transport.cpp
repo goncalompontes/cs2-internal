@@ -5,33 +5,129 @@
 #include <cstring>
 #include <mutex>
 
+#include "log.hpp"
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-
-#include "log.hpp"
+#endif
 
 namespace cs2::overlay::transport {
 namespace {
 
 std::mutex g_lock;
 wire::Shared* g_shared = nullptr;
-int g_fd = -1;
 const char* g_path = nullptr;
 char g_path_buffer[1024];
 
-// The payload writes to `C:\cs2-overlay.shm`; under Proton that is
-// `<prefix>/drive_c/cs2-overlay.shm`. Steam sets WINEPREFIX and
-// STEAM_COMPAT_DATA_PATH in the game environment.
+#if defined(_WIN32)
+HANDLE g_mapping = nullptr;
+#else
+int g_fd = -1;
+#endif
+
+#if defined(_WIN32)
+
+// Native Windows: the payload writes its shared segment under the user's local
+// app data (`%LOCALAPPDATA%\cs2-internal\cs2-overlay.shm`) — a Medium-integrity
+// game process cannot create files in `C:\` root. `CS2_PAYLOAD_DIR` overrides
+// the directory; `CS2_OVERLAY_SHM` overrides the whole path. See payload
+// ModelPublisher::map.
 const char* resolve_path() {
   if (const char* explicit_path = std::getenv("CS2_OVERLAY_SHM")) return explicit_path;
-  if (const char* prefix = std::getenv("WINEPREFIX")) {
-    std::snprintf(g_path_buffer, sizeof(g_path_buffer), "%s/drive_c/cs2-overlay.shm", prefix);
+  if (const char* dir = std::getenv("CS2_PAYLOAD_DIR")) {
+    std::snprintf(g_path_buffer, sizeof(g_path_buffer), "%s\\cs2-overlay.shm", dir);
     return g_path_buffer;
   }
-  if (const char* data = std::getenv("STEAM_COMPAT_DATA_PATH")) {
-    std::snprintf(g_path_buffer, sizeof(g_path_buffer), "%s/pfx/drive_c/cs2-overlay.shm", data);
+  char base[MAX_PATH];
+  if (GetEnvironmentVariableA("LOCALAPPDATA", base, sizeof(base)) == 0 &&
+      GetEnvironmentVariableA("TEMP", base, sizeof(base)) == 0) {
+    return nullptr;
+  }
+  std::snprintf(g_path_buffer, sizeof(g_path_buffer), "%s\\cs2-internal\\cs2-overlay.shm", base);
+  return g_path_buffer;
+}
+
+bool ensure_mapped() {
+  if (g_shared != nullptr) return true;
+  if (g_path == nullptr) g_path = resolve_path();
+  if (g_path == nullptr) return false;
+
+  HANDLE file = CreateFileA(g_path, GENERIC_READ | GENERIC_WRITE,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return false;
+  HANDLE mapping = CreateFileMappingA(file, nullptr, PAGE_READWRITE, 0,
+                                      static_cast<DWORD>(sizeof(wire::Shared)), nullptr);
+  CloseHandle(file);
+  if (mapping == nullptr) return false;
+  void* view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(wire::Shared));
+  if (view == nullptr) {
+    CloseHandle(mapping);
+    return false;
+  }
+  auto* shared = static_cast<wire::Shared*>(view);
+  if (shared->magic != wire::k_magic || shared->version != wire::k_version) {
+    UnmapViewOfFile(view);
+    CloseHandle(mapping);
+    return false;
+  }
+  g_mapping = mapping;
+  g_shared = shared;
+  overlay_log("cs2-overlay: shared segment mapped at %s", g_path);
+  return true;
+}
+
+#else  // POSIX / Wine/Proton
+
+// Candidate segment paths under a Wine `drive_c`, in priority order: the
+// payload's per-user data dir (`%LOCALAPPDATA%\cs2-internal`, i.e.
+// `users/<user>/AppData/Local/cs2-internal` — the native-Windows default),
+// a shared `drive_c\cs2-internal`, then the legacy `drive_c\cs2-overlay.shm`.
+const char* pick_existing(const char* drive_c_root) {
+  char users_dir[1024];
+  std::snprintf(users_dir, sizeof(users_dir), "%s/users", drive_c_root);
+  if (DIR* dir = ::opendir(users_dir)) {
+    while (dirent* entry = ::readdir(dir)) {
+      if (entry->d_name[0] == '.') continue;
+      std::snprintf(g_path_buffer, sizeof(g_path_buffer),
+                    "%s/users/%s/AppData/Local/cs2-internal/cs2-overlay.shm", drive_c_root,
+                    entry->d_name);
+      if (::access(g_path_buffer, F_OK) == 0) {
+        ::closedir(dir);
+        return g_path_buffer;
+      }
+    }
+    ::closedir(dir);
+  }
+  std::snprintf(g_path_buffer, sizeof(g_path_buffer), "%s/cs2-internal/cs2-overlay.shm",
+                drive_c_root);
+  if (::access(g_path_buffer, F_OK) == 0) return g_path_buffer;
+  std::snprintf(g_path_buffer, sizeof(g_path_buffer), "%s/cs2-overlay.shm", drive_c_root);
+  return g_path_buffer;  // may not exist yet; ensure_mapped retries
+}
+
+// The payload writes under the user's local app data; under Proton that is
+// `<prefix>/drive_c/users/<user>/AppData/Local/cs2-internal/cs2-overlay.shm`.
+// Steam sets WINEPREFIX and STEAM_COMPAT_DATA_PATH in the game environment.
+const char* resolve_path() {
+  if (const char* explicit_path = std::getenv("CS2_OVERLAY_SHM")) return explicit_path;
+  if (const char* dir = std::getenv("CS2_PAYLOAD_DIR")) {
+    std::snprintf(g_path_buffer, sizeof(g_path_buffer), "%s/cs2-overlay.shm", dir);
     return g_path_buffer;
+  }
+  char drive_c[1024];
+  if (const char* prefix = std::getenv("WINEPREFIX")) {
+    std::snprintf(drive_c, sizeof(drive_c), "%s/drive_c", prefix);
+    return pick_existing(drive_c);
+  }
+  if (const char* data = std::getenv("STEAM_COMPAT_DATA_PATH")) {
+    std::snprintf(drive_c, sizeof(drive_c), "%s/pfx/drive_c", data);
+    return pick_existing(drive_c);
   }
   return nullptr;
 }
@@ -61,6 +157,8 @@ bool ensure_mapped() {
   overlay_log("cs2-overlay: shared segment mapped at %s", g_path);
   return true;
 }
+
+#endif
 
 }  // namespace
 

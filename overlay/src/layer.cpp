@@ -22,6 +22,14 @@
 #include <mutex>
 #include <unordered_map>
 
+// The layer's loader entry points must be exported. `__attribute__((visibility))`
+// is a no-op on Windows, where the DLL needs `__declspec(dllexport)`.
+#if defined(_WIN32)
+#define CS2_OVERLAY_EXPORT __declspec(dllexport)
+#else
+#define CS2_OVERLAY_EXPORT __attribute__((visibility("default")))
+#endif
+
 namespace {
 
 constexpr const char* k_layer_name = "VK_LAYER_CS2_overlay";
@@ -339,7 +347,7 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL layer_get_physical_device_proc_addr(
 
 extern "C" {
 
-__attribute__((visibility("default"))) VKAPI_ATTR VkResult VKAPI_CALL
+CS2_OVERLAY_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
 vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* version) {
   if (version->sType != LAYER_NEGOTIATE_INTERFACE_STRUCT) {
     return VK_ERROR_INITIALIZATION_FAILED;
@@ -352,12 +360,12 @@ vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* version) {
   return VK_SUCCESS;
 }
 
-__attribute__((visibility("default"))) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+CS2_OVERLAY_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vkGetInstanceProcAddr(VkInstance instance, const char* name) {
   return layer_get_instance_proc_addr(instance, name);
 }
 
-__attribute__((visibility("default"))) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+CS2_OVERLAY_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vkGetDeviceProcAddr(VkDevice device, const char* name) {
   return layer_get_device_proc_addr(device, name);
 }

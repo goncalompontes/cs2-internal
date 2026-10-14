@@ -31,7 +31,10 @@ meson compile -C build-payload
   and server register the same schema names with different layouts (e.g.
   `CCSPlayerController`), and both must survive.
   Memory access sits behind `ProcessMemory` / `MemoryRead` so a `memflow`
-  backend can be added without touching analysis code. Header generation
+  backend can be added without touching analysis code. Two live backends exist:
+  `LinuxProcMemory` (`/proc/<pid>/{mem,maps}`, for Wine/Proton) and
+  `WindowsMemory` (`ReadProcessMemory` + `VirtualQueryEx` + toolhelp snapshots,
+  for native Windows). Header generation
   (`sdk`) is JSON-driven: `--gen [dir]` consumes `--interfaces-json` /
   `--schema-json` / `--offsets-json` and writes into `payload/sdk` by default.
 - `payload/loader` — manual map: PE parse, sections, relocs, imports, TLS,
@@ -54,19 +57,23 @@ meson compile -C build-payload
   hard-coded per-build RVA.
 - `payload/features` — `Overlay` builds a `render::OverlayModel` from a
   `game::Snapshot` and serializes it to shared memory (`ModelPublisher`), and
-  appends a compact dump to `C:\cs2-payload.log`. `DxgiInterposer` (ADR-0015)
-  and `GamePresentHook` (game-present inline hook) are retained but **not the
-  default** — any payload work in the present/render path stalls DXVK under
-  Wine/Proton (**ADR-0017**). The Vulkan layer does the rendering.
+  appends a compact dump to the payload log. Output paths are under the payload's
+  writable data dir (`%LOCALAPPDATA%\cs2-internal` on Windows; ADR-0019) — not
+  `C:\` root, which a Medium-integrity game process cannot write. `DxgiInterposer`
+  (ADR-0015) and `GamePresentHook` (game-present inline hook) are retained but
+  **not the default** — any payload work in the present/render path stalls DXVK
+  under Wine/Proton (**ADR-0017**). The Vulkan layer does the rendering.
 - `payload/render` — `UiBackend` abstraction (ADR-0007) with an **ImGui** DX11
   backend (retained but unused; Win32 platform backend/`WndProc` not used) and a
   frame-log stand-in. The UI-agnostic `render::HudModel`/`DrawList` (the
   `wire::Model` wire format) keep the backend free of game types.
 - `overlay/` — **portable Vulkan present layer** (ADR-0016): intercepts
-  `vkCreateSwapchainKHR`/`vkQueuePresentKHR` (Linux `.so` under DXVK; a Windows
-  `.dll` via the Vulkan loader is TBD), reads the shared-memory model, writes the
-  presented extent back, and renders with ImGui+Vulkan (`imgui_impl_vulkan`).
-  Validated in CS2 without a payload. Enabled with `CS2_OVERLAY=1`.
+  `vkCreateSwapchainKHR`/`vkQueuePresentKHR` (a Linux `.so` under DXVK, and a
+  native Windows `.dll` via the Vulkan loader), reads the shared-memory model,
+  writes the presented extent back, and renders with ImGui+Vulkan
+  (`imgui_impl_vulkan`). Validated in CS2 without a payload. Enabled with
+  `CS2_OVERLAY=1`; see `overlay/README.md` for the Windows registry
+  registration.
 - `payload/tls` — per-thread TLS bootstrap for a manually-mapped image plus an
   `NtCreateThreadEx(SKIP_THREAD_ATTACH)` thread helper (the loader never
   initializes TLS for mapped modules; ADR-0016).
@@ -77,7 +84,9 @@ meson compile -C build-payload
   local buffer, resolve imports by reading the target's module export tables,
   register the image in the PEB loader list, register `.pdata`
   (`RtlAddFunctionTable`), `WriteProcessMemory` the image, then call the entry
-  point on a remote thread via a small x64 stub. Bypasses the target's
+  point on a remote thread via a small x64 stub. The import resolver maps API-set
+  stubs (`api-ms-win-crt-*` → `ucrtbase.dll`, `api-ms-win-core-*` →
+  `kernelbase.dll`; ADR-0019). Bypasses the target's
   `LoadLibrary`/signature checks. Includes `victim.exe` + CRT-less `trivial.dll`
   for offline validation.
 - `scripts/` — `gen-sdk.sh` (build-time header render), `calibrate-live.sh`
@@ -91,10 +100,13 @@ meson compile -C build-payload
 
 Two loops feed `payload/sdk/*.hpp`:
 
-1. **Live calibration** (`scripts/calibrate-live.sh`) attaches to a running
-   target and writes `calibration/interfaces.json` (and `schema.json` when an
-   address is supplied). Interactive offset work is done through the
-   `cs2-live` MCP tools.
+1. **Live calibration** (`scripts/calibrate-live.py`, cross-platform; the
+   `.sh` is a wrapper) attaches to a running target and writes
+   `calibration/interfaces.json`, `schema.json`, `schema_system.json`,
+   `offsets.json` and `_manifest.json`. `offsets.json` comes from
+   `cs2-dumper --resolve-offsets` (the curated signatures in
+   `external/dumper/src/analysis.rs`); a signature that stops matching is
+   reported rather than silently skipped.
 2. **Build-time generation** — the `sdk-headers` Meson target runs
    `scripts/gen-sdk.sh`, rendering headers from whatever dumps are present.
    With `-Dlive_calibration=true` it refreshes the dumps first, so a release

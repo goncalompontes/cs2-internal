@@ -2,10 +2,21 @@ project('cs2-internal', 'cpp',
   version : '0.1.0',
   meson_version : '>=1.3',
   default_options : [
-    'cpp_std=c++23',
     'warning_level=3',
     'buildtype=debugoptimized',
   ])
+
+# C++23 dialect. Meson's built-in cpp_std option does not list 'c++23' for the
+# MSVC-style drivers (clang-cl / cl.exe), so the flag is selected explicitly.
+# The spellings below avoid Meson's "use the built-in cpp_std option" warning:
+#   - GNU-like drivers accept the long form `--std=c++23` (GCC and Clang);
+#   - clang-cl / cl.exe accept the dash form `-std:c++latest` (C++23 and later).
+cpp = meson.get_compiler('cpp')
+if cpp.get_id() == 'msvc' or cpp.get_id() == 'clang-cl'
+  add_project_arguments('-std:c++latest', language : 'cpp')
+else
+  add_project_arguments('--std=c++23', language : 'cpp')
+endif
 
 # Host-side (Linux) tools, tests and helpers live here.
 # The payload is a separate Meson project under payload/ and is
@@ -28,11 +39,11 @@ test('game-matrix', game_matrix_test)
 
 # --- Generated C++ SDK headers -------------------------------------------
 # Render payload/sdk/*.hpp from the calibration dumps in calibration/. The
-# generator is the Rust dumper, built on demand by scripts/gen-sdk.sh. With
+# generator is the Rust dumper, built on demand by scripts/gen-sdk.py. With
 # -Dlive_calibration=true the script refreshes the dumps from a running target
 # first (see scripts/calibrate-live.sh).
 if get_option('sdk_gen')
-  gen_sdk = find_program('scripts/gen-sdk.sh')
+  gen_sdk = find_program('scripts/gen-sdk.py')
   dump_dir = meson.current_source_dir() / 'calibration'
   sdk_dir = meson.current_source_dir() / 'payload' / 'sdk'
 

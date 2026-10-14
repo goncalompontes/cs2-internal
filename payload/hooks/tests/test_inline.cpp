@@ -12,7 +12,9 @@ using Fn = int (*)(int, int);
 
 Fn g_original = nullptr;
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__clang__)
+__attribute__((noinline, optnone))
+#elif defined(__GNUC__)
 __attribute__((noinline, optimize("O0")))
 #endif
 int target(int a, int b) {

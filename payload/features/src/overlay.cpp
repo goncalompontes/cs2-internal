@@ -135,11 +135,6 @@ const render::OverlayModel& Overlay::update(float screen_width, float screen_hei
 
   model_ = render::OverlayModel{};
   model_.hud.title = "cs2-internal";
-#if defined(CS2_NATIVE_WINDOWS_BUILD)
-  // Native Windows builds are untested; advertise that on the HUD itself so it
-  // can never be mistaken for a validated build (see docs/handoff.md).
-  model_.hud.title += "  [NATIVE WINDOWS - UNTESTED]";
-#endif
   if (!reader_ || !reader_->ready()) {
     model_.hud.title += "  [waiting for client.dll]";
     return model_;

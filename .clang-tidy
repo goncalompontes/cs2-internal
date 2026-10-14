@@ -1,0 +1,53 @@
+# clang-tidy configuration for cs2-internal.
+#
+# Read by two consumers:
+#   * CLion - Settings | Editor | Inspections | C/C++ | Static Analysis Tools |
+#     Clang-Tidy. "Prefer .clang-tidy files over IDE settings" is on by default,
+#     so these checks appear as editor quick-fixes (Alt+Enter) and participate in
+#     Code | Code Cleanup.
+#   * scripts/clang-tidy-fix.py - a staged, per-group `clang-tidy -fix` sweep.
+#     The sweep overrides `Checks` per group; the filters and options below apply
+#     to both the IDE and the sweep.
+#
+# Trailing return types are an opt-in style change, not part of the default set,
+# so modernize-use-trailing-return-type stays disabled here. Turn it on with
+# `--group trailing-return-type` (or drop the `-modernize-...` line below).
+---
+# This set is what the editor shows. It is deliberately focused on the
+# modernisation/const actions rather than a blanket `readability-*` (which floods
+# the editor with pure-style warnings). Widen it here if you want more in the UI;
+# scripts/clang-tidy-fix.py can run broader groups regardless, because it passes
+# `--checks` explicitly on the command line.
+Checks: >
+  -*,
+  modernize-*,
+  misc-const-correctness,
+  bugprone-*,
+  performance-unnecessary-value-param,
+  performance-unnecessary-copy-initialization,
+  performance-for-range-copy,
+  readability-container-size-empty,
+  readability-else-after-return,
+  readability-qualified-auto,
+  readability-redundant-string-cstr,
+  readability-simplify-boolean-expr,
+  readability-static-accessed-through-instance,
+  readability-use-anyofallof,
+  -modernize-use-trailing-return-type,
+  -bugprone-easily-swappable-parameters
+
+# Apply the project's .clang-format to the lines clang-tidy rewrites, so fixes
+# come out already formatted. Comment this out to leave formatting untouched.
+FormatStyle: file
+
+# Only project headers are eligible for fixes and diagnostics.
+HeaderFilterRegex: '.*(payload|overlay|injector|tools)/.*'
+
+# Vendored, generated and toolchain headers are never patched.
+ExcludeHeaderFilterRegex: '(^|/)(third_party|external|toolchain|subprojects)/'
+
+# The tree uses value-initialisation (`std::uint32_t x{};`), so the default
+# member initialiser fix should use `{}` rather than `=` too.
+CheckOptions:
+  - key: modernize-use-default-member-init.UseAssignment
+    value: 'false'

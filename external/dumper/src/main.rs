@@ -4,14 +4,26 @@ use clap::Parser;
 use cs2_dumper::analysis;
 use cs2_dumper::interfaces;
 use cs2_dumper::live;
-use cs2_dumper::memory::{find_pid, LinuxProcMemory, ProcessMemory};
+use cs2_dumper::memory::{find_pid, ProcessMemory};
+#[cfg(unix)]
+use cs2_dumper::memory::LinuxProcMemory;
+#[cfg(windows)]
+use cs2_dumper::memory::WindowsMemory;
 use cs2_dumper::output::{self, DumpManifest};
 use cs2_dumper::pattern::Pattern;
 use cs2_dumper::pe::{self, PeInfo};
 use cs2_dumper::reader::BytesReader;
 use cs2_dumper::rename;
-use cs2_dumper::schema::{self, SchemaLayout};
+use cs2_dumper::schema;
+use cs2_dumper::schema::SchemaLayout;
 use cs2_dumper::sdk;
+
+/// The platform live-memory backend. Wine/Proton is read through
+/// `/proc/<pid>/mem`; native Windows through `ReadProcessMemory`.
+#[cfg(unix)]
+type LiveMemory = LinuxProcMemory;
+#[cfg(windows)]
+type LiveMemory = WindowsMemory;
 
 /// External offset/interface/schema dumper.
 #[derive(Parser, Debug)]
@@ -124,9 +136,14 @@ const DEFAULT_INTERFACE_SEEDS: &[&str] = &[
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Live-analysis MCP server over stdio.
+    // Live-analysis MCP server over stdio (Unix hosts only; it reads /proc).
     if cli.mcp {
+        #[cfg(unix)]
         return cs2_dumper::mcp::serve();
+        #[cfg(not(unix))]
+        return Err(anyhow!(
+            "--mcp (live analysis) requires a Unix host; it reads /proc"
+        ));
     }
 
     // SDK generation from JSON dumps — no process required.
@@ -153,7 +170,9 @@ fn main() -> Result<()> {
         return analyze(&cli, &name, &mapped, base, Some(&info));
     }
 
-    // Live process mode.
+    // Live process mode: attach to the target and read it in-process. Under
+    // Wine/Proton this is `/proc/<pid>/mem`; on native Windows it is
+    // `ReadProcessMemory` (see `memory::WindowsMemory`).
     let pid = match cli.pid {
         Some(pid) => pid,
         None => find_pid(&cli.process).ok_or_else(|| {
@@ -163,7 +182,7 @@ fn main() -> Result<()> {
             )
         })?,
     };
-    let mem = LinuxProcMemory::open(pid).with_context(|| format!("opening memory of pid {pid}"))?;
+    let mem = LiveMemory::open(pid).with_context(|| format!("opening memory of pid {pid}"))?;
     let modules = mem.modules();
 
     if let Some(addr_text) = &cli.read_ptr {

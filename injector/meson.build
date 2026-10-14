@@ -12,10 +12,18 @@ project('cs2-injector', 'cpp',
   version : '0.1.0',
   meson_version : '>=1.3',
   default_options : [
-    'cpp_std=c++23',
     'warning_level=3',
     'buildtype=debugoptimized',
   ])
+
+# C++23 dialect (see the root meson.build): the spellings avoid Meson's
+# "use the built-in cpp_std option" warning (see the root file for details).
+cpp = meson.get_compiler('cpp')
+if cpp.get_id() == 'msvc' or cpp.get_id() == 'clang-cl'
+  add_project_arguments('-std:c++latest', language : 'cpp')
+else
+  add_project_arguments('--std=c++23', language : 'cpp')
+endif
 
 # The platform-independent loader core is shared with the payload.
 loader_inc = include_directories('../payload/loader/include')

@@ -255,8 +255,9 @@ the injected Windows payload over **shared memory**:
   and the shared-memory transport of `render::OverlayModel`.
 - The **payload keeps computing state** (its schema/SDK reader is validated) and
   **stops drawing**: it publishes the `OverlayModel` (HUD + `DrawList`) to a
-  file-backed shared segment (`C:\cs2-overlay.shm` on Windows; the Proton layer
-  derives `<WINEPREFIX>/drive_c/cs2-overlay.shm` from its environ).
+  file-backed shared segment (`%LOCALAPPDATA%\cs2-internal\cs2-overlay.shm` on
+  native Windows; the Proton layer derives the prefix's `drive_c` path from its
+  environ — see ADR-0019).
 - **Portable, not Linux-specific**: the same layer builds as a Linux `.so`
   (loaded via the Vulkan loader under DXVK/Proton) and a Windows `.dll` (loaded
   via the Windows Vulkan loader when the game runs Vulkan, i.e. CS2 `-vulkan`).
@@ -297,8 +298,10 @@ loader's global exports, which are invalid/re-entrant from inside a layer.
 - Remaining: (1) the Vulkan renderer (ImGui+Vulkan backend or a minimal
   `DrawList` renderer) drawing into the swapchain image in `vkQueuePresentKHR`;
   (2) the shared-memory model + payload publisher; (3) the Windows `.dll`
-  target + registry/manifest. Until then the ADR-0015 D3D path stays in-tree but
-  is not the default.
+  target + registry/manifest. (1) and (2) are implemented (the renderer draws
+  via `imgui_impl_vulkan`; the payload publishes `wire::Model` over the shared
+  segment) and (3) landed with the native Windows bring-up (ADR-0018). The
+  ADR-0015 D3D path stays in-tree but is not the default.
 - The payload's `payload/diag/` watchdog (which captured the ADR-0015 freeze)
   remains useful.
 - Anti-cheat note: this targets `-insecure` local testing only.
@@ -370,4 +373,75 @@ prologue-copying inline hook.
   `CS2_PAYLOAD_PUB_NOWRITE`, `CS2_PAYLOAD_PUB_NOSHM`, `CS2_PAYLOAD_PUB_INTERVAL_MS`,
   and the layer's `CS2_OVERLAY_NO_DRAW`/`CS2_OVERLAY_NO_WAIT`/`CS2_OVERLAY_NO_CHAIN`.
 - Anti-cheat note: `-insecure` local testing only.
+
+## ADR-0018 — Native Windows build + live memory backend
+**Status:** accepted
+
+The project was developed and exercised only under Wine/Proton (ADR-0017). A
+native Windows bring-up was needed so the payload, dumper, injector and overlay
+build and run on a real Windows host. What changed:
+
+- **C++23 dialect per compiler.** Meson's built-in `cpp_std` option does not list
+  `c++23` for the MSVC-style drivers, so each Meson project selects the flag
+  explicitly: GNU-like drivers get `--std=c++23` (GCC and Clang accept the long
+  form), clang-cl/cl.exe get `-std:c++latest`. Both spellings avoid Meson's
+  "use the built-in cpp_std option" warning.
+- **Cross-platform SDK generation.** `scripts/gen-sdk.py` replaces the shell
+  generator (which needed a POSIX `bash` and would not run on native Windows);
+  `gen-sdk.sh` is now a thin wrapper. The Rust dumper's `/proc`-based code is
+  `cfg(unix)`-gated so the crate builds on Windows (`--file`, `--pattern`,
+  `--interfaces`, `--resolve-offsets`, `--gen` all work there).
+- **`WindowsMemory`.** A second `ProcessMemory` backend for native Windows
+  (`ReadProcessMemory` + `VirtualQueryEx` + toolhelp snapshots), selected by
+  `cfg(windows)`; `LinuxProcMemory` stays for Wine/Proton. The dumper CLI's live
+  mode is now cross-platform, so live calibration works on Windows.
+- **Inline-hook engine fix.** The trampoline used `mov rax, imm64; jmp rax`,
+  which clobbers RAX (corrupting the copied prologue's live registers and the
+  MSVC x64 variadic AL). Replaced with a register-free `jmp qword ptr [rip+0]`
+  (14-byte) jump. Exposed on Windows because clang-cl ignores the test's GCC-only
+  `optimize("O0")` (now `optnone`).
+- **Injector loader entry.** The synthetic PEB `LDR_DATA_TABLE_ENTRY` faults
+  `LdrpInitializeThread` on native Windows when a thread attaches. The injector
+  now skips it there (auto-detected via `wine_get_version`, overridable with
+  `--register`/`--no-register`) and keeps it for Wine/Proton.
+- **Overlay Windows `.dll`.** The layer builds as `cs2_overlay_layer.dll`
+  (exporting `vkNegotiateLoaderLayerInterfaceVersion` +
+  `vkGetInstanceProcAddr`/`vkGetDeviceProcAddr` via `__declspec(dllexport)`),
+  maps the payload's shared segment (`%LOCALAPPDATA%\cs2-internal\cs2-overlay.shm`;
+  see ADR-0019) with the Win32 file-mapping API, and ships a manifest for
+  registry-based implicit-layer registration.
+
+**Verified:** host `meson test` (7/7), dumper `cargo test`, and the injector's
+offline validation (`victim.exe` + `trivial.dll` writes its marker) all pass on
+native Windows (clang-cl). The payload DLL and the overlay DLL link.
+
+**Validated in-game (2026-10, build 25815307):** the payload was injected into
+CS2 on Windows and read live state; the Vulkan layer rendered the HUD + ESP; a
+windowed/fullscreen toggle did not freeze the game. The "native Windows —
+untested" marker was removed; see `docs/windows-validation.md`.
+
+## ADR-0019 — Native Windows runtime: API-set imports + user-writable output paths
+**Status:** accepted
+
+Two issues surfaced when the payload first ran inside CS2 on native Windows
+(neither reproduces under Wine/Proton):
+
+- **API-set imports.** `payload.dll` links the UCRT through the virtual
+  `api-ms-win-crt-*.dll` API-set stubs, which the loader resolves to a host DLL
+  but which never appear in the target's module list. The injector's import
+  resolver found no such module and aborted injection. **Decision:** the
+  injector rewrites API-set names to their host DLL before lookup
+  (`api-ms-win-crt-*` → `ucrtbase.dll`, `api-ms-win-core-*` → `kernelbase.dll`)
+  and resolves the symbols from the real export table.
+- **Output paths.** The payload wrote its marker, log, and shared segment to
+  `C:\` root. CS2 runs at **Medium integrity**, and a standard-user process
+  cannot create files in `C:\` root, so every write failed silently (no marker,
+  no log, no segment). **Decision:** the payload resolves its data directory to
+  `%LOCALAPPDATA%\cs2-internal` (`CS2_PAYLOAD_DIR` overrides it) and the overlay
+  layer maps the same path on Windows; under Proton the layer searches the
+  prefix's `drive_c` (per-user `AppData\Local\cs2-internal`, a shared
+  `cs2-internal`, then the legacy `cs2-overlay.shm`).
+
+**Verified:** after both fixes, injection completes, the marker/log/segment are
+written, and the overlay renders (see `docs/windows-validation.md`).
 

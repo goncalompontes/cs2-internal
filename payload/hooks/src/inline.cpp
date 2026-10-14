@@ -10,14 +10,20 @@
 namespace cs2::hooks {
 namespace {
 
-constexpr std::size_t k_jmp_size = 12;  // mov rax, imm64 ; jmp rax
+// A register-free absolute jump: `jmp qword ptr [rip+0]` followed by the
+// 8-byte destination. Using `mov rax, imm64; jmp rax` would clobber RAX, which
+// corrupts the copied prologue's live registers (and, on the target patch, the
+// MSVC x64 variadic convention that carries the SSE arg count in AL).
+constexpr std::size_t k_jmp_size = 14;  // jmp [rip+0] ; .quad destination
 
 void write_abs_jmp(unsigned char* out, std::uintptr_t destination) noexcept {
-  out[0] = 0x48;
-  out[1] = 0xB8;
-  std::memcpy(out + 2, &destination, sizeof(destination));
-  out[10] = 0xFF;
-  out[11] = 0xE0;
+  out[0] = 0xFF;
+  out[1] = 0x25;
+  out[2] = 0x00;
+  out[3] = 0x00;
+  out[4] = 0x00;
+  out[5] = 0x00;
+  std::memcpy(out + 6, &destination, sizeof(destination));
 }
 
 struct Decoded {

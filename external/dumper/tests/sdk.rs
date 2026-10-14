@@ -165,7 +165,12 @@ fn writes_expected_files_and_aggregates_modules() {
 
     let names: Vec<String> = written
         .iter()
-        .map(|p| p.strip_prefix(&dir).unwrap().to_string_lossy().to_string())
+        .map(|p| {
+            p.strip_prefix(&dir)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
         .collect();
     for expected in ["interfaces.hpp", "offsets.hpp", "schemas.hpp"] {
         assert!(names.contains(&expected.to_string()), "missing {expected}");

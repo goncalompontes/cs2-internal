@@ -1,35 +1,40 @@
-# Hand-off — resume from a native Windows box
+# Hand-off — overlay / payload state
 
-> **Untested marker:** native Windows builds self-identify as untested (build
-> define, boot banner, `C:\cs2-payload-boot.txt`, and the HUD title). See
-> [docs/windows-untested.md](windows-untested.md). Remove the marker only after
-> the payload has actually run on Windows.
+> **Validated on native Windows (2026-10, CS2 build 25815307).** The payload was
+> manual-mapped into CS2 on a real Windows host and read live player state; the
+> Vulkan overlay layer rendered the HUD + ESP into the swapchain; a
+> windowed/fullscreen toggle did not freeze the game. See
+> [docs/windows-validation.md](windows-validation.md). The historic "native
+> Windows — untested" marker has been removed.
 
-This note records where the overlay work stands and what to try next from a
-Windows machine. Read alongside `decisions.md` **ADR-0015/0016/0017**.
+Read alongside `decisions.md` **ADR-0015/0016/0017/0018/0019**.
 
 ## One-line summary
 
 The portable Vulkan present layer (`overlay/`) renders the overlay from shared
-memory and is proven in isolation. Every attempt to **inject a payload into the
-present/render path** freezes the game under Wine/Proton on a swapchain/display
-change, with no frame of ours in the stuck stacks (ADR-0017). **We need to check
-whether that freeze is Wine/DXVK-specific by testing the payload on native
-Windows.**
+memory and is proven in isolation. On native Windows (D3D11/DXGI, no DXVK) the
+full stack now works: the injected payload reads game state and publishes a
+`wire::Model`, and the Vulkan layer renders it — **no freeze on the display-mode
+change that wedged the game under Wine/Proton (ADR-0017)**.
 
 ## What is proven
 
 - **`overlay/` (Vulkan present layer)** — intercepts `vkCreateSwapchainKHR` /
   `vkQueuePresentKHR`, renders the `wire::Model` (HUD + `DrawList`) with
-  ImGui+Vulkan, and draws a real HUD in CS2 (`CS2_OVERLAY=1`), surviving the
-  full resize/fullscreen stress **with no payload injected**.
+  ImGui+Vulkan, and draws a real HUD + ESP in CS2. Validated on native Windows
+  with the payload (`-vulkan`, implicit layer registered under
+  `HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers`, `CS2_OVERLAY=1`) and, earlier,
+  without a payload under Proton.
 - **State → shm model** — `ModelPublisher` serializes `render::OverlayModel`
-  into `C:\cs2-overlay.shm` (`wire::Shared`); the layer writes the presented
-  extent back.
+  into the shared segment (`%LOCALAPPDATA%\cs2-internal\cs2-overlay.shm` on
+  native Windows; under Proton the prefix's `drive_c`); the layer writes the
+  presented extent back so the payload can project world coordinates.
+- **State introspection** — local player + every player (health, armor, team,
+  weapon, ammo, origin/eye/velocity/angles), live-verified on the updated build.
 - **Payload plumbing** — injector `.pdata` registration (`RtlAddFunctionTable`,
-  ~4260 entries), per-thread TLS bootstrap for the manually-mapped image
-  (`payload/tls`), `NtCreateThreadEx(SKIP_THREAD_ATTACH)` thread helper,
-  crash handler + freeze watchdog (`payload/diag`).
+  ~2043 entries), per-thread TLS bootstrap for the manually-mapped image
+  (`payload/tls`), `NtCreateThreadEx(SKIP_THREAD_ATTACH)` thread helper, crash
+  handler + freeze watchdog (`payload/diag`).
 - **RE** — the game's present is `CRenderContextBase::Present`
   (`rendersystemdx11.dll + 0x16dd0`, build 25815307), dispatching to
   `CRenderContextDx11::Present` at `*(this)+0x510`; the swapchain wrapper is
@@ -37,56 +42,60 @@ Windows.**
   home stores the epilogue reads back; use a vtable-slot hook or a
   stack-correct hook (ADR-0017).
 
-## What to do on Windows
+## Windows notes (learned 2026-10)
 
-1. **Build the payload** (MSVC or `clang-cl`; the project also cross-builds with
-   `toolchain/msvc-wine`). `payload/` targets Windows already.
-2. **Decide the injection path for Windows** — on native D3D11/DXGI (no DXVK),
-   the ADR-0015 `DxgiInterposer` (method-table slots for `Present` /
-   `ResizeBuffers`) is the intended path; `PresentHook` + the ImGui DX11 backend
-   are still in-tree. Re-enable them for Windows.
-3. **Reproduce/confirm** the mode-change (resize / fullscreen toggle) with the
-   payload present:
-   - If it is **stable on Windows**, the freeze is Wine/DXVK-specific; proceed
-     with the internal payload + ImGui DX11 overlay on Windows.
-   - If it **still freezes on Windows**, the bug is ours; the suspect is
-     swapchain-lifecycle handling (held back-buffer references / D3D state),
-     not the hook engine.
-4. **Alternatively (payload-free)** — the only path not yet tripped is having
-   the Vulkan layer read `client.dll` itself (same process, single render
-   thread, no injection, no extra thread). This also runs the overlay on Windows
-   if the game is launched `-vulkan`.
+- **Session 0 has no GPU.** The agent/SSH shell cannot start the game; use the
+  `CS2Launch` scheduled task (`scripts/launch-cs2.cmd`), which runs in the
+  interactive session. See `AGENTS.md`.
+- **Medium integrity.** The game runs as the standard user; it cannot create
+  files in `C:\` root. All payload/overlay output paths must be under
+  `%LOCALAPPDATA%` (or another user-writable dir).
+- **API-set imports.** The injector maps `api-ms-win-crt-*` → `ucrtbase.dll`
+  (and `api-ms-win-core-*` → `kernelbase.dll`) when resolving imports.
 
 ## Build / run cheat-sheet
 
 ```sh
-# Host build (Linux)
+# Host build (native)
 meson setup build && meson compile -C build && meson test -C build
+
+# Native Windows (clang-cl; from a vcvars64 environment with LLVM on PATH)
+set CC=clang-cl && set CXX=clang-cl
+meson setup build-payload payload && meson compile -C build-payload
+meson setup build-injector injector && meson compile -C build-injector
+meson setup build-overlay overlay && meson compile -C build-overlay
 
 # Payload (cross, Windows target)
 BIN=toolchain/msvc/bin/x64 . toolchain/msvcenv-native.sh
 meson setup build-payload payload --cross-file toolchain/windows-msvc.ini
 meson compile -C build-payload
 
-# Injector
-meson setup build-injector injector --cross-file toolchain/windows-msvc.ini
-meson compile -C build-injector
-
-# Overlay layer (native Linux .so; the Windows .dll target is TBD)
-meson setup build-overlay overlay && meson compile -C build-overlay
+# Live calibration (game running) + SDK regeneration
+python scripts/calibrate-live.py            # writes calibration/*.json
+python scripts/gen-sdk.py calibration payload/sdk
+meson compile -C build-payload              # rebuild against the fresh SDK
 ```
 
-Diagnostic env switches (added during the bisection): `CS2_PAYLOAD_NO_DIAG`,
-`CS2_PAYLOAD_NO_PUBLISH`, `CS2_PAYLOAD_PUB_THREAD`, `CS2_PAYLOAD_PUB_NOSTATE`,
-`CS2_PAYLOAD_PUB_NOWRITE`, `CS2_PAYLOAD_PUB_NOSHM`,
-`CS2_PAYLOAD_PUB_INTERVAL_MS`; and on the layer `CS2_OVERLAY_NO_DRAW`,
-`CS2_OVERLAY_NO_WAIT`, `CS2_OVERLAY_NO_CHAIN`.
+Run flow on Windows: `schtasks /run /tn CS2Launch` (or the AGENTS.md command) →
+wait for `client.dll` to load → `build-injector\injector.exe <pid>
+build-payload\payload.dll` → read `%LOCALAPPDATA%\cs2-internal\cs2-payload.log`
+and `cs2-overlay-layer.log`.
+
+Diagnostic env switches: `CS2_PAYLOAD_NO_DIAG`, `CS2_PAYLOAD_NO_PUBLISH`,
+`CS2_PAYLOAD_PUB_THREAD` (dedicated publish thread instead of the game-present
+hook), `CS2_PAYLOAD_PUB_NOSTATE`, `CS2_PAYLOAD_PUB_NOWRITE`,
+`CS2_PAYLOAD_PUB_NOSHM`, `CS2_PAYLOAD_PUB_INTERVAL_MS`, `CS2_PAYLOAD_DIR`; and on
+the layer `CS2_OVERLAY`, `CS2_OVERLAY_SHM`, `CS2_OVERLAY_LOG`,
+`CS2_OVERLAY_NO_DRAW`, `CS2_OVERLAY_NO_WAIT`, `CS2_OVERLAY_NO_CHAIN`.
 
 ## Open items
 
-- Windows `.dll` build + manifest for the `overlay/` layer (Vulkan implicit
-  layer via the Windows registry / loader).
-- Decide: keep the rendered-in-payload path (Windows) or move state reading into
-  the layer (payload-free) for Wine/Proton.
-- Replace the `GamePresentHook` inline hook with a vtable-slot hook (or drop it)
-  — the inline hook is known-bad on this target (ADR-0017).
+- The overlay layer is enabled via a machine-wide implicit-layer registry entry
+  (HKLM) scoped by `CS2_OVERLAY=1`; a per-user/portable registration is still
+  open.
+- Decide whether the Windows default should be the dedicated publish thread or
+  the game-present hook (the hook path was not exercised in the validated run).
+- A strict swapchain-recreation stress (resolution change) was not captured on
+  Windows (the windowed/fullscreen toggle did not recreate the swapchain); the
+  layer's `vkCreateSwapchainKHR` handling is unchanged from the Proton-validated
+  path.

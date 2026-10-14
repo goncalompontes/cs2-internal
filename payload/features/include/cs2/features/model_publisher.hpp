@@ -2,8 +2,11 @@
 
 // Publishes the overlay model to shared memory for the Vulkan present layer
 // (ADR-0016). The payload no longer draws into the game's D3D present; it maps
-// `C:\cs2-overlay.shm`, runs `Overlay::update` on a timer thread, and serializes
-// the `render::OverlayModel` into the `wire::Shared` layout. The layer reads it.
+// the shared segment (under the payload's writable data dir, `%LOCALAPPDATA%\
+// cs2-internal` on native Windows — not `C:\` root, which a Medium-integrity
+// game process cannot write), runs `Overlay::update` on a timer thread, and
+// serializes the `render::OverlayModel` into the `wire::Shared` layout. The
+// layer reads it.
 //
 // The layer writes the presented extent back into the same segment so the
 // payload can project world coordinates.
