@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "cs2/control/service.hpp"
 #include "cs2/diag/crash_handler.hpp"
 #include "cs2/diag/watchdog.hpp"
 #include "cs2/features/game_present_hook.hpp"
@@ -43,6 +44,7 @@ struct Runtime {
   features::ModelPublisher publisher{overlay};
   features::GamePresentHook game_present{publisher};
   features::PresentHook present{backend, overlay};
+  control::Service control;
 };
 
 Runtime g_runtime;
@@ -63,6 +65,11 @@ DWORD WINAPI install_thread(void*) {
     cs2::diag::install_watchdog();
   }
   cs2::payload::runtime().overlay.initialize();
+  // Control channel (ADR-0020): the named-pipe server the scenario runner
+  // connects to. Runs on its own thread and never touches the render path.
+  if (std::getenv("CS2_PAYLOAD_NO_CONTROL") == nullptr) {
+    (void)cs2::payload::runtime().control.start();
+  }
   // Publish the overlay model for the Vulkan present layer (ADR-0016), driven
   // from the game's own present hook on the render thread — no payload thread.
   if (std::getenv("CS2_PAYLOAD_NO_PUBLISH") == nullptr) {

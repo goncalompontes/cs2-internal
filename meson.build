@@ -37,6 +37,24 @@ game_matrix_test = executable('game_matrix_test', 'payload/game/tests/test_matri
 )
 test('game-matrix', game_matrix_test)
 
+# Control-channel core (ADR-0020): the platform-independent parts of
+# payload/control (JSON value, `wait_for` predicate, snapshot serialization are
+# built here; the pipe/console/thread parts are Windows-only and live in the
+# payload subproject).
+control_core_test = executable('control_core_test',
+  files(
+    'payload/control/tests/test_control_core.cpp',
+    'payload/control/src/json.cpp',
+    'payload/control/src/predicate.cpp',
+    'payload/control/src/snapshot_json.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('control-core', control_core_test)
+
 # --- Generated C++ SDK headers -------------------------------------------
 # Render payload/sdk/*.hpp from the calibration dumps in calibration/. The
 # generator is the Rust dumper, built on demand by scripts/gen-sdk.py. With

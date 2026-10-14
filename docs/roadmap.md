@@ -89,7 +89,11 @@
       kit, scoped, defusing, bomb, flash, ping, distance). Flags/names/weapons
       use an embedded pixel font (Silkscreen, OFL), embedded at build time by
       `scripts/gen-font.py`.
-- [ ] Control channel (IPC) + scenario runner
+- [~] Control channel (IPC) + scenario runner — **designed** (ADR-0020); see
+      `docs/control-harness.md`. RE of the console `exec` primitive is **done**
+      (`docs/re/engine2.md`): in-process `Cbuf_AddText` (`FUN_1801b8790`,
+      RVA `0x1b8790`) is the primary path; `-concommandpipe` is the
+      no-injection fallback (input-only). Implemented: none yet.
 
 ## Phase 5 — Interfaces, events, deeper introspection
 - [ ] `Source2Client002`, `GameEventSystemClientV001`

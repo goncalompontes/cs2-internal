@@ -7,7 +7,12 @@
 > [docs/windows-validation.md](windows-validation.md). The historic "native
 > Windows — untested" marker has been removed.
 
-Read alongside `decisions.md` **ADR-0015/0016/0017/0018/0019**.
+Read alongside `decisions.md` **ADR-0015/0016/0017/0018/0019/0020**.
+
+> **Active feature:** the programmatic scenario/control harness. Resume from
+> [`docs/control-harness.md`](control-harness.md) (design, decisions, next
+> actions) and [`docs/re/engine2.md`](re/engine2.md) (RE of the engine
+> console-command path).
 
 ## One-line summary
 

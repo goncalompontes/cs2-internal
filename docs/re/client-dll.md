@@ -1,9 +1,10 @@
 # `client.dll` (build 25815307)
 
-Image base `0x180000000`. Analysis is now **complete** via the cached Ghidra
-project (one cold run, then `-process -noanalysis` reuse): 76,880 procedures and
-58,107 strings with the default analyzer set (including `Decompiler Parameter
-ID`). See `docs/rea-project-cache.md`.
+Image base `0x180000000`. Analysis is now **complete** via Ghidra with the
+default analyzer set (including `Decompiler Parameter ID`): 76,880 procedures
+and 58,107 strings. On Windows a pre-imported project can be reused per run via
+`REA_GHIDRA_EXISTING_PROJECT` / `REA_GHIDRA_EXISTING_PROGRAM` (PR #2358, commit
+`9adad2c`); the global MCP entry otherwise re-imports per session.
 
 ## Globals found
 

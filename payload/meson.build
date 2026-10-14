@@ -77,6 +77,7 @@ else
   subdir('tls')
   subdir('render')
   subdir('features')
+  subdir('control')
 
   shared_library('payload',
     'src/payload_main.cpp',
@@ -84,5 +85,6 @@ else
     install : false,
     include_directories : loader_inc,
     link_with : loader_lib,
-    dependencies : [sdk_dep, hooks_dep, game_dep, diag_dep, render_dep, features_dep])
+    dependencies : [sdk_dep, hooks_dep, game_dep, diag_dep, render_dep, features_dep,
+                    control_dep])
 endif

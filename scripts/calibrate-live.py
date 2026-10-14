@@ -144,11 +144,12 @@ def main():
         print("calibrate-live: no CSchemaSystem resolved; skipping schema", file=sys.stderr)
 
     # --- curated global offsets --------------------------------------------
-    # Re-resolve the target globals from their signatures (client.dll). A
-    # signature that no longer matches is reported on stderr ("unresolved: …")
-    # so a global that moved across builds is visible rather than silent.
+    # Re-resolve the target globals from their signatures. A signature that no
+    # longer matches is reported on stderr ("unresolved: …") so a global that
+    # moved across builds is visible rather than silent. engine2.dll carries the
+    # Cbuf console entry used by the control channel's `exec` (docs/re/engine2.md).
     offsets = []
-    for module in ("client.dll",):
+    for module in ("client.dll", "engine2.dll"):
         if module not in bases:
             continue
         proc = subprocess.run(

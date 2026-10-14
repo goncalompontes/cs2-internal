@@ -22,3 +22,40 @@ with the offline flags `-insecure -novid`). To change the flags, edit
 
 Do **not** run `cs2.exe` or `steam.exe` directly from an agent/SSH shell for
 play/injection testing — it will land in session 0 and there will be no GPU.
+
+## Conventions
+
+- C++ style (naming, idioms, file layout, tests, automated fixes):
+  `docs/style-guide.md`. Normative sources are `.clang-format`, `.clang-tidy`
+  and ADR-0010 in `docs/decisions.md`.
+- Bulk style/modernisation changes go through `scripts/clang-tidy-fix.py`
+  (one check group per commit; verify with all four `meson compile` targets plus
+  `meson test -C build`). See §7 of the style guide.
+
+## Where to resume (current work)
+
+The active feature is the **programmatic scenario / control harness** (drive CS2
+for tests: launch, inject, join a bot match, add/place bots, aim, input
+sequences, await events). Resume from:
+
+- `docs/control-harness.md` — design, decisions, command surface, next actions.
+- `docs/re/engine2.md` — RE of the engine console-command path (the `exec`
+  primitive; `-concommandpipe` finding).
+
+The payload, injection, live state and the Vulkan overlay are already validated
+on native Windows — see `docs/handoff.md` and `docs/windows-validation.md`.
+
+## Static RE tooling (REA + Ghidra)
+
+- REA is built from upstream **PR #2358** at `C:\Users\gpmpo\rea-src`
+  (branch `pr-2358`, HEAD `9adad2c23`), `npm link`ed to the global `rea`.
+  Provider: **Ghidra 12.1.4** at `C:\Users\gpmpo\ghidra\ghidra_12.1.4_PUBLIC`
+  (Java 21 at `C:\Program Files\Java\jdk-21`). Configured in the global OpenCode
+  config's `mcp.rea` entry (`C:\Users\gpmpo\.config\opencode\opencode.jsonc`).
+- The running `rea` MCP server **hot-reloads** config edits; do **not** run
+  `opencode service restart` (it kills the agent session).
+- Fast iteration uses the pre-imported project
+  `C:\Users\gpmpo\ghidra-analysis\rea-project` (program `engine2.dll`) via
+  `REA_GHIDRA_EXISTING_PROJECT` / `REA_GHIDRA_EXISTING_PROGRAM` (~13 s vs ~4 min
+  cold). Exact env/commands are in `docs/control-harness.md`.
+- Windows Ghidra is **read-only** (no annotation).

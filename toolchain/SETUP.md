@@ -34,8 +34,12 @@ export JAVA_HOME=/usr/lib/jvm/java-27-openjdk
 
 Verify: `rea doctor` reports the `ghidra` scope check as `healthy`.
 
-For large targets, apply the local **Ghidra project cache** (one project per
-target digest, reused on later opens) — see `docs/rea-project-cache.md`.
+REA is built from upstream PR #2358, which adds the
+`REA_GHIDRA_EXISTING_PROJECT` / `REA_GHIDRA_EXISTING_PROGRAM` existing-project
+reuse path (`-process -noanalysis`). Windows support for that path was added
+upstream (PR #2358, commit `9adad2c`). The global MCP entry uses REA's normal
+per-session import with a raised `REA_GHIDRA_STARTUP_TIMEOUT_MS`; the
+existing-project settings bind to a single target and are passed per run.
 
 > After editing `opencode.jsonc` MCP entries, run `opencode service restart`
 > so the running service reloads configuration.

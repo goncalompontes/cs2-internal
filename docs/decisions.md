@@ -100,10 +100,15 @@ The project no longer vendors Ghidra: ADR-0004's ReVa toolchain is retired and
 the ~1.4 GB download/extraction is removed from the tree. This keeps checkouts
 small and decouples RE tooling from the project tree.
 
-A **local patch** to the installed `rea-agents` package adds a Ghidra project
-cache (one project per target digest, reused with `-process -noanalysis`) so
-large targets are not re-analyzed on every open; upstream REA only offers
-exact-query snapshot replay. See `docs/rea-project-cache.md`.
+REA is built from upstream PR #2358, which adds the existing-project launch
+path (`REA_GHIDRA_EXISTING_PROJECT` / `REA_GHIDRA_EXISTING_PROGRAM`): a
+pre-imported Ghidra project is reused with `-process -noanalysis` instead of
+being re-imported on every open. Windows support for that path was added
+upstream (PR #2358, commit `9adad2c`). The global MCP entry uses REA's normal
+per-session import — the existing-project settings bind to one target, so they
+are passed per run — and `REA_GHIDRA_STARTUP_TIMEOUT_MS` is raised for cold
+imports. The former local `rea-agents` project-cache patch and its
+`scripts/rea-*` / `docs/rea-project-cache.md` machinery were removed.
 
 ## ADR-0013 — Swapchain hooking: kiero + MinHook
 **Status:** superseded by ADR-0015
@@ -444,4 +449,34 @@ Two issues surfaced when the payload first ran inside CS2 on native Windows
 
 **Verified:** after both fixes, injection completes, the marker/log/segment are
 written, and the overlay renders (see `docs/windows-validation.md`).
+
+## ADR-0020 — Programmatic scenario/control harness
+
+**Status:** accepted (design); not yet implemented.
+
+To test the payload/overlay against real game situations, the project will
+expose a **control channel** and a **scenario runner** instead of driving the
+game by hand.
+
+- **Transport:** a Win32 **named pipe** (default `\\.\pipe\cs2-internal-control`,
+  env `CS2_CONTROL_PIPE`) carrying newline-delimited JSON. Chosen over TCP and
+  shared memory: pure Win32, reachable cross-session by the same user, openable
+  from the Python stdlib, no ports.
+- **`exec` (console commands):** run **in-process in the payload** via the
+  `Cbuf_AddText` wrapper — `FUN_1801b8790(&g_InputService, 5, line, 0)`
+  (RVA `0x1b8790` / `0x8dbf20`, resolved by the dumper's `input_service` and
+  `cbuf_add_text` signatures). The engine's built-in `-concommandpipe`
+  (`-insecure`-gated, input-only in this build) is retained as a no-injection
+  fallback. See `docs/re/engine2.md`.
+- **`look` (aim):** **direct view-angle control** (not synthetic mouse), which
+  needs a small RE/hook pass.
+- **Runner:** a Python package under `scripts/` (`scenario/` + `run-scenario.py`)
+  that launches via the `CS2Launch` task, injects, connects, and asserts.
+- **First milestone:** control core — `ping`/`state`/`exec`/`wait_for`/`quit`,
+  the console entry point, the Python client/launcher, and a join-bot-match
+  scenario. `input`/`look` and game events (`GameEventSystemClientV001`) follow.
+
+The control channel is a distinct seam from the render path (ADR-0016): it runs
+on its own thread and never touches the present path. See
+`docs/control-harness.md` for the full design, command surface, and next actions.
 
