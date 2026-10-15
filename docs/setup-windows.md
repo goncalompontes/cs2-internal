@@ -13,13 +13,20 @@ first live run otherwise.
 
 > **Never launch `cs2.exe` / `steam.exe` directly.** An agent shell runs in
 > Windows **session 0**, which has no GPU and no desktop. Always go through the
-> `CS2Launch` scheduled task (§7), which runs in the interactive session (§6).
+> `CS2Launch` scheduled task (§7), which runs in the interactive session.
 > See `AGENTS.md`.
 
 > **Docs contain the primary machine's absolute paths** (`C:\Users\gpmpo\...`,
 > `F:\SteamLibrary\...`). Everything repo-relative is portable; map any
 > absolute path you meet in `docs/re/*.md` and `docs/handoff.md` to your own
 > locations.
+
+**Kick-off prompt** (what the owner can hand to the agent on the new machine):
+
+> Clone `https://github.com/goncalompontes/cs2-internal` to `C:\cs2-internal`,
+> then read and execute `docs/setup-windows.md` top to bottom. After each
+> numbered section run its verification and report the result. Finish with the
+> §13 checklist and tell me anything that still fails.
 
 ---
 
@@ -100,10 +107,17 @@ Notes:
 
 ## 3. Clone
 
+The private repo is `https://github.com/goncalompontes/cs2-internal` (ask the
+owner to add your GitHub account as a **collaborator** first, then accept the
+invitation).
+
 ```powershell
-git clone <REPO_URL> C:\cs2-internal
+git clone https://github.com/goncalompontes/cs2-internal.git C:\cs2-internal
 cd C:\cs2-internal
 ```
+
+(GitHub over HTTPS prompts for credentials; `gh auth setup-git` wires up the
+GitHub CLI as a credential helper, or use your own SSH key.)
 
 - The repo carries a **symlink** (`overlay/third_party/imgui` →
   `../../payload/third_party/imgui`). A Windows checkout materialises it as a
@@ -435,7 +449,10 @@ rea cache-list           # must be a known subcommand -> cache feature present
 ```
 
 Then set `REA_GHIDRA_PROJECT_CACHE=on` in the MCP entry (§10). This is the
-cache-enabled build; verify with `rea cache-list` / `rea doctor`.
+cache-enabled build; verify with `rea cache-list` / `rea doctor`. This recipe
+reproduces the primary machine but is the fiddly path — prefer the published
+package unless you specifically want warm analysis, and expect to adapt the
+native-addon step if the pinned commit no longer matches the shipped addon.
 
 Notes for either path:
 
