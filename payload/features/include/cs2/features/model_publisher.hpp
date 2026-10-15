@@ -44,6 +44,23 @@ class ModelPublisher {
 
   [[nodiscard]] bool running() const noexcept { return running_.load(); }
 
+  // Movement features (`docs/re/subtick.md`): what the payload publishes into the
+  // shared settings as **defaults** — the layer's menu can change them afterwards
+  // (its `Movement` tab), and the sink below tells the payload when it did. Set from
+  // the payload's own env (`CS2_PAYLOAD_MOVEMENT`).
+  void set_movement_defaults(bool auto_strafe, bool bhop) noexcept {
+    movement_auto_strafe_ = auto_strafe;
+    movement_bhop_ = bhop;
+  }
+  using SettingsSink = void (*)(void* context, bool auto_strafe, bool bhop);
+  // Called **every published frame** with the settings' state, so the menu is the
+  // single owner of the movement features (an out-of-band change is corrected
+  // rather than sticking).
+  void set_settings_sink(SettingsSink sink, void* context) noexcept {
+    settings_sink_ = sink;
+    settings_sink_context_ = context;
+  }
+
  private:
 #if defined(_WIN32)
   static unsigned long __stdcall thread_entry(void* self) noexcept;
@@ -56,6 +73,10 @@ class ModelPublisher {
 #endif
 
   Overlay* overlay_;
+  bool movement_auto_strafe_ = false;
+  bool movement_bhop_ = false;
+  SettingsSink settings_sink_ = nullptr;
+  void* settings_sink_context_ = nullptr;
 #if defined(_WIN32)
   void* mapping_ = nullptr;  // HANDLE
   void* shared_ = nullptr;   // wire::Shared*

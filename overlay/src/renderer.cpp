@@ -444,6 +444,10 @@ auto default_ui_settings() -> wire::Settings {
   settings.only_enemies = 1;
   settings.show_dead = 0;
   settings.show_hud = 1;
+  // Movement features are off until the payload (env) or the menu turns them on: an
+  // injected payload moving the player by itself would be surprising.
+  settings.auto_strafe = 0;
+  settings.bhop = 0;
   return settings;
 }
 

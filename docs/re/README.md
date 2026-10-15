@@ -6,6 +6,7 @@ REA, headless). Findings are recorded per subsystem.
 - [`interface-system.md`](interface-system.md) — `CreateInterface` registration
 - [`schema-system.md`](schema-system.md) — schema system
 - [`client-dll.md`](client-dll.md) — entity system, local player, view matrix (WIP)
+- [`subtick.md`](subtick.md) — sub-tick input: view-angle history, move steps, button steps
 - [`engine2.md`](engine2.md) — console-command path (`exec`), game event system
 
 > Addresses are absolute VAs for the module as loaded at its PE image base
@@ -171,7 +172,7 @@ The payload must never hard-code an RVA (ADR-0012).
 
    ```powershell
    .\external\dumper\target\release\cs2-dumper.exe --file <dll> --module <dll> --resolve-offsets --json
-   python C:\Users\gpmpo\.agents\skills\re-toolkit\retool.py pattern <dll> "<pattern>"
+   python .agents\skills\re-toolkit\retool.py pattern <dll> "<pattern>"
    ```
 
    (A pattern with two matches is fine *only* if both resolve to the same
@@ -285,7 +286,16 @@ every warm target.
   `IGameEventListener2`/`AddListener` API lives in client.dll (see above) and is
   what the harness uses.
 - **`client.dll`** — entity system / local player / view matrix documented
-  (`docs/re/client-dll.md`). **Game events resolved:** the harness patches the
+  (`docs/re/client-dll.md`). **Round/game phase resolved:** the harness reads the
+  level's `C_CSGameRules` through the `game_rules` global (`+0x25651d0`,
+  signatured) — `m_bFreezePeriod`/`m_bWarmupPeriod`/`m_gamePhase`/`m_iRoundTime`/
+  `m_iRoundWinStatus`/`m_bTCantBuy`/`m_bCTCantBuy`/`m_bBombPlanted` — and exposes
+  it as `state.rules`. **Main-screen rule resolved:** the global is non-null at the
+  main menu too (a default unstarted object), so "a level is up" comes from the
+  level's `C_CSGameRulesProxy` entity instead — an identity whose
+  `m_pGameRules` (`+0x600`) equals the global (`state.level`/`state.in_game`,
+  walked in the same pass as the players). Consumed by the scenario screen state
+  machine (`scripts/scenario/screens.py`). **Game events resolved:** the harness patches the
   `CGameEventManager` dispatch vtable slots (`FireEvent` `+0x38`,
   `FireEventClientSide` `+0x40`); `IGameEvent::GetName` and
   `IGameEventListener2::FireGameEvent` are both at vtable `+0x8`; the field
@@ -308,6 +318,32 @@ every warm target.
   `payload/control/input.{hpp,cpp}` (`usercmd` backend). The old
   `CreateMove 0x1c9c334` / `CCSGOInput 0x2320304` / `m_nButtons 0x1c338a8`
   anchors were **strings**.
+- **`client.dll` — sub-tick input** (`docs/re/subtick.md`): `CSGOUserCmdPB`
+  (`cmd+0x10`) fields, the `input_history` angle list
+  (`CSGOInputHistoryEntryPB.view_angles` = 3 floats), `CBaseUserCmdPB`
+  (field numbers + offsets confirmed against the public proto:
+  `buttons_pb@0x38`, `viewangles@0x40`, `forwardmove/leftmove/upmove@0x58/5c/60`,
+  `subtick_moves@0x18`), `CSubtickMoveStep` (`0x38`), and the `CCSGOInput`
+  `+0xbd0` history entries. **Seams:** aim = all `input_history[i].view_angles`
+  (`subtick-shot`); analog movement = the raw input at `CCSGOInput + 0x270/0x274`
+  (which `create_move_input` copies into the command each tick; the payload writes
+  it around `CreateMove`, measured by `subtick-move`). Consumer:
+  `CPlayer_MovementServices::DoMovement::Subtick`. **Correction (2026-10-15):** the
+  "write the per-controller input entry at `CCSGOInput + 0xb58 + 0x18`" probe is
+  **wrong for this build** — enabling it corrupts the input state and crashes
+  inside the input path (`client.dll + 0xb64a80`, next to `create_move_input`); the
+  offset/stride needs re-deriving before it is retried
+  (`docs/re/subtick.md` §"Actionable seams").
+
+- **`client.dll` — sub-tick jump chain** (`docs/re/prediction.md` §"RE findings",
+  re-derived 2026-10-15/16 on 25815307): `DECIDE` `0x8c2630` (the
+  `sv_bhop_time_window`/`sv_jump_spam_penalty_time` gate, `NOW = {movedata+0xd4,
+  +0xdc}`), `DoJump` `0x8e6fb0` (the alpha takeoff that restores the recorded
+  `m_flLastLandedVelocityX/Y`), the press-edge machine `0x4c0f10`
+  (`edge = C || (A && B)`), `RunCommand` `0xa719a0` (advances
+  `CBasePlayerController::m_nTickBase` `+0x6b8` once per simulated command), and the
+  `subtick_moves` → `CMoveData` copy `0xa73c70`. Consumed by the payload's
+  record-based bhop (`Input::bhop_tick`, `payload/control/src/input.cpp`).
 
 When you finish a subsystem, update this map and the per-module doc.
 

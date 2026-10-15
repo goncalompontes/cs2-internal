@@ -147,6 +147,9 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
     return model_;
   }
   model_.in_game = true;  // a local player exists: the menu may take input
+  if (local_pawn_sink_ != nullptr) {
+    local_pawn_sink_(local_pawn_context_, snapshot.local_pawn);
+  }
 
   model_.hud.sections.push_back(local_section(snapshot));
   model_.hud.sections.push_back(players_section(snapshot));
@@ -155,6 +158,22 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
   const game::Matrix4x4 view = reader_->view_matrix(0);
   EspStats esp_stats;
   esp_.build(snapshot, view, screen_width, screen_height, model_.draw, &esp_stats);
+
+  // The bhop prediction's current position, drawn as a box — a live demonstration
+  // that the engine simulation is running (docs/re/prediction.md).
+  if (predicted_origin_provider_ != nullptr) {
+    float predicted[3] = {0.0F, 0.0F, 0.0F};
+    if (predicted_origin_provider_(predicted_origin_context_, predicted)) {
+      const game::Vec3 centre{.x = predicted[0], .y = predicted[1], .z = predicted[2] + 36.0F};
+      const auto screen = view.project(centre, screen_width, screen_height);
+      if (screen.has_value()) {
+        constexpr render::Color k_predicted{.r = 0, .g = 255, .b = 255, .a = 235};
+        model_.draw.outline(screen->x - 18.0F, screen->y - 38.0F, screen->x + 18.0F,
+                            screen->y + 38.0F, k_predicted, 2.0F);
+        model_.draw.text(screen->x, screen->y - 52.0F, k_predicted, "PRED", true, true);
+      }
+    }
+  }
 
   // Periodic compact state dump, so the data is verifiable without the overlay.
   if (now == 0 || now - last_log_ms_ >= 2000) {

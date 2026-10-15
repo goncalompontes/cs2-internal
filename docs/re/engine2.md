@@ -208,7 +208,7 @@ object built on the stack in `FUN_1801c5910` which captures the console output
 lines produced while a command runs and **re-executes** each captured line as a
 concommand/convar (`FUN_1801c54e0`). It does not touch the pipe.
 
-## Game event system (`GameEventSystemClientV001`) — RE in progress
+## Game event system (`GameEventSystemClientV001`) — engine side (+ client API)
 
 The harness wants a listener so scenarios can await/assert on game events
 (`player_death`, `round_start`, …) instead of polling state. The interface is an
@@ -244,14 +244,91 @@ Verified from the code:
 - `gameevents_showeventlisteners` is a console command that prints the current
   listeners — a cheap live check.
 
-**Not yet resolved:** the registration entry observed at `vtable + 0x60` has the
-shape `(this, listener, void* ctx16, const char* eventName, bool)`, which does not
-match the public `IGameEventSystem::AddListener(listener, name, bServer)` — the
-thin wrapper was not located in engine2 (the slot has **no direct callers**, i.e.
-it is only reached through the vtable). The exact slot/calling convention will be
-pinned from **client.dll** call sites (`player_death` etc. live in the game
-module). Likewise the `IGameEventListener2` vtable shape (what the dispatcher
-calls on the listener) is still to be recovered.
+### Interface vtable (`0x18058ae38`) and the dispatch pump
+
+`create()` is a 7-byte thunk (`LEA RAX,[singleton]; RET`), so the
+`GameEventSystemClientV001` interface pointer **is** the singleton and its vtable
+is `0x18058ae38`. The confirmed slots (offset = index·8, from `read_bytes` +
+`address_name`):
+
+| off (slot) | function | role |
+|---|---|---|
+| `+0x58` (11) | `FUN_180217060` | `FireEvent(event)`: resolves the event definition and forwards to the engine broadcast |
+| `+0x60` (12) | `FUN_1802170b0` | **add listener** — logs `GameEvent:  Event %s … added listener.` |
+| `+0x68` (13) | `FUN_1802171d0` | **remove listener** — logs `… removed listener.` |
+| `+0x90` (18) | `FUN_1802180c0` | dispatch pump (`ServiceEvents`): drains the queued events and calls the listeners |
+
+(Slots 0–10 and 14–20 are the `CGameEventSystem` ctor/base machinery and the
+event queue; slot 5 resolves to `_guard_check_icall`. The function names in the
+Ghidra project are all analysis-generated `FUN_*` — there are no PDB symbols.)
+
+### Listener shape — a plain `{context, callback}` pair (no vtable)
+
+The listener registry is a **tier0** `CEventDispatcher_Base` embedded at
+`singleton + 0x70`. Registration goes through the tier0 exports
+`CEventDispatcher_Base::RegisterEventListener_Base` (ordinal `0xa4`) /
+`UnregisterEventListener_Base` (ordinal `0xa3`), whose mangled names give the
+exact signature:
+
+```
+RegisterEventListener_Base(CEventDispatcher_Base*, const CUtlAbstractDelegate&,
+                           unsigned int, bool,
+                           CUtlVector<EventListenerInfo_t>&, int, const char*);
+```
+
+In the dispatch pump each entry returned by `IterateListener` is invoked as a raw
+`{context, callback}` pair — **there is no listener interface/vtable at the call
+site**:
+
+```asm
+MOVZX EDX, byte ptr [RAX + 0x1c]   ; "wants the IGameEvent* argument" flag
+MOV   R8,  qword ptr [RAX + 0x8]   ; callback
+MOV   RCX, qword ptr [RAX]         ; context ("obj")
+TEST  EDX, EDX
+JZ    one_arg
+MOV   RDX, RDI                     ; the IGameEvent* being dispatched
+CALL  R8                           ; callback(obj, event)
+```
+
+So the effective listener is `void (*)(void* ctx, IGameEvent* event)` plus a byte
+at entry `+0x1c` selecting the 1-arg vs 2-arg form; the engine wraps it in a
+16-byte `CUtlAbstractDelegate` (`{obj, fn}`) before calling
+`RegisterEventListener_Base`. `IGameEvent::GetName` is at event vtable `+0x18`.
+
+### Event queue (the pump's input)
+
+`FUN_1802180c0` drains the singleton's own event queue:
+
+| offset | meaning |
+|---|---|
+| `+0x100` | element count (`int`) |
+| `+0x104` | capacity (`uint`; high bits are allocation flags) |
+| `+0x108` | data pointer |
+| `+0x110` | current index (`int`; `-1` = end) |
+| `+0x114` | "last index" |
+
+Each element is `0x10` bytes: `[0]` = `IGameEvent*`, `[8]` = `uint32 id`.
+
+> **This queue is unused in build 25815307.** A payload hook on the pump shows it
+> running (~330×/s) with the queue always empty (`capacity 0`, `data null`,
+> `first/last = -1`): CS2 client gameplay events do **not** flow through the
+> engine's `CGameEventSystem`. They are dispatched by client.dll's
+> `CGameEventManager` — see `docs/re/client-dll.md` §"Game events". (The layout
+> is recorded in case a future build uses it.)
+
+### Resolved in client.dll
+
+Neither `IGameEventListener2` nor a listener wrapper exists in engine2 (string /
+RTTI search is empty). The client-facing API is **client.dll**'s
+`CGameEventManager` (`IGameEventManager2`): `AddListener(IGameEventListener2*,
+name, bServer)` at vtable `+0x18` and `FireGameEvent` at listener vtable `+0x8`
+(`IGameEvent::GetName` at `+0x8`). The observed engine2 add path
+`FUN_1802170b0` takes an already-built `CUtlAbstractDelegate`
+(`(this, key, const CUtlAbstractDelegate&, name, bool)`) and has **no direct
+callers** in engine2 (reached only through the vtable); client.dll registers a
+single delegate with it (via its cached `CGameEventSystem*` at `0x2557b48`) and
+re-dispatches to `IGameEventListener2` clients. See `docs/re/client-dll.md`
+§"Game events".
 
 ## Still to recover
 

@@ -13,7 +13,7 @@ namespace {
 #if defined(_WIN32)
 
 using CaptureBackTraceFn = unsigned short(__stdcall*)(unsigned long, unsigned long, void**,
-                                                       unsigned long*);
+                                                      unsigned long*);
 
 CaptureBackTraceFn g_capture_backtrace = nullptr;
 int g_first_chance_logged = 0;
@@ -48,6 +48,38 @@ void log_stack(unsigned long skip) noexcept {
   }
 }
 
+// Fallback walk of the RBP chain from the faulting context. `RtlCaptureStackBackTrace`
+// yields nothing for a manually-mapped module in some contexts, and this needs no
+// imports. Every read is bounds-checked against the faulting stack.
+void log_frame_chain(const CONTEXT* context) noexcept {
+  if (context == nullptr) {
+    return;
+  }
+  const auto stack = static_cast<std::uintptr_t>(context->Rsp);
+  std::uintptr_t frame = static_cast<std::uintptr_t>(context->Rbp);
+  const std::uintptr_t limit = stack + 0x40000;
+  int emitted = 0;
+  while (emitted < 24 && frame >= stack && frame < limit && (frame & 7) == 0) {
+    const auto next = *reinterpret_cast<const std::uintptr_t*>(frame);
+    const auto ret = *reinterpret_cast<const std::uintptr_t*>(frame + 8);
+    if (ret == 0) {
+      break;
+    }
+    char line[96];
+    TextBuffer text(line, sizeof(line));
+    text += "[crash]   fp#";
+    text.dec(emitted);
+    text += ' ';
+    text.address(ret);
+    cs2::game::append_log(text.view());
+    ++emitted;
+    if (next <= frame) {
+      break;
+    }
+    frame = next;
+  }
+}
+
 void log_exception(const char* phase, EXCEPTION_POINTERS* info) noexcept {
   char line[256];
   TextBuffer text(line, sizeof(line));
@@ -70,6 +102,7 @@ void log_exception(const char* phase, EXCEPTION_POINTERS* info) noexcept {
   }
   cs2::game::append_log(text.view());
   log_stack(2);  // trim log_stack/log_exception themselves
+  log_frame_chain(info->ContextRecord);
 }
 
 LONG CALLBACK vectored_handler(EXCEPTION_POINTERS* info) noexcept {

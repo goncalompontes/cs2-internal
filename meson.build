@@ -47,6 +47,7 @@ control_core_test = executable('control_core_test',
     'payload/control/src/json.cpp',
     'payload/control/src/predicate.cpp',
     'payload/control/src/snapshot_json.cpp',
+    'payload/control/src/event_ring.cpp',
   ),
   include_directories : [
     include_directories('payload/control/include'),

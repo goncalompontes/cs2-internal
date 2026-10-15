@@ -1,5 +1,10 @@
 # Agent notes
 
+> **New machine?** Read [`docs/setup-windows.md`](docs/setup-windows.md) first —
+> it installs and verifies everything (tools, the `CS2Launch` task, the Vulkan
+> layer registration, REA + Ghidra) and ends with an end-to-end checklist. Then
+> run `scripts/preflight-windows.ps1` to see what is still missing.
+
 ## Launching the game on Windows
 
 The agent (and anything else you run over SSH / from the OpenCode background

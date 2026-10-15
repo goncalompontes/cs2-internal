@@ -90,21 +90,72 @@
       stock Dear ImGui font with antialiasing off; every ESP element except the
       player name is outlined.
 - [x] In-game menu — `Insert` (or `Delete`, for keyboards where Insert needs Fn)
-      opens a tabbed Dear ImGui window (ESP / Interface /
-      About) with toggles for the ESP elements; the settings round-trip through
+      opens a tabbed Dear ImGui window (ESP / Movement / Interface /
+      About) with toggles for the ESP elements and the payload's movement features
+      (auto-strafe, bunnyhop); the settings round-trip through
       the shared segment to the payload (**ADR-0021**).
-- [~] Control channel (IPC) + scenario runner — **control core + input
-      implemented and validated live** (ADR-0020). `payload/control/`
-      (`ping`/`state`/`exec`/`wait_for`/`quit` over a named pipe) +
+- [~] Control channel (IPC) + scenario runner — **control core + input + game
+      events implemented (events validated live)** (ADR-0020). `payload/control/`
+      (`ping`/`state`/`exec`/`events`/`wait_for`/`quit` over a named pipe) +
       `scripts/scenario/` Python runner with `look`/`press`/`noclip`/`teleport`
-      (engine `setang` + button commands through `exec`; no OS input, no hooks).
-      `exec` uses the in-process `Cbuf_AddText` (`FUN_1801b8790`, RVA `0x1b8790`;
-      see `docs/re/engine2.md`). Scenarios `join-bot-match` and `move-and-aim`
-      run end to end; host test `control-core` is green. Remaining: game events
-      (`GameEventSystemClientV001`) and console-output capture.
+      (engine `setang` + button commands through `exec`; no OS input, no hooks)
+      and game events (dispatch vtable hooks on the client's
+      `CGameEventManager`, with names *and arguments* read via the engine's own
+      field-name hash, validated against the build's `resource/*.gameevents`).
+      `exec` uses the in-process `Cbuf_AddText`
+      (`FUN_1801b8790`, RVA `0x1b8790`; see `docs/re/engine2.md`); game events
+      use the `game_event_manager` signature (`docs/re/client-dll.md`).
+      Scenarios `join-bot-match`, `move-and-aim` and `game-events` run end to
+      end; host test `control-core` is green. Remaining: console-output capture.
       See `docs/control-harness.md`.
 
 ## Phase 5 — Interfaces, events, deeper introspection
 - [ ] `Source2Client002`, `GameEventSystemClientV001`
+- [x] `CreateMove` / `CUserCmd` input path RE — `CCSGOInput` singleton + vtable,
+      `CreateMove` (slot 5 `+0xb64e60`, slot 25 `+0xd01610`), `CUserCmd` layout
+      (stride `0x98`, buttons `+0x60`), `GetUserCmd` chain; signatures in
+      `analysis.rs` (see `docs/re/client-dll.md`).
+- [~] `usercmd` input backend — `payload/control/input.{hpp,cpp}` hooks
+      `CreateMove`; writes `cmd->buttons` (discrete: jump/bhop) and the sub-tick
+      `view_angles` (`look(..., via="usercmd")`, silent); `press`/`release`/
+      `bhop`; `on_ground` predicate; `awaiting.py` readiness helpers.
+      **Validated live** (`usercmd-move`: jump + bhop; `subtick-aim`: silent angle
+      write; `subtick-shot`: the **shot follows the silent angle** — camera 45°
+      off a bot, silent aim, health drop). The sub-tick angle write covers every
+      `input_history` entry. **Analog movement validated live** (2026-10-15):
+      `move(forward=1.0)` walks 204 units/s (1.01× the console `+forward`) and
+      `move(forward=0.5)` walks 115 (0.57×) — the engine's units are `±1`, not
+      450; `movement-probe` pins a clear test spot and reports a console baseline.
+- [~] Sub-tick RE (`docs/re/subtick.md`) — `CSGOUserCmdPB` / `CBaseUserCmdPB` /
+      `CSGOInputHistoryEntryPB` / `CSubtickMoveStep` layouts (offsets + field
+      numbers confirmed against the public proto and the build's parser), the
+      `CCSGOInput` history, the command build (`create_move_input`) and the
+      movement consumer (`CPlayer_MovementServices::DoMovement::Subtick`).
+      `view_angles` implemented (all history entries); analog movement validated
+      live (`move(1.0)` = 204 units/s = 1.01× the console path, `move(0.5)` = 115 =
+      0.57×; the engine's units are `±1`) — `subtick-move`, `movement-probe`.
+- [~] **Auto-strafe / silent sub-tick movement** (`payload/control` `strafe`,
+      `docs/re/subtick.md` §"The movement yaw channel") — implemented (airborne-only:
+      community air-strafe wish angle applied as **silent** sub-tick `yaw_delta` steps
+      + full-forward analog in the rotated frame) and the **mechanism is measured**
+      (analog write = 1.01× the engine's walk; a 90° yaw step turns the walk 89.9°
+      with the eye angles untouched). **But the menu-enabled feature does not work
+      in-game yet** (operator-confirmed 2026-10-15) — next probe: also write the raw
+      axes (`CCSGOInput + 0x270/0x274`) from the strafe, which `create_move_input`
+      re-derives the base floats from. See the wrap-up at the top of `handoff.md`.
+- [~] **Payload-native movement controls** — `auto_strafe`/`bhop` live in
+      `wire::Settings` (overlay menu's `Movement` tab, version 4) and the payload
+      re-applies them every frame, so the menu is the single owner; the settings
+      plumbing is validated (seqlock write → payload flags), the *effect* is not.
+- [x] Screen/round state machine (`scripts/scenario/screens.py`) — the payload
+      answers "is a level up?" with the **main-screen rule** (the level's
+      `C_CSGameRulesProxy` entity exists, `state.level`/`state.in_game`; the
+      `game_rules` global is readable at the main menu too, measured 2026-10-15)
+      and reports the round phase from `C_CSGameRules` (`state.rules`). The
+      harness reduces that to one screen (not-ready / not-in-game / team-select /
+      spectator / warmup / freeze / live / dead / round-end) with per-screen
+      capabilities and the transitions between them. Scenarios gate on
+      `require("move")` / drive `ensure(Screen.LIVE)`; the `screens` scenario
+      tests the main-screen rule, then walks `→ LIVE → kill → DEAD → LIVE`.
 - [ ] Tick/frame hook
 - [ ] Full scripted/interactive session instrumentation

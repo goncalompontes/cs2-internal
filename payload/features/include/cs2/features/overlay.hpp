@@ -33,6 +33,23 @@ class Overlay {
   [[nodiscard]] const EspConfig& esp_config() const noexcept { return esp_.config(); }
   void set_esp_config(const EspConfig& config) noexcept { esp_.config() = config; }
 
+  // Forward the local pawn from each state refresh. The control thread's movement
+  // features (strafe/bhop prediction) need it fresh even when no scenario is
+  // polling `state` (`Input::note_local_pawn`).
+  using LocalPawnSink = void (*)(void* context, std::uintptr_t pawn);
+  void set_local_pawn_sink(LocalPawnSink sink, void* context) noexcept {
+    local_pawn_sink_ = sink;
+    local_pawn_context_ = context;
+  }
+
+  // A provider for the bhop prediction's current position; when it returns one,
+  // the overlay draws a box there so the engine simulation is visible.
+  using PredictedOriginProvider = bool (*)(void* context, float out[3]);
+  void set_predicted_origin_provider(PredictedOriginProvider provider, void* context) noexcept {
+    predicted_origin_provider_ = provider;
+    predicted_origin_context_ = context;
+  }
+
  private:
   std::optional<game::StateReader> reader_;
   render::OverlayModel model_;
@@ -42,6 +59,10 @@ class Overlay {
   float last_width_ = 0.0F;
   float last_height_ = 0.0F;
   bool initialized_ = false;
+  LocalPawnSink local_pawn_sink_ = nullptr;
+  void* local_pawn_context_ = nullptr;
+  PredictedOriginProvider predicted_origin_provider_ = nullptr;
+  void* predicted_origin_context_ = nullptr;
 };
 
 }  // namespace cs2::features

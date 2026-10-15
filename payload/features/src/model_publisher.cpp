@@ -202,7 +202,11 @@ void ModelPublisher::publish_settings() noexcept {
   if (shared == nullptr) {
     return;
   }
-  const wire::Settings defaults = to_wire_settings(overlay_->esp_config());
+  wire::Settings defaults = to_wire_settings(overlay_->esp_config());
+  // The movement features' initial state travels with the defaults; the menu then
+  // owns them (see `apply_settings`).
+  defaults.auto_strafe = movement_auto_strafe_ ? 1 : 0;
+  defaults.bhop = movement_bhop_ ? 1 : 0;
   const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_relaxed);
   shared->settings_sequence.store(sequence + 1, std::memory_order_relaxed);  // odd: writing
   std::memcpy(&shared->settings, &defaults, sizeof(defaults));
@@ -215,18 +219,39 @@ void ModelPublisher::apply_settings() noexcept {
   if (shared == nullptr) {
     return;
   }
-  const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_acquire);
-  if ((sequence & 1U) != 0U || sequence == settings_sequence_) {
-    return;  // mid-write, or nothing new
-  }
+  // Read the block every frame (16 bytes under a seqlock) so the movement features
+  // can be corrected even when nobody writes it — a flag left set out-of-band (a
+  // stale control command) is reverted on the next frame and the menu stays the
+  // single owner. The ESP config only needs the *change* check.
   wire::Settings copy{};
-  std::memcpy(&copy, &shared->settings, sizeof(copy));
-  const std::uint32_t confirmed = shared->settings_sequence.load(std::memory_order_acquire);
-  if (confirmed != sequence) {
+  bool fresh = false;
+  for (int attempt = 0; attempt < 3 && !fresh; ++attempt) {
+    const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_acquire);
+    if ((sequence & 1U) != 0U) {
+      continue;  // mid-write
+    }
+    std::memcpy(&copy, &shared->settings, sizeof(copy));
+    if (shared->settings_sequence.load(std::memory_order_acquire) == sequence) {
+      fresh = true;
+    }
+  }
+  if (!fresh) {
     return;  // raced a write; retry on the next frame
   }
-  settings_sequence_ = sequence;
-  overlay_->set_esp_config(from_wire_settings(copy));
+
+  const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_acquire);
+  if (sequence != settings_sequence_) {
+    settings_sequence_ = sequence;
+    overlay_->set_esp_config(from_wire_settings(copy));
+  }
+
+  // The movement features are **menu-owned**: push the settings' state every frame
+  // (two atomic stores), so an out-of-band change — a stale control command, a
+  // leftover from an earlier session — is corrected on the next frame instead of
+  // sticking.
+  if (settings_sink_ != nullptr) {
+    settings_sink_(settings_sink_context_, copy.auto_strafe != 0, copy.bhop != 0);
+  }
 }
 
 auto ModelPublisher::map() noexcept -> bool {

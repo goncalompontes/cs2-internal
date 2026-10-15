@@ -80,47 +80,126 @@ fn curated_signatures_resolve_offsets_offline() {
     use cs2_dumper::analysis::{resolve_known, OffsetSource};
 
     // (name, pattern, rip_offset, instr_len, target_rva) — mirrors
-    // `analysis::known_signatures()` and the build-25815307 RVAs.
-    let cases: &[(&str, &str, usize, usize, usize)] = &[
+    // `analysis::known_signatures()` and the build-25815307 RVAs. `rip_offset`
+    // is `None` for function-entry signatures (the resolved RVA is the match
+    // start, so `target_rva` is unused).
+    let cases: &[(&str, &str, Option<usize>, Option<usize>, Option<usize>)] = &[
         (
             "game_entity_system",
             "48 8B C8 E8 ?? ?? ?? ?? 48 8B 1D ?? ?? ?? ??",
-            11,
-            15,
-            0x2711598,
+            Some(11),
+            Some(15),
+            Some(0x2711598),
         ),
         (
             "entity_list",
             "45 8B 80 BC 06 00 00 41 83 F8 FF 74 4D 4C 8B 0D ?? ?? ?? ??",
-            16,
-            20,
-            0x2366770,
+            Some(16),
+            Some(20),
+            Some(0x2366770),
         ),
         (
             "game_rules",
             "8B 0D ?? ?? ?? ?? 48 89 1D ?? ?? ?? ?? FF 15 ?? ?? ?? ?? 84 C0",
-            9,
-            13,
-            0x255be80,
+            Some(9),
+            Some(13),
+            Some(0x255be80),
         ),
         (
             "local_player_controllers",
             "8B 08 48 63 C1 48 8D 0D ?? ?? ?? ?? 48 8B 04 C1",
-            8,
-            12,
-            0x25338a8,
+            Some(8),
+            Some(12),
+            Some(0x25338a8),
         ),
         (
             "view_matrix",
             "48 63 C1 48 8D 0D ?? ?? ?? ?? 48 C1 E0 06 48 03 C1 C3",
-            6,
-            10,
-            0x2561cd0,
+            Some(6),
+            Some(10),
+            Some(0x2561cd0),
+        ),
+        (
+            "game_event_manager",
+            "48 C7 05 ?? ?? ?? ?? 00 00 C8 00 75 07 48 89 0D ?? ?? ?? ?? E8",
+            Some(16),
+            Some(20),
+            Some(0x2542908),
+        ),
+        (
+            "event_key_hash",
+            "48 83 EC 28 45 8B D0 4C 8B C9 48 83 FA 04 0F 82 ?? ?? ?? ?? 0F B6 09 48 89 5C 24 20",
+            None,
+            None,
+            None,
+        ),
+        (
+            "create_move",
+            "48 8B C4 4C 89 40 ?? 48 89 48 ?? 55 53 57",
+            None,
+            None,
+            None,
+        ),
+        (
+            "create_move_input",
+            "85 D2 0F 85 ?? ?? ?? ?? 48 8B C4 44 88 40",
+            None,
+            None,
+            None,
+        ),
+        (
+            "ccsgo_input",
+            "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 33 C9 C7 05 ?? ?? ?? ?? FF FF FF FF 48 8D 05 ?? ?? ?? ?? 48 89 0D ?? ?? ?? ?? 48 89 05 ?? ?? ?? ??",
+            Some(3),
+            Some(7),
+            Some(0x2572460),
+        ),
+        (
+            "user_cmd_array",
+            "48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B CF 4C 8B F8",
+            Some(3),
+            Some(7),
+            Some(0x221bd10),
+        ),
+        (
+            "get_user_cmd_tick",
+            "48 83 EC ?? 4C 8B 0D ?? ?? ?? ?? 4C 8B DA",
+            None,
+            None,
+            None,
+        ),
+        (
+            "get_user_cmd_array",
+            "48 89 4C 24 ?? 41 56 41 57",
+            None,
+            None,
+            None,
+        ),
+        (
+            "get_user_cmd_by_sequence",
+            "40 53 48 83 EC ?? 8B DA E8 ?? ?? ?? ?? 4C 8B C0",
+            None,
+            None,
+            None,
+        ),
+        (
+            "repeated_ptr_add",
+            "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 48 8B FA 48 8B 49 10 48 85 C9 74 07 8B 01 3B 43 0C 75 13",
+            None,
+            None,
+            None,
+        ),
+        (
+            "subtick_step_alloc",
+            "E8 ?? ?? ?? ?? 48 8B D0 48 8B CE E8 ?? ?? ?? ?? 48 8B C8",
+            Some(1),
+            Some(5),
+            Some(0x4f7120),
         ),
     ];
 
     let base = 0x180000000usize;
-    let mut bytes = vec![0u8; 0x400];
+    let mut bytes = vec![0u8; 0x800];
     let mut expected = std::collections::BTreeMap::new();
     let mut off = 0x10;
     for (name, text, rip_offset, instr_len, target_rva) in cases {
@@ -135,10 +214,18 @@ fn curated_signatures_resolve_offsets_offline() {
             bytes[off + i] = tok.unwrap_or(0);
         }
         let match_addr = base + off;
-        let target_addr = base + target_rva;
-        let disp = (target_addr as i64 - (match_addr as i64 + *instr_len as i64)) as i32;
-        bytes[off + rip_offset..off + rip_offset + 4].copy_from_slice(&disp.to_le_bytes());
-        expected.insert(name.to_string(), *target_rva);
+        // A RIP-relative signature patches its disp32 to the documented RVA;
+        // a function-entry signature resolves to the match start itself.
+        let rva = match (*rip_offset, *instr_len, *target_rva) {
+            (Some(rip), Some(len), Some(target)) => {
+                let target_addr = base + target;
+                let disp = (target_addr as i64 - (match_addr as i64 + len as i64)) as i32;
+                bytes[off + rip..off + rip + 4].copy_from_slice(&disp.to_le_bytes());
+                target
+            }
+            _ => off,
+        };
+        expected.insert(name.to_string(), rva);
         off += toks.len() + 8;
     }
 

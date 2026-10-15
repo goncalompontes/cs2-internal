@@ -33,6 +33,10 @@ void capture_modules() noexcept {
   add("client", "client.dll");
   add("engine", "engine2.dll");
   add("cs2", "cs2.exe");
+  add("tier0", "tier0.dll");
+  add("render", "rendersystemdx11.dll");
+  add("materials", "materialsystem2.dll");
+  add("ntdll", "ntdll.dll");
 }
 
 auto TextBuffer::operator+=(std::string_view text) noexcept -> TextBuffer& {

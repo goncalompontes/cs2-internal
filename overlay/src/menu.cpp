@@ -291,6 +291,14 @@ auto draw_window(wire::Settings& settings) -> bool {
         ImGui::TextDisabled("Insert or Delete toggles this menu");
         ImGui::EndTabItem();
       }
+      if (ImGui::BeginTabItem("Movement")) {
+        toggle("Auto-strafe (silent)", settings.auto_strafe);
+        toggle("Bunnyhop", settings.bhop);
+        ImGui::Separator();
+        ImGui::TextDisabled("Applied by the payload per tick while airborne (strafe)");
+        ImGui::TextDisabled("or grounded (bhop). The camera does not move.");
+        ImGui::EndTabItem();
+      }
       if (ImGui::BeginTabItem("About")) {
         ImGui::TextWrapped("cs2-internal overlay. ESP labels are outlined; the player name is not.");
         ImGui::TextDisabled("font: Dear ImGui default, antialiasing off");

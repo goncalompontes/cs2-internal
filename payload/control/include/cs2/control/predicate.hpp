@@ -6,10 +6,13 @@
 // Grammar (a JSON object; several keys mean AND):
 //   { "in_map": true }
 //   { "local_alive": true }
+//   { "on_ground": true }     // local pawn FL_ONGROUND
 //   { "players_gte": 3 }      // total players
 //   { "alive_gte": 2 }        // players with life_state == 0
 //   { "local_hp_gte": 1 }
 //   { "team": "T" }           // "T"/"CT" (or 2/3)
+//   { "playable": true }      // alive AND on a team (T/CT) — false on the
+//                             //   team-select screen / as a spectator / dead
 //   { "all": [ ... ] }        // every child matches
 //   { "any": [ ... ] }        // at least one child matches
 //   { "not": { ... } }        // negation
@@ -42,10 +45,12 @@ class Predicate {
     always,
     in_map,
     local_alive,
+    on_ground,
     players_gte,
     alive_gte,
     local_hp_gte,
     team,
+    playable,
     all,
     any,
     negated,

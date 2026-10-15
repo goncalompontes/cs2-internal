@@ -162,18 +162,57 @@ class Game:
     def exec(self, line: str) -> dict[str, Any]:
         return self.control.exec(line)
 
-    def wait_for(self, *, timeout: float = 30.0, **predicates: Any) -> dict[str, Any]:
-        return self.control.wait_for(timeout=timeout, **predicates)
+    def wait_for(self, *, timeout: float = 30.0, event: str | None = None,
+                 event_args: dict[str, Any] | None = None,
+                 **predicates: Any) -> dict[str, Any]:
+        return self.control.wait_for(timeout=timeout, event=event, event_args=event_args,
+                                     **predicates)
 
-    def press(self, key: str, hold: float = 0.0) -> dict[str, Any]:
-        return self.control.press(key, hold=hold)
+    def events(self, limit: int = 64, subscribe: str | list[str] | None = None) -> dict[str, Any]:
+        """Recent game events: ``{count, events: [{name, seq, args}, ...]}``."""
+        return self.control.events(limit=limit, subscribe=subscribe)
 
-    def release(self, key: str) -> dict[str, Any]:
-        return self.control.release(key)
+    def press(self, key: str, hold: float = 0.0, via: str | None = None) -> dict[str, Any]:
+        return self.control.press(key, hold=hold, via=via)
+
+    def release(self, key: str, via: str | None = None) -> dict[str, Any]:
+        return self.control.release(key, via=via)
+
+    def input(self, via: str | None = None) -> dict[str, Any]:
+        """Select/query the input backend (``"console"`` / ``"usercmd"``)."""
+        return self.control.input(via=via)
+
+    def buttons(self, *, press: Any = None, release: Any = None,
+                reset: bool = False) -> dict[str, Any]:
+        """Raw ``usercmd`` button overrides (names or a mask)."""
+        return self.control.buttons(press=press, release=release, reset=reset)
+
+    def bhop(self, on: bool = True) -> dict[str, Any]:
+        """Enable the payload's auto-jump."""
+        return self.control.bhop(on)
+
+    def strafe(self, on: bool = True, *, wishspeed: float | None = None,
+               subtick: int | None = None) -> dict[str, Any]:
+        """Toggle the payload's auto-strafe (airborne only, silent)."""
+        return self.control.strafe(on, wishspeed=wishspeed, subtick=subtick)
 
     def look(self, *, yaw: float | None = None, pitch: float | None = None,
-             roll: float | None = None) -> dict[str, Any]:
-        return self.control.look(yaw=yaw, pitch=pitch, roll=roll)
+             roll: float | None = None, via: str | None = None,
+             command: bool = False, raw: bool = False,
+             step_yaw: float | None = None) -> dict[str, Any]:
+        return self.control.look(yaw=yaw, pitch=pitch, roll=roll, via=via,
+                                 command=command, raw=raw, step_yaw=step_yaw)
+
+    def move(self, *, forward: float = 0.0, side: float = 0.0, up: float = 0.0,
+             clear: bool = False, quantize: bool = False, step: bool = False,
+             raw_entry: bool = False) -> dict[str, Any]:
+        """Set the ``usercmd`` analog move (`forward`/`side`), or ``clear`` it.
+
+        ``quantize``/``step``/``raw_entry`` opt into the community ingredients of
+        the movement write — see :meth:`Control.move`.
+        """
+        return self.control.move(forward=forward, side=side, up=up, clear=clear,
+                                 quantize=quantize, step=step, raw_entry=raw_entry)
 
     def noclip(self, enabled: bool = True) -> dict[str, Any]:
         return self.control.noclip(enabled)
@@ -186,6 +225,70 @@ class Game:
 
     def local(self) -> dict[str, Any] | None:
         return self.state().get("local")
+
+    # --- screen state machine (see `.screens`) ----------------------------
+    # The scenarios gate on these rather than re-deriving "is it safe to send
+    # input?" from raw fields: `screen()` says which screen the game is in,
+    # `require()` asserts a capability with the *reason*, and `ensure()` drives
+    # the documented transitions to reach a screen.
+    def state_machine(self, *, map_name: str = "de_dust2",
+                      debug: bool = True):
+        """A :class:`~.screens.Machine` bound to this session."""
+        from .screens import Machine
+
+        return Machine(self, map_name=map_name, debug=debug)
+
+    def screen(self):
+        """The current :class:`~.screens.Screen`."""
+        from .awaiting import screen
+
+        return screen(self)
+
+    def game_state(self):
+        """The deduced :class:`~.screens.GameState` (screen + capabilities)."""
+        from .awaiting import state
+
+        return state(self)
+
+    def require(self, capability):
+        """Fail (with a reason) unless ``capability`` is available now."""
+        from .awaiting import require
+
+        return require(self, capability)
+
+    def ensure_screen(self, target, *, map_name: str = "de_dust2", **kwargs):
+        """Drive the machine into ``target`` (see `.screens.Machine.ensure`)."""
+        from .awaiting import ensure
+
+        return ensure(self, target, map_name=map_name, **kwargs)
+
+    # --- readiness / measurement (see `.awaiting`) ------------------------
+    # Thin delegators so scenarios can write `game.ensure_live_round()`; the
+    # logic lives in `.awaiting` (imported lazily to avoid an import cycle).
+    def ensure_map(self, map_name: str = "de_dust2", timeout: float = 180.0) -> None:
+        from .awaiting import ensure_map
+
+        return ensure_map(self, map_name=map_name, timeout=timeout)
+
+    def ensure_live_round(self, **kwargs: Any) -> None:
+        from .awaiting import ensure_live_round
+
+        return ensure_live_round(self, **kwargs)
+
+    def wait_airborne(self, timeout: float = 5.0) -> bool:
+        from .awaiting import wait_airborne
+
+        return wait_airborne(self, timeout=timeout)
+
+    def wait_on_ground(self, timeout: float = 5.0) -> bool:
+        from .awaiting import wait_on_ground
+
+        return wait_on_ground(self, timeout=timeout)
+
+    def measure_move(self, **kwargs: Any) -> dict[str, Any]:
+        from .awaiting import measure_move
+
+        return measure_move(self, **kwargs)
 
 
 @contextlib.contextmanager

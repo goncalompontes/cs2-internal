@@ -92,6 +92,118 @@ pub fn known_signatures() -> Vec<Signature> {
             Some(6),
             Some(10),
         ),
+        // `IGameEventManager2*` (the static `CGameEventManager`) — the manager
+        // the game registers its `IGameEventListener2` listeners with
+        // (`docs/re/client-dll.md` §"Game events"). Anchor: the static-init store
+        // `DAT_182542908 = &static CGameEventManager` in `FUN_1800be760`.
+        sig(
+            "client.dll",
+            "game_event_manager",
+            "48 C7 05 ?? ?? ?? ?? 00 00 C8 00 75 07 48 89 0D ?? ?? ?? ?? E8",
+            Some(16),
+            Some(20),
+        ),
+        // The case-insensitive `MurmurHash2` used to hash game-event field names
+        // (`FUN_180165ce0`); callers pass `seed = len ^ 0x31415926`. The payload
+        // calls it to build the `{hash, pad, str}` key the `IGameEvent` getters
+        // take (`docs/re/client-dll.md` §"Game events").
+        sig(
+            "client.dll",
+            "event_key_hash",
+            "48 83 EC 28 45 8B D0 4C 8B C9 48 83 FA 04 0F 82 ?? ?? ?? ?? 0F B6 09 48 89 5C 24 20",
+            None,
+            None,
+        ),
+        // `CCSGOInput::CreateMove` — the per-tick input step that receives the
+        // `CUserCmd*` as its third argument (`rcx = CCSGOInput*`, `edx = int`,
+        // `r8 = CUserCmd*`). `docs/re/client-dll.md` §"Input path (CUserCmd)".
+        // Resolve the match start (function entry, no RIP-relative operand).
+        sig(
+            "client.dll",
+            "create_move",
+            "48 8B C4 4C 89 40 ?? 48 89 48 ?? 55 53 57",
+            None,
+            None,
+        ),
+        // `CCSGOInput` vtable slot 5 — the newer `CreateMove(CCSGOInput*, int slot,
+        // bool active)`; fetches the current command via `GetUserCmd`. Resolve the
+        // match start (function entry).
+        sig(
+            "client.dll",
+            "create_move_input",
+            "85 D2 0F 85 ?? ?? ?? ?? 48 8B C4 44 88 40",
+            None,
+            None,
+        ),
+        // Static `CCSGOInput` singleton object (`0x182572460`); its vtable
+        // (`0x181c97b28`, slot 5 = `create_move_input`) is `*(ccsgo_input)`.
+        // Anchor: the static init `FUN_1800ee570`, which does
+        // `LEA RCX,[object]; …; LEA RAX,[vtable]; …; MOV [object], RAX`. The
+        // singleton pointer used by the game is `dwCSGOInput` (RVA `0x2233d10`).
+        sig(
+            "client.dll",
+            "ccsgo_input",
+            "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 33 C9 C7 05 ?? ?? ?? ?? FF FF FF FF 48 8D 05 ?? ?? ?? ?? 48 89 0D ?? ?? ?? ?? 48 89 05 ?? ?? ?? ??",
+            Some(3),
+            Some(7),
+        ),
+        // `CUserCmdArray*` global the game's `GetUserCmd` chain reads (anchor:
+        // `MOV RCX,[global]; CALL get_user_cmd_tick; …` inside `create_move_input`).
+        sig(
+            "client.dll",
+            "user_cmd_array",
+            "48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B CF 4C 8B F8",
+            Some(3),
+            Some(7),
+        ),
+        // The `GetUserCmd` chain (`docs/re/client-dll.md` §"Input path"):
+        // `get_user_cmd_tick(controller, int* out)`, `get_user_cmd_array(array*,
+        // tick)`, `get_user_cmd_by_sequence(controller, seq) -> CUserCmd*`.
+        sig(
+            "client.dll",
+            "get_user_cmd_tick",
+            "48 83 EC ?? 4C 8B 0D ?? ?? ?? ?? 4C 8B DA",
+            None,
+            None,
+        ),
+        sig(
+            "client.dll",
+            "get_user_cmd_array",
+            "48 89 4C 24 ?? 41 56 41 57",
+            None,
+            None,
+        ),
+        sig(
+            "client.dll",
+            "get_user_cmd_by_sequence",
+            "40 53 48 83 EC ?? 8B DA E8 ?? ?? ?? ?? 4C 8B C0",
+            None,
+            None,
+        ),
+        // Protobuf `RepeatedPtrField<T>::Add(field, element)` used to append a
+        // `CSubtickMoveStep` to `CBaseUserCmdPB.subtick_moves` (and an
+        // `CSGOInputHistoryEntryPB` to `input_history`). `field` is the field
+        // base; the element must already be allocated in the command's arena
+        // (see `docs/re/subtick.md` §"Open questions").
+        sig(
+            "client.dll",
+            "repeated_ptr_add",
+            "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 48 8B FA 48 8B 49 10 48 85 C9 74 07 8B 01 3B 43 0C 75 13",
+            None,
+            None,
+        ),
+        // `CSubtickMoveStep` allocator (`FUN_1804f7120`) — the "get or create"
+        // the command's `add_subtick_moves()` uses. Its own code is identical to
+        // every other `0x38`-message allocator, so anchor on the call site in
+        // `create_move_input` (`E8` call, resolve the rel32). See
+        // `docs/re/subtick.md`.
+        sig(
+            "client.dll",
+            "subtick_step_alloc",
+            "E8 ?? ?? ?? ?? 48 8B D0 48 8B CE E8 ?? ?? ?? ?? 48 8B C8",
+            Some(1),
+            Some(5),
+        ),
         // ---- engine2.dll --------------------------------------------------
         // `CInputService` singleton (`DAT_1808dbf20`), anchor on
         // `LEA RCX, [g_InputService]; MOV EDX, 5; CALL Cbuf_AddText` inside

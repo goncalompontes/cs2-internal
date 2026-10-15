@@ -11,6 +11,8 @@ namespace cs2::control {
 [[nodiscard]] Json to_json(const game::Vec3& value);
 [[nodiscard]] Json to_json(const game::Angle& value);
 [[nodiscard]] Json to_json(const game::PlayerSnapshot& player);
+[[nodiscard]] Json to_json(const game::RulesSnapshot& rules);
+[[nodiscard]] Json to_json(const game::LevelSnapshot& level);
 [[nodiscard]] Json to_json(const game::Snapshot& snapshot);
 
 }  // namespace cs2::control

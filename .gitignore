@@ -24,6 +24,8 @@ target/
 artifacts/
 *.dump
 *.bin
+# RE scratch: derived string dumps are large and regenerable
+re/**/strings.txt
 
 # Editor / OS
 .DS_Store

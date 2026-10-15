@@ -4,6 +4,7 @@
 // ImGui debug HUD, which reads local-player/player state via `payload/game`.
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 #include "cs2/control/service.hpp"
 #include "cs2/diag/crash_handler.hpp"
@@ -53,6 +54,45 @@ auto runtime() -> Runtime& {
   return g_runtime;
 }
 
+// `CS2_PAYLOAD_MOVEMENT` — the payload's own switch for the movement features
+// (`docs/re/subtick.md` §"The movement yaw channel"). Comma-separated names:
+// `strafe` (silent airborne auto-strafe) and `bhop` (auto-jump while grounded).
+// They become the *defaults* published to the overlay menu, so the menu can change
+// them later; an empty/unset value leaves both off.
+struct MovementConfig {
+  bool strafe = false;
+  bool bhop = false;
+};
+
+auto parse_movement_env() noexcept -> MovementConfig {
+  MovementConfig config;
+  const char* value = std::getenv("CS2_PAYLOAD_MOVEMENT");
+  if (value == nullptr) {
+    return config;
+  }
+  const std::string names(value);
+  config.strafe = names.find("strafe") != std::string::npos;
+  config.bhop = names.find("bhop") != std::string::npos;
+  return config;
+}
+
+// The overlay menu's `Movement` tab writes the shared settings; the publisher calls
+// this when they *change*, and the payload's movement features follow.
+void on_movement_settings(void* context, bool auto_strafe, bool bhop) noexcept {
+  static_cast<Runtime*>(context)->control.set_movement_features(auto_strafe, bhop);
+}
+
+// The per-frame overlay refresh forwards the local pawn so the movement features
+// (strafe/bhop prediction) see it fresh during menu-only play.
+void on_local_pawn(void* context, std::uintptr_t pawn) noexcept {
+  static_cast<Runtime*>(context)->control.note_local_pawn(pawn);
+}
+
+// The overlay asks for the bhop prediction's position to draw the demo box.
+bool on_predicted_origin(void* context, float out[3]) noexcept {
+  return static_cast<Runtime*>(context)->control.predicted_origin(out);
+}
+
 }  // namespace
 
 #if defined(_WIN32)
@@ -69,6 +109,29 @@ DWORD WINAPI install_thread(void*) {
   // connects to. Runs on its own thread and never touches the render path.
   if (std::getenv("CS2_PAYLOAD_NO_CONTROL") == nullptr) {
     (void)cs2::payload::runtime().control.start();
+  }
+  // Movement features: the payload's env sets the initial state and the defaults the
+  // overlay menu starts from; the menu then owns them (ADR-0021 settings block).
+  {
+    const MovementConfig movement = parse_movement_env();
+    const auto env_value = [](const char* name) -> std::string {
+      const char* value = std::getenv(name);
+      return value == nullptr ? std::string("<unset>") : std::string(value);
+    };
+    cs2::game::append_log(std::string("[cs2-payload] movement: strafe=") +
+                          (movement.strafe ? "1" : "0") + " bhop=" + (movement.bhop ? "1" : "0") +
+                          " | env: MOVEMENT=" + env_value("CS2_PAYLOAD_MOVEMENT") +
+                          " PUB_THREAD=" + env_value("CS2_PAYLOAD_PUB_THREAD") +
+                          " OVERLAY=" + env_value("CS2_OVERLAY") +
+                          " OVERLAY_LOG=" + env_value("CS2_OVERLAY_LOG"));
+    cs2::payload::runtime().control.set_movement_features(movement.strafe, movement.bhop);
+    cs2::payload::runtime().publisher.set_movement_defaults(movement.strafe, movement.bhop);
+    cs2::payload::runtime().publisher.set_settings_sink(&on_movement_settings,
+                                                        &cs2::payload::runtime());
+    cs2::payload::runtime().overlay.set_local_pawn_sink(&on_local_pawn,
+                                                        &cs2::payload::runtime());
+    cs2::payload::runtime().overlay.set_predicted_origin_provider(
+        &on_predicted_origin, &cs2::payload::runtime());
   }
   // Publish the overlay model for the Vulkan present layer (ADR-0016), driven
   // from the game's own present hook on the render thread — no payload thread.

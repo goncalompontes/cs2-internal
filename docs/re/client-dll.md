@@ -161,6 +161,205 @@ Supporting pipeline:
 - **Per-slot client mode** — `FUN_180cec8f0(slot)` → `(&DAT_182573478)[slot]`,
   class `ClientModeCSNormal` (vtable `0x181c99c20`).
 
+## Game events (`IGameEventManager2`)
+
+The payload captures game events by **hooking the client manager's dispatch**
+(ADR-0020; the harness's `events`/`wait_for(event=…)`).
+
+| What | VA | RVA | Notes |
+|---|---|---|---|
+| `CGameEventManager` (`IGameEventManager2`) **pointer global** | `0x182542908` | `0x2542908` | points at the static manager object `0x18221f280`; set by the static init `FUN_1800be760` |
+| `CGameEventManager` vtable | `0x181c2b858` | — | COL `0x181c2b850`; RTTI `.?AVCGameEventManager@@` `0x182312af8` |
+| ↳ vtable `+0x18` (slot 3) | `0x1809c8e70` | — | `AddListener(listener, name, bServer)` → returns the event index, `-1` if the name is unknown |
+| ↳ vtable `+0x20` (slot 4) | `0x1809e0d30` | — | `RemoveListener(listener, name, bServer)` |
+| ↳ vtable `+0x30` (slot 6) | `0x1809d3750` | — | `CreateEvent(name, …)` |
+| ↳ vtable `+0x38` (slot 7) | `0x1809e1810` | — | **`FireEvent(event, bDontBroadcast)`** — dispatches to listeners |
+| ↳ vtable `+0x40` (slot 8) | `0x1809e1aa0` | — | **`FireEventClientSide(event)`** — the client-side dispatch |
+| `IGameEventListener2` RTTI | `0x1822ff4d8` | — | `.?AVIGameEventListener2@@` |
+| ↳ vtable `+0x08` (slot 1) | — | — | **`FireGameEvent(IGameEvent*)`** |
+| `IGameEvent` vtable (`CGameEvent`, `0x181c2b5a0`) | — | — | set by the event ctor `FUN_1809c0330` (objects are 0x68 bytes) |
+| ↳ `+0x08` (slot 1) | `0x1809e6f90` | — | **`GetName()`** → `const char*` |
+| ↳ `+0x30` (slot 6) | — | — | `GetBool(key, def)` |
+| ↳ `+0x38` (slot 7) | `0x1809e6260` | — | **`GetInt(key, def)`** |
+| ↳ `+0x40` (slot 8) | — | — | `GetUint64(key, def)` |
+| ↳ `+0x48` (slot 9) | `0x1809e5e80` | — | **`GetFloat(key, def)`** |
+| ↳ `+0x50` (slot 10) | `0x1809e8690` | — | **`GetString(key, def)`** |
+| ↳ `+0x78` (slot 15) | `0x1809e7b90` | — | **`GetPlayerIndex(int* out, key)`** — for `userid`/`attacker`/`assister` (the `player_*` field types); returns a player slot |
+
+The getters take a **16-byte key** by pointer:
+
+```c
+struct EventKey {          // CUtlStringToken / EventHash_t
+  std::uint32_t hash;      // MurmurHash2(name, len, seed), case-insensitive
+  std::uint32_t pad;
+  const char* str;
+};
+```
+
+`hash` is the engine's case-insensitive `MurmurHash2` (`V_StringToIntHash`,
+`FUN_180165ce0`), called as `hash(str, len, len ^ 0x31415926)` (so the effective
+seed is the `CUtlStringToken` constant `0x31415926`). The payload resolves that
+function via the `event_key_hash` signature and hashes each field name itself —
+a key with `hash = 0` does **not** resolve. Slots 6/7/9/10 match the manager
+serializer's own switch (type 1 string → `+0x50`, 2 float → `+0x48`, 3..6/8/9 int
+→ `+0x38`, 7 bool → `+0x40`) and the community reverse of `CGameEvent` on
+UnknownCheats.
+
+**How the game registers.** `FUN_180ba9a90` is a typical listener's setup: after
+obtaining the manager it registers many events through the same call —
+
+```c
+manager = *reinterpret_cast<void**>(client_base + 0x2542908);   // IGameEventManager2*
+vtable  = *reinterpret_cast<void***>(manager);
+// vtable[3](manager, listener, name, bServer=0)
+vtable[3](manager, this_listener, "player_death", 0);
+```
+
+`CGameEventManager::AddListener` (`0x1809c8e70`) hashes the name, looks the event
+up in the manager's own table (a case-insensitive string BST) and stores the
+listener in that event's bucket (logging `CGameEventManager::AddListener: event
+'%s' unknown.` for a name the game does not know). The table is populated **when
+a level loads** — it is empty right after injection.
+
+> **Do not call `AddListener` from a non-game thread.** Doing so from the
+> harness's control thread faults inside `tier0` (the game's allocator/logging)
+> on the *success* path; the observed fault was `tier0+0x1ffce9`, `read
+> addr=0x40`. That is why the harness hooks the dispatch below instead of
+> registering a listener.
+
+**How a listener is called.** `FireEvent` resolves the event's definition and
+iterates its bucket, calling `(**(code**)(*listener + 8))(listener, event)` —
+i.e. `FireGameEvent` at listener vtable `+0x8`. Both dispatch functions read the
+event name with `(**(code**)(*event + 8))(event)` (`GetName` at `+0x8`),
+confirmed in the manager's own code and in two real listener implementations,
+`C_GameInstructor::FireGameEvent` (`FUN_180b27540`, vtable `0x181c4e040`, COL
+`0x181c4e038`) and `C_CSGameRules`' handler (`FUN_180df8e80`).
+
+**How the harness observes.** It patches the two dispatch vtable slots (7 and 8)
+to its own detour, which reads the event name (validated against the build's own
+event list) and then calls the original — no listener is registered and no game
+state is mutated. The prologues are too long for the inline hook's trampoline, so
+this is a vtable patch (the DXGI method-table technique, ADR-0015).
+
+**How the harness reads arguments.** For each captured event it looks the field
+list up in the generated `event_names.hpp` (the union of what `core`/`game`/`mod`
+declare, since `mod` *extends* `core`), hashes each field name with the engine's
+own `event_key_hash` (`MurmurHash2_casefolded(name, len, 0x31415926 ^ len)`), and
+calls the getter for the declared type — `GetInt`/`GetFloat`/`GetString`, bools
+via `GetBool`, and `player_*` fields via `GetPlayerIndex` — formatting the value
+(`%d` / `%g` / `true|false` / string / player slot). So `events()` reports
+per-event `args` and `wait_for(event=…, event_args={…})` can match on them.
+
+> Cross-checked against the community reverse of `CGameEvent` on UnknownCheats
+> (the `EventHash_t` key and the `GetInt`/`GetFloat`/`GetString` =
+> 7/9/10 slots agree with the serializer above).
+
+> The engine also has its own `CGameEventSystem` (`GameEventSystemClientV001`,
+> engine2 — see `docs/re/engine2.md`); client.dll caches a pointer to it at
+> `0x2557b48`. In this build its event queue is never populated, so it is **not**
+> the path client gameplay events take.
+
+## Input path (`CUserCmd`)
+
+The per-tick client command that bhop / autostrafe / aim / silent-aim write.
+Everything below was derived from build 25815307 **and cross-checked against the
+community reverse** (see step 4, *"Cross-check against the community reverse"*,
+in [`README.md`](README.md) — do that before trusting any of it):
+
+- UnknownCheats, *"Help with cs2 internals (createmove)"* (thread 687361):
+  `CreateMove` pattern + the `buttons` field / `IN_JUMP` bhop idiom.
+- UnknownCheats, *"Correct CCSGOInput::GetUserCmd logic/offsets for Index 5
+  Hook?"* (thread 730511): **`CCSGOInput` vtable index 5 = `CreateMove`**, the
+  `getUserCmd` chain, and `CUserCmdArray`, `CUserCmdBase`/`CUserCmdBaseHost`
+  structure.
+- UnknownCheats, *"CUserCmd structure & help"* (thread 702186):
+  `CUserCmdBase`/`CUserCmdBaseHost<CSGOUserCmdPB>`/`CCSGOUserCmd`/`CUserCmd`
+  inheritance and `CInButtonState InButtonState;`.
+
+> The older notes were **strings, not functions**: `0x1c9c334` is `+4` of the log
+> string `"cl: CreateMove - Invalid player history …"`; `0x1c338a8` is the schema
+> field-name string `m_nButtons`; `0x2320304` is the `.?AVCCSGOInput@@`
+> `_TypeDescriptor` (`0x1823202f0`, name at `0x182320300`).
+
+### `CCSGOInput` (the input service; the `dwCSGOInput` global)
+
+| What | VA | RVA | Notes |
+|---|---|---|---|
+| `CCSGOInput` RTTI | `0x1823202f0` | `0x23202f0` | `.?AVCCSGOInput@@` (name at `+0x10`) |
+| `CCSGOInput` singleton object | `0x182572460` | `0x2572460` | static object; vtable installed by `FUN_1800ee570` |
+| `CCSGOInput` vtable | `0x181c97b28` | `0x1c97b28` | COL `0x181f1d598` |
+| `CCSGOInput*` global (`dwCSGOInput`) | `0x182233d10` | `0x2233d10` | holds `0x182572460`; the handle the game reads everywhere |
+| ↳ vtable `+0x28` (slot 5) | `0x180b64e60` | `0xb64e60` | **`CreateMove(CCSGOInput*, int slot, bool active)`** — fetches the cmd via `GetUserCmd`; the community's hook slot |
+| ↳ vtable `+0xc8` (slot 25) | `0x180d01610` | `0xd01610` | **`CreateMove(CCSGOInput*, int, CUserCmd* cmd)`** — receives the `CUserCmd*` directly in `r8`; the attack-history/sub-tick processor |
+
+`FUN_180d01610` (`create_move`) is the one that already has the command in hand:
+its third argument (`r8`) is the `CUserCmd*`, and param usage confirms it
+(`[cmd+0x08]` = command number — logged as `"cmd %d"`; `[cmd+0x10]` = the
+protobuf whose `ByteSize` is logged as `"Usr cmd size = %d B"`). Hook it inline
+(or patch slot 25) to write the command with no extra plumbing.
+`FUN_180b64e60` (`create_move_input`) is slot 5; it resolves the local
+controller (`FUN_1809699f0(0)`), fetches the current `CUserCmd` through the
+chain below, and processes it. Hooking slot 5 is the community-standard seam and
+is where a `usercmd` backend should live; hooking slot 25 is the shortcut when
+you only need the command.
+
+### `CUserCmd` layout
+
+The command is `CUserCmd : CCSGOUserCmd : CUserCmdBaseHost<CSGOUserCmdPB> :
+CUserCmdBase`. `stride = 0x98`, 150 per `CUserCmdArray` (confirmed by
+`get_user_cmd_by_sequence`: `base + (seq % 0x96) * 0x98`):
+
+| Offset | Size | What | Evidence |
+|---|---|---|---|
+| `+0x00` | 8 | vtable (`CUserCmdBase` `0x181c14ec8` → … → final `0x181c14fe8`) | `get_user_cmd_array` init loop |
+| `+0x08` | 4 | `nSequenceNumber` (uint32) | `get_user_cmd_by_sequence` compares it |
+| `+0x10` | `0x48` | **`CSGOUserCmdPB`** (protobuf message object; vtable `0x181bc6dd0`; its `New()` = `FUN_1807b08f0` allocs `0x48`) | `FUN_1807b1310` ctor; `FUN_1807afce0(cmd+0x10)` = `ByteSize` |
+| `+0x58` | `0x20` | **`CInButtonState`** (RTTI `.?AVCInButtonState@@` `0x182306758`, vtable `0x181b23590` + 3× `uint64`) | `FUN_1804b4e90` ctor |
+| `+0x60` | 8 | button mask #1 — **`buttons`** (`IN_JUMP = 1<<1`) | community `cmd->buttons` @ `0x60`; 1st `uint64` after the vtable |
+| `+0x68` | 8 | button mask #2 | |
+| `+0x70` | 8 | button mask #3 | |
+| `+0x78` | 4 | `-1` at construction | |
+| `+0x88`/`+0x8c`/`+0x90` | 4/1/8 | misc (`bHasBeenPredicted`-ish) | community `CUserCmd` tail |
+
+> The `CSGOUserCmdPB` object is protobuf (`_has_bits_`/fields) so its *internal*
+> field offsets are not stable; use the generated accessors or the cached
+> `InButtonState` at `+0x58`. View angles are subtick (`CSubtickMoveStep`) — a
+> "silent aim" writes the subtick angle history, not a plain `viewangles` field.
+>
+> **Live-verified (build 25815307):** the button mask is `cmd + 0x60` — a console
+> `+forward` sets bit 3 and `+jump` bit 1 (read from a running game). Writing that
+> bit from the payload's `CreateMove` hook leaves the player grounded for `jump`
+> and hops for `bhop`, but does **not** produce `forward` movement:
+> `create_move_input` derives `CBaseUserCmdPB::forwardmove`/`leftmove`
+> (`base+0x58`/`+0x5c`) from the raw input at `CCSGOInput + 0x270/0x274` each
+> tick, so the movement source of truth is the raw input, not the command. See
+> [`subtick.md`](subtick.md) for the sub-tick structures (view-angle history,
+> move steps, the command build and the movement consumer),
+> [`prediction.md`](prediction.md) §"RE findings" for the sub-tick **jump chain**
+> (`DECIDE`/`DoJump`, `m_ModernJump`, the press-edge machine, the controller tick
+> base) and `docs/control-harness.md` §"`usercmd` backend".
+
+### Reading the current command without hooking
+
+`CUserCmdArray*` global `0x18221bd10` (RVA `0x221bd10`). `CUserCmdArray` is
+`0x5970` bytes, 150 commands, `m_nSequenceNumber` at `+0x5910`. The chain the
+game (and the community) uses:
+
+```c
+controller = FUN_1809699f0(0);                       // local controller, slot 0
+get_user_cmd_tick(controller, &tick);                // 0x15d9b20
+array = get_user_cmd_array(*CUserCmdArray_global, tick - 1);   // 0x943800
+seq   = *(uint32_t*)(array + 0x5910);
+cmd   = get_user_cmd_by_sequence(controller, seq);   // 0x9435e0
+```
+
+Signatures for `create_move`, `create_move_input`, `ccsgo_input`,
+`user_cmd_array`, `get_user_cmd_tick`, `get_user_cmd_array`
+and `get_user_cmd_by_sequence` live in
+`external/dumper/src/analysis.rs::known_signatures()` (all resolve offline: see
+the re-derivation section). `cl_showusercmd` / `cl_usercmd_showsize` remain handy
+live checks via the harness `exec` channel.
+
 ## Re-derivation (after a game update)
 
 Every absolute address above moves each build, so re-find them from stable
@@ -199,6 +398,64 @@ must be re-cut — is:
 - **Steps:** xref → the ctor; the store `mov [rip+X], rbx` of `this` is the
   global (the derived `C_CSGameRules` ctor then swaps in the derived vtable).
 - **Invariant:** `*(global)` has a `client.dll` vtable.
+- **Consumer:** the payload reads it every snapshot for the authoritative round
+  phase (`payload/game/src/state_reader.cpp` `read_rules`, `C_CSGameRules`
+  fields from the generated schema: `m_bFreezePeriod`, `m_bWarmupPeriod`,
+  `m_gamePhase`, `m_iRoundTime`, `m_iRoundWinStatus`, `m_bTCantBuy`/
+  `m_bCTCantBuy`, `m_bBombPlanted`, …). Exposed as `state`'s `rules` and consumed
+  by the scenario screen state machine (`scripts/scenario/screens.py`,
+  `docs/control-harness.md` §"The screen state machine").
+- **What is *not* the main-screen test (all measured live 2026-10-15):** the
+  `game_rules` global is **readable at the main menu** (a default, unstarted
+  `C_CSGameRules`: `warmup = freeze = true`, `match_started = false`,
+  `total_rounds_played = 0`, `round_start_time = 0`, but note
+  `match_start_time = warmup_period_start = 1`); the main menu **is a level world**
+  (258 entities in the identity list, and a `C_CSGameRulesProxy` entity whose
+  `m_pGameRules` is the global). So neither "the rules exist" nor "a rules proxy
+  exists" separates the menu from a game. The harness's interim rule is the
+  observable consequence — *the local player is spawned in the level* (the menu
+  placeholder sits at `origin = (0,0,0)`, no team, no weapon, `life_state = 2`) —
+  see `docs/control-harness.md` §"The screen state machine".
+
+## "Am I in a game?" — the main-menu rule (community)
+
+The canonical community answer is **`CNetworkGameClient`**: `dwNetworkGameClient`
+(engine2) holds the client, and two fields decide:
+
+```c
+CNetworkGameClient* ngc = *(CNetworkGameClient**)(engine2 + dwNetworkGameClient);
+uint8_t  is_background_map = *(uint8_t*)(ngc + m_bIsBackgroundMap);  // vtable slot 17
+uint32_t signon_state      = *(uint32_t*)(ngc + m_nSignonState);
+bool is_connected = signon_state >= 2;                            // SIGNONSTATE_CONNECTED
+bool is_in_game   = is_background_map == 0 && signon_state >= 6;  // SIGNONSTATE_FULL
+```
+
+- **Sources:** `cs2-dumper` issue #111 (2024-04-05) — the recipe above, with the
+  signature for the global `48 89 3D ? ? ? ? 48 8D 15`; `UC "Signonstate value?"`
+  (2023-12-01) — *"even in the main menu you are on a map, so ur connected"*, i.e.
+  the signon state alone is 6 in the menu, which is why `is_background_map` is
+  needed (the same thread also suggests the current map name — *reported
+  unreliable* — or the game phase); `sezzyaep/CS2-OFFSETS` —
+  `dwNetworkGameClient`, `dwNetworkGameClient_signOnState`,
+  `dwNetworkGameClient_isBackgroundMap` ("boolean flag indicating if the current
+  map is a UI background"); `SignonState_t` (s2v schema) — `NONE=0, CHALLENGE=1,
+  CONNECTED=2, NEW=3, PRESPAWN=4, SPAWN=5, FULL=6, CHANGELEVEL=7`. The same
+  question via engine vfuncs: `IsInGame` = vtable index 32, `IsConnected` = 33.
+- **Cross-check against our build (measured live 2026-10-15)** — it matches: the
+  menu is a background map, which is exactly why the menu has entities, a rules
+  proxy and a readable rules object.
+- **Not the rule** (measured on our build, same date): `rules.loaded` (true at the
+  menu), the rules-proxy entity (present at the menu),
+  `CBasePlayerController::m_iConnected` (`+0x6f4`; **0 even in a game** — the older
+  community offset `0x63c` for `m_iConnected` does not behave as "connected"
+  here), `rules.match_start_time`/`m_fWarmupPeriodStart` (1 at the menu, not 0),
+  and the world entity count (258/382 at the menu vs 726 in a level — magnitude
+  only).
+- **Follow-up (not implemented):** resolve `dwNetworkGameClient` with the
+  signature above and read `m_bIsBackgroundMap`/`m_nSignonState`, so the harness's
+  `in_game` is the canonical rule instead of the spawn heuristic. The two field
+  offsets are build-specific (cs2-dumper resolves them separately), so they need
+  their own anchor or a live re-derivation.
 
 ### `local_player_controllers` — per-slot controller array
 - **Anchor:** strings `GetLocalPlayerController` / `GetLocalPlayerPawn`.
@@ -224,6 +481,66 @@ must be re-cut — is:
   point `d` units ahead maps to `clip.w ≈ d`. Screen mapping:
   `sx = (ndc.x·0.5 + 0.5)·W`, `sy = (0.5 − ndc.y·0.5)·H`.
   (A row-vector form, `clip = world · M`, does **not** satisfy the invariant.)
+
+### `game_event_manager` — `IGameEventManager2*`
+- **Anchor:** string `CGameEventManager::AddListener: event '%s' unknown.`
+  (`0x181c2bca0`) → xref `0x1809c8f3c` → `FUN_1809c8e70` (`AddListener`); or RTTI
+  `.?AVCGameEventManager@@` → COL → vtable `0x181c2b858`, where slot 3 (`+0x18`)
+  is `AddListener`.
+- **Steps:** the manager is a **static** object; the init `FUN_1800be760` does
+  `if (DAT_182542908 == 0) DAT_182542908 = &<static CGameEventManager>` — the
+  store `MOV [rip+X], RCX` right after a `MOV qword [rip+X], 0xc80000` /
+  `JNZ +7` is the signature. Decompile `FUN_1800be760` if the pattern moves.
+- **Invariant:** `*(client.dll + game_event_manager)` is an object whose vtable
+  (`*(*(client.dll + game_event_manager))`) points inside `client.dll`; the
+  dispatch slots (`+0x38`/`+0x40`) iterate listener buckets and call
+  `listener->vtable[+0x8]`, and `IGameEvent::GetName` is at event vtable `+0x8`.
+- **Event names:** the manager's definitions come from
+  `resource/{core,game,mod}.gameevents` (VPK-packed, loaded per level);
+  `scripts/extract-gameevents.py` extracts the authoritative name list and emits
+  `payload/control/include/cs2/control/event_names.hpp`.
+
+### `create_move` / `create_move_input` — the per-tick input step
+- **`create_move` (`FUN_180d01610`, receives the `CUserCmd*`)** — anchor: the log
+  strings `"cl: CreateMove clamped invalid attack history %d index in cmd …"`
+  (`0x181c9c580`) and `"cl: CreateMove - Frame %d, cmd %d …"` (`0x181c9c5e0`);
+  xref them into the function. **Or** scan the community prologue
+  `48 8B C4 4C 89 40 ?? 48 89 48 ?? 55 53 57` (unique; `mov rax,rsp; mov
+  [rax+18h],r8; mov [rax+8],rcx; push rbp/rbx/rdi`). Resolve the match start.
+- **`create_move_input` (`FUN_180b64e60`, vtable slot 5)** — scan
+  `85 D2 0F 85 ?? ?? ?? ?? 48 8B C4 44 88 40` (unique). Resolve the match start.
+- **Invariant:** both are in the `CCSGOInput` vtable (`0x181c97b28`); the
+  `create_move_input` body starts by resolving the local controller via
+  `FUN_1809699f0(0)` and calling the `get_user_cmd_*` chain.
+
+### `ccsgo_input` — the input singleton
+- **Anchor:** the static init `FUN_1800ee570` does
+  `LEA RCX,[object]; CALL …; …; LEA RAX,[vtable]; MOV [obj+0x…], RAX;
+  MOV [object], RAX`.
+- **Steps:** scan
+  `48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 33 C9 C7 05 ?? ?? ?? ?? FF FF FF FF 48 8D 05 ?? ?? ?? ?? 48 89 0D ?? ?? ?? ?? 48 89 05 ?? ?? ?? ??`
+  (unique), rip-offset `3`, instruction length `7` → the **object**
+  (`0x182572460`).
+- **Invariant:** `*(object)` is the `CCSGOInput` vtable (`0x181c97b28`; read it
+  at runtime rather than signature it — the LEA for it is not unique on its own).
+  The game reaches the object through the `dwCSGOInput` pointer (RVA
+  `0x2233d10`).
+
+### `user_cmd_array` — the `CUserCmdArray*` global
+- **Anchor:** inside `create_move_input`, the sequence
+  `MOV RCX,[global]; CALL …; …` — scan
+  `48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B CF 4C 8B F8` (unique),
+  rip-offset `3`, instruction length `7`.
+- **Invariant:** `*(global)` is the `0x5970`-byte `CUserCmdArray`
+  (`m_nSequenceNumber` at `+0x5910`).
+
+### `get_user_cmd_tick` / `get_user_cmd_array` / `get_user_cmd_by_sequence`
+- **Anchor:** the `create_move_input` body calls them in order; scan the
+  community patterns (all unique): `48 83 EC ?? 4C 8B 0D ?? ?? ?? ?? 4C 8B DA`,
+  `48 89 4C 24 ?? 41 56 41 57`,
+  `40 53 48 83 EC ?? 8B DA E8 ?? ?? ?? ?? 4C 8B C0`. Resolve the match starts.
+- **Invariant:** `get_user_cmd_by_sequence` returns `base + (seq % 0x96) * 0x98`
+  and validates `[cmd+0x8] == seq`.
 
 ### Regenerating the SDK offsets
 

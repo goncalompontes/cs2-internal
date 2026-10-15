@@ -72,6 +72,7 @@ auto StateReader::FieldOffsets::resolve() -> StateReader::FieldOffsets {
   o.max_health = field("C_BaseEntity", "m_iMaxHealth", o.max_health);
   o.life_state = field("C_BaseEntity", "m_lifeState", o.life_state);
   o.team = field("C_BaseEntity", "m_iTeamNum", o.team);
+  o.flags = field("C_BaseEntity", "m_fFlags", o.flags);
   o.scene_node = field("C_BaseEntity", "m_pGameSceneNode", o.scene_node);
   o.collision = field("C_BaseEntity", "m_pCollision", o.collision);
   o.velocity = field("C_BaseEntity", "m_vecAbsVelocity", o.velocity);
@@ -88,6 +89,7 @@ auto StateReader::FieldOffsets::resolve() -> StateReader::FieldOffsets {
   o.controller = field("C_BasePlayerPawn", "m_hController", o.controller);
   o.is_local_controller =
       field("CBasePlayerController", "m_bIsLocalPlayerController", o.is_local_controller);
+  o.connected = field("CBasePlayerController", "m_iConnected", o.connected);
   o.pawn = field("CBasePlayerController", "m_hPawn", o.pawn);
   o.player_name = field("CBasePlayerController", "m_iszPlayerName", o.player_name);
   o.ping = field("CCSPlayerController", "m_iPing", o.ping);
@@ -102,6 +104,29 @@ auto StateReader::FieldOffsets::resolve() -> StateReader::FieldOffsets {
   o.reserve_ammo = field("C_BasePlayerWeapon", "m_pReserveAmmo", o.reserve_ammo);
   // CGameSceneNode::m_vecAbsOrigin — the class lives in the server schema.
   o.abs_origin = 0xc8;
+  // C_CSGameRules — the authoritative round/game phase (see `read_rules`).
+  o.rules_freeze_period = field("C_CSGameRules", "m_bFreezePeriod", o.rules_freeze_period);
+  o.rules_warmup_period = field("C_CSGameRules", "m_bWarmupPeriod", o.rules_warmup_period);
+  o.rules_freeze_time = field("C_CSGameRules", "m_iFreezeTime", o.rules_freeze_time);
+  o.rules_round_time = field("C_CSGameRules", "m_iRoundTime", o.rules_round_time);
+  o.rules_round_start_time = field("C_CSGameRules", "m_fRoundStartTime", o.rules_round_start_time);
+  o.rules_restart_round_time =
+      field("C_CSGameRules", "m_flRestartRoundTime", o.rules_restart_round_time);
+  o.rules_game_restart = field("C_CSGameRules", "m_bGameRestart", o.rules_game_restart);
+  o.rules_time_until_next_phase =
+      field("C_CSGameRules", "m_timeUntilNextPhaseStarts", o.rules_time_until_next_phase);
+  o.rules_game_phase = field("C_CSGameRules", "m_gamePhase", o.rules_game_phase);
+  o.rules_total_rounds_played =
+      field("C_CSGameRules", "m_totalRoundsPlayed", o.rules_total_rounds_played);
+  o.rules_has_match_started =
+      field("C_CSGameRules", "m_bHasMatchStarted", o.rules_has_match_started);
+  o.rules_bomb_planted = field("C_CSGameRules", "m_bBombPlanted", o.rules_bomb_planted);
+  o.rules_bomb_dropped = field("C_CSGameRules", "m_bBombDropped", o.rules_bomb_dropped);
+  o.rules_round_win_status = field("C_CSGameRules", "m_iRoundWinStatus", o.rules_round_win_status);
+  o.rules_round_win_reason = field("C_CSGameRules", "m_eRoundWinReason", o.rules_round_win_reason);
+  o.rules_t_cant_buy = field("C_CSGameRules", "m_bTCantBuy", o.rules_t_cant_buy);
+  o.rules_ct_cant_buy = field("C_CSGameRules", "m_bCTCantBuy", o.rules_ct_cant_buy);
+  o.rules_proxy_game_rules = field("C_CSGameRulesProxy", "m_pGameRules", o.rules_proxy_game_rules);
   return o;
 }
 
@@ -148,6 +173,7 @@ auto StateReader::read_player(int index, std::uintptr_t controller) const -> Pla
   std::uint8_t helmet = 0;
   (void)read(controller + o.pawn_has_defuser, defuser);
   (void)read(controller + o.pawn_has_helmet, helmet);
+  player.connected = read_or<std::int32_t>(controller + o.connected, 0);
   player.defuser = defuser != 0;
   player.helmet = helmet != 0;
   player.ping = static_cast<int>(read_or<std::uint32_t>(controller + o.ping, 0));
@@ -169,6 +195,8 @@ auto StateReader::read_player(int index, std::uintptr_t controller) const -> Pla
   std::uint8_t life_state = 0;
   (void)read(pawn + o.life_state, life_state);
   player.life_state = life_state;
+  player.flags = read_or<std::uint32_t>(pawn + o.flags, 0);
+  player.on_ground = (player.flags & 1U) != 0;  // FL_ONGROUND
   player.health = read_or<std::int32_t>(pawn + o.health, 0);
   player.max_health = read_or<std::int32_t>(pawn + o.max_health, 0);
   player.armor = read_or<std::int32_t>(pawn + o.armor, 0);
@@ -218,23 +246,66 @@ auto StateReader::read_player(int index, std::uintptr_t controller) const -> Pla
   return player;
 }
 
+auto StateReader::read_rules() const -> RulesSnapshot {
+  const FieldOffsets& o = offsets_;
+  RulesSnapshot rules;
+  // `*(game_rules)` is the level's `C_CSGameRules`; the pointer is null at the
+  // main menu and until a level constructs its rules (`docs/re/client-dll.md`
+  // §"`game_rules`"), which is exactly the "a level is up" signal.
+  const std::uintptr_t base = global(client_base_, "game_rules");
+  if (base == 0) {
+    return rules;
+  }
+  rules.loaded = true;
+  const auto flag = [base](std::uint32_t offset) {
+    return read_or<std::uint8_t>(base + offset, 0) != 0;
+  };
+  rules.has_match_started = flag(o.rules_has_match_started);
+  rules.freeze_period = flag(o.rules_freeze_period);
+  rules.warmup_period = flag(o.rules_warmup_period);
+  rules.game_restart = flag(o.rules_game_restart);
+  rules.bomb_planted = flag(o.rules_bomb_planted);
+  rules.bomb_dropped = flag(o.rules_bomb_dropped);
+  rules.t_cant_buy = flag(o.rules_t_cant_buy);
+  rules.ct_cant_buy = flag(o.rules_ct_cant_buy);
+  rules.game_phase = read_or<std::int32_t>(base + o.rules_game_phase, 0);
+  rules.round_time = read_or<std::int32_t>(base + o.rules_round_time, 0);
+  rules.freeze_time = read_or<std::int32_t>(base + o.rules_freeze_time, 0);
+  rules.round_win_status = read_or<std::int32_t>(base + o.rules_round_win_status, 0);
+  rules.round_win_reason = read_or<std::int32_t>(base + o.rules_round_win_reason, 0);
+  rules.total_rounds_played = read_or<std::int32_t>(base + o.rules_total_rounds_played, 0);
+  rules.match_start_time = read_or<float>(base + o.rules_match_start_time, 0.0F);
+  rules.round_start_time = read_or<float>(base + o.rules_round_start_time, 0.0F);
+  rules.restart_round_time = read_or<float>(base + o.rules_restart_round_time, 0.0F);
+  rules.game_start_time = read_or<float>(base + o.rules_game_start_time, 0.0F);
+  rules.warmup_period_start = read_or<float>(base + o.rules_warmup_period_start, 0.0F);
+  rules.time_until_next_phase = read_or<float>(base + o.rules_time_until_next_phase, 0.0F);
+  return rules;
+}
+
 auto StateReader::snapshot() const -> Snapshot {
   Snapshot snapshot;
   if (!ready()) {
     return snapshot;
   }
 
+  // The rules are readable even when there is no local player yet (a level that
+  // is still connecting), so read them before the local-controller bail-outs.
+  const std::uintptr_t rules_ptr = global(client_base_, "game_rules");
+  snapshot.rules = read_rules();
+  snapshot.level.rules = rules_ptr;
+
   const std::uintptr_t local_controller = global(client_base_, "local_player_controllers");
-  if (local_controller == 0) {
-    return snapshot;
-  }
-  snapshot.valid = true;
+  const auto controller_vtable =
+      local_controller != 0 ? read_or<std::uintptr_t>(local_controller, 0) : 0;
+  snapshot.valid = local_controller != 0;
 
   // All player controllers share the local controller's vtable; enumerate them
   // from the entity table by matching it (no per-build vtable RVA is
-  // hard-coded).
-  const auto controller_vtable = read_or<std::uintptr_t>(local_controller, 0);
-  for (int page = 0; controller_vtable != 0 && page < EntitySystem::k_page_count; ++page) {
+  // hard-coded). The same walk answers the main-screen rule: the level's
+  // `C_CSGameRulesProxy` entity (whose `m_pGameRules` is `rules_ptr`) exists only
+  // in a level, while the `game_rules` global is non-null at the main menu too.
+  for (int page = 0; page < EntitySystem::k_page_count; ++page) {
     const std::uintptr_t page_base = entities_.page(page);
     if (page_base == 0) {
       continue;
@@ -242,13 +313,22 @@ auto StateReader::snapshot() const -> Snapshot {
     for (int slot = 0; slot < EntitySystem::k_slots_per_page; ++slot) {
       const std::uintptr_t entry =
           page_base + EntitySystem::k_identity_stride * static_cast<std::uintptr_t>(slot);
-      const auto controller = read_or<std::uintptr_t>(entry, 0);
-      if (controller == 0 || read_or<std::uintptr_t>(controller, 0) != controller_vtable) {
+      const auto instance = read_or<std::uintptr_t>(entry, 0);
+      if (instance == 0) {
+        continue;
+      }
+      snapshot.level.identities += 1;
+      if (!snapshot.level.up && rules_ptr != 0 &&
+          read_or<std::uintptr_t>(instance + offsets_.rules_proxy_game_rules, 0) == rules_ptr) {
+        snapshot.level.up = true;
+        snapshot.level.proxy = instance;
+      }
+      if (controller_vtable == 0 || read_or<std::uintptr_t>(instance, 0) != controller_vtable) {
         continue;
       }
       const int index = (page << EntitySystem::k_page_shift) | slot;
-      PlayerSnapshot player = read_player(index, controller);
-      player.is_local = player.is_local || controller == local_controller;
+      PlayerSnapshot player = read_player(index, instance);
+      player.is_local = player.is_local || instance == local_controller;
       if (player.is_local) {
         snapshot.local = player;
         snapshot.local_pawn = player.pawn;
@@ -259,6 +339,7 @@ auto StateReader::snapshot() const -> Snapshot {
 
   // Measure everyone against the local player.
   if (snapshot.local.has_value()) {
+    snapshot.level.local_spawned = snapshot.local->connected;
     for (PlayerSnapshot& player : snapshot.players) {
       player.distance = distance(player.origin, snapshot.local->origin);
     }

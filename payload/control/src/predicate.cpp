@@ -10,6 +10,12 @@ namespace {
   return snapshot.local.has_value() && snapshot.local->alive;
 }
 
+// Alive *and* on a team: false on the team-select screen, as a spectator, or dead.
+[[nodiscard]] auto local_playable(const game::Snapshot& snapshot) noexcept -> bool {
+  return snapshot.local.has_value() && snapshot.local->alive &&
+         (snapshot.local->team == 2 || snapshot.local->team == 3);
+}
+
 [[nodiscard]] auto alive_count(const game::Snapshot& snapshot) noexcept -> std::int64_t {
   return static_cast<std::int64_t>(
       std::count_if(snapshot.players.begin(), snapshot.players.end(),
@@ -48,11 +54,14 @@ auto Predicate::parse_object(const Json& value) -> std::optional<Predicate> {
   std::vector<Predicate> children;
   for (const auto& [key, member] : value.members()) {
     Predicate node;
-    if (key == "in_map" || key == "local_alive") {
+    if (key == "in_map" || key == "local_alive" || key == "on_ground" || key == "playable") {
       if (!member.is_bool()) {
         return std::nullopt;
       }
-      node.kind_ = (key == "in_map") ? Kind::in_map : Kind::local_alive;
+      node.kind_ = (key == "in_map")     ? Kind::in_map
+                   : (key == "on_ground") ? Kind::on_ground
+                   : (key == "playable")  ? Kind::playable
+                                          : Kind::local_alive;
       node.expected_ = member.as_bool();
     } else if (key == "players_gte" || key == "alive_gte" || key == "local_hp_gte") {
       if (!member.is_number()) {
@@ -110,6 +119,8 @@ auto Predicate::matches(const game::Snapshot& snapshot) const noexcept -> bool {
       return (snapshot.valid && snapshot.local.has_value()) == expected_;
     case Kind::local_alive:
       return local_alive(snapshot) == expected_;
+    case Kind::on_ground:
+      return (snapshot.local.has_value() && snapshot.local->on_ground) == expected_;
     case Kind::players_gte:
       return static_cast<std::int64_t>(snapshot.players.size()) >= threshold_;
     case Kind::alive_gte:
@@ -118,6 +129,8 @@ auto Predicate::matches(const game::Snapshot& snapshot) const noexcept -> bool {
       return snapshot.local.has_value() && snapshot.local->health >= threshold_;
     case Kind::team:
       return snapshot.local.has_value() && snapshot.local->team == team_;
+    case Kind::playable:
+      return local_playable(snapshot) == expected_;
     case Kind::all:
       return std::all_of(children_.begin(), children_.end(),
                          [&](const Predicate& child) { return child.matches(snapshot); });

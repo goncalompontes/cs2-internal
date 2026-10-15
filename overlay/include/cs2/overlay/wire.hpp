@@ -20,7 +20,7 @@
 namespace cs2::overlay::wire {
 
 inline constexpr uint32_t k_magic = 0x324F5343U;  // 'CSO2'
-inline constexpr uint32_t k_version = 3;
+inline constexpr uint32_t k_version = 4;
 
 inline constexpr int k_max_sections = 16;
 inline constexpr int k_max_lines = 64;
@@ -82,9 +82,11 @@ struct Settings {
   uint8_t flags;
   uint8_t only_enemies;
   uint8_t show_dead;
-  uint8_t show_hud;   // draw the debug HUD window
-  uint8_t menu_open;  // written by the layer; the payload may suppress input
-  uint8_t reserved[6];
+  uint8_t show_hud;       // draw the debug HUD window
+  uint8_t menu_open;      // written by the layer; the payload may suppress input
+  uint8_t auto_strafe;    // payload movement features (`docs/re/subtick.md`):
+  uint8_t bhop;           //   silent airborne air-strafe / auto-jump
+  uint8_t reserved[4];
 };
 
 struct Model {

@@ -41,6 +41,7 @@ class StateReader {
     std::uint32_t max_health = 0x348;
     std::uint32_t life_state = 0x354;
     std::uint32_t team = 0x3e7;
+    std::uint32_t flags = 0x3f4;
     std::uint32_t scene_node = 0x330;
     std::uint32_t collision = 0x340;
     std::uint32_t velocity = 0x3f8;
@@ -63,6 +64,9 @@ class StateReader {
     // CBasePlayerController
     std::uint32_t is_local_controller = 0x790;
     std::uint32_t pawn = 0x6bc;
+    // `CBasePlayerController::m_iConnected` (PlayerConnectedState) — candidate
+    // "the client is in a game" signal.
+    std::uint32_t connected = 0x6f4;
     std::uint32_t player_name = 0x6fc;
     std::uint32_t ping = 0x838;
     // CCSPlayerController
@@ -81,10 +85,43 @@ class StateReader {
     // CGameSceneNode
     std::uint32_t abs_origin = 0xc8;
 
+    // C_CSGameRules (via the `game_rules` global — readable at the main menu
+    // too; "a level is up" comes from the rules-proxy entity, see
+    // `rules_proxy_game_rules`)
+    std::uint32_t rules_freeze_period = 0x40;
+    std::uint32_t rules_warmup_period = 0x41;
+    std::uint32_t rules_freeze_time = 0x64;
+    std::uint32_t rules_round_time = 0x68;
+    std::uint32_t rules_round_start_time = 0x70;
+    std::uint32_t rules_restart_round_time = 0x74;
+    std::uint32_t rules_game_restart = 0x78;
+    std::uint32_t rules_time_until_next_phase = 0x80;
+    std::uint32_t rules_game_phase = 0x84;
+    std::uint32_t rules_total_rounds_played = 0x88;
+    std::uint32_t rules_has_match_started = 0xb0;
+    std::uint32_t rules_bomb_planted = 0x8c7;
+    std::uint32_t rules_bomb_dropped = 0x9a8;
+    std::uint32_t rules_round_win_status = 0x9ac;
+    std::uint32_t rules_round_win_reason = 0x9b0;
+    std::uint32_t rules_t_cant_buy = 0x9b4;
+    std::uint32_t rules_ct_cant_buy = 0x9b5;
+    std::uint32_t rules_match_start_time = 0x6c;
+    std::uint32_t rules_game_start_time = 0x7c;
+    std::uint32_t rules_warmup_period_start = 0x48;
+    // `C_CSGameRulesProxy::m_pGameRules` — the level's rules-proxy *entity* holds
+    // the same `CGameRules*` as the global. The entity only exists in a level, so
+    // an identity whose `+rules_proxy_game_rules` equals the global is the
+    // main-screen rule.
+    std::uint32_t rules_proxy_game_rules = 0x600;
+
     [[nodiscard]] static FieldOffsets resolve();
   };
 
   [[nodiscard]] PlayerSnapshot read_player(int index, std::uintptr_t controller) const;
+  // Read `C_CSGameRules` through the `game_rules` global. Note `loaded` can be
+  // true at the **main menu** as well (a default object) — the "a level is up"
+  // answer is `Snapshot::level` (the rules-proxy entity), not this.
+  [[nodiscard]] RulesSnapshot read_rules() const;
 
   std::uintptr_t client_base_ = 0;
   EntitySystem entities_;

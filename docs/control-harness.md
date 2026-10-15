@@ -11,10 +11,24 @@ the payload patches the client manager's dispatch vtable (`FireEvent` /
 `wait_for(event=…)` expose them. **The `usercmd` input backend is implemented and
 validated live for discrete buttons**: the payload hooks
 `CCSGOInput::CreateMove` and writes the `CUserCmd` button mask, and
-`usercmd-move` drives `jump` and `bhop` (repeated hops) in a real game. Analog
-movement (`forward`/`moveleft`) and view angles are **subtick** in this build and
-stay on the console backend for now. Remaining: **console-output capture**, and
-`usercmd` subtick move/angles.
+`usercmd-move` drives `jump` and `bhop` (repeated hops) in a real game. The
+**sub-tick view angles** are implemented **and validated**: `look(...,
+via="usercmd")` writes every `input_history` entry's `view_angles`; `subtick-aim`
+shows the write lands every tick and is *silent* (the camera does not follow), and
+`subtick-shot` proves the **shot uses it** (camera 45° off a bot, silent aim, the
+bot loses hp). **Analog movement is validated live** — `move(forward=1.0)` walks
+204 units in a second (1.01× the engine's own console `+forward`) and
+`move(forward=0.5)` walks 115 (0.57×), so the magnitude is honoured; the missing
+ingredient was the engine's own units (`±1`, not 450), plus a clear spot
+(`movement-probe` pins one). Remaining: **console-output capture**.
+**Screens/round phases are now modelled once** in the screen state machine
+(`scripts/scenario/screens.py`) instead of being re-derived per scenario: the
+payload's new `level` block is the **main-screen rule** (the level's
+`C_CSGameRulesProxy` entity exists — the `game_rules` global is readable at the
+main menu too), and its `rules` block (from `C_CSGameRules`) gives the
+authoritative `warmup`/`freeze`/`round_win_status`/buy-window signals; scenarios
+gate on capabilities (`require("move")`) or drive transitions
+(`ensure(Screen.LIVE)`).
 
 This is the resume document for the feature we are actively working on: a way to
 programmatically drive CS2 for testing — launch, inject, join a bot match, add /
@@ -81,9 +95,12 @@ Requests are `{"id": <n>, "cmd": <name>, "args": {…}}`; responses are
 | `exec` | `line` | `{queued}` (semicolon-separated console line) |
 | `events` | `limit`, `subscribe` | `{count, events: [{name, seq}, …]}` — recent game events (oldest first); `subscribe` is a name or array of names to register on demand |
 | `wait_for` | `expr`, `event`, `timeout_ms` | `{matched, snapshot}` |
-| `input` | `via` (`"console"`\|`"usercmd"`) | backend + hook status `{backend, ready, hooked, slot, buttons_set, buttons_clear, bhop, calls, writes}` |
+| `input` | `via` (`"console"`\|`"usercmd"`) | backend + hook status `{backend, ready, hooked, slot, slot5, buttons_set, buttons_clear, bhop, calls, writes, move_*, angles, base_has_bits, base_move, raw_move, entry_move, steps, step_dump, entry_writes, step_writes, cmd_words, base_words}` plus the bhop block `{bhop_writes, bhop_presses, bhop_a, bhop_b, bhop_skipped, bhop_landed_tick, bhop_landed_frac, bhop_build, bhop_age, bhop_tick_base, bhop_client_tick, bhop_cmd_number, bhop_mode, bhop_when, bhop_holding_ticks, bhop_air_ticks}` (`bhop_a`/`bhop_b` = landings answered with placement A / the B catch-up; **A firing is the phase proof**, validated live) |
 | `press` / `release` | `buttons` (name, array, or mask); `reset` | hold / release command buttons on the active backend |
+| `look` | `pitch`, `yaw`, `roll`; `clear` | write the sub-tick `view_angles` (silent; `usercmd` backend) |
 | `bhop` | `on` | toggle the payload auto-jump |
+| `strafe` | `on`, `wishspeed` (30), `subtick` (12) | toggle the payload **auto-strafe**: airborne-only, silent (sub-tick `yaw_delta` turn + full-forward analog in the rotated frame); returns `strafe`, `strafe_airborne`, `strafe_speed`, `strafe_delta`, `strafe_writes` |
+| `move` | `forward`, `side`, `up`; `clear`; `quantize`, `step`, `raw_entry` | set the analog move; the three flags opt into the community ingredients (`docs/re/subtick.md` §"Community cross-check, second pass") |
 | `quit` | — | closes the channel |
 
 `wait_for`'s `expr` is a structured object, ANDed across keys, evaluated every
@@ -92,14 +109,16 @@ duration — single-client v1):
 
 ```jsonc
 {"local_alive": true} {"players_gte": 4} {"alive_gte": 2} {"local_hp_gte": 1}
-{"team": "T"} {"in_map": true} {"on_ground": true}
+{"team": "T"} {"in_map": true} {"on_ground": true} {"playable": true}
 {"all": [ … ]} {"any": [ … ]} {"not": { … }}
 ```
 
 `in_map` is `valid && local player present`; `players_gte` counts every player,
 `alive_gte` counts `life_state == 0`; `on_ground` is the local pawn's
-`m_fFlags & FL_ONGROUND`. Unknown keys are rejected so a typo is an error rather
-than an always-true predicate.
+`m_fFlags & FL_ONGROUND`; `playable` is `alive && team ∈ {T, CT}` — **false on the
+team-select screen** (`team == 0`), as a spectator, or when dead, so tests can
+gate on it. Unknown keys are rejected so a typo is an error rather than an
+always-true predicate.
 
 `wait_for` also takes an optional `event` (a game-event name, e.g.
 `"player_death"`): it subscribes on demand and matches once that event has fired
@@ -117,37 +136,129 @@ payload's `CreateMove` hook (`docs/re/client-dll.md` §"Input path"). Provided b
 
 | helper | effect |
 |---|---|
-| `look(yaw=…, pitch=…, roll=…)` | `setang` to the given angles; omitted components keep their current value (read from `state`). Needs `sv_cheats 1`. (Console only for now; `usercmd` angles are subtick — a follow-up.) |
+| `look(yaw=…, pitch=…, roll=…, via=None, command=False, raw=False, step_yaw=None)` | aim. Default: engine `setang` (blocks until the eye angles reach the target — compared as the **shortest angle**, so `180` matches a reported `-180`; without that, every heading at or past due-south "never converges" and times out). `via="usercmd"`: write the **sub-tick** `view_angles` — silent for *shots* (`subtick-shot`), and **inert for movement**. `command=True` also writes the command's own `viewangles` (steers movement, but the eye angles follow — visible). `raw=True` writes the raw per-sub-tick input history (inert for movement). **`step_yaw=<deg>`** appends a `CSubtickMoveStep` carrying only a yaw delta — **the silent movement-yaw channel**: a 90° step turns the walk 89.9° (209 units) with the eye angles unchanged before *and* after. That is what an auto-strafe uses (per tick: `step_yaw = desired yaw − camera yaw`, plus `move(forward/side)`). Omitted components keep their current value. Needs `sv_cheats 1` for `setang`. |
 | `press(key, hold=0, via=None)` | hold a button. Default: engine `+forward` (works for analog movement). `via="usercmd"`: set the command's button bit (payload `press`) — works for **discrete** actions (`space`/`jump`, `ctrl`/`duck`, `mouse1`/`attack`, `r`/`reload`), not analog movement. `hold` releases after that many seconds. Keys map to buttons (`w`→`forward`, `space`→`jump`, `ctrl`→`duck`, `mouse1`→`attack`, `r`→`reload`, …). |
 | `release(key, via=None)` | release a button held with `press(..., hold=0)`. |
 | `input(via=None)` | select/query the backend (`"console"`/`"usercmd"`) and read the hook status. |
 | `buttons(press=…, release=…, reset=False)` | raw `usercmd` button overrides (a name, array of names, or a mask). |
-| `bhop(on=True)` | payload auto-jump: force `IN_JUMP` while grounded, clear it airborne. |
+| `bhop(on=True)` | payload auto-jump — a **tick-perfect sub-tick assist**. It acts only while the player actually holds jump (reads the engine's own `CInButtonState`), and answers each landing with a **release+press pair sharing one sub-tick `when`** placed at the engine's recorded landing fraction (`m_ModernJump`'s `m_flLastLandedFrac`), so the takeoff uses `DoJump`'s speed-preserving *alpha* path instead of being a whole tick late. A lone press is not a press edge while the key is held (the edge machine is `C || (A && B)`) — the pair is what makes one. Read-only (no engine calls); re-derived and re-appended every frame; owned by the overlay menu's `Movement` tab (`wire::Settings.bhop`), so a control command is corrected on the next frame. See `docs/re/prediction.md` §"RE findings" and `docs/re/research-bhop.md`. |
+| `strafe(on=True, wishspeed=30, subtick=12)` | payload **auto-strafe** (airborne only, **silent**): each airborne tick it computes the community's optimal wish angle from the velocity and turns the *movement* yaw onto it with sub-tick `yaw_delta` steps (the measured silent channel — the camera and the pawn's eye angles never move), holding the analog move at full forward in that rotated frame. On the ground it writes nothing. **Validated live**: +66.3 u/s gained in the air (132.2 → 198.5) with 0.0° eye-angle drift (`autostrafe`). |
+| `move(forward=…, side=…, up=…, clear=False, quantize=False, step=False, raw_entry=False)` | `usercmd` analog movement — **validated live**: `forward=1.0` = 204 units/s (1.01× the console `+forward`), `forward=0.5` = 115 (0.57×). **Units are the engine's own: `1.0` = full speed** (a console `+forward` writes `1.0` into the raw axes *and* the command's `forwardmove`; measured 2026-10-15 — `450` was a wrong guess). The payload writes the raw axes (`CCSGOInput + 0x270`) plus the command floats/buttons; `quantize` snaps to the `sv_quantize_movement_input` valid set `{-1, 0, +1}` and `step` pushes the residual onto the sub-tick analog channel. **`raw_entry` is unsafe** (writing `CCSGOInput + 0xb58` crashed the game in the input path, 2026-10-15) — do not enable it. Measure with `subtick-move` / `movement-probe` (which kicks the bots, pins a test spot, waits for the teleport *and* zero velocity, and sweeps for a clear heading first — a blocked walk otherwise masquerades as a dead write). |
 | `noclip(bool)` / `teleport(x, y, z=None)` | `noclip` / `setpos` (needs `sv_cheats 1`) — positioning for tests. |
 
 Verified live: `look(yaw=90)` moved the eye angles; `press("w", hold=1.0)` moved
 the player (~270 units along the facing direction); `press("space", via="usercmd")`
-left the ground and `bhop(True)` hopped repeatedly.
+left the ground and `bhop(True)` hopped repeatedly; `look(..., via="usercmd")`
+wrote the silent sub-tick angles without moving the camera.
+
+### The screen state machine (`scripts/scenario/screens.py`)
+
+Almost every silent failure in this harness has been "the test ran in the wrong
+screen". The machine makes that explicit: one **screen**, the **capabilities**
+that screen has, and the **transitions** between them, driven from the payload's
+state (no more per-scenario guessing from raw fields).
+
+**Signals.** The payload's `state` carries a `level` block (the main-screen rule)
+and a `rules` block read from the level's `C_CSGameRules` (`client.dll`
+`game_rules` global; `docs/re/client-dll.md` §"`game_rules`"):
+
+| signal | meaning |
+|---|---|
+| `in_game` | **the main-screen rule** (harness-derived, not a payload field): the local player is *spawned in a level* — a non-zero origin or a team, or a running match (see `docs/re/client-dll.md` §"Am I in a game?" for why the "obvious" signals fail: the menu has a readable `game_rules`, a rules proxy and hundreds of entities, and `m_iConnected` is 0 in-game too). The canonical community rule is `CNetworkGameClient::m_bIsBackgroundMap == 0 && m_nSignonState >= 6` — a documented follow-up. |
+| `level.up` / `level.proxy` | the level's `C_CSGameRulesProxy` entity exists — **true at the main menu too** (the menu is a background map); diagnostics, not the rule. |
+| `level.identities` | how many entities the identity list holds (menu ≈ 258–382, level ≈ 726) — diagnostics. |
+| `local.connected` | `CBasePlayerController::m_iConnected` (`+0x6f4`) — measured 0 both in the menu **and in a game** on this build; diagnostics, not the rule. |
+| `in_map` | a local player snapshot exists — **also true at the main menu**, which is why it cannot be the level test. |
+| `rules.loaded` | the `game_rules` global was readable — **also true at the main menu** (a default, unstarted `C_CSGameRules` with `warmup = freeze = true`, `match_started = false`; measured live 2026-10-15). A fact to report, *not* the level test. |
+| `rules.warmup` / `rules.freeze` | `m_bWarmupPeriod` / `m_bFreezePeriod` — warmup, and the round started but input is frozen |
+| `rules.round_win_status` | `m_iRoundWinStatus` — a winner is set ⇒ the round is over |
+| `rules.t_cant_buy` / `ct_cant_buy` | whether each team's buy window has closed |
+| `rules.game_phase`, `round_time`, `freeze_time`, `bomb_planted`, `match_started` | the rest of the round phase (`m_gamePhase`, `m_iRoundTime`, …) |
+| `local.team` | 0 = no team (team-select/spectator screen), 1 = spectator, 2 = T, 3 = CT |
+| `local.alive` | `life_state == 0`; dead players ignore input |
+
+`Machine.ensure` also **debounces**: it only acts on a screen whose loading
+progress (player count / level / team) has stopped changing, because a level that
+is still connecting reports `team = 0` and looks exactly like team-select.
+
+**Screens** (mutually exclusive; the deduction order is in `screens.deduce`):
+
+| screen | how it is recognised | what works |
+|---|---|---|
+| `NOT_READY` | `valid=false` — the engine has no readable local state yet (still booting after injection, or a level teardown in flight) | nothing, and **no `exec`**: queued console lines fault inside the engine before its input service is up |
+| `NOT_IN_GAME` | `in_game` false — the main screen (or a level still loading): no rules-proxy entity | nothing (`map <name>` is the transition) |
+| `TEAM_SELECT` | level up, `team == 0` | nothing (`jointeam` is the transition) |
+| `SPECTATOR` | `team == 1` | look |
+| `WARMUP` | `rules.warmup` | move/jump/attack (no round structure yet) |
+| `FREEZE` | `rules.freeze` | look, buy |
+| `LIVE` | alive, in a team, not warmup/freeze, no winner | everything |
+| `DEAD` | in a team, not alive (`life_state != 0`; `1` while dying, `2` when dead — the machine keys on `alive`) | nothing until respawn |
+| `ROUND_END` | `rules.round_win_status != 0` (or the newest round event is `round_end`) | buy |
+
+**Capabilities** (`state.can("move")`, `state.require("attack")`,
+`game.require("move")`) are `state`, `look`, `move`, `jump`, `attack`, `reload`,
+`buy`, `teleport`; `buy` additionally needs the buy window from the rules, and
+`why()` returns the reason a capability is blocked (`"blocked: dead does not
+allow move"`).
+
+**Transitions** (`screens.TRANSITIONS`, driven by `Machine.ensure(target)`):
+
+| from → to | action |
+|---|---|
+| `NOT_READY` → `NOT_IN_GAME` | wait (never `exec`) |
+| `NOT_IN_GAME` → `TEAM_SELECT` | `game_type 0; game_mode 0; map <name>` — **never re-issued while a load is in flight** (a re-issue restarts the load; a load slower than the re-issue window then never finishes — the 2026-10-15 livelock). Each attempt gets a `load_budget` (60 s), refreshed while player/event counts still change |
+| `TEAM_SELECT` / `SPECTATOR` → `FREEZE` | `jointeam <2\|3>` |
+| `WARMUP` → `FREEZE` | `mp_warmup_end; mp_restartgame 1` |
+| `FREEZE` → `LIVE` | wait for `m_bFreezePeriod` to clear |
+| `ROUND_END` → `LIVE` | wait for the next `round_start` |
+| `DEAD` → `LIVE` | wait for the respawn, else `mp_restartgame 1` |
+
+Scenarios use it as:
+
+```python
+observation = awaiting.ensure(game, Screen.LIVE)   # drives the transitions
+awaiting.require(game, "move")                     # or fail with the reason
+game.ensure_screen(Screen.LIVE)                    # same, mirrored on Game
+game.require("attack")
+```
+
+`ensure(..., verify_movable=True)` keeps the old liveness gate on top of the
+screen: warmup/freeze/dead can all *look* live, so a console `+forward` must
+actually move the player.
+
+**Validated live (2026-10-15)** by the `screens` scenario: main screen →
+`not-ready`/`in-game` false (the rule), `load_map` out of the main screen,
+`team-select → wait_team → join_team → freeze → wait_freeze_end → live`, then
+`kill` → `dead` with `move`/`attack`/`look` refused (capability gate) →
+`wait_respawn` → `live` again. The scenario prints the tables above, so they
+cannot silently drift from the code.
 
 ### Readiness helpers (`scripts/scenario/awaiting.py`)
 
 The payload is only useful once the game is in a **started round with an alive,
-movable local player** — the game boots to the main menu, `mp_restartgame` leads
-to warmup then a freeze period, and a dead player ignores input. That sequence
-lives once, in `awaiting` (re-exported from `scenario` and mirrored on `Game`):
+movable local player**. These are the thin, backwards-compatible face of the
+machine (re-exported from `scenario` and mirrored on `Game`):
 
 | helper | effect |
 |---|---|
-| `ensure_map(game, map_name="de_dust2")` | load a casual offline map if none is loaded |
-| `ensure_live_round(game, …)` | map + end warmup/freeze + restart + wait for `round_start` **and** `round_freeze_end`, then **gate on movement actually working** (a console `+forward` nudge), restarting until it does |
+| `state(game)` / `screen(game)` | the deduced `GameState` / `Screen` |
+| `require(game, "move")` | assert a capability now, with the reason if blocked |
+| `ensure(game, Screen.LIVE, …)` | drive the documented transitions to a screen |
+| `machine(game, map_name=…)` | the `Machine` itself (`ensure`/`observe`/`require`/`log`) |
+| `pick_clear_heading(game, home=…)` | sweep evenly-spaced yaws from `home`, hold the console `+forward` at each, and aim down the most open one — so a blocked walk cannot masquerade as a dead write |
+| `recenter(game, spot)` / `settle(game)` / `prepare(game, spot)` | teleport to the test spot and wait for the move to land; wait for zero velocity and ground contact; both together (the quiet start a movement measurement needs — `setpos` does not clear velocity) |
+| `ensure_map(game, map_name="de_dust2")` | load a casual offline map if no level is up |
+| `ensure_live_round(game, …)` | `ensure(Screen.LIVE, verify_movable=True)` |
 | `wait_round_started(game)` | wait for `round_start` + `round_freeze_end` (the raw event waits) |
 | `is_movable` / `wait_movable(game)` | whether a `+forward` actually moves the player (the liveness gate) |
 | `wait_airborne` / `wait_on_ground(game)` | wait for the local player to leave / touch the ground |
 | `measure_move(game, key="w", via=…, yaw=…)` | hold a key and return `{before, after, moved}` (horizontal displacement) |
+| `round_state(game)` | diagnostics: screen, capabilities blocked, rules, recent events |
 | `local`/`origin`/`on_ground`/`alive`/`displacement` | state readers |
 
-Use `game.ensure_live_round()` before any input test — testing during warmup or
-freeze silently produces zero movement.
+Use `game.ensure_live_round()` (or `ensure(game, Screen.LIVE)`) before any input
+test — testing during warmup, freeze, team-select or while dead silently produces
+zero movement, and `require(...)` now says so instead of failing obscurely.
 
 ## Event helpers (runner-side)
 
@@ -179,7 +290,7 @@ fallback.
 
 | backend | how | notes |
 |---|---|---|
-| `usercmd` | hook `CCSGOInput::CreateMove` (client.dll) and write the `CUserCmd`'s button bitmask after the original runs | exact, per-tick; **discrete** buttons (jump/bhop/attack/duck/reload) work; analog movement/angles are subtick |
+| `usercmd` | hook `CCSGOInput::CreateMove` (client.dll); write the `CUserCmd` button mask, the sub-tick `input_history` angles, and the raw analog move axes | exact, per-tick; **discrete** buttons (jump/bhop/attack/duck/reload) work; silent angles work; **analog movement works** (`move(forward=1.0)` = 1.01× the console path, `0.5` = 0.57×) |
 | `console` (default) | `setang` + button commands through `exec` | no offsets or hooks; works for analog movement too; the fallback when the payload is not loaded |
 
 Payload-side state (shared by both backends):
@@ -187,9 +298,59 @@ Payload-side state (shared by both backends):
 - **buttons** — a held set/clear mask (`IN_ATTACK`, `IN_JUMP`, `IN_DUCK`,
   `IN_FORWARD`, `IN_MOVELEFT`, …); `usercmd` writes it every tick, `console`
   emits `+<button>`/`-<button>` on transitions.
-- **bhop** — the payload forces `IN_JUMP` while grounded and clears it airborne.
-- **view angles / move axes** — `console` uses `setang`; the `usercmd` path is a
-  follow-up (angles/analog are subtick — see below).
+- **bhop** — the payload's **tick-perfect sub-tick jump assist**. It acts only
+  while the player is actually holding jump (the read is the engine's own
+  `CInButtonState` word 0, `IN_JUMP`), so it never jumps on its own, and it answers
+  each landing with a **release+press pair sharing one sub-tick `when`**: the
+  fraction comes from the landing the engine's own prediction recorded
+  (`m_ModernJump.m_nLastLandedTick/m_flLastLandedFrac`, in `{build-1, f}`
+  coordinates, with `build = m_nTickBase + (fresh ? 1 : 0)`), placed past the
+  contact inside `sv_bhop_time_window * 0.5 = 16/64`. The pair is required because
+  a lone press produces **no** press edge while the key is held
+  (`edge = C || (A && B)`); it is re-derived and re-appended every frame (the
+  command's sub-tick table is rebuilt each frame), budget-checked against the gate's
+  32-entry limit and insertion-sorted so its monotonicity clause cannot discard the
+  array. Fully read-only — no engine calls, nothing cleared. See
+  `docs/re/prediction.md` §"RE findings" (and `docs/re/research-bhop.md` for the
+  community sources).
+- **strafe** — the payload's **auto-strafe** (airborne only, silent): it reads the
+  local pawn's velocity, computes the optimal air-strafe wish angle (the community
+  formula: `velocity_yaw ± (90° − asin(wishspeed / speed))`, with the side taken
+  from the velocity's position relative to the camera), turns the command's
+  *movement* yaw onto it with sub-tick `yaw_delta` steps — the measured silent
+  channel, so the camera and the pawn's eye angles are untouched — and holds the
+  analog move at full forward in that rotated frame (a quantising server still sees
+  `(1, 0)`). On the ground, or below ~25 units/s, it writes nothing at all.
+  **Status (2026-10-15, end of session): the menu path now *engages*.** The earlier
+  "no in-game effect" was the `apply()` backend gate (the menu cannot select the
+  `usercmd` backend, so the features never ran); that is fixed. The strafe is now a
+  port of the known-good **analog** path (`airstrafe.cpp`, `sv_quantize_movement_input
+  0`) — the wish is re-encoded into the command frame and written to the command
+  floats **and** the raw axes — and engagement is validated, but the in-game effect
+  is not yet cleanly measured. The **bhop** is now the record-based design from
+  `docs/re/prediction.md` §"RE findings": a release+press pair past the recorded
+  landing (`build == landed_tick + 1`), written every frame, read-only. Its phase
+  (`bhop_age`) must be validated live; the manual `RunCommand` prediction path
+  crashes without the `CPrediction` envelope and stays off by default (`predict(on)`).
+  See the wrap-up at the top of `docs/handoff.md`.
+
+**Where the movement features are controlled.** They are **payload features**, not
+something the external harness has to drive: the payload publishes the initial state
+as the defaults in the shared settings block and the **overlay menu's `Movement` tab**
+owns them (ADR-0021 — the same settings mechanism the ESP toggles use). The payload
+re-applies the settings **every published frame**, so the menu is the single owner: a
+`strafe`/`bhop` control command is corrected on the next frame (those commands remain
+only as a convenience for a one-frame nudge, and scenarios should not rely on them).
+`CS2_PAYLOAD_MOVEMENT=strafe,bhop` seeds the initial state, but note it is read from
+the **game's** environment — the game inherits *Steam's* environment, so setting it in
+`scripts/launch-cs2.cmd` only works when that script also starts Steam; use a user
+environment variable (`setx` + restart Steam) or the menu for an always-on seed.
+Verified live: a seqlock write of the settings block (exactly what the menu does)
+turned `strafe`/`bhop` on in the payload and back off, and a stale flag left by an
+earlier session no longer sticks.
+- **view angles / move axes** — `console` uses `setang`; the `usercmd` path writes
+  the sub-tick `input_history` angles and the raw analog move axes
+  (`CCSGOInput + 0x270`) — see below.
 
 Control surface (payload): `input` (select/query the backend), `press`,
 `release`, `bhop`. Runner wrappers (`press`, `release`, `look`) take
@@ -214,6 +375,15 @@ src/input.cpp}`:
   command number `+0x8`, `CSGOUserCmdPB` `+0x10`, `InButtonState` `+0x58`.
 - `on_ground` comes from the local pawn's `m_fFlags` (`C_BaseEntity`), noted from
   the last `state`/`wait_for` snapshot (also exposed as a `wait_for` key).
+- **Movement (second pass, `docs/re/subtick.md`):** `move(...)` gained three
+  default-off ingredients — `quantize` (snap the axes to the
+  `sv_quantize_movement_input` valid set `{-450, 0, +450}`), `step` (append 12
+  `CSubtickMoveStep`s carrying the residual the quantised base cannot express,
+  `when = i/12`), and `raw_entry` (write the per-controller input entry
+  `CCSGOInput + 0xb58`, entry 0 = local, so `FUN_180b5f7b0` copies our value into
+  `+0x270` inside slot 5). `input()` now reports the decoded movement probes
+  (`base_has_bits`, `base_move`, `raw_move`, `entry_move`, `steps`, `step_dump`,
+  `entry_writes`, `step_writes`), and `movement-probe` drives the whole matrix.
 
 **Live-validated (build 25815307).** `usercmd-move` drives `jump` (leaves the
 ground) and `bhop` (repeated hops) with the write in place. The button-mask offset
@@ -221,12 +391,29 @@ is confirmed live: a console `+forward` sets `cmd + 0x60` bit 3 and `+jump` bit 
 The hook also carries a diagnostic capture of the command's first 16 qwords
 (`input` → `cmd_words`), used to map fields.
 
-**Analogue movement and view angles are subtick.** Writing only the legacy
-`cmd + 0x60` bit does **not** produce `forward` movement — the magnitude comes
-from the subtick move steps / the `CUserCmdPB` floats (`m_flForwardMove`/
-`m_flSideMove`), and the angles from the `CSubtickMoveStep` history. That is the
-next step for autostrafe/aim; discrete buttons (jump/bhop/attack/duck/reload)
-already work.
+**Sub-tick view angles (implemented, silent).** `look(..., via="usercmd")` writes
+**every** `input_history` entry's `view_angles` (3 floats; `docs/re/subtick.md`)
+every tick — the shot reads the entry at `attack1_start_history_index`
+(`pb+0x3c`), so all entries must carry the angle. `subtick-aim` validates the
+write lands (dozens/tick) and the **camera does not follow**; `subtick-shot`
+proves the *shot* uses it — camera 45° off a bot, silent aim at its body centre,
+fire, and the bot's **health drops** (read from `state`; a `wait_for(event=…)`
+started *after* the shot can never see the hit it caused).
+
+**Analog movement works (validated live 2026-10-15).** `create_move_input`
+*derives* `base->forwardmove` from `CCSGOInput + 0x270` and `base->leftmove` from
+`+0x274` every tick (and re-derives `+0x270` from the input entry inside
+`FUN_180b5f7b0`), so the write must land around the slot-5 call — which the payload
+does (before and after). The decisive detail is the **unit**: the engine's own
+input writes `±1` (a console `+forward` = `forwardmove 1.0` on the command *and*
+`1.0` on the raw axes), while the payload used to write `450`
+(`cl_forwardspeed`, applied downstream). With `1.0` the player walks — measured
+from one fixed, unobstructed spot with a console baseline of 203 units in 1 s:
+`move(1.0)` = 204.5 (1.01×) and `move(0.5)` = 115 (0.57×, the analog value is
+honoured). `quantize`/`step` are neutral for a full-speed request. An obstructed
+test direction or a freeze-period run reads as "no movement", which is what made
+this look broken; `movement-probe` now pins a test spot, waits for the teleport and
+zero velocity, sweeps for a clear heading and reports a console baseline.
 
 The `console` backend (`setang` + button commands through `exec`) stays as the
 no-injection fallback. The console-input RE anchors in the older notes
@@ -246,9 +433,12 @@ were **strings**, now superseded above.
 - `scripts/scenario/`: `session.py` (kill stale `cs2.exe` → run the `CS2Launch`
   task → wait for `client.dll` → inject `build-payload/payload.dll` →
   connect → teardown), `control.py` (pipe client + typed helpers),
+  `screens.py` (the screen state machine: deduction, capabilities, transitions),
   `awaiting.py` (readiness: map/round/alive/movable + `measure_move`),
   `scenarios/*.py` (`join-bot-match`, `move-and-aim`, `game-events`,
-  `usercmd-move`); `scripts/run-scenario.py` (CLI).
+  `usercmd-move`, `bhop`, `subtick-aim`, `subtick-shot`, `subtick-move`,
+  `movement-probe`, `move-to`, `screens`);
+  `scripts/run-scenario.py` (CLI).
 - PID/module discovery: `external/dumper/target/release/cs2-dumper.exe
   --process cs2.exe --json`; injection: `build-injector/injector.exe`.
 
@@ -334,18 +524,26 @@ node C:\Users\gpmpo\rea-src-install\scripts\rea.mjs analyze <target> --provider 
 
 ## Next actions (pick up here)
 
-1. **`usercmd` view angles / move axes** (subtick) — the aim / autostrafe
-   backend. Writing the legacy `cmd + 0x60` bit drives discrete buttons but **not**
-   analog movement; the magnitude lives in the subtick move steps / the
-   `CUserCmdPB` floats (`m_flForwardMove`/`m_flSideMove`) and the angles in the
-   `CSubtickMoveStep` history. Use the payload's `input` → `cmd_words` capture to
-   locate the `CSGOUserCmdPB`/`CBaseUserCmdPB` field offsets, then write them in
-   the `CreateMove` detour. Also find `dwViewAngles` (camera-vs-view-angles).
-2. **Console-output capture** for `wait_for(text=…)` and authoritative `exec`
+1. **Analog movement** (autostrafe) — **community recipe implemented, pending live
+   validation.** `move(...)` can snap the axes to the `sv_quantize_movement_input`
+   valid set (`quantize`), append the residual as sub-tick `CSubtickMoveStep`s
+   (`step`), and write the input entry (`raw_entry`) `FUN_180b5f7b0` copies into
+   `+0x270`. Run **`movement-probe`** first: it dumps the engine's own convention
+   (hold `+forward`/`+jump`, read `base_has_bits`/`base_move`/`raw_move`/
+   `entry_move`/steps), then measures every variant with
+   `sv_quantize_movement_input` 0 and 1, so the has-bit values, the delta sign and
+   the simulated command are settled by data rather than guesswork. See
+   [`docs/re/subtick.md`](re/subtick.md) §"Community cross-check, second pass".
+2. **Aim validation — done.** `look(..., via="usercmd")` writes every
+   `input_history` entry's silent sub-tick angles; `subtick-shot` proves the shot
+   uses them (camera 45° off a bot, silent aim at its body centre, health drop,
+   camera stays put). Still open: relate `dwViewAngles` (the camera global) to
+   `view_angles` for a "camera differing from view angles" feature.
+3. **Console-output capture** for `wait_for(text=…)` and authoritative `exec`
    results. `exec` returns `{queued}` only and `-concommandpipe` is input-only,
    so output must come from `-condebug` (console log), a payload hook on the
    console-print/logging path, or the logging system.
-3. Then `screenshot` and a `players_lte` / `text` predicate.
+4. Then `screenshot` and a `players_lte` / `text` predicate.
 
 ## Live validation notes (2026-10)
 
@@ -396,9 +594,15 @@ A few issues cost time; all are handled now:
 - The legacy button mask is `cmd + 0x60`: a console `+forward` sets bit 3 and
   `+jump` bit 1 (read live via the payload's `input` → `cmd_words` capture).
 - **Writing that mask drives discrete actions but not analog movement.** `jump`
-  leaves the ground and `bhop` hops repeatedly, but `forward` moves ~0 — CS2's
-  movement magnitude is subtick (the `CUserCmdPB` floats / `CSubtickMoveStep`).
-  Keep analog movement on the console backend until the subtick write lands.
+  leaves the ground and `bhop` hops repeatedly, but `forward` moves ~0. The
+  `CBaseUserCmdPB` move floats (`+0x58/+0x5c/+0x60`) do not move either — holding
+  `+forward` sets no move float in the command — so CS2's movement magnitude is
+  sub-tick (`CSubtickMoveStep`). Keep analog movement on the console backend until
+  the sub-tick write lands.
+- **The sub-tick view angles are writable and silent.** Writing every
+  `input_history` entry's `view_angles` (`docs/re/subtick.md`) lands every tick and
+  the camera does not follow (`subtick-aim`) — the silent-aim seam; `subtick-shot`
+  proves the shot uses it.
 - `exec` can fault (`engine2!CCommandBuffer::AddText`, `read addr=0x0`) if it is
   issued *very* early after launch (before the engine input service is up); give
   the game a moment after connecting.

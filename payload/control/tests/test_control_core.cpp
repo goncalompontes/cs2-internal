@@ -4,8 +4,10 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
+#include "cs2/control/event_ring.hpp"
 #include "cs2/control/json.hpp"
 #include "cs2/control/predicate.hpp"
 #include "cs2/control/snapshot_json.hpp"
@@ -63,6 +65,7 @@ void test_predicate_matching() {
   local.alive = true;
   local.health = 100;
   local.team = 2;
+  local.on_ground = true;
   snapshot.local = local;
   snapshot.local_pawn = 0x1000;
   snapshot.players = {local};
@@ -76,6 +79,8 @@ void test_predicate_matching() {
   assert(!Predicate::from_json(*Json::parse(R"({"players_gte":3})"))->matches(snapshot));
   assert(Predicate::from_json(*Json::parse(R"({"alive_gte":1})"))->matches(snapshot));
   assert(Predicate::from_json(*Json::parse(R"({"team":"T"})"))->matches(snapshot));
+  assert(Predicate::from_json(*Json::parse(R"({"on_ground":true})"))->matches(snapshot));
+  assert(!Predicate::from_json(*Json::parse(R"({"on_ground":false})"))->matches(snapshot));
   assert(Predicate::from_json(
              *Json::parse(R"({"all":[{"in_map":true},{"team":"T"},{"local_hp_gte":50}]})"))
              ->matches(snapshot));
@@ -99,6 +104,7 @@ void test_snapshot_serialization() {
   local.health = 42;
   local.team = 3;
   local.name = "me";
+  local.on_ground = true;
   local.origin = {1.0F, 2.0F, 3.0F};
   snapshot.local = local;
   snapshot.players = {local};
@@ -112,12 +118,73 @@ void test_snapshot_serialization() {
   assert(player->find("health")->as_int() == 42);
   assert(player->find("team")->as_int() == 3);
   assert(player->find("name")->as_string() == "me");
+  assert(player->find("on_ground")->as_bool());
   assert(player->find("origin")->find("z")->as_number() == 3.0);
 
   // An empty/unattached snapshot is still well-formed.
   const Json empty = cs2::control::to_json(Snapshot{});
   assert(empty.find("valid") != nullptr && !empty.find("valid")->as_bool());
   assert(empty.find("players")->items().empty());
+}
+
+void test_event_ring() {
+  using cs2::control::EventArg;
+  using cs2::control::EventArgMatch;
+  using cs2::control::EventEntry;
+  using cs2::control::EventRing;
+
+  EventRing ring;
+  assert(ring.count() == 0);
+  assert(ring.push("round_start", nullptr, 0) == 1);
+
+  EventArg args[2] = {};
+  std::strcpy(args[0].key, "userid");
+  std::strcpy(args[0].value, "7");
+  std::strcpy(args[1].key, "headshot");
+  std::strcpy(args[1].value, "true");
+  assert(ring.push("player_death", args, 2) == 2);
+  assert(ring.count() == 2);
+  assert(ring.seen_since("player_death", 1));
+  assert(!ring.seen_since("player_death", 2));  // strictly after `after`
+  assert(!ring.seen_since("round_end", 0));
+
+  EventEntry recent[4];
+  const std::size_t captured = ring.recent(recent, 4);
+  assert(captured == 2);
+  assert(std::string(recent[0].name) == "round_start" && recent[0].seq == 1);
+  assert(recent[0].arg_count == 0);
+  assert(std::string(recent[1].name) == "player_death" && recent[1].seq == 2);
+  assert(recent[1].arg_count == 2);
+  assert(std::string(recent[1].args[0].key) == "userid");
+  assert(std::string(recent[1].args[0].value) == "7");
+
+  // Argument constraints.
+  const EventArgMatch want_userid[] = {{.key = "userid", .value = "7"}};
+  const EventArgMatch wrong_userid[] = {{.key = "userid", .value = "8"}};
+  const EventArgMatch want_both[] = {{.key = "userid", .value = "7"},
+                                     {.key = "headshot", .value = "true"}};
+  const EventArgMatch missing[] = {{.key = "nope", .value = "1"}};
+  assert(ring.seen_since("player_death", 1, want_userid, 1));
+  assert(ring.seen_since("player_death", 1, want_both, 2));
+  assert(!ring.seen_since("player_death", 1, wrong_userid, 1));
+  assert(!ring.seen_since("player_death", 1, missing, 1));
+
+  // Over capacity: the newest `k_capacity` survive, oldest first.
+  for (int i = 0; i < 200; ++i) {
+    ring.push("tick", nullptr, 0);
+  }
+  assert(ring.count() == 202);
+  EventEntry all[EventRing::k_capacity];
+  const std::size_t kept = ring.recent(all, EventRing::k_capacity);
+  assert(kept == EventRing::k_capacity);
+  assert(all[kept - 1].seq == 202);
+  assert(all[0].seq == 202 - EventRing::k_capacity + 1);
+
+  // Long names are truncated, never overflowed.
+  ring.push(std::string(80, 'x'), nullptr, 0);
+  EventEntry one[1];
+  assert(ring.recent(one, 1) == 1);
+  assert(std::string(one[0].name).size() == EventEntry::k_max_name_length);
 }
 
 }  // namespace
@@ -128,6 +195,7 @@ auto main() -> int {
   test_json_rejects_malformed();
   test_predicate_matching();
   test_snapshot_serialization();
+  test_event_ring();
   std::puts("control-core: ok");
   return 0;
 }

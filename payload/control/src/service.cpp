@@ -2,7 +2,9 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <string_view>
 
 #include "cs2/control/predicate.hpp"
@@ -36,6 +38,42 @@ void set_error(Json& out, std::string_view message) {
 void set_ok(Json& out, Json value) {
   out.set("ok", Json::boolean(true));
   out.set("result", std::move(value));
+}
+
+// Parse a button spec: a friendly name, an array of names, or a raw bit mask.
+// Returns false (with `bad` set) on an unknown name.
+auto parse_buttons(const Json& value, std::uint64_t& mask, std::string& bad) -> bool {
+  mask = 0;
+  if (value.is_number()) {
+    mask = static_cast<std::uint64_t>(value.as_int());
+    return true;
+  }
+  const auto add = [&](const Json& item) -> bool {
+    if (!item.is_string()) {
+      bad = item.dump();
+      return false;
+    }
+    const std::uint64_t bit = button_bit(item.as_string());
+    if (bit == 0) {
+      bad = std::string(item.as_string());
+      return false;
+    }
+    mask |= bit;
+    return true;
+  };
+  if (value.is_string()) {
+    return add(value);
+  }
+  if (value.is_array()) {
+    for (const Json& item : value.items()) {
+      if (!add(item)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  bad = value.dump();
+  return false;
 }
 
 }  // namespace
@@ -109,8 +147,26 @@ auto Service::handle(const std::string& line, std::string& response) noexcept ->
     do_state(out);
   } else if (command == "exec") {
     do_exec(arguments, out);
+  } else if (command == "events") {
+    do_events(arguments, out);
   } else if (command == "wait_for") {
     do_wait_for(arguments, out);
+  } else if (command == "input") {
+    do_input(arguments, out);
+  } else if (command == "press") {
+    do_press(arguments, out, false);
+  } else if (command == "release") {
+    do_press(arguments, out, true);
+  } else if (command == "move") {
+    do_move(arguments, out);
+  } else if (command == "look") {
+    do_look(arguments, out);
+  } else if (command == "bhop") {
+    do_bhop(arguments, out);
+  } else if (command == "strafe") {
+    do_strafe(arguments, out);
+  } else if (command == "predict") {
+    do_predict(arguments, out);
   } else {
     set_error(out, "unknown cmd");
   }
@@ -118,12 +174,38 @@ auto Service::handle(const std::string& line, std::string& response) noexcept ->
   return true;
 }
 
+Service::Service() {
+#if defined(_WIN32)
+  start_tick_ = static_cast<std::uint64_t>(GetTickCount64());
+#endif
+}
+
+auto Service::uptime_ms() const noexcept -> std::uint64_t {
+#if defined(_WIN32)
+  return static_cast<std::uint64_t>(GetTickCount64()) - start_tick_;
+#else
+  return 0;
+#endif
+}
+
 auto Service::ping_result() noexcept -> Json {
   console_.refresh();
+  events_.refresh();
+  input_.refresh();
   Json result = Json::object();
   result.set("pong", Json::boolean(true));
   result.set("pid", Json::number(static_cast<double>(GetCurrentProcessId())));
+  // How long ago the payload was injected (its own clock): the harness waits for
+  // this before the first console line, because `exec` faults in the engine's
+  // Cbuf path when issued too soon after injection.
+  result.set("uptime_ms", Json::number(static_cast<double>(uptime_ms())));
   result.set("exec_ready", Json::boolean(console_.ready()));
+  result.set("events_ready", Json::boolean(events_.ready()));
+  result.set("events_subscribed", Json::number(static_cast<double>(events_.subscriptions())));
+  result.set("events_dispatch_calls", Json::number(static_cast<double>(events_.fire_calls())));
+  result.set("input_ready", Json::boolean(input_.ready()));
+  result.set("input_hooked", Json::boolean(input_.hooked()));
+  result.set("input_backend", Json::string(Input::backend_name(input_.backend())));
   result.set("state_ready", Json::boolean(reader_.has_value()));
   return result;
 }
@@ -149,6 +231,7 @@ void Service::do_state(Json& out) noexcept {
   }
   const game::Snapshot snapshot = reader_->snapshot();
   refresh_reader(snapshot.valid);
+  note_local_pawn(snapshot);
   set_ok(out, to_json(snapshot));
 }
 
@@ -172,6 +255,53 @@ void Service::do_exec(const Json& args, Json& out) noexcept {
   set_ok(out, std::move(result));
 }
 
+void Service::do_events(const Json& args, Json& out) noexcept {
+  events_.refresh();
+  if (!events_.ready()) {
+    set_error(out, "events unavailable: event dispatch hooks not installed");
+    return;
+  }
+  // Optional on-demand subscription: `subscribe` is a name or an array of names.
+  // Each name is reported as accepted or rejected (a name the build does not
+  // define is rejected), so a typo is visible rather than a silent no-op.
+  Json accepted = Json::array();
+  Json rejected = Json::array();
+  const auto handle_subscribe = [&](std::string_view name) {
+    const std::int32_t code = events_.subscribe(name);
+    if (code == EventLog::k_subscribe_already || code >= 0) {
+      accepted.push_back(Json::string(std::string(name)));
+    } else {
+      rejected.push_back(Json::string(std::string(name)));
+    }
+  };
+  if (const Json* subscribe = args.find("subscribe"); subscribe != nullptr) {
+    if (subscribe->is_string()) {
+      handle_subscribe(subscribe->as_string());
+    } else if (subscribe->is_array()) {
+      for (const Json& name : subscribe->items()) {
+        if (name.is_string()) {
+          handle_subscribe(name.as_string());
+        }
+      }
+    }
+  }
+  std::int64_t limit = static_cast<std::int64_t>(EventRing::k_capacity);
+  if (const Json* arg = args.find("limit"); arg != nullptr && arg->is_number()) {
+    limit = arg->as_int();
+  }
+  if (limit < 0) {
+    limit = 0;
+  }
+  Json subscriptions = Json::object();
+  subscriptions.set("accepted", std::move(accepted));
+  subscriptions.set("rejected", std::move(rejected));
+  Json result = Json::object();
+  result.set("count", Json::integer(static_cast<std::int64_t>(events_.count())));
+  result.set("subscribe", std::move(subscriptions));
+  result.set("events", events_.recent(static_cast<std::size_t>(limit)));
+  set_ok(out, std::move(result));
+}
+
 void Service::do_wait_for(const Json& args, Json& out) noexcept {
   Predicate predicate = Predicate::always_true();
   if (const Json* expr = args.find("expr"); expr != nullptr) {
@@ -191,22 +321,68 @@ void Service::do_wait_for(const Json& args, Json& out) noexcept {
     timeout_ms = 0;
   }
 
+  // Optional event gate: match once `event` fires *after* this request, carrying
+  // every `event_args` value. We subscribe before snapshotting the count so the
+  // wait cannot miss the event.
+  std::string event_name;
+  if (const Json* event = args.find("event"); event != nullptr && event->is_string()) {
+    event_name = std::string(event->as_string());
+  }
+  // `event_args` is an object of field -> expected value; values are compared as
+  // strings against the captured (formatted) argument.
+  std::vector<std::string> arg_storage;
+  if (const Json* event_args = args.find("event_args");
+      event_args != nullptr && event_args->is_object()) {
+    arg_storage.reserve(event_args->members().size() * 2);  // keep the strings stable
+    for (const auto& [key, value] : event_args->members()) {
+      arg_storage.push_back(key);
+      arg_storage.push_back(value.is_string() ? std::string(value.as_string()) : value.dump());
+    }
+  }
+  std::vector<EventArgMatch> arg_matches;
+  arg_matches.reserve(arg_storage.size() / 2);
+  for (std::size_t i = 0; i + 1 < arg_storage.size(); i += 2) {
+    arg_matches.push_back(EventArgMatch{arg_storage[i], arg_storage[i + 1]});
+  }
+  std::uint64_t event_after = 0;
+  if (!event_name.empty()) {
+    events_.refresh();
+    if (!events_.ready()) {
+      set_error(out, "wait_for: game events unavailable (event dispatch hooks not installed)");
+      return;
+    }
+    if (events_.subscribe(event_name) == EventLog::k_subscribe_rejected) {
+      set_error(out, "wait_for: unknown game event \"" + event_name + "\"");
+      return;
+    }
+    event_after = events_.count();
+  }
+
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   bool matched = false;
   Json snapshot = Json();
   for (;;) {
     cs2::diag::heartbeat();
+    bool state_ok = false;
     refresh_reader(true);
     if (reader_.has_value()) {
       const game::Snapshot current = reader_->snapshot();
       refresh_reader(current.valid);
       if (current.valid) {
         snapshot = to_json(current);
+        note_local_pawn(current);
       }
-      if (predicate.matches(current)) {
-        matched = true;
-        break;
-      }
+      state_ok = predicate.matches(current);
+    } else {
+      state_ok = predicate.matches(game::Snapshot{});
+    }
+    const bool event_ok =
+        event_name.empty() ||
+        (events_.ready() &&
+         events_.seen_since(event_name, event_after, arg_matches.data(), arg_matches.size()));
+    if (state_ok && event_ok) {
+      matched = true;
+      break;
     }
     if (!running_.load(std::memory_order_relaxed) || std::chrono::steady_clock::now() >= deadline) {
       break;
@@ -218,6 +394,296 @@ void Service::do_wait_for(const Json& args, Json& out) noexcept {
   result.set("matched", Json::boolean(matched));
   result.set("snapshot", std::move(snapshot));
   set_ok(out, std::move(result));
+}
+
+auto Service::input_status() noexcept -> Json {
+  const auto hex = [](std::uint64_t value) {
+    char buffer[24];
+    std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(value));
+    return std::string(buffer);
+  };
+  Json result = Json::object();
+  result.set("backend", Json::string(Input::backend_name(input_.backend())));
+  result.set("ready", Json::boolean(input_.ready()));
+  result.set("hooked", Json::boolean(input_.hooked()));
+  result.set("slot", Json::number(static_cast<double>(input_.slot_index())));
+  result.set("slot5", Json::number(static_cast<double>(input_.slot5_index())));
+  result.set("calls5", Json::number(static_cast<double>(input_.calls5())));
+  result.set("buttons_set", Json::number(static_cast<double>(input_.buttons_set())));
+  result.set("buttons_clear", Json::number(static_cast<double>(input_.buttons_clear())));
+  result.set("bhop", Json::boolean(input_.bhop()));
+  result.set("predict", Json::boolean(input_.predict()));
+  result.set("move", Json::boolean(input_.move_enabled()));
+  result.set("move_quantize", Json::boolean(input_.move_quantize()));
+  result.set("move_step", Json::boolean(input_.move_step()));
+  result.set("move_raw_entry", Json::boolean(input_.move_raw_entry()));
+  result.set("move_forward", Json::number(input_.move_forward()));
+  result.set("move_side", Json::number(input_.move_side()));
+  result.set("move_up", Json::number(input_.move_up()));
+  result.set("angles", Json::boolean(input_.angles_enabled()));
+  result.set("angle_pitch", Json::number(input_.angle_pitch()));
+  result.set("angle_yaw", Json::number(input_.angle_yaw()));
+  result.set("angle_roll", Json::number(input_.angle_roll()));
+  result.set("command_angles", Json::boolean(input_.command_angles_enabled()));
+  result.set("command_angle_yaw", Json::number(input_.command_angle_yaw()));
+  result.set("command_angle_writes",
+             Json::number(static_cast<double>(input_.command_angle_writes())));
+  result.set("raw_angles", Json::boolean(input_.raw_angles_enabled()));
+  result.set("raw_angle_writes", Json::number(static_cast<double>(input_.raw_angle_writes())));
+  result.set("step_yaw", Json::number(input_.step_yaw()));
+  result.set("step_yaw_enabled", Json::boolean(input_.step_yaw_enabled()));
+  result.set("strafe", Json::boolean(input_.strafe()));
+  result.set("strafe_airborne", Json::boolean(input_.strafe_airborne()));
+  result.set("strafe_speed", Json::number(input_.strafe_speed()));
+  result.set("strafe_delta", Json::number(input_.strafe_delta()));
+  result.set("strafe_wishspeed", Json::number(input_.strafe_wishspeed()));
+  result.set("strafe_subticks", Json::number(static_cast<double>(input_.strafe_subticks())));
+  result.set("strafe_writes", Json::number(static_cast<double>(input_.strafe_writes())));
+  result.set("strafe_raw_writes",
+             Json::number(static_cast<double>(input_.strafe_raw_writes())));
+  result.set("bhop_presses", Json::number(static_cast<double>(input_.bhop_presses())));
+  result.set("bhop_writes", Json::number(static_cast<double>(input_.bhop_writes())));
+  result.set("bhop_landed_tick", Json::number(static_cast<double>(input_.bhop_landed_tick())));
+  result.set("bhop_landed_frac", Json::number(static_cast<double>(input_.bhop_landed_frac())));
+  result.set("bhop_build", Json::number(static_cast<double>(input_.bhop_build())));
+  result.set("bhop_age", Json::number(static_cast<double>(input_.bhop_age())));
+  result.set("bhop_tick_base", Json::number(static_cast<double>(input_.bhop_tick_base())));
+  result.set("bhop_client_tick", Json::number(static_cast<double>(input_.bhop_client_tick())));
+  result.set("bhop_cmd_number", Json::number(static_cast<double>(input_.bhop_cmd_number())));
+  result.set("bhop_mode", Json::number(static_cast<double>(input_.bhop_mode())));
+  result.set("bhop_when", Json::number(static_cast<double>(input_.bhop_when())));
+  result.set("bhop_a", Json::number(static_cast<double>(input_.bhop_a())));
+  result.set("bhop_b", Json::number(static_cast<double>(input_.bhop_b())));
+  result.set("bhop_skipped", Json::number(static_cast<double>(input_.bhop_skipped())));
+  result.set("bhop_holding_ticks",
+             Json::number(static_cast<double>(input_.bhop_holding_ticks())));
+  result.set("bhop_air_ticks", Json::number(static_cast<double>(input_.bhop_air_ticks())));
+  result.set("input_local_pawn", Json::number(static_cast<double>(input_.local_pawn())));
+  result.set("predict_ready", Json::boolean(input_.predict_ready()));
+  result.set("predict_runs", Json::number(static_cast<double>(input_.predict_runs())));
+  result.set("predicted_landing_tick",
+             Json::number(static_cast<double>(input_.predicted_landing_tick())));
+  result.set("predicted_landing_frac",
+             Json::number(static_cast<double>(input_.predicted_landing_frac())));
+  result.set("predicted_landing_delta",
+             Json::number(static_cast<double>(input_.predicted_landing_delta())));
+  result.set("calls", Json::number(static_cast<double>(input_.calls())));
+  result.set("writes", Json::number(static_cast<double>(input_.writes())));
+  result.set("angle_writes", Json::number(static_cast<double>(input_.angle_writes())));
+  result.set("move_writes", Json::number(static_cast<double>(input_.move_writes())));
+  result.set("raw_writes", Json::number(static_cast<double>(input_.raw_writes())));
+  result.set("entry_writes", Json::number(static_cast<double>(input_.entry_writes())));
+  result.set("step_writes", Json::number(static_cast<double>(input_.step_writes())));
+  result.set("last_cmd", Json::string(hex(input_.last_cmd())));
+  Json words = Json::array();
+  for (std::size_t i = 0; i < Input::k_probe_words; ++i) {
+    words.push_back(Json::string(hex(input_.last_word(i))));
+  }
+  result.set("cmd_words", std::move(words));
+  result.set("base", Json::string(hex(input_.last_base())));
+  Json base_words = Json::array();
+  for (std::size_t i = 0; i < Input::k_probe_base_words; ++i) {
+    base_words.push_back(Json::string(hex(input_.last_base_word(i))));
+  }
+  result.set("base_words", std::move(base_words));
+
+  // Decoded movement probes (`docs/re/subtick.md` §"Actionable seams"): what the
+  // engine's own input put on the command, the raw axes and the input entry the
+  // raw axes are derived from, plus the command's own sub-tick steps.
+  const auto move_json = [](const MoveSample& sample) {
+    Json out = Json::object();
+    out.set("valid", Json::boolean(sample.valid));
+    out.set("forward", Json::number(sample.forward));
+    out.set("side", Json::number(sample.side));
+    out.set("up", Json::number(sample.up));
+    return out;
+  };
+  result.set("base_has_bits",
+             Json::string(hex(static_cast<std::uint64_t>(input_.base_has_bits()))));
+  result.set("base_move", move_json(input_.base_move()));
+  result.set("raw_move", move_json(input_.raw_move()));
+  result.set("entry_move", move_json(input_.entry_move()));
+  result.set("steps", Json::number(static_cast<double>(input_.step_count())));
+  Json steps = Json::array();
+  for (std::size_t i = 0; i < k_probe_steps; ++i) {
+    const StepProbe probe = input_.step_probe(i);
+    if (!probe.valid) {
+      continue;
+    }
+    Json step = Json::object();
+    step.set("when", Json::number(probe.when));
+    step.set("forward", Json::number(probe.forward));
+    step.set("left", Json::number(probe.left));
+    step.set("button", Json::string(hex(probe.button)));
+    step.set("pressed", Json::boolean(probe.pressed));
+    steps.push_back(std::move(step));
+  }
+  result.set("step_dump", std::move(steps));
+  return result;
+}
+
+void Service::do_input(const Json& args, Json& out) noexcept {
+  input_.refresh();
+  if (const Json* via = args.find("via"); via != nullptr && via->is_string()) {
+    const std::string_view name = via->as_string();
+    if (name == "usercmd") {
+      input_.set_backend(Input::Backend::usercmd);
+    } else if (name == "console") {
+      input_.set_backend(Input::Backend::console);
+    } else {
+      set_error(out, "input: unknown via (expected \"console\" or \"usercmd\")");
+      return;
+    }
+  }
+  set_ok(out, input_status());
+}
+
+void Service::do_press(const Json& args, Json& out, bool release) noexcept {
+  input_.refresh();
+  if (const Json* reset = args.find("reset");
+      reset != nullptr && reset->is_bool() && reset->as_bool()) {
+    input_.reset_buttons();
+    set_ok(out, input_status());
+    return;
+  }
+  const Json* buttons = args.find("buttons");
+  if (buttons == nullptr) {
+    set_error(out, "press/release requires \"buttons\" (a name, array of names, or mask)");
+    return;
+  }
+  std::uint64_t mask = 0;
+  std::string bad;
+  if (!parse_buttons(*buttons, mask, bad)) {
+    set_error(out, "unknown button \"" + bad + "\"");
+    return;
+  }
+  if (release) {
+    input_.release(mask);
+  } else {
+    input_.press(mask);
+  }
+  set_ok(out, input_status());
+}
+
+void Service::do_move(const Json& args, Json& out) noexcept {
+  input_.refresh();
+  if (const Json* clear = args.find("clear");
+      clear != nullptr && clear->is_bool() && clear->as_bool()) {
+    input_.clear_move();
+    set_ok(out, input_status());
+    return;
+  }
+  const auto number = [&](const char* key, float fallback) -> float {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
+                                                  : fallback;
+  };
+  const auto flag = [&](const char* key) -> bool {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_bool() && value->as_bool();
+  };
+  // `quantize` = snap to the `sv_quantize_movement_input` valid set, `step` = also
+  // write the residual on the sub-tick analog channel, `raw_entry` = also write
+  // the per-controller input entry `+0x270` is derived from (the documented next
+  // probe). All default off, so the historic write is unchanged.
+  input_.set_move(number("forward", 0.0F), number("side", 0.0F), number("up", 0.0F),
+                  flag("quantize"), flag("step"), flag("raw_entry"));
+  set_ok(out, input_status());
+}
+
+void Service::do_look(const Json& args, Json& out) noexcept {
+  input_.refresh();
+  if (const Json* clear = args.find("clear");
+      clear != nullptr && clear->is_bool() && clear->as_bool()) {
+    input_.clear_view_angles();
+    input_.clear_command_angles();
+    input_.clear_raw_angles();
+    input_.clear_step_yaw();
+    set_ok(out, input_status());
+    return;
+  }
+  const auto number = [&](const char* key, float fallback) -> float {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
+                                                  : fallback;
+  };
+  const auto flag = [&](const char* key) -> bool {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_bool() && value->as_bool();
+  };
+  const float pitch = number("pitch", 0.0F);
+  const float yaw = number("yaw", 0.0F);
+  const float roll = number("roll", 0.0F);
+  // Default: the silent sub-tick `input_history.view_angles`. `command: true`
+  // writes the command's **own** `viewangles` (`base + 0x40`) instead/in addition —
+  // that is the channel movement's wishdir uses (measured live 2026-10-15: the
+  // history entries do not steer movement), which is what an auto-strafe needs.
+  input_.set_view_angles(pitch, yaw, roll);
+  if (flag("command")) {
+    input_.set_command_angles(pitch, yaw, roll);
+  } else {
+    input_.clear_command_angles();
+  }
+  if (flag("raw")) {
+    // The raw per-sub-tick input angle history (`CCSGOInput + 0xbd0`).
+    input_.set_raw_angles(pitch, yaw, roll);
+  } else {
+    input_.clear_raw_angles();
+  }
+  // `step_yaw: <degrees>` appends a `CSubtickMoveStep` carrying only a yaw delta
+  // (`when = 1`) each tick — the other silent movement-yaw candidate.
+  if (const Json* step = args.find("step_yaw"); step != nullptr && step->is_number()) {
+    input_.set_step_yaw(static_cast<float>(step->as_number()));
+  } else {
+    input_.clear_step_yaw();
+  }
+  set_ok(out, input_status());
+}
+
+void Service::do_bhop(const Json& args, Json& out) noexcept {
+  input_.refresh();
+  bool on = true;
+  if (const Json* arg = args.find("on"); arg != nullptr && arg->is_bool()) {
+    on = arg->as_bool();
+  }
+  input_.set_bhop(on);
+  set_ok(out, input_status());
+}
+
+void Service::do_predict(const Json& args, Json& out) noexcept {
+  input_.refresh();
+  bool on = true;
+  if (const Json* arg = args.find("on"); arg != nullptr && arg->is_bool()) {
+    on = arg->as_bool();
+  }
+  input_.set_predict(on);
+  set_ok(out, input_status());
+}
+
+void Service::do_strafe(const Json& args, Json& out) noexcept {
+  input_.refresh();
+  bool on = true;
+  if (const Json* arg = args.find("on"); arg != nullptr && arg->is_bool()) {
+    on = arg->as_bool();
+  }
+  const auto number = [&](const char* key, float fallback) -> float {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
+                                                  : fallback;
+  };
+  if (on) {
+    // `wishspeed` (30) and `subtick` (12) follow the community air-strafe recipe.
+    input_.set_strafe_config(
+        number("wishspeed", input_.strafe_wishspeed()),
+        static_cast<int>(number("subtick", static_cast<float>(input_.strafe_subticks()))));
+  }
+  input_.set_strafe(on);
+  set_ok(out, input_status());
+}
+
+void Service::set_movement_features(bool auto_strafe, bool bhop) noexcept {
+  input_.set_strafe(auto_strafe);
+  input_.set_bhop(bhop);
 }
 
 auto Service::start() noexcept -> bool {

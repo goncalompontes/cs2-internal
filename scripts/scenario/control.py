@@ -7,8 +7,8 @@ JSON, one object per line::
     {"id": 1, "cmd": "exec", "args": {"line": "sv_cheats 1"}}
     {"id": 1, "ok": true, "result": {"queued": true}}
 
-Commands: ``ping``, ``state``, ``exec``, ``wait_for``, ``quit``
-(see ``docs/control-harness.md``).
+Commands: ``ping``, ``state``, ``exec``, ``events``, ``wait_for``, ``input``,
+``press``, ``release``, ``bhop``, ``quit`` (see ``docs/control-harness.md``).
 """
 
 from __future__ import annotations
@@ -18,6 +18,12 @@ import json
 import os
 import time
 from typing import Any
+
+
+def _angle_delta(a: float, b: float) -> float:
+    """Shortest absolute difference between two angles, in degrees."""
+    delta = abs((a - b + 180.0) % 360.0 - 180.0)
+    return delta
 
 DEFAULT_PIPE = r"\\.\pipe\cs2-internal-control"
 
@@ -146,7 +152,7 @@ class Control:
 
     # --- commands ---------------------------------------------------------
     def ping(self) -> dict[str, Any]:
-        """Liveness + readiness: ``{pong, pid, exec_ready, state_ready}``."""
+        """Liveness + readiness: ``{pong, pid, exec_ready, state_ready, events_ready}``."""
         return self.request("ping")
 
     def state(self) -> dict[str, Any]:
@@ -157,16 +163,44 @@ class Control:
         """Queue a (``;``-separated) console line in the engine's Cbuf."""
         return self.request("exec", {"line": line})
 
-    def wait_for(self, *, timeout: float = 30.0, **predicates: Any) -> dict[str, Any]:
-        """Poll until ``predicates`` hold; returns ``{matched, snapshot}``.
+    def events(self, limit: int = 64, subscribe: str | list[str] | None = None) -> dict[str, Any]:
+        """Recent game events captured by the payload listener.
+
+        Returns ``{count, events: [{"name": ..., "seq": ...}, ...]}``, oldest
+        first. ``subscribe`` registers one or more event names on demand (for
+        events the payload was not already watching); names the game does not
+        know are ignored by the manager.
+        """
+        args: dict[str, Any] = {"limit": limit}
+        if subscribe is not None:
+            args["subscribe"] = subscribe
+        return self.request("events", args)
+
+    def wait_for(self, *, timeout: float = 30.0, event: str | None = None,
+                 event_args: dict[str, Any] | None = None,
+                 **predicates: Any) -> dict[str, Any]:
+        """Wait until ``predicates`` hold and (if given) ``event`` has fired.
 
         ``predicates`` is the structured expression described in
         ``docs/control-harness.md`` (``local_alive=True``, ``players_gte=3``,
-        ``team="T"``, ``in_map=True``, ``all=[...]``, ...). With no predicate it
-        waits for the local player to exist.
+        ``team="T"``, ``in_map=True``, ``all=[...]``, ...). With no predicate
+        and no ``event`` it waits for the local player to exist.
+
+        ``event`` matches a game event fired *after* this call started; the
+        payload watches it on demand. ``event_args`` additionally requires the
+        event to carry those field values, e.g.
+        ``wait_for(event="player_death", event_args={"headshot": True})``.
         """
-        expr: dict[str, Any] = dict(predicates) if predicates else {"in_map": True}
-        return self.wait_for_expr(expr, timeout=timeout)
+        args: dict[str, Any] = {"timeout_ms": int(timeout * 1000)}
+        if predicates:
+            args["expr"] = dict(predicates)
+        elif event is None:
+            args["expr"] = {"in_map": True}
+        if event is not None:
+            args["event"] = event
+        if event_args:
+            args["event_args"] = event_args
+        return self.request("wait_for", args)
 
     def wait_for_expr(self, expr: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
         """Like :meth:`wait_for` but takes the expression object directly."""
@@ -175,13 +209,32 @@ class Control:
         )
 
     # --- input (engine button commands + setang) --------------------------
-    def press(self, key: str, hold: float = 0.0) -> dict[str, Any]:
+    def input(self, via: str | None = None) -> dict[str, Any]:
+        """Select/query the input backend (``"console"`` or ``"usercmd"``).
+
+        Returns the backend + hook status: ``{backend, ready, hooked, slot,
+        buttons_set, buttons_clear, bhop, calls, writes}``.
+        """
+        args: dict[str, Any] = {}
+        if via is not None:
+            args["via"] = via
+        return self.request("input", args)
+
+    def press(self, key: str, hold: float = 0.0, via: str | None = None) -> dict[str, Any]:
         """Hold a key/button; with ``hold`` seconds, release it again.
 
-        ``key`` is a friendly name (``"w"``, ``"space"``, ``"mouse1"``, ...) or
-        a raw button command name (``"forward"``). With ``hold=0`` the button
-        stays held until :meth:`release` (or the game clears it).
+        ``via="usercmd"`` writes the command's button mask through the payload's
+        `CreateMove` hook (``docs/re/client-dll.md`` §"Input path"); otherwise
+        the engine's own ``+<button>`` console command is used. ``key`` is a
+        friendly name (``"w"``, ``"space"``, ``"mouse1"``, ...).
         """
+        if via == "usercmd":
+            name = key.lower()
+            self.request("press", {"buttons": [name]})
+            if hold > 0:
+                time.sleep(hold)
+                self.request("release", {"buttons": [name]})
+            return {"button": name, "held": hold <= 0, "via": "usercmd"}
         button = BUTTONS.get(key.lower(), key)
         self.exec(f"+{button}")
         if hold > 0:
@@ -189,18 +242,110 @@ class Control:
             self.exec(f"-{button}")
         return {"button": button, "held": hold <= 0}
 
-    def release(self, key: str) -> dict[str, Any]:
+    def release(self, key: str, via: str | None = None) -> dict[str, Any]:
         """Release a button previously held with :meth:`press`."""
+        if via == "usercmd":
+            return self.request("release", {"buttons": [key.lower()]})
         button = BUTTONS.get(key.lower(), key)
         return self.exec(f"-{button}")
 
-    def look(self, *, yaw: float | None = None, pitch: float | None = None,
-             roll: float | None = None, timeout: float = 5.0) -> dict[str, Any]:
-        """Aim the view via the engine ``setang`` command (needs ``sv_cheats 1``).
+    def move(self, *, forward: float = 0.0, side: float = 0.0, up: float = 0.0,
+             clear: bool = False, quantize: bool = False, step: bool = False,
+             raw_entry: bool = False) -> dict[str, Any]:
+        """Set the ``usercmd`` analog move (raw input axes + command + buttons).
 
-        Omitted components keep their current value (read from ``state``). Blocks
-        until the engine has applied the angles (``setang`` is queued in the Cbuf
-        and takes effect on the next frame). Returns the applied angles.
+        The payload writes the raw analog axes on ``CCSGOInput`` (``+0x270``) —
+        the source ``create_move_input`` copies from — plus the command's move
+        floats/buttons, before and after the original ``CreateMove``
+        (``docs/re/subtick.md`` §"The command build"). Measure it with the
+        ``subtick-move`` scenario.
+
+        Three opt-in ingredients of the community recipe (all default off, so the
+        historic write is unchanged), exercised by ``movement-probe``:
+
+        ``quantize``
+            snap the axes to the ``sv_quantize_movement_input`` valid set
+            ``{-1, 0, +1}`` (the engine's own units — measured live 2026-10-15) so a
+            server that rounds ``forwardmove``/``leftmove`` to integers still moves
+            the player (UC 729264).
+        ``step``
+            also write the residual (``requested - quantized``) on the sub-tick
+            analog channel (``CSubtickMoveStep``), which the engine adds on top of
+            the base move (UC 761983).
+        ``raw_entry``
+            also write the per-controller input entry (``CCSGOInput + 0xb58``)
+            that ``FUN_180b5f7b0`` copies into ``+0x270`` inside slot 5 — the
+            documented "next probe" for the raw-input seam.
+        """
+        if clear:
+            args: dict[str, Any] = {"clear": True}
+        else:
+            args = {"forward": forward, "side": side, "up": up}
+            if quantize:
+                args["quantize"] = True
+            if step:
+                args["step"] = True
+            if raw_entry:
+                args["raw_entry"] = True
+        return self.request("move", args)
+
+    def buttons(self, *, press: Any = None, release: Any = None,
+                reset: bool = False) -> dict[str, Any]:
+        """Raw ``usercmd`` button overrides (a name, array of names, or mask)."""
+        if reset:
+            self.request("press", {"reset": True})
+        if release is not None:
+            self.request("release", {"buttons": release})
+        if press is not None:
+            self.request("press", {"buttons": press})
+        return self.input()
+
+    def bhop(self, on: bool = True) -> dict[str, Any]:
+        """Enable the payload's auto-jump (force ``IN_JUMP`` while grounded)."""
+        return self.request("bhop", {"on": bool(on)})
+
+    def strafe(self, on: bool = True, *, wishspeed: float | None = None,
+               subtick: int | None = None) -> dict[str, Any]:
+        """Toggle the payload's **auto-strafe** (airborne only, silent).
+
+        While airborne and above ~25 units/s the payload computes the community's
+        optimal air-strafe wish angle from the velocity and turns the *movement*
+        yaw onto it with sub-tick ``yaw_delta`` steps — the measured silent channel,
+        so the camera and the pawn's eye angles never move — holding the analog move
+        at full forward in that rotated frame. On the ground it writes nothing.
+
+        ``wishspeed`` (default 30) and ``subtick`` (default 12, i.e. split the turn
+        across the tick) follow the community recipe. Returns the backend status
+        (``strafe``, ``strafe_airborne``, ``strafe_speed``, ``strafe_delta``,
+        ``strafe_writes``).
+        """
+        args: dict[str, Any] = {"on": bool(on)}
+        if wishspeed is not None:
+            args["wishspeed"] = wishspeed
+        if subtick is not None:
+            args["subtick"] = subtick
+        return self.request("strafe", args)
+
+    def look(self, *, yaw: float | None = None, pitch: float | None = None,
+             roll: float | None = None, timeout: float = 5.0,
+             via: str | None = None, command: bool = False, raw: bool = False,
+             step_yaw: float | None = None) -> dict[str, Any]:
+        """Aim the view.
+
+        Default: the engine ``setang`` command (needs ``sv_cheats 1``), blocking
+        until the eye angles reach the target. ``via="usercmd"`` instead writes the
+        *sub-tick* ``view_angles`` through the payload (``docs/re/subtick.md``) —
+        the silent-aim seam; it does not block (the camera may not follow).
+
+        ``command=True`` additionally writes the command's **own** ``viewangles``
+        (``base + 0x40``): measured live 2026-10-15, that is the channel movement's
+        wishdir uses (the ``input_history`` entries do not steer movement) — but the
+        pawn's eye angles follow it, so it is not silent.
+
+        The *silent* movement-yaw candidates are ``raw=True`` (the raw per-sub-tick
+        angle history ``CCSGOInput + 0xbd0``) and ``step_yaw=<degrees>`` (one
+        ``CSubtickMoveStep`` carrying only a yaw delta) — see ``docs/re/subtick.md``
+        §"The movement yaw channel". Omitted components keep their current value.
         """
         current = self.state().get("local")
         if current is None:
@@ -211,6 +356,16 @@ class Control:
             "yaw": angles["yaw"] if yaw is None else yaw,
             "roll": angles["roll"] if roll is None else roll,
         }
+        if via == "usercmd":
+            request = dict(target)
+            if command:
+                request["command"] = True
+            if raw:
+                request["raw"] = True
+            if step_yaw is not None:
+                request["step_yaw"] = step_yaw
+            self.request("look", request)
+            return target
         self.exec(f"setang {target['pitch']:.3f} {target['yaw']:.3f} {target['roll']:.3f}")
         return self.wait_look(yaw=target["yaw"], pitch=target["pitch"],
                               roll=target["roll"], timeout=timeout)
@@ -218,14 +373,21 @@ class Control:
     def wait_look(self, *, yaw: float | None = None, pitch: float | None = None,
                   roll: float | None = None, tolerance: float = 1.5,
                   timeout: float = 5.0) -> dict[str, Any]:
-        """Wait until the local eye angles reach the given values."""
+        """Wait until the local eye angles reach the given values.
+
+        The comparison shortens to the **shortest angle** (``(-180, 180]``), so a
+        target of ``180`` matches a reported ``-180`` — without that, any heading
+        at or past due-south (180/225/270/315) can never converge and the wait
+        times out even though the view is correct (observed 2026-10-15: the
+        clearance sweep "failed" exactly those four headings).
+        """
         deadline = time.monotonic() + timeout
         while True:
             local = self.state().get("local")
             if local is not None:
                 angles = local["eye_angles"]
                 wanted = (("yaw", yaw), ("pitch", pitch), ("roll", roll))
-                if all(want is None or abs(angles[name] - want) <= tolerance
+                if all(want is None or _angle_delta(angles[name], want) <= tolerance
                        for name, want in wanted):
                     return angles
             if time.monotonic() >= deadline:

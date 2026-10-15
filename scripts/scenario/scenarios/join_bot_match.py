@@ -14,6 +14,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from .. import awaiting
 from ..session import Game, SessionError
 
 MAX_ADD_ATTEMPTS = 3
@@ -42,14 +43,9 @@ def _add_bot(game: Game, command: str, expected_players: int) -> bool:
 def run(game: Game, *, map_name: str = "de_dust2", bots: int = 2,
         map_timeout: float = 180.0) -> dict[str, Any]:
     """Seed a bot match on ``map_name`` and assert at least ``bots + 1`` players."""
-    # Cheats on, then a casual offline match. `game_type 0; game_mode 0` is
-    # casual; the semicolons are queued as one Cbuf line.
+    # Cheats on, then a casual offline match (`awaiting.ensure_map`).
     game.exec("sv_cheats 1")
-    game.exec(f"game_type 0; game_mode 0; map {map_name}")
-
-    loaded = game.wait_for(in_map=True, timeout=map_timeout)
-    if not loaded.get("matched"):
-        raise SessionError(f"map {map_name!r} did not load within {map_timeout:.0f}s")
+    awaiting.ensure_map(game, map_name=map_name, timeout=map_timeout)
 
     game.exec("bot_kick")  # clear whatever the previous match left behind
     added = max(_wait_players_at_most(game, 1), 1)
