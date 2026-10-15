@@ -345,6 +345,22 @@ every warm target.
   `subtick_moves` → `CMoveData` copy `0xa73c70`. Consumed by the payload's
   record-based bhop (`Input::bhop_tick`, `payload/control/src/input.cpp`).
 
+- **`client.dll` — air movement / strafing** (`docs/re/strafing.md`, re-derived
+  2026-10-15/16 on 25815307): `AirMove` `0x8e48f0` (the `wishdir` build from the
+  CMoveData angles + the button-derived axes), `AirAccelerate` `0x8beb70`
+  (`addspeed = min(wishspeed, 30) − dot(v, ŵ)`, `accelspeed = sv_airaccelerate ·
+  wishspeed · frametime`), the convar defaults read from their registration
+  (`sv_air_max_wishspeed` 30, `sv_airaccelerate` 12, `sv_quantize_movement_input` 1),
+  the `SetupMove` analog sanitizer (`m_flCmdForwardMove` → `CMoveData+0x2c`, values
+  `|x| ≥ 10` dropped), the analog scale (`UpdateInputState` `0xa764d0` stores
+  `CBaseUserCmdPB::forwardmove` into `m_flCmdForwardMove` **unscaled**, and the engine
+  treats the unit `1.0` as the full-speed request), the sub-tick movement-yaw channel
+  (`yaw_delta` accumulates onto the command's `viewangles` → per-slice `CMoveData`
+  angles, gated by `sv_subtick_movement_view_angles` via `DoMovement::Subtick`'s
+  `(*vtable+0x150)()`), and the `SetupMove` button gate (an axis is copied only when
+  `IN_FORWARD|IN_BACK` / `IN_MOVELEFT|IN_MOVERIGHT` is held). **Consumed by the
+  payload's `Input::strafe_tick` / `write_strafe_wish` (the silent auto-strafe).**
+
 When you finish a subsystem, update this map and the per-module doc.
 
 Warm analysis is automatic now (see §8): a later session reuses the stored

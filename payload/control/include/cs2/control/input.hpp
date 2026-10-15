@@ -123,15 +123,26 @@ inline constexpr float k_pi = 3.14159265358979323846F;
 //: Below this horizontal speed the air-strafe wish angle is meaningless (the
 //: community's own guard is `speed < 5`) — nothing is written.
 inline constexpr float k_strafe_min_speed = 25.0F;
-// The air-strafe gain model (the reference `test_strafer::ref_ideal_angle`): the
-// optimal wish angle is where `dot(velocity, wishdir)` falls to
-// `wishcap - accel_speed`, so the tick's acceleration is not spent on the
-// velocity projection. `accel_speed = maxspeed * airaccelerate * frame_time`
-// (`sv_airaccelerate` 12, weapon speed 250, 64 tick). Hard-coded: the payload has
-// no cvar reader, and the defaults are what an offline match runs.
+// The air-strafe gain model (`CGameMovement::AirAccelerate`, re-derived on build
+// 25815307; `docs/re/strafing.md`): the optimal wish angle is where
+// `dot(velocity, wishdir)` falls to `W - A`, with the air cap `W =
+// sv_air_max_wishspeed` (30) and the per-call budget `A = sv_airaccelerate *
+// wishspeed * frametime`. Once `A >= W` the optimum is exactly 90 degrees (a pure
+// perpendicular push). `wishspeed` is the engine's own clamped speed for a full
+// analog (a `1.0` axis reaches `m_flMaxSpeed`), so the offline default (a rifle at
+// 250) puts `A = 46.875 > W` and the answer at 90 degrees. Computing it rather than
+// hard-coding the 90 keeps the raid correct for a slower weapon or a short slice.
+inline constexpr float k_strafe_air_wishspeed = 30.0F;
 inline constexpr float k_strafe_max_speed = 250.0F;
 inline constexpr float k_strafe_airaccelerate = 12.0F;
 inline constexpr float k_tick_interval = 1.0F / 64.0F;
+// The admission gate discards the *whole* sub-tick array when the accumulated
+// view delta exceeds ~2.0 (radians) per command, so the basis rotation is clamped
+// to this many degrees (1.75 rad) with the bhop pair in the same array.
+inline constexpr float k_strafe_rot_limit_deg = 100.0F;
+//: The most `yaw_delta` steps the strafe will emit for one tick (the shared array's
+//: admission gate caps the whole field at 32 entries; the bhop pair shares it).
+inline constexpr int k_strafe_max_steps = 16;
 
 //: Shortest signed difference `a - b` in degrees, in `(-180, 180]`.
 [[nodiscard]] inline auto normalize_angle(float value) noexcept -> float {
@@ -313,17 +324,36 @@ class Input {
   [[nodiscard]] float move_up() const noexcept { return move_up_.load(); }
 
   // --- auto-strafe -------------------------------------------------------
-  // While **airborne** (and above a minimum speed), each tick:
-  //   1. computes the optimal air-strafe wish yaw from the velocity (the
-  //      community formula: `wish = velocity_yaw + dir * (90 - asin(wishspeed /
-  //      speed))`, `dir = sign(camera_yaw - velocity_yaw)`),
-  //   2. turns the *movement* yaw onto it with sub-tick `CSubtickMoveStep`
-  //      `yaw_delta`s — the **silent** channel (measured: the camera and the pawn's
-  //      eye angles never move), split into `subtick` steps across the tick, and
-  //   3. holds the analog move at full forward in that rotated frame (so a
-  //      quantising server still sees `(1, 0)` = the intended direction).
-  // On the ground, or below the minimum speed, it writes nothing — the player's own
-  // input is untouched. Pairs with `bhop` for the classic auto-bhop-strafe.
+  // A **normal, silent** auto-strafe: while **airborne** (and above a minimum
+  // speed) each tick it
+  //   1. takes the goal heading from the held keys read in the *view* frame
+  //      (W/nothing ⇒ the camera's forward, S ⇒ behind; holding A/D stands the
+  //      feature down — the player's own air control wins), and
+  //   2. pushes the air-acceleration wish **perpendicular to the velocity** on the
+  //      side of that goal (the optimal `theta*` of `AirAccelerate`:
+  //      `theta* = A >= W ? 90 : acos((W - A) / speed)`, `W = sv_air_max_wishspeed
+  //      = 30`, `A = sv_airaccelerate * wishspeed * frametime`), re-derived from the
+  //      *current* velocity every tick so the wish re-perpendicularises.
+  //
+  // The wish is written **silently** — no view angle is touched, so neither the
+  // camera nor the pawn's eye angles move. Two encodings, chosen by `subticks`:
+  //
+  //   * `subticks >= 1` (**default 8**, the precise channel — validated live at
+  //     **+85.1 median / +104.9 max u/s per hop**, scaling with the slice count): the analog stays on the
+  //     valid set (`forwardmove = 1`, `leftmove = 0`) and the *movement basis* is
+  //     rotated onto the wish with `subticks` `CSubtickMoveStep` `yaw_delta`s
+  //     (`when = i/N`). The engine accumulates them onto the command's `viewangles`
+  //     and `AirMove` builds `wishdir` from that rotated basis, so the wish is exact
+  //     and `sv_quantize_movement_input` is a no-op (`docs/re/strafing.md` §"The
+  //     silent movement-yaw channel"). Needs `sv_subtick_movement_view_angles` on.
+  //   * `subticks == 0` (the fallback): the wish direction is encoded in the analog
+  //     itself, in the camera frame, snapped to the `{-1,0,1}` valid set. Needs no
+  //     sub-tick policy but the snap loses the exact perpendicular angle — measured
+  //     nearly flat.
+  //
+  // On the ground, below the minimum speed, when no command/basis is readable, or
+  // when the player holds A/D, it writes nothing. Pairs with `bhop` for the classic
+  // auto-bhop-strafe, sharing the sub-tick array and its admission gate.
   void set_strafe(bool on) noexcept;
   [[nodiscard]] bool strafe() const noexcept { return strafe_enabled_.load(); }
   void set_strafe_config(float wishspeed, int subticks) noexcept;
@@ -336,6 +366,21 @@ class Input {
   [[nodiscard]] bool strafe_airborne() const noexcept { return strafe_airborne_.load(); }
   [[nodiscard]] float strafe_speed() const noexcept { return strafe_speed_.load(); }
   [[nodiscard]] float strafe_delta() const noexcept { return strafe_delta_.load(); }
+  // The goal heading (from the held keys, world yaw), the chosen wish yaw, the
+  // basis rotation written (`wish - view`, degrees, after the gate clamp), the side
+  // (+1 CCW / −1 CW of the velocity) and how many `yaw_delta` steps were queued.
+  [[nodiscard]] float strafe_goal() const noexcept { return strafe_goal_.load(); }
+  [[nodiscard]] float strafe_wish() const noexcept { return strafe_wish_.load(); }
+  [[nodiscard]] float strafe_rot() const noexcept { return strafe_rot_.load(); }
+  [[nodiscard]] int strafe_side() const noexcept { return strafe_side_.load(); }
+  [[nodiscard]] int strafe_steps() const noexcept { return strafe_steps_.load(); }
+  // Why the last tick did or did not act: 0 off/no command, 1 on the ground,
+  // 2 too slow, 3 no readable basis, 4 acted, 5 no room in the sub-tick array,
+  // 6 nothing to write, 7 the player is holding A/D (their input wins).
+  [[nodiscard]] int strafe_reason() const noexcept { return strafe_reason_.load(); }
+  // True when the basis rotation had to be clamped so the admission gate's
+  // view-delta limit could not discard the whole array (the bhop pair included).
+  [[nodiscard]] bool strafe_clamped() const noexcept { return strafe_clamped_.load(); }
   // How many times the bhop assist queued a (sub-tick) jump press.
   [[nodiscard]] std::uint64_t bhop_presses() const noexcept { return bhop_presses_.load(); }
   // Bhop gate diagnostics: ticks the engine's button state showed the player
@@ -486,6 +531,21 @@ class Input {
   // One tick of the auto-strafe (see `set_strafe`); called from `apply()` with the
   // `CBaseUserCmdPB` (`base`) and the owning `CUserCmd` (`cmd`).
   void strafe_tick(void* base, void* cmd) noexcept;
+  // Write the strafe's wish: the analog move floats + both button states, and (in
+  // the `subticks >= 1` mode) the basis-rotating `yaw_delta` steps (`deltas[0..steps)`,
+  // already the per-slice optimum — see `strafe_tick`). Returns false when nothing
+  // could be written.
+  auto write_strafe_wish(std::uint8_t* base, std::uint8_t* cmd, float forward, float side,
+                         const float* deltas, int steps) noexcept -> bool;
+  // True when `base->subtick_moves` already holds a yaw-only step (button 0, no
+  // analog, a non-zero `yaw_delta`) — the per-frame idempotency check for the
+  // strafe's rotation (the hook can run more than once for the same command, and
+  // the engine rebuilds the table every frame).
+  [[nodiscard]] auto strafe_steps_present(std::uint8_t* base) const noexcept -> bool;
+  // Move the just-appended last element of `base->subtick_moves` to its `when`
+  // order, so the admission gate's monotonicity clause cannot discard the whole
+  // array (the engine's own steps and the bhop pair share the field).
+  void sort_last_step(std::uint8_t* base, float when) noexcept;
   [[nodiscard]] bool on_ground() const noexcept;
   // The local pawn's horizontal velocity (``false`` when unavailable).
   [[nodiscard]] bool velocity(float& x, float& y) const noexcept;
@@ -554,8 +614,8 @@ class Input {
   std::atomic<std::uint64_t> bhop_a_{0};        // landings answered with A
   std::atomic<std::uint64_t> bhop_b_{0};        // landings answered with B
   std::atomic<std::uint64_t> bhop_skipped_{0};  // landings with no pair placed
-  std::atomic<float> strafe_wishspeed_{30.0F};
-  std::atomic<int> strafe_subticks_{12};
+  std::atomic<float> strafe_wishspeed_{250.0F};
+  std::atomic<int> strafe_subticks_{8};
   std::atomic<std::uint64_t> strafe_writes_{0};
   std::atomic<std::uint64_t> strafe_raw_writes_{0};
   // Engine prediction (sub-tick bhop): the movement-services vtable entries the
@@ -574,7 +634,13 @@ class Input {
   std::atomic<bool> strafe_airborne_{false};
   std::atomic<float> strafe_speed_{0.0F};
   std::atomic<float> strafe_delta_{0.0F};
-  bool strafe_side_ = false;  // alternates the gain side when aligned with the camera
+  std::atomic<float> strafe_goal_{0.0F};
+  std::atomic<float> strafe_wish_{0.0F};
+  std::atomic<float> strafe_rot_{0.0F};
+  std::atomic<int> strafe_side_{0};
+  std::atomic<int> strafe_steps_{0};
+  std::atomic<int> strafe_reason_{0};
+  std::atomic<bool> strafe_clamped_{false};
   std::atomic<bool> move_enabled_{false};
   std::atomic<bool> move_quantize_{false};
   std::atomic<bool> move_step_{false};

@@ -308,15 +308,24 @@ class Control:
                subtick: int | None = None) -> dict[str, Any]:
         """Toggle the payload's **auto-strafe** (airborne only, silent).
 
-        While airborne and above ~25 units/s the payload computes the community's
-        optimal air-strafe wish angle from the velocity and turns the *movement*
-        yaw onto it with sub-tick ``yaw_delta`` steps — the measured silent channel,
-        so the camera and the pawn's eye angles never move — holding the analog move
-        at full forward in that rotated frame. On the ground it writes nothing.
+        While airborne and above ~25 units/s the payload takes the goal heading from
+        the held keys in the view frame (``W``/nothing = the camera's forward, ``S``
+        = behind; a held ``A``/``D`` stands it down — your own air control wins) and
+        pushes the air-acceleration wish perpendicular to the *current* velocity on
+        that side, re-deriving it every tick. Nothing writes a view angle, so the
+        camera and the pawn's eye angles never move. On the ground it writes nothing.
 
-        ``wishspeed`` (default 30) and ``subtick`` (default 12, i.e. split the turn
-        across the tick) follow the community recipe. Returns the backend status
-        (``strafe``, ``strafe_airborne``, ``strafe_speed``, ``strafe_delta``,
+        ``subtick`` (**default 8**, validated live at **+85.1 median / +104.9 max u/s
+        per hop**, scaling with the slice count) keeps the analog on the valid set
+        ``(1, 0)`` and rotates the movement basis with ``N`` ``yaw_delta`` steps (each
+        set from a per-slice simulation, so every slice lands on the optimal angle —
+        needs ``sv_subtick_movement_view_angles``); ``0`` puts the direction in the
+        camera-frame analog instead (exact only when ``sv_quantize_movement_input`` is
+        off, and the ``{-1,0,1}`` snap loses the perpendicular angle — measured nearly
+        flat). ``wishspeed`` (default ~250 = the engine's clamped speed for a full
+        analog) is the ``AirAccelerate`` budget. Returns the backend status
+        (``strafe``, ``strafe_airborne``, ``strafe_speed``, ``strafe_wish``,
+        ``strafe_rot``, ``strafe_side``, ``strafe_steps``, ``strafe_reason``,
         ``strafe_writes``).
         """
         args: dict[str, Any] = {"on": bool(on)}

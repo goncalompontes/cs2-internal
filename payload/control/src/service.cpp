@@ -436,6 +436,13 @@ auto Service::input_status() noexcept -> Json {
   result.set("strafe_airborne", Json::boolean(input_.strafe_airborne()));
   result.set("strafe_speed", Json::number(input_.strafe_speed()));
   result.set("strafe_delta", Json::number(input_.strafe_delta()));
+  result.set("strafe_goal", Json::number(input_.strafe_goal()));
+  result.set("strafe_wish", Json::number(input_.strafe_wish()));
+  result.set("strafe_rot", Json::number(input_.strafe_rot()));
+  result.set("strafe_side", Json::number(static_cast<double>(input_.strafe_side())));
+  result.set("strafe_steps", Json::number(static_cast<double>(input_.strafe_steps())));
+  result.set("strafe_reason", Json::number(static_cast<double>(input_.strafe_reason())));
+  result.set("strafe_clamped", Json::boolean(input_.strafe_clamped()));
   result.set("strafe_wishspeed", Json::number(input_.strafe_wishspeed()));
   result.set("strafe_subticks", Json::number(static_cast<double>(input_.strafe_subticks())));
   result.set("strafe_writes", Json::number(static_cast<double>(input_.strafe_writes())));
@@ -672,7 +679,9 @@ void Service::do_strafe(const Json& args, Json& out) noexcept {
                                                   : fallback;
   };
   if (on) {
-    // `wishspeed` (30) and `subtick` (12) follow the community air-strafe recipe.
+    // `wishspeed` (the engine's clamped speed for a full analog, ~250) and
+    // `subtick` (0 = the camera-frame analog, N = split the basis rotation over N
+    // `yaw_delta` steps) follow `docs/re/strafing.md` §3.4.
     input_.set_strafe_config(
         number("wishspeed", input_.strafe_wishspeed()),
         static_cast<int>(number("subtick", static_cast<float>(input_.strafe_subticks()))));

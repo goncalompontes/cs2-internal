@@ -268,7 +268,7 @@ void Input::set_strafe_config(float wishspeed, int subticks) noexcept {
   if (wishspeed > 0.0F) {
     strafe_wishspeed_.store(wishspeed);
   }
-  strafe_subticks_.store(std::clamp(subticks, 1, 16));
+  strafe_subticks_.store(std::clamp(subticks, 0, 16));
 }
 
 auto Input::velocity(float& x, float& y) const noexcept -> bool {
@@ -285,131 +285,329 @@ auto Input::velocity(float& x, float& y) const noexcept -> bool {
   return true;
 }
 
-// The auto-strafe (`set_strafe`): one tick of **analog** air-strafing, ported
-// from the known-good reference (`airstrafe.cpp`, the `sv_quantize_movement_input
-// 0` path). Each airborne tick the wish is a pure side push perpendicular to the
-// optimal wish yaw, re-encoded from the wish frame into the command's own view
-// frame (`rotate_movement`), so the camera never moves. The wish is written to the
-// command's `forwardmove`/`leftmove` **and** the raw axes (`CCSGOInput + 0x270`),
-// because the movement reads the raw input — the command-side floats alone are
-// re-derived away (`docs/re/subtick.md`).
+// The auto-strafe (`set_strafe`): one tick of a **normal, silent** air-strafe.
+// Airborne only (`AirMove` is the air path; the ground is `WalkMove` + friction).
+// The goal heading is the held keys read in the *view* frame — `W`/nothing is the
+// camera's forward, `S` is behind — and a held `A`/`D` stands the feature down so
+// the player's own air control is never hijacked. The wish is then pushed
+// perpendicular to the **current** horizontal velocity on the goal's side, at the
+// `AirAccelerate` optimum `theta*` (`docs/re/strafing.md`), recomputed every tick
+// so it re-perpendicularises instead of decaying (a *held* side with a fixed basis
+// stops accelerating after ~3 ticks). Nothing writes a view angle, so neither the
+// camera nor the pawn's eye angles move (`write_strafe_wish` documents the two
+// silent encodings).
 void Input::strafe_tick(void* base, void* cmd) noexcept {
   strafe_airborne_.store(false);
   strafe_delta_.store(0.0F);
+  strafe_goal_.store(0.0F);
+  strafe_wish_.store(0.0F);
+  strafe_rot_.store(0.0F);
+  strafe_side_.store(0);
+  strafe_steps_.store(0);
+  strafe_clamped_.store(false);
+  strafe_reason_.store(0);
   if (base == nullptr || !strafe_enabled_.load()) {
     return;
   }
   if (on_ground()) {
-    return;  // grounded: leave the player's own input alone
+    strafe_reason_.store(1);  // grounded: leave the player's own input alone
+    return;
   }
   float vx = 0.0F;
   float vy = 0.0F;
   if (!velocity(vx, vy)) {
+    strafe_reason_.store(2);
     return;
   }
   const float speed = std::sqrt(vx * vx + vy * vy);
   strafe_speed_.store(speed);
   if (speed < k_strafe_min_speed) {
+    strafe_reason_.store(2);
     return;
   }
   strafe_airborne_.store(true);
 
   auto* bytes_base = static_cast<std::uint8_t*>(base);
+  auto* bytes_cmd = static_cast<std::uint8_t*>(cmd);
   const auto angles_ptr = *reinterpret_cast<std::uintptr_t*>(bytes_base + k_base_viewangles_offset);
   float view_yaw = 0.0F;
   if (angles_ptr == 0 ||
       !cs2::game::read(angles_ptr + k_angles_values_offset + sizeof(float), view_yaw)) {
+    strafe_reason_.store(3);
+    strafe_airborne_.store(false);
     return;
   }
 
-  // The player's travel intent: the direction they are holding. Read the command's
-  // own button mask *before* the analog is overwritten.
+  // The player's travel intent, read from the command's own mask *before* it is
+  // overwritten. Holding a strafe key (A/D) stands the assist down — the player is
+  // already air-controlling — and `S` flips the goal behind the camera.
   std::uint64_t buttons = 0;
   const auto cmd_ptr = reinterpret_cast<std::uintptr_t>(cmd);
   if (cmd != nullptr && writable(cmd_ptr + k_cmd_buttons_offset, sizeof(std::uint64_t))) {
     buttons = *reinterpret_cast<std::uint64_t*>(cmd_ptr + k_cmd_buttons_offset);
   }
-  float yaw_offset = 0.0F;
-  if ((buttons & button::k_moveleft) != 0) {
-    yaw_offset += 90.0F;
+  constexpr std::uint64_t side_bits = button::k_moveleft | button::k_moveright;
+  if ((buttons & side_bits) != 0) {
+    strafe_reason_.store(7);
+    strafe_airborne_.store(false);
+    return;
   }
-  if ((buttons & button::k_moveright) != 0) {
-    yaw_offset -= 90.0F;
-  }
-  if ((buttons & button::k_forward) != 0) {
-    yaw_offset *= 0.5F;
-  } else if ((buttons & button::k_back) != 0) {
-    yaw_offset = -yaw_offset * 0.5F + 180.0F;
-  }
+  const float goal = normalize_angle(view_yaw + ((buttons & button::k_back) != 0 ? 180.0F : 0.0F));
+  strafe_goal_.store(goal);
 
-  // The optimal wish angle (reference `test_strafer::ref_ideal_angle`): the wish
-  // is a perpendicular push, so this is how far off perpendicular the push yaw
-  // sits — it keeps `dot(velocity, wishdir)` inside the tick's acceleration
-  // budget instead of spending it on the velocity projection.
-  const int steps = strafe_subticks_.load();
-  const float sub_frame = k_tick_interval / static_cast<float>(steps);
-  const float wish_cap = strafe_wishspeed_.load();
-  const float accel_speed = k_strafe_max_speed * k_strafe_airaccelerate * sub_frame;
-  const float cos_theta = accel_speed >= wish_cap ? wish_cap / (2.0F * speed)
-                                                  : (wish_cap - accel_speed) / speed;
-  const float ideal = std::fmax(
-      static_cast<float>(std::acos(std::clamp(cos_theta, -1.0F, 1.0F)) * 180.0 / k_pi), 1.0F);
+  // The `AirAccelerate` optimum: with the per-call budget
+  // `A = wishspeed * sv_airaccelerate * frametime` and the air cap
+  // `W = sv_air_max_wishspeed` (30), the wish sits at `theta* = acos((W - A)/s)`
+  // off the velocity; `A >= W` collapses it to exactly 90 degrees (the usual case
+  // for a full analog, `A = 250 * 12 / 64 = 46.875`). `theta` is clamped so the
+  // degenerate `A >= W` branch and a slow player both stay sane.
+  const int steps = std::clamp(strafe_subticks_.load(), 0, k_strafe_max_steps);
+  const float cap = k_strafe_air_wishspeed;
+  const float wishspeed = strafe_wishspeed_.load();
+  // The per-call budget `A` and the optimal angle it implies. The engine re-runs
+  // `AirAccelerate` once per slice with `frametime = (1/64)/slices`
+  // (`docs/re/strafing.md` §2.5), so a slice's `A` is the full-tick `A` divided by
+  // the slice count.
+  const auto theta_for = [cap](float speed, float accel) -> float {
+    if (cap - accel <= 0.0F || speed <= 0.0F) {
+      return 90.0F;  // A >= W: exactly perpendicular
+    }
+    return static_cast<float>(std::acos(std::clamp((cap - accel) / speed, -1.0F, 1.0F)) * 180.0 /
+                              k_pi);
+  };
+  const float accel_tick = wishspeed * k_strafe_airaccelerate * k_tick_interval;
 
   const float vel_yaw = static_cast<float>(std::atan2(vy, vx) * 180.0 / k_pi);
-  float target_yaw = normalize_angle(view_yaw + yaw_offset);
-  const float velocity_delta = normalize_angle(target_yaw - vel_yaw);
-  float side = 0.0F;
-  if (velocity_delta > ideal && speed > 80.0F) {
-    // Target sits CCW of the velocity: push on the left to turn toward it.
-    target_yaw = normalize_angle(vel_yaw - ideal);
-    side = 1.0F;
-  } else if (velocity_delta < -ideal && speed > 80.0F) {
-    target_yaw = normalize_angle(vel_yaw + ideal);
-    side = -1.0F;
-  } else if (strafe_side_) {
-    target_yaw = normalize_angle(target_yaw - ideal);
-    side = 1.0F;
-  } else {
-    target_yaw = normalize_angle(target_yaw + ideal);
-    side = -1.0F;
-  }
-  strafe_side_ = !strafe_side_;
-  strafe_delta_.store(normalize_angle(target_yaw - view_yaw));
+  const float delta = normalize_angle(goal - vel_yaw);
+  const float side = delta >= 0.0F ? 1.0F : -1.0F;
+  const float theta = std::clamp(theta_for(speed, accel_tick), 1.0F, 90.0F);
+  const float wish_yaw = normalize_angle(vel_yaw + side * theta);
+  const float rot = normalize_angle(wish_yaw - view_yaw);
+  strafe_side_.store(side > 0.0F ? 1 : -1);
+  strafe_wish_.store(wish_yaw);
+  strafe_delta_.store(rot);
 
-  // Re-encode the `(forward=0, left=side)` wish from the wish frame into the view
-  // frame (reference `airstrafe::rotate_movement`; the engine resolves
-  // `forward(view)*forwardmove + right(view)*leftmove`, `right = (-sin, cos)`).
-  const float view_rad = view_yaw * k_pi / 180.0F;
-  const float target_rad = target_yaw * k_pi / 180.0F;
-  const float wish_forward = side * std::sin(view_rad - target_rad);
-  const float wish_left = side * std::cos(view_rad - target_rad);
+  // The per-slice basis rotations for the sub-tick mode. The engine **accumulates**
+  // each step's `yaw_delta` onto the basis, so splitting the whole rotation evenly
+  // ramps the wish and only the last slice lands on `theta*` (≈ 1/N of the gain).
+  // Instead simulate the tick slice by slice and set each step's delta so slice `k`'s
+  // basis is the wish `theta_k*` from the **simulated** velocity at slice `k` — the
+  // community's `ref_air_accel_sim` recipe. That puts the bulk of the rotation on the
+  // first step and small deltas after, and makes every slice gain.
+  float deltas[k_strafe_max_steps] = {};
+  int count = 0;
+  if (steps >= 1) {
+    const float accel_slice = accel_tick / static_cast<float>(steps);
+    float sx = vx;
+    float sy = vy;
+    float basis = view_yaw;
+    for (int k = 0; k < steps && count < k_strafe_max_steps; ++k) {
+      const float s = std::sqrt(sx * sx + sy * sy);
+      if (s < k_strafe_min_speed) {
+        break;
+      }
+      const float slice_vel = static_cast<float>(std::atan2(sy, sx) * 180.0 / k_pi);
+      const float slice_theta = std::clamp(theta_for(s, accel_slice), 1.0F, 90.0F);
+      const float wish = normalize_angle(slice_vel + side * slice_theta);
+      deltas[count++] = normalize_angle(wish - basis);
+      basis = wish;
+      // Step the simulated velocity the way `AirAccelerate` will:
+      // `addspeed = min(wishspeed, 30) - dot(v, wishdir)`, `applied = min(A, addspeed)`.
+      const float wx = std::cos(wish * k_pi / 180.0F);
+      const float wy = std::sin(wish * k_pi / 180.0F);
+      const float addspeed = cap - (sx * wx + sy * wy);
+      if (addspeed > 0.0F) {
+        const float applied = std::min(accel_slice, addspeed);
+        sx += applied * wx;
+        sy += applied * wy;
+      }
+    }
+    // Keep the accumulated rotation inside the admission gate's limit (the bhop pair
+    // shares the array) by scaling the whole sequence down if it is exceeded.
+    float total = 0.0F;
+    for (int k = 0; k < count; ++k) {
+      total += deltas[k];
+    }
+    if (std::fabs(total) > k_strafe_rot_limit_deg) {
+      const float scale = k_strafe_rot_limit_deg / std::fabs(total);
+      for (int k = 0; k < count; ++k) {
+        deltas[k] *= scale;
+      }
+      strafe_clamped_.store(true);
+      total *= scale;
+    }
+    strafe_rot_.store(total);
+  }
+
+  // The camera-frame analog (`leftmove` positive = right, the engine's `right(yaw)
+  // = (sin, -cos)`), snapped to the `sv_quantize_movement_input` valid set so a
+  // rounding server and the client agree. Used only in the `subticks == 0` mode —
+  // the sub-tick mode rotates the basis instead and keeps `(1, 0)`.
+  const float rel = rot * k_pi / 180.0F;
+  const float forward = std::cos(rel);
+  const float left = -std::sin(rel);
+
+  if (write_strafe_wish(bytes_base, bytes_cmd, forward, left, deltas, steps)) {
+    strafe_reason_.store(4);
+    strafe_writes_.fetch_add(1);
+  } else if (strafe_reason_.load() == 0) {
+    strafe_reason_.store(5);  // the sub-tick array had no room
+  }
+}
+
+// True when the command's `subtick_moves` already holds a yaw-only step (button 0,
+// no analog deltas, a non-zero `yaw_delta`) — i.e. the strafe's basis rotation is
+// already in the array. The engine's own steps carry buttons, so this only matches
+// a strafe/`step_yaw` rotation.
+auto Input::strafe_steps_present(std::uint8_t* base) const noexcept -> bool {
+  if (base == nullptr) {
+    return false;
+  }
+  auto* field = base + k_base_subtick_moves_offset;
+  if (!writable(reinterpret_cast<std::uintptr_t>(field), k_field_rep_offset + sizeof(void*))) {
+    return false;
+  }
+  const auto count = *reinterpret_cast<const int*>(field + k_field_size_offset);
+  const auto rep = *reinterpret_cast<const std::uintptr_t*>(field + k_field_rep_offset);
+  if (count <= 0 || rep == 0 || static_cast<std::size_t>(count) > k_bhop_step_capacity) {
+    return false;
+  }
+  const auto elements = rep + k_rep_elements_offset;
+  for (int i = 0; i < count; ++i) {
+    std::uintptr_t step = 0;
+    if (!cs2::game::read(elements + static_cast<std::uintptr_t>(i) * 8, step) || step == 0 ||
+        !writable(step, k_step_yaw_offset + sizeof(float))) {
+      continue;
+    }
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(step);
+    if (*reinterpret_cast<const std::uint64_t*>(bytes + k_step_button_offset) != 0) {
+      continue;
+    }
+    if (*reinterpret_cast<const float*>(bytes + k_step_forward_offset) != 0.0F ||
+        *reinterpret_cast<const float*>(bytes + k_step_left_offset) != 0.0F) {
+      continue;
+    }
+    if (*reinterpret_cast<const float*>(bytes + k_step_yaw_offset) != 0.0F) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Move the just-appended last element of `base->subtick_moves` to its `when` order,
+// keeping the field monotonic (the gate discards the *whole* array on a decreasing
+// `when`). The engine's own button steps and the bhop pair share the field, so an
+// appended strafe step may have to move before them. Never moves a step past an
+// equal `when`.
+void Input::sort_last_step(std::uint8_t* base, float when) noexcept {
+  if (base == nullptr) {
+    return;
+  }
+  auto* field = base + k_base_subtick_moves_offset;
+  if (!writable(reinterpret_cast<std::uintptr_t>(field), k_field_rep_offset + sizeof(void*))) {
+    return;
+  }
+  const auto count = *reinterpret_cast<const int*>(field + k_field_size_offset);
+  const auto rep = *reinterpret_cast<const std::uintptr_t*>(field + k_field_rep_offset);
+  if (count < 2 || rep == 0) {
+    return;
+  }
+  const auto elements = rep + k_rep_elements_offset;
+  const auto size = static_cast<std::size_t>(count);
+  if (!writable(elements, size * sizeof(std::uintptr_t))) {
+    return;
+  }
+  auto* pointers = reinterpret_cast<std::uintptr_t*>(elements);
+  const std::uintptr_t moved = pointers[size - 1];
+  std::size_t insert = size - 1;
+  for (std::size_t i = 0; i + 1 < size; ++i) {
+    if (step_when(reinterpret_cast<const void*>(pointers[i])) > when) {
+      insert = i;
+      break;
+    }
+  }
+  if (insert == size - 1) {
+    return;
+  }
+  for (std::size_t k = size - 1; k > insert; --k) {
+    pointers[k] = pointers[k - 1];
+  }
+  pointers[insert] = moved;
+}
+
+// Write the strafe's wish. In the sub-tick mode (`steps >= 1`) the analog stays on
+// the valid set (`forwardmove = 1`) and the **movement basis** is rotated onto the
+// wish with `steps` `yaw_delta`s (`when = i/N`, snapped to the engine's 1/64 grid)
+// — exact and immune to `sv_quantize_movement_input`, and silent (`docs/re/
+// strafing.md` §"The silent movement-yaw channel"). Otherwise the direction is
+// carried by the camera-frame analog and snapped to the valid set. Both write the
+// command floats, both button states and the raw axes `create_move_input` derives
+// the command's floats from.
+auto Input::write_strafe_wish(std::uint8_t* base, std::uint8_t* cmd, float forward, float left,
+                              const float* deltas, int steps) noexcept -> bool {
+  if (base == nullptr) {
+    return false;
+  }
+  if (steps >= 1 && deltas != nullptr) {
+    // The analog stays on the valid set; the basis rotation carries the direction.
+    forward = k_move_scale;
+    left = 0.0F;
+    // The hook can run more than once for the same command, and the engine rebuilds
+    // the table every frame — re-derive and re-append only when the rotation is not
+    // already in the array (by content, like the bhop pair).
+    if (!strafe_steps_present(base)) {
+      auto* field = base + k_base_subtick_moves_offset;
+      if (!writable(reinterpret_cast<std::uintptr_t>(field), k_field_rep_offset + sizeof(void*))) {
+        return false;
+      }
+      const auto before = *reinterpret_cast<const int*>(field + k_field_size_offset);
+      if (before < 0 || static_cast<std::size_t>(before) + static_cast<std::size_t>(steps) >
+                            k_bhop_step_capacity) {
+        return false;  // no room under the gate's budget
+      }
+      for (int i = 0; i < steps; ++i) {
+        const float when = quantize64(static_cast<float>(i + 1) / static_cast<float>(steps));
+        if (add_yaw_step(base, deltas[i], when) == nullptr) {
+          return false;
+        }
+        sort_last_step(base, when);
+      }
+    }
+    strafe_steps_.store(steps);
+  } else {
+    strafe_rot_.store(0.0F);
+  }
 
   // The command's analog + both button states (the legacy `cmd + 0x60` mask and
-  // `buttons_pb`, like `apply()`'s explicit move). Positive `leftmove` moves
-  // right (the reference's engine convention).
+  // `buttons_pb`, like `apply()`'s explicit move). Positive `leftmove` moves right
+  // (the engine's `right = (sin, -cos)`).
   constexpr std::uint64_t move_bits =
       button::k_forward | button::k_back | button::k_moveleft | button::k_moveright;
   std::uint64_t held = 0;
-  if (wish_forward > k_move_epsilon) {
+  if (forward > k_move_epsilon) {
     held |= button::k_forward;
-  } else if (wish_forward < -k_move_epsilon) {
+  } else if (forward < -k_move_epsilon) {
     held |= button::k_back;
   }
-  if (wish_left > k_move_epsilon) {
+  if (left > k_move_epsilon) {
     held |= button::k_moveright;
-  } else if (wish_left < -k_move_epsilon) {
+  } else if (left < -k_move_epsilon) {
     held |= button::k_moveleft;
   }
-  auto* move = reinterpret_cast<float*>(bytes_base + k_base_move_offset);
-  move[0] = wish_forward;
-  move[1] = wish_left;
+  if ((held & move_bits) == 0) {
+    return false;  // nothing to write
+  }
+  auto* move = reinterpret_cast<float*>(base + k_base_move_offset);
+  move[0] = forward;
+  move[1] = left;
   move[2] = 0.0F;
-  *reinterpret_cast<std::uint32_t*>(bytes_base + k_base_has_bits_offset) |= k_base_move_bits;
-  if (cmd != nullptr && writable(cmd_ptr + k_cmd_buttons_offset, sizeof(std::uint64_t))) {
-    auto* legacy = reinterpret_cast<std::uint64_t*>(cmd_ptr + k_cmd_buttons_offset);
+  *reinterpret_cast<std::uint32_t*>(base + k_base_has_bits_offset) |= k_base_move_bits;
+  if (cmd != nullptr && writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_buttons_offset,
+                                 sizeof(std::uint64_t))) {
+    auto* legacy = reinterpret_cast<std::uint64_t*>(cmd + k_cmd_buttons_offset);
     *legacy = (*legacy & ~move_bits) | held;
   }
-  const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(bytes_base + k_base_buttons_pb_offset);
+  const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
   if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
     auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
     state[0] = (state[0] & ~move_bits) | held;
@@ -419,17 +617,17 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
 
   // The raw axes are the source `create_move_input` derives the command floats
   // from; write them here too so the value survives (and is the one the movement
-  // reads). `write_strafe_move` does the same in the slot-5 detour.
+  // reads).
   if (ccsgo_input_ != 0) {
     auto* raw = reinterpret_cast<float*>(ccsgo_input_ + k_input_move_offset);
     if (writable(reinterpret_cast<std::uintptr_t>(raw), 3 * sizeof(float))) {
-      raw[0] = wish_forward;
-      raw[1] = wish_left;
+      raw[0] = forward;
+      raw[1] = left;
       raw[2] = 0.0F;
       strafe_raw_writes_.fetch_add(1);
     }
   }
-  strafe_writes_.fetch_add(1);
+  return true;
 }
 
 // Engine prediction (`docs/re/prediction.md`): run the game's own per-command

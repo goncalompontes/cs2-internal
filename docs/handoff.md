@@ -73,12 +73,34 @@ regardless of the control backend and gates only the explicit `press`/`move`/
   lands in `build == landed_tick + 1`. `bhop_age` spans the whole airtime between
   landings (the record only moves on a new contact), so the phase is read from the
   `bhop_a`/`bhop_b` counters, not from sampling `bhop_age`.
-- **Auto-strafe** is a port of the known-good analog path (wish re-encoded into
-  the command frame + raw axes; `docs/re/subtick.md`). Engagement validated; the
-  in-game effect not yet cleanly measured.
+- **Auto-strafe — re-implemented as a normal, silent air-strafe (2026-10-15).** The
+  payload now computes the `AirAccelerate` optimum `theta*` every airborne tick and
+  pushes the wish perpendicular to the *current* velocity on the side of the goal
+  taken from the held keys in the view frame (`W`/nothing forward, `S` behind; a
+  held `A`/`D` stands it down), so nothing writes a view angle and the camera/eye
+  angles stay put. `Input::strafe_tick` / `write_strafe_wish`; wired into the menu
+  (`wire::Settings.auto_strafe`), the `strafe` control command and the `autostrafe`
+  scenario. Two encodings: `subtick=0` (default) camera-frame analog; `subtick=N>=1`
+  keeps `(1, 0)` and rotates the movement basis with `N` `yaw_delta` steps. RE and
+  concise re-derivation: [`docs/re/strafing.md`](re/strafing.md); community sources:
+  [`docs/re/research-strafe.md`](re/research-strafe.md).
+  - Decisive re-derivation this session: `m_flCmdForwardMove` is
+    `CBaseUserCmdPB::forwardmove` **unscaled** (`UpdateInputState`, `FUN_180a764d0`),
+    and the engine's own unit analog (`1.0`) reaches `AirMove` as the full-speed
+    request (`move(forward=1.0)` = 204 u/s, 1.01x the console `+forward`), so a unit
+    analog still gets the full `A` budget and `theta* = 90°`. The silent-yaw gate is
+    the convar `sv_subtick_movement_view_angles`, read by `DoMovement::Subtick`'s
+    `(*vtable+0x150)()` predicate.
 
 **Resume here, in this order:**
 
+0. **⚠️ Footgun fixed 2026-10-15:** a `move()` request with all-zero axes used to
+   strip the movement bits out of every command (silently removing *all* movement —
+   a scenario that ended with `move(forward=0, side=0)` left the operator unable to
+   move). It now only overrides the bits when the wish is non-zero; `move(clear=True)`
+   turns the override off. Also note the **overlay menu owns the settings block** (the
+   layer re-writes it every frame), so a Python `settings.write()` can be clobbered —
+   toggle the features in the menu when a write "does not stick".
 1. **Bhop — validated live** (2026-10-15: `python scripts/run-scenario.py bhop`,
    de_dust2 bot match, operator-confirmed): hops, `bhop_writes`/`bhop_presses`
    climb, and placement **A fires** (`bhop_a`), i.e. the phase
@@ -86,9 +108,29 @@ regardless of the control backend and gates only the explicit `press`/`move`/
    dominates `bhop_b` (B is the beta catch-up — a hop, but the ground-slice
    clamp keeps the speed loss), and consider the optional fresh-frame
    hull-trace guess.
-2. Re-validate the strafe's effect (the earlier A/B was confounded by geometry).
-3. Optional: the UC 771389 Part IX fresh-frame hull-trace guess (only matters
-   online, where the replay slot is not fixed).
+2. **Strafer — validated live (2026-10-15); the silent sub-tick yaw rotation is the
+   working recipe.** `Input::strafe_tick` + `write_strafe_wish`
+   (`payload/control/src/input.cpp`) compute the `AirAccelerate` optimum every
+   airborne tick and push the wish perpendicular to the *current* velocity on the
+   side of the goal taken from the held keys in the view frame (`W`/nothing forward,
+   `S` behind; a held `A`/`D` stands it down). The sub-tick rotation is **simulated
+   per slice** (the community's `ref_air_accel_sim`): an *even* split ramps the basis
+   (the engine accumulates the deltas) and only the last slice lands on `theta*`;
+   setting each step's `yaw_delta` from the simulated velocity makes every slice gain.
+   Measured on a de_dust2 bot match (listen server, 250 u/s ground speed,
+   `sv_quantize_movement_input 1`, enabled purely through the menu's settings block):
+   - `strafe(subtick=8)` (**default**): **+85.1 median / +104.9 max u/s per hop**, and
+     the gain scales with the slice count — `subtick=1` +15.4, `4` +41.9, `8` +85.1
+     (all vs an ≈ 0 control). The even split (an earlier revision) gained +17.4.
+   - `strafe(subtick=0)` (camera-frame analog): nearly flat — the `{-1,0,1}` snap
+     loses the exact perpendicular angle, so the rotation channel is the one to use.
+   The `strafe` control command, the `wire::Settings.auto_strafe` byte and the menu
+   toggle are wired back in; the `autostrafe` scenario observes it. Drive the settings
+   block (`scripts/scenario/settings.py`) for a test — the menu owns the feature and
+   reverts a control-side enable on the next published frame. RE:
+   `docs/re/strafing.md`.
+3. Re-check the bhop's `bhop_b` share (B is the beta catch-up; a high share means
+   the phase slips) and consider the optional fresh-frame hull-trace guess.
 
 Diagnostics on `input()`: the `bhop_*` block above plus `bhop_holding_ticks`,
 `bhop_air_ticks`, `input_local_pawn`; `predict_ready`/`predict_runs`/

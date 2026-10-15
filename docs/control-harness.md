@@ -95,11 +95,10 @@ Requests are `{"id": <n>, "cmd": <name>, "args": {…}}`; responses are
 | `exec` | `line` | `{queued}` (semicolon-separated console line) |
 | `events` | `limit`, `subscribe` | `{count, events: [{name, seq}, …]}` — recent game events (oldest first); `subscribe` is a name or array of names to register on demand |
 | `wait_for` | `expr`, `event`, `timeout_ms` | `{matched, snapshot}` |
-| `input` | `via` (`"console"`\|`"usercmd"`) | backend + hook status `{backend, ready, hooked, slot, slot5, buttons_set, buttons_clear, bhop, calls, writes, move_*, angles, base_has_bits, base_move, raw_move, entry_move, steps, step_dump, entry_writes, step_writes, cmd_words, base_words}` plus the bhop block `{bhop_writes, bhop_presses, bhop_a, bhop_b, bhop_skipped, bhop_landed_tick, bhop_landed_frac, bhop_build, bhop_age, bhop_tick_base, bhop_client_tick, bhop_cmd_number, bhop_mode, bhop_when, bhop_holding_ticks, bhop_air_ticks}` (`bhop_a`/`bhop_b` = landings answered with placement A / the B catch-up; **A firing is the phase proof**, validated live) |
+| `input` | `via` (`"console"`\|`"usercmd"`) | backend + hook status `{backend, ready, hooked, slot, slot5, buttons_set, buttons_clear, bhop, calls, writes, move_*, angles, base_has_bits, base_move, raw_move, entry_move, steps, step_dump, entry_writes, step_writes, cmd_words, base_words}` plus the bhop block `{bhop_writes, bhop_presses, bhop_a, bhop_b, bhop_skipped, bhop_landed_tick, bhop_landed_frac, bhop_build, bhop_age, bhop_tick_base, bhop_client_tick, bhop_cmd_number, bhop_mode, bhop_when, bhop_holding_ticks, bhop_air_ticks}` (`bhop_a`/`bhop_b` = landings answered with placement A / the B catch-up; **A firing is the phase proof**, validated live) and the strafe block `{strafe, strafe_airborne, strafe_speed, strafe_delta, strafe_goal, strafe_wish, strafe_rot, strafe_side, strafe_steps, strafe_reason, strafe_clamped, strafe_wishspeed, strafe_writes}` (`strafe_rot` = the basis rotation written, `strafe_steps` the yaw steps queued, `strafe_reason` why the tick did/did not act (1 ground, 2 slow, 3 no angles, 4 wrote, 5 no room), `strafe_clamped` how often the rotation had to be clamped so the gate could not drop the shared step array) |
 | `press` / `release` | `buttons` (name, array, or mask); `reset` | hold / release command buttons on the active backend |
 | `look` | `pitch`, `yaw`, `roll`; `clear` | write the sub-tick `view_angles` (silent; `usercmd` backend) |
 | `bhop` | `on` | toggle the payload auto-jump |
-| `strafe` | `on`, `wishspeed` (30), `subtick` (12) | toggle the payload **auto-strafe**: airborne-only, silent (sub-tick `yaw_delta` turn + full-forward analog in the rotated frame); returns `strafe`, `strafe_airborne`, `strafe_speed`, `strafe_delta`, `strafe_writes` |
 | `move` | `forward`, `side`, `up`; `clear`; `quantize`, `step`, `raw_entry` | set the analog move; the three flags opt into the community ingredients (`docs/re/subtick.md` §"Community cross-check, second pass") |
 | `quit` | — | closes the channel |
 
@@ -142,7 +141,7 @@ payload's `CreateMove` hook (`docs/re/client-dll.md` §"Input path"). Provided b
 | `input(via=None)` | select/query the backend (`"console"`/`"usercmd"`) and read the hook status. |
 | `buttons(press=…, release=…, reset=False)` | raw `usercmd` button overrides (a name, array of names, or a mask). |
 | `bhop(on=True)` | payload auto-jump — a **tick-perfect sub-tick assist**. It acts only while the player actually holds jump (reads the engine's own `CInButtonState`), and answers each landing with a **release+press pair sharing one sub-tick `when`** placed at the engine's recorded landing fraction (`m_ModernJump`'s `m_flLastLandedFrac`), so the takeoff uses `DoJump`'s speed-preserving *alpha* path instead of being a whole tick late. A lone press is not a press edge while the key is held (the edge machine is `C || (A && B)`) — the pair is what makes one. Read-only (no engine calls); re-derived and re-appended every frame; owned by the overlay menu's `Movement` tab (`wire::Settings.bhop`), so a control command is corrected on the next frame. See `docs/re/prediction.md` §"RE findings" and `docs/re/research-bhop.md`. |
-| `strafe(on=True, wishspeed=30, subtick=12)` | payload **auto-strafe** (airborne only, **silent**): each airborne tick it computes the community's optimal wish angle from the velocity and turns the *movement* yaw onto it with sub-tick `yaw_delta` steps (the measured silent channel — the camera and the pawn's eye angles never move), holding the analog move at full forward in that rotated frame. On the ground it writes nothing. **Validated live**: +66.3 u/s gained in the air (132.2 → 198.5) with 0.0° eye-angle drift (`autostrafe`). |
+| `strafe(on=True, wishspeed=…, subtick=…)` | the payload's **silent auto-strafe** (airborne only): the goal heading comes from the held keys in the view frame (`W`/nothing forward, `S` behind; a held `A`/`D` stands it down), and the air-acceleration wish is pushed perpendicular to the *current* velocity at the `AirAccelerate` optimum `theta*`. `subtick=8` (**default**, validated live: **+85.1 median / +104.9 max u/s per hop**, scaling with the slice count) keeps the analog on the valid set and rotates the movement basis with `N` sub-tick `yaw_delta` steps, each set from a per-slice simulation (`ref_air_accel_sim`) so every slice lands on `theta*`; `subtick=0` carries the direction in the camera-frame analog instead (nearly flat). Owned by the menu's `Movement` tab. See `docs/re/strafing.md`. |
 | `move(forward=…, side=…, up=…, clear=False, quantize=False, step=False, raw_entry=False)` | `usercmd` analog movement — **validated live**: `forward=1.0` = 204 units/s (1.01× the console `+forward`), `forward=0.5` = 115 (0.57×). **Units are the engine's own: `1.0` = full speed** (a console `+forward` writes `1.0` into the raw axes *and* the command's `forwardmove`; measured 2026-10-15 — `450` was a wrong guess). The payload writes the raw axes (`CCSGOInput + 0x270`) plus the command floats/buttons; `quantize` snaps to the `sv_quantize_movement_input` valid set `{-1, 0, +1}` and `step` pushes the residual onto the sub-tick analog channel. **`raw_entry` is unsafe** (writing `CCSGOInput + 0xb58` crashed the game in the input path, 2026-10-15) — do not enable it. Measure with `subtick-move` / `movement-probe` (which kicks the bots, pins a test spot, waits for the teleport *and* zero velocity, and sweeps for a clear heading first — a blocked walk otherwise masquerades as a dead write). |
 | `noclip(bool)` / `teleport(x, y, z=None)` | `noclip` / `setpos` (needs `sv_cheats 1`) — positioning for tests. |
 
@@ -313,25 +312,36 @@ Payload-side state (shared by both backends):
   array. Fully read-only — no engine calls, nothing cleared. See
   `docs/re/prediction.md` §"RE findings" (and `docs/re/research-bhop.md` for the
   community sources).
-- **strafe** — the payload's **auto-strafe** (airborne only, silent): it reads the
-  local pawn's velocity, computes the optimal air-strafe wish angle (the community
-  formula: `velocity_yaw ± (90° − asin(wishspeed / speed))`, with the side taken
-  from the velocity's position relative to the camera), turns the command's
-  *movement* yaw onto it with sub-tick `yaw_delta` steps — the measured silent
-  channel, so the camera and the pawn's eye angles are untouched — and holds the
-  analog move at full forward in that rotated frame (a quantising server still sees
-  `(1, 0)`). On the ground, or below ~25 units/s, it writes nothing at all.
-  **Status (2026-10-15, end of session): the menu path now *engages*.** The earlier
-  "no in-game effect" was the `apply()` backend gate (the menu cannot select the
-  `usercmd` backend, so the features never ran); that is fixed. The strafe is now a
-  port of the known-good **analog** path (`airstrafe.cpp`, `sv_quantize_movement_input
-  0`) — the wish is re-encoded into the command frame and written to the command
-  floats **and** the raw axes — and engagement is validated, but the in-game effect
-  is not yet cleanly measured. The **bhop** is now the record-based design from
-  `docs/re/prediction.md` §"RE findings": a release+press pair past the recorded
-  landing (`build == landed_tick + 1`), written every frame, read-only. Its phase
-  (`bhop_age`) must be validated live; the manual `RunCommand` prediction path
-  crashes without the `CPrediction` envelope and stays off by default (`predict(on)`).
+- **`move(forward=0, side=0)` no longer strips your keys.** A *set* `move` request
+  with all-zero axes used to take the movement bits out of every command's button
+  mask, which silently removes **all** movement (found 2026-10-15: a scenario
+  finishing with `move(forward=0, side=0)` left the payload in that state and the
+  operator could not move at all). The write now only takes the movement bits over
+  when the resolved wish is non-zero; use `move(clear=True)` to turn the override
+  off for good.
+- **strafe — silent auto-strafe (airborne only).** While the local pawn is airborne
+  and moving faster than ~25 u/s the payload takes the goal heading from the held
+  keys in the **view** frame (`W`/nothing = the camera's forward, `S` = behind) and
+  pushes the air-acceleration wish **perpendicular to the current velocity** on that
+  side, at the `AirAccelerate` optimum `theta* = A >= W ? 90 : acos((W - A) / speed)`
+  (`W = sv_air_max_wishspeed = 30`, `A = sv_airaccelerate * wishspeed * frametime`),
+  re-derived every tick so it re-perpendicularises. Nothing writes a view angle, so
+  it is **silent** (the camera and the pawn's eye angles stay put). Two encodings
+  (`strafe(subtick=…)`): `8` (**default**, **validated live: +85.1 median / +104.9 max
+  u/s per hop**, scaling with the slice count) keeps the analog on the valid set
+  `(1, 0)` and rotates the movement basis with `N` `CSubtickMoveStep` `yaw_delta`s —
+  each set from a **per-slice simulation** (the engine accumulates the deltas, so an
+  even split ramps the basis and only the last slice is optimal); exact under
+  quantisation, and needs `sv_subtick_movement_view_angles`. `0` puts the direction in
+  the camera-frame analog instead (exact when `sv_quantize_movement_input` is off, but
+  the `{-1,0,1}` snap loses the perpendicular angle — measured nearly flat).
+  A held `A`/`D` stands the feature down (your own air control wins). RE and the
+  community sources: `docs/re/strafing.md`, `docs/re/research-strafe.md`. The `strafe`
+  control command, the `wire::Settings.auto_strafe` byte and the menu toggle are all
+  wired to it (menu-owned, ADR-0021).
+- **bhop** — the record-based design from `docs/re/prediction.md` §"RE findings",
+  validated live (`bhop_a` fires). The manual `RunCommand` prediction path crashes
+  without the `CPrediction` envelope and stays off by default (`predict(on)`).
   See the wrap-up at the top of `docs/handoff.md`.
 
 **Where the movement features are controlled.** They are **payload features**, not
