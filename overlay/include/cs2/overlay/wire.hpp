@@ -20,11 +20,12 @@
 namespace cs2::overlay::wire {
 
 inline constexpr uint32_t k_magic = 0x324F5343U;  // 'CSO2'
-inline constexpr uint32_t k_version = 6;
+inline constexpr uint32_t k_version = 7;
 
 inline constexpr int k_max_sections = 16;
 inline constexpr int k_max_lines = 64;
-inline constexpr int k_max_draws = 2048;
+inline constexpr int k_max_draws = 12288;
+inline constexpr int k_max_vertices = 16384;  // xy pairs for filled polygons
 inline constexpr int k_max_title = 64;
 inline constexpr int k_max_label = 48;
 inline constexpr int k_max_value = 200;
@@ -50,6 +51,9 @@ enum class DrawKind : uint32_t {
   filled_rect = 1,
   line = 2,
   text = 3,
+  // A filled convex polygon; `vertex_offset`/`vertex_count` index `Model.vertices`
+  // (xy pairs, screen space). Used for the solid hitbox capsules.
+  filled_poly = 4,
 };
 
 struct Draw {
@@ -67,6 +71,8 @@ struct Draw {
   uint8_t shadow;   // 1px drop shadow
   uint8_t outline;  // 1px outline on every side
   uint8_t reserved;
+  uint32_t vertex_offset;  // filled_poly: index into Model.vertices (xy pairs)
+  uint32_t vertex_count;   // filled_poly: number of points
   char text[k_max_text];
 };
 
@@ -90,6 +96,11 @@ struct Settings {
   uint8_t rage_key;       //   the virtual-key code held to trigger (0 = none)
   uint8_t rage_fire;      //   auto-fire while aiming
   uint8_t hitboxes;       // draw the real studio hitboxes (`docs/re/aim.md`)
+  // Hitbox rendering (menu-owned). `hitbox_mode`: 0 = outline, 1 = solid, 2 = wire.
+  // `hitbox_color_mode`: 0 = automatic per-hitgroup scheme, 1 = `hitbox_color`.
+  uint8_t hitbox_mode;
+  uint8_t hitbox_color_mode;
+  uint8_t hitbox_color[4];  // RGBA, used when `hitbox_color_mode == 1`
 };
 
 struct Model {
@@ -98,6 +109,9 @@ struct Model {
   Section sections[k_max_sections];
   uint32_t draw_count;
   Draw draws[k_max_draws];
+  // Pool for `filled_poly` vertices: xy pairs, indexed by `Draw.vertex_offset`.
+  uint32_t vertex_count;
+  float vertices[k_max_vertices * 2];
   uint32_t in_game;  // 1 when a local player is present (menu may interact)
 };
 

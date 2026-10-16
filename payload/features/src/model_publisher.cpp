@@ -48,6 +48,11 @@ auto to_wire_settings(const EspConfig& config) -> wire::Settings {
   settings.only_enemies = config.only_enemies ? 1 : 0;
   settings.show_dead = config.show_dead ? 1 : 0;
   settings.hitboxes = config.hitboxes ? 1 : 0;
+  settings.hitbox_mode = static_cast<std::uint8_t>(config.hitbox_mode);
+  settings.hitbox_color_mode = config.hitbox_custom_color ? 1 : 0;
+  for (int i = 0; i < 4; ++i) {
+    settings.hitbox_color[i] = config.hitbox_color[i];
+  }
   settings.show_hud = 1;
   return settings;
 }
@@ -63,6 +68,13 @@ auto from_wire_settings(const wire::Settings& settings) -> EspConfig {
   config.only_enemies = settings.only_enemies != 0;
   config.show_dead = settings.show_dead != 0;
   config.hitboxes = settings.hitboxes != 0;
+  config.hitbox_mode = settings.hitbox_mode <= 2
+                           ? static_cast<HitboxMode>(settings.hitbox_mode)
+                           : HitboxMode::outline;
+  config.hitbox_custom_color = settings.hitbox_color_mode != 0;
+  for (int i = 0; i < 4; ++i) {
+    config.hitbox_color[i] = settings.hitbox_color[i];
+  }
   return config;
 }
 
@@ -153,6 +165,7 @@ void ModelPublisher::publish(const render::OverlayModel& source, float /*width*/
   const std::size_t draw_count =
       (std::min)(source.draw.commands.size(), static_cast<std::size_t>(wire::k_max_draws));
   out.draw_count = static_cast<uint32_t>(draw_count);
+  uint32_t vertex_cursor = 0;
   for (std::size_t i = 0; i < draw_count; ++i) {
     wire::Draw& target = out.draws[i];
     target = wire::Draw{};
@@ -191,10 +204,24 @@ void ModelPublisher::publish(const render::OverlayModel& source, float /*width*/
             target.outline = command.outline ? 1 : 0;
             store_color(target, command.color);
             copy_string(target.text, sizeof(target.text), command.value);
+          } else if constexpr (std::is_same_v<T, render::FilledPoly>) {
+            target.kind = DrawKind::filled_poly;
+            const std::size_t room =
+                static_cast<std::size_t>(wire::k_max_vertices) - vertex_cursor;
+            const std::size_t count = (std::min)(command.points.size(), room);
+            target.vertex_offset = vertex_cursor;
+            target.vertex_count = static_cast<uint32_t>(count);
+            for (std::size_t j = 0; j < count; ++j) {
+              out.vertices[(vertex_cursor + j) * 2] = command.points[j].first;
+              out.vertices[(vertex_cursor + j) * 2 + 1] = command.points[j].second;
+            }
+            vertex_cursor += static_cast<uint32_t>(count);
+            store_color(target, command.color);
           }
         },
         source.draw.commands[i]);
   }
+  out.vertex_count = vertex_cursor;
 
   shared->sequence.store(sequence + 2, std::memory_order_release);  // even: stable
 }

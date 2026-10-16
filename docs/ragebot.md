@@ -48,19 +48,21 @@
     the command `rage_tick` happened to see (the slot-25 `create_move` **copy**
     vs the slot-5 simulated command), so a shot could be released on a command the
     silent write had not reached.
-- **Hitbox renderer — off by default, needs a live re-check.** The overlay draws each
-  live enemy's real hitbox capsules (coloured by hitgroup, rage target highlighted) on
-  the render thread. The draw is now the **true silhouette**: a capsule is the convex
-  hull of its two end spheres, so the tangent circle of each sphere as seen from the
-  eye is built in 3D, sampled and projected, and the two are hulled in screen space —
-  an honest pill with the correct tangents and per-endpoint perspective (it replaces
-  the previous screen-space stadium approximation). The read path's degenerate cases
-  are fixed too: a box whose bone cannot be resolved is skipped instead of leaving its
-  endpoints at the origin, and a mesh with no hitbox-set table is skipped instead of
-  being read as an inline array. `EspConfig::hitboxes` is still **off** and has **not
-  been re-validated live** — toggle it from the menu's ESP tab and compare against the
-  engine's own `sv_showplayerhitboxes`. See `docs/re/aim.md` §"The runtime studio
-  hitbox set".
+- **Hitbox renderer — three modes, menu-selectable.** The overlay draws each live
+  enemy's real hitbox capsules on the render thread (`EspConfig::hitboxes`, menu → ESP
+  → *Hitboxes (studio)*), in one of **Outline** (the true silhouette as a closed
+  polyline: a capsule is the convex hull of its two end spheres, so the tangent circle
+  of each sphere from the eye is built in 3D and the two are hulled in screen space),
+  **Solid** (that silhouette filled — `wire::DrawKind::filled_poly` →
+  `AddConvexPolyFilled`), or **Wireframe** (the capsule mesh cage: rim/cap rings plus
+  longitudinal lines, back-facing edges dimmed). Colours are either the **automatic
+  per-hitgroup** scheme (the head stands out; the rage target is highlighted) or a
+  **custom** RGBA picked in the menu. The read path's degenerate cases are fixed too: a
+  box whose bone cannot be resolved is skipped instead of leaving its endpoints at the
+  origin, and a mesh with no hitbox-set table is skipped. Offline reference:
+  `scripts/hitbox-view.py --style solid|wire` renders the same capsules from the live
+  `aim` data. Compare with the engine's own `sv_showplayerhitboxes`. See
+  `docs/re/aim.md` §"The runtime studio hitbox set".
 - **`aim` control command** — solves and returns the aim direction/value and the
   raw hitbox list; with `write: true` it also applies the solve to the silent
   sub-tick view angles.
@@ -220,12 +222,9 @@ save/restore the engine stream) to keep predictions exact.
 
 ## 10. Next actions
 
-1. **Hitbox renderer (live re-check).** The draw was rewritten to the true capsule
-   silhouette (§0) and the read path's degenerate cases fixed (unresolved-bone boxes
-   skipped; no-hitbox-set meshes skipped). Re-run the close-up comparison: project the
-   same boxes externally (`aim-probe`'s `hitboxes[]` carries bone-local and world
-   centres) and compare pixel for pixel with the drawn image. `EspConfig::hitboxes`
-   stays **off** until it lines up.
+1. **Hitbox renderer (live re-check).** The three modes and the colour picker are wired
+   (§0). Re-run the close-up comparison against `sv_showplayerhitboxes`, with
+   `scripts/hitbox-view.py` as the offline reference for the same boxes.
 2. **Occlusion / wallbang (Tier 1).** The engine trace call convention is pinned
    from a live call site (`docs/re/aim.md` §"Calling the trace from the payload"):
    `TraceShapeWithSortedResults` is

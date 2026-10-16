@@ -53,17 +53,20 @@ the **auto-fire timing bug is fixed**. Two things landed on top:
   carries the attack with the silent angle — the manual-fire path worked for the
   same reason. (Previously the press was only on the command `rage_tick` saw.)
 
-**Hitbox renderer — rewritten, needs a live re-check, off by default.**
-`EspConfig::hitboxes` draws each live enemy's real studio hitbox capsules, coloured by
-hitgroup with the rage target highlighted. The draw now traces the **true silhouette**:
-a capsule is the convex hull of its two end spheres, so the tangent circle of each
-sphere as seen from the eye is built in 3D, sampled and projected, and the two outlines
-are hulled in screen space — replacing the previous screen-space stadium approximation.
-Two degenerate cases were fixed in the read path as well (a box whose bone cannot be
-resolved is skipped instead of leaving its endpoints at the map origin; a mesh with no
-hitbox-set table is skipped instead of being read as an inline array). It has **not been
-re-validated live**: toggle it from the menu's ESP tab and compare with the engine's
-`sv_showplayerhitboxes`. `docs/ragebot.md` §10 item 1.
+**Hitbox renderer — three modes, menu-selectable.** `EspConfig::hitboxes` draws each
+live enemy's real studio hitbox capsules. The mode and colour are menu-owned (ESP tab):
+**Outline** (the true silhouette as a closed polyline — a capsule is the convex hull of
+its two end spheres, so the tangent circle of each sphere from the eye is built in 3D
+and the two are hulled in screen space), **Solid** (that silhouette filled via the new
+`wire::DrawKind::filled_poly` → ImGui's `AddConvexPolyFilled`), and **Wireframe** (the
+capsule mesh cage: rim/cap rings plus longitudinal lines, back-facing edges dimmed).
+Colours are the **automatic per-hitgroup** scheme (rage target highlighted) or a
+**custom** RGBA from the menu's colour picker. Two degenerate cases were fixed in the
+read path as well (a box whose bone cannot be resolved is skipped instead of leaving its
+endpoints at the map origin; a mesh with no hitbox-set table is skipped instead of being
+read as an inline array). `scripts/hitbox-view.py` renders the same capsules offline as
+a reference. Compare against the engine's `sv_showplayerhitboxes`.
+`docs/ragebot.md` §10 item 1.
 
 **Occlusion (item 3) — RE pinned, not implemented.** The trace call convention is
 resolved from a live call site: `TraceShapeWithSortedResults` =

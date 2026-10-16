@@ -1,10 +1,19 @@
 #pragma once
 
+#include <cstdint>
+
 #include "cs2/game/matrix.hpp"
 #include "cs2/game/snapshot.hpp"
 #include "cs2/render/draw_list.hpp"
 
 namespace cs2::features {
+
+// How the real studio hitboxes are drawn (`docs/re/aim.md`).
+enum class HitboxMode : std::uint8_t {
+  outline = 0,    // the capsule silhouette outline
+  solid = 1,      // the silhouette filled
+  wireframe = 2,  // the capsule mesh cage (rim/cap rings + longitudinals)
+};
 
 // Which ESP elements to draw.
 struct EspConfig {
@@ -16,11 +25,13 @@ struct EspConfig {
   bool flags = true;
   bool only_enemies = true;  // skip the local player
   bool show_dead = false;
-  // Draw the real studio hitbox capsules (`docs/re/aim.md`). **Off by default**:
-  // the renderer draws the true capsule set, but at present it comes out as an
-  // unreadable tangle (and the off-screen culling is a mitigation, not a fix) —
-  // see `docs/ragebot.md` §0. Re-enable from the menu's ESP tab to look at it.
+  // Draw the real studio hitbox capsules (`docs/re/aim.md`). Enabled from the
+  // menu's ESP tab; the mode and colour are menu-owned (`wire::Settings`).
   bool hitboxes = false;
+  HitboxMode hitbox_mode = HitboxMode::outline;
+  // false = the automatic per-hitgroup scheme; true = `hitbox_color`.
+  bool hitbox_custom_color = false;
+  std::uint8_t hitbox_color[4] = {90, 255, 130, 220};
 };
 
 // Per-build counters, for diagnostics/logging (never used for rendering).

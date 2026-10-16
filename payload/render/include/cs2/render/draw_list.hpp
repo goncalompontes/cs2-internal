@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -55,7 +56,14 @@ struct Text {
   bool outline = false;   // 1px black outline on every side (ESP labels)
 };
 
-using DrawCommand = std::variant<Rect, FilledRect, Line, Text>;
+// A filled convex polygon in screen space (used for the solid hitbox capsules).
+// Points are wound consistently; the backend fills the convex hull.
+struct FilledPoly {
+  std::vector<std::pair<float, float>> points;
+  Color color{};
+};
+
+using DrawCommand = std::variant<Rect, FilledRect, Line, Text, FilledPoly>;
 
 struct DrawList {
   std::vector<DrawCommand> commands;
@@ -73,6 +81,9 @@ struct DrawList {
             bool outline = false) {
     commands.push_back(
         Text{x, y, color, std::move(value), centered, !outline, outline});
+  }
+  void poly(std::vector<std::pair<float, float>> points, Color color) {
+    commands.push_back(FilledPoly{std::move(points), color});
   }
 
   void clear() { commands.clear(); }

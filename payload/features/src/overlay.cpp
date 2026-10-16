@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <utility>
@@ -23,6 +24,10 @@ constexpr int k_max_hitboxes = 40;
 
 // Samples around each capsule end cap; the pill outline is the hull of both.
 constexpr int k_capsule_segments = 16;
+// The wireframe mesh cage is coarser: segments per ring, cap subdivisions.
+constexpr int k_wire_segments = 10;
+constexpr int k_wire_cap_rings = 2;
+constexpr float k_pi = 3.14159265358979323846F;
 
 auto format_vec3(const game::Vec3& value) -> std::string {
   char buffer[80];
@@ -50,8 +55,14 @@ auto format_float(double value) -> std::string {
   return buffer;
 }
 
-// One hitbox's colour: the head stands out, the rest are a dim body colour.
-auto hitbox_color(int group, bool active) -> render::Color {
+// One hitbox's colour: the menu's custom pick, or the automatic per-hitgroup
+// scheme (the head stands out, the rest a dim body colour, brighter when the
+// ragebot is aiming at this pawn).
+auto hitbox_color(const EspConfig& config, int group, bool active) -> render::Color {
+  if (config.hitbox_custom_color) {
+    return render::Color{config.hitbox_color[0], config.hitbox_color[1],
+                         config.hitbox_color[2], config.hitbox_color[3]};
+  }
   if (group == 1) {  // HITGROUP_HEAD
     return active ? render::Color{255, 70, 70, 235} : render::Color{255, 96, 96, 150};
   }
@@ -126,34 +137,30 @@ void project_sphere_outline(const game::Matrix4x4& view, float width, float heig
   }
 }
 
-// Draw a world capsule as its real silhouette: a capsule is the convex hull of
-// its two end spheres, and projection preserves convexity, so the outline is the
-// hull of the two projected sphere outlines — an honest pill, with the correct
-// tangents and per-endpoint perspective (`docs/re/aim.md`).
-void draw_capsule(render::DrawList& out, const game::Matrix4x4& view, float width, float height,
-                  const game::Vec3& eye, const game::HitboxCapsule& capsule,
-                  const render::Color& color) {
+// The screen-space silhouette of a world capsule: a capsule is the convex hull of
+// its two end spheres and projection preserves convexity, so the outline is the
+// hull of the two projected end-sphere outlines — correct tangents and
+// per-endpoint perspective (`docs/re/aim.md`). Empty when degenerate.
+auto capsule_silhouette(const game::Matrix4x4& view, float width, float height,
+                        const game::Vec3& eye, const game::HitboxCapsule& capsule)
+    -> std::vector<game::Vec2> {
   if (capsule.radius <= 0.0F) {
-    // A zero-radius capsule is a segment: draw its axis.
-    const auto a = view.project(capsule.a, width, height);
-    const auto b = view.project(capsule.b, width, height);
-    if (a.has_value() && b.has_value()) {
-      out.line(a->x, a->y, b->x, b->y, color, 1.0F);
-    }
-    return;
+    return {};
   }
-
   std::vector<game::Vec2> points;
   points.reserve(2 * static_cast<std::size_t>(k_capsule_segments));
   project_sphere_outline(view, width, height, eye, capsule.a, capsule.radius, points);
   project_sphere_outline(view, width, height, eye, capsule.b, capsule.radius, points);
-  const std::vector<game::Vec2> outline = convex_hull(std::move(points));
-  if (outline.size() < 3) {
-    return;  // behind the eye / degenerate
-  }
+  return convex_hull(std::move(points));
+}
 
-  // Cull only the fully off-screen case — a framing test, so nothing visible is
-  // discarded (a capsule near the eye draws its own, large but true, silhouette).
+// A framing test: an entirely off-screen silhouette draws nothing, so nothing
+// visible is ever discarded.
+auto outline_on_screen(const std::vector<game::Vec2>& outline, float width,
+                       float height) -> bool {
+  if (outline.size() < 3) {
+    return false;
+  }
   float min_x = outline[0].x;
   float max_x = outline[0].x;
   float min_y = outline[0].y;
@@ -164,14 +171,164 @@ void draw_capsule(render::DrawList& out, const game::Matrix4x4& view, float widt
     min_y = (std::min)(min_y, point.y);
     max_y = (std::max)(max_y, point.y);
   }
-  if (max_x < 0.0F || min_x > width || max_y < 0.0F || min_y > height) {
+  return !(max_x < 0.0F || min_x > width || max_y < 0.0F || min_y > height);
+}
+
+// A zero-radius capsule is a segment: draw its axis.
+void draw_capsule_axis(render::DrawList& out, const game::Matrix4x4& view, float width,
+                       float height, const game::HitboxCapsule& capsule,
+                       const render::Color& color) {
+  const auto a = view.project(capsule.a, width, height);
+  const auto b = view.project(capsule.b, width, height);
+  if (a.has_value() && b.has_value()) {
+    out.line(a->x, a->y, b->x, b->y, color, 1.0F);
+  }
+}
+
+// OUTLINE: the silhouette as a closed polyline.
+void draw_capsule_outline(render::DrawList& out, const game::Matrix4x4& view, float width,
+                          float height, const game::Vec3& eye,
+                          const game::HitboxCapsule& capsule, const render::Color& color) {
+  if (capsule.radius <= 0.0F) {
+    draw_capsule_axis(out, view, width, height, capsule, color);
     return;
   }
-
+  const std::vector<game::Vec2> outline = capsule_silhouette(view, width, height, eye, capsule);
+  if (!outline_on_screen(outline, width, height)) {
+    return;
+  }
   for (std::size_t i = 0; i < outline.size(); ++i) {
     const game::Vec2& a = outline[i];
     const game::Vec2& b = outline[(i + 1) % outline.size()];
     out.line(a.x, a.y, b.x, b.y, color, 1.0F);
+  }
+}
+
+// SOLID: the silhouette as a filled convex polygon.
+void draw_capsule_solid(render::DrawList& out, const game::Matrix4x4& view, float width,
+                        float height, const game::Vec3& eye,
+                        const game::HitboxCapsule& capsule, const render::Color& color) {
+  if (capsule.radius <= 0.0F) {
+    draw_capsule_axis(out, view, width, height, capsule, color);
+    return;
+  }
+  const std::vector<game::Vec2> outline = capsule_silhouette(view, width, height, eye, capsule);
+  if (!outline_on_screen(outline, width, height)) {
+    return;
+  }
+  std::vector<std::pair<float, float>> points;
+  points.reserve(outline.size());
+  for (const game::Vec2& point : outline) {
+    points.emplace_back(point.x, point.y);
+  }
+  out.poly(std::move(points), color);
+}
+
+// One sample of the capsule's mesh: position + outward normal.
+struct CapsuleSample {
+  game::Vec3 position{};
+  game::Vec3 normal{};
+};
+
+// The capsule's mesh rings, bottom pole -> top pole. A capsule is the Minkowski
+// sum of the segment `a`-`b` and a sphere of `radius`: a cylinder with two
+// hemispherical caps. Mirrors `scripts/hitbox-view.py`.
+void capsule_rings(const game::Vec3& a, const game::Vec3& b, float radius,
+                   std::vector<std::vector<CapsuleSample>>& rings) {
+  game::Vec3 axis = b - a;
+  game::Vec3 end = b;
+  if (game::length(axis) < 1e-4F) {
+    end = a + game::Vec3{0.0F, 0.0F, 1.0F};  // degenerate: a unit-length capsule
+    axis = end - a;
+  }
+  const game::Vec3 n = game::normalized(axis);
+  const game::Vec3 reference = std::fabs(n.z) < 0.9F ? game::Vec3{0.0F, 0.0F, 1.0F}
+                                                     : game::Vec3{1.0F, 0.0F, 0.0F};
+  const game::Vec3 u = game::normalized(game::cross(n, reference));
+  const game::Vec3 v = game::cross(n, u);
+  const auto make_ring = [&](const game::Vec3& center, float ring_radius,
+                             const game::Vec3& sphere) {
+    std::vector<CapsuleSample> points;
+    points.reserve(k_wire_segments);
+    for (int i = 0; i < k_wire_segments; ++i) {
+      const float theta =
+          2.0F * k_pi * static_cast<float>(i) / static_cast<float>(k_wire_segments);
+      const game::Vec3 position =
+          center + (u * std::cos(theta) + v * std::sin(theta)) * ring_radius;
+      points.push_back(CapsuleSample{position, game::normalized(position - sphere)});
+    }
+    return points;
+  };
+  rings.clear();
+  rings.push_back(make_ring(a - n * radius, 0.0F, a));
+  for (int k = 1; k <= k_wire_cap_rings; ++k) {
+    const float phi =
+        (k_pi * 0.5F) * static_cast<float>(k) / static_cast<float>(k_wire_cap_rings);
+    rings.push_back(make_ring(a - n * (radius * std::cos(phi)), radius * std::sin(phi), a));
+  }
+  for (int k = k_wire_cap_rings; k >= 1; --k) {
+    const float phi =
+        (k_pi * 0.5F) * static_cast<float>(k) / static_cast<float>(k_wire_cap_rings);
+    rings.push_back(make_ring(end + n * (radius * std::cos(phi)), radius * std::sin(phi), end));
+  }
+  rings.push_back(make_ring(end + n * radius, 0.0F, end));
+}
+
+// WIREFRAME: the mesh cage — every ring plus longitudinal lines, with
+// back-facing edges dimmed (the same look as the Python renderer).
+void draw_capsule_wire(render::DrawList& out, const game::Matrix4x4& view, float width,
+                       float height, const game::Vec3& eye,
+                       const game::HitboxCapsule& capsule, const render::Color& color) {
+  if (capsule.radius <= 0.0F) {
+    draw_capsule_axis(out, view, width, height, capsule, color);
+    return;
+  }
+  std::vector<std::vector<CapsuleSample>> rings;
+  capsule_rings(capsule.a, capsule.b, capsule.radius, rings);
+
+  const auto emit = [&](const CapsuleSample& p, const CapsuleSample& q) {
+    const auto pa = view.project(p.position, width, height);
+    const auto pb = view.project(q.position, width, height);
+    if (!pa.has_value() || !pb.has_value()) {
+      return;
+    }
+    const float facing =
+        game::dot(p.normal, p.position - eye) + game::dot(q.normal, q.position - eye);
+    const float scale = facing > 0.0F ? 0.45F : 1.0F;  // back-facing edges dimmed
+    const auto channel = [scale](std::uint8_t base) {
+      return static_cast<std::uint8_t>(static_cast<float>(base) * scale);
+    };
+    out.line(pa->x, pa->y, pb->x, pb->y,
+             render::Color{channel(color.r), channel(color.g), channel(color.b), color.a}, 1.0F);
+  };
+
+  for (const std::vector<CapsuleSample>& ring : rings) {
+    for (std::size_t j = 0; j < ring.size(); ++j) {
+      emit(ring[j], ring[(j + 1) % ring.size()]);
+    }
+  }
+  for (std::size_t i = 0; i + 1 < rings.size(); ++i) {
+    for (std::size_t j = 0; j < rings[i].size(); j += 2) {
+      emit(rings[i][j], rings[i + 1][j]);
+    }
+  }
+}
+
+// One hitbox in the menu-selected mode (`docs/ragebot.md`).
+void draw_hitbox(render::DrawList& out, const game::Matrix4x4& view, float width, float height,
+                 const game::Vec3& eye, const game::HitboxCapsule& capsule,
+                 const render::Color& color, HitboxMode mode) {
+  switch (mode) {
+    case HitboxMode::solid:
+      draw_capsule_solid(out, view, width, height, eye, capsule, color);
+      break;
+    case HitboxMode::wireframe:
+      draw_capsule_wire(out, view, width, height, eye, capsule, color);
+      break;
+    case HitboxMode::outline:
+    default:
+      draw_capsule_outline(out, view, width, height, eye, capsule, color);
+      break;
   }
 }
 
@@ -326,11 +483,13 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
         continue;
       }
       const bool active = player.index == rage_target;
+      const EspConfig& config = esp_config();
       game::HitboxCapsule capsules[k_max_hitboxes] = {};
       const int count = hitbox_provider_(hitbox_context_, player.pawn, capsules, k_max_hitboxes);
       for (int i = 0; i < count; ++i) {
-        draw_capsule(model_.draw, view, screen_width, screen_height, snapshot.local->eye_origin,
-                     capsules[i], hitbox_color(capsules[i].group, active));
+        draw_hitbox(model_.draw, view, screen_width, screen_height, snapshot.local->eye_origin,
+                    capsules[i], hitbox_color(config, capsules[i].group, active),
+                    config.hitbox_mode);
       }
     }
   }

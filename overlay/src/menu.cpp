@@ -302,6 +302,32 @@ auto draw_window(wire::Settings& settings) -> bool {
         toggle("Show dead", settings.show_dead);
         ImGui::Separator();
         toggle("Hitboxes (studio)", settings.hitboxes);
+        if (settings.hitboxes != 0) {
+          static const char* const k_modes[] = {"Outline", "Solid", "Wireframe"};
+          int mode = settings.hitbox_mode <= 2 ? settings.hitbox_mode : 0;
+          ImGui::SetNextItemWidth(160.0F);
+          if (ImGui::Combo("Mode", &mode, k_modes, IM_ARRAYSIZE(k_modes))) {
+            settings.hitbox_mode = static_cast<std::uint8_t>(mode);
+          }
+          static const char* const k_colors[] = {"Automatic (hitgroup)", "Custom"};
+          int color_mode = settings.hitbox_color_mode != 0 ? 1 : 0;
+          ImGui::SetNextItemWidth(160.0F);
+          if (ImGui::Combo("Colour", &color_mode, k_colors, IM_ARRAYSIZE(k_colors))) {
+            settings.hitbox_color_mode = static_cast<std::uint8_t>(color_mode);
+          }
+          if (settings.hitbox_color_mode != 0) {
+            float rgba[4] = {settings.hitbox_color[0] / 255.0F, settings.hitbox_color[1] / 255.0F,
+                             settings.hitbox_color[2] / 255.0F, settings.hitbox_color[3] / 255.0F};
+            if (ImGui::ColorEdit4("Colour pick", rgba,
+                                  ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs)) {
+              for (int i = 0; i < 4; ++i) {
+                const float clamped = rgba[i] < 0.0F ? 0.0F : (rgba[i] > 1.0F ? 1.0F : rgba[i]);
+                settings.hitbox_color[i] = static_cast<std::uint8_t>(clamped * 255.0F + 0.5F);
+              }
+            }
+          }
+          ImGui::TextDisabled("Outline: silhouette. Solid: filled. Wireframe: mesh cage.");
+        }
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("Interface")) {

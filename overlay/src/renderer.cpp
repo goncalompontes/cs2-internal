@@ -468,6 +468,25 @@ void draw_overlay_model(const wire::Model& model, const wire::Settings& settings
       case wire::DrawKind::filled_rect:
         draw->AddRectFilled(p0, p1, color);
         break;
+      case wire::DrawKind::filled_poly: {
+        if (command.vertex_count < 3) {
+          break;
+        }
+        const uint32_t first = command.vertex_offset;
+        const uint32_t count = command.vertex_count;
+        if (first + count > model.vertex_count ||
+            first + count > static_cast<uint32_t>(wire::k_max_vertices)) {
+          break;
+        }
+        std::vector<ImVec2> points;
+        points.reserve(count);
+        for (uint32_t v = 0; v < count; ++v) {
+          points.emplace_back(model.vertices[(first + v) * 2],
+                              model.vertices[(first + v) * 2 + 1]);
+        }
+        draw->AddConvexPolyFilled(points.data(), static_cast<int>(count), color);
+        break;
+      }
       case wire::DrawKind::line:
         draw->AddLine(p0, p1, color, command.thickness);
         break;
