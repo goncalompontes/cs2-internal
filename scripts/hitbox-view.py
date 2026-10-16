@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Extract one player's studio hitboxes and render them in 3D (no dependencies).
+"""Extract one player's studio hitboxes and render them as real 3D capsules.
 
-The payload's ``aim`` command already reports each hitbox's bone-local endpoints,
-its bone transform and (from this build) the **world** capsule endpoints. This
-tool pulls those for a single live player, rebases them on the player's origin,
-dumps the raw JSON, and rasterises the capsules into a PNG montage (four
-elevations) with a tiny pure-Python renderer — so the hitbox *coordinates* can be
-judged independently of the in-game overlay's drawing.
+Pulls the live hitbox set for a single player through the payload's ``aim``
+command (bone-local endpoints + the world endpoints + the bone transform +
+radius), rebases everything on the player's origin, dumps the raw JSON, and
+rasterises each hitbox as an **actual capsule mesh** (a cylinder with two
+hemispherical caps) with a small pure-Python triangle rasteriser: per-vertex
+normals, Gouraud shading, a depth buffer and back-to-front correctness via the
+z-buffer. No dependencies (no numpy/PIL/matplotlib) — just zlib for the PNG.
+
+The point is to validate the *geometry* out of process: if these capsules look
+right, the coordinates are right and any in-game mismatch is the overlay's draw.
 
 Usage:
-  python scripts/hitbox-view.py                     # nearest live enemy, all views
+  python scripts/hitbox-view.py                 # nearest live enemy, 4 views
   python scripts/hitbox-view.py --index 12
-  python scripts/hitbox-view.py --out hit.png --json dump.json
+  python scripts/hitbox-view.py --out artifacts/hit.png --json artifacts/hit.json
 """
 
 from __future__ import annotations
@@ -28,20 +32,23 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from scenario.control import Control  # noqa: E402
 
-# Hitgroup -> display colour (RGB). Mirrors the payload's own hitgroup ids.
+# Hitgroup -> display colour (RGB).
 GROUP_COLORS: dict[int, tuple[int, int, int]] = {
-    1: (235, 70, 70),     # head
-    2: (90, 210, 130),    # chest
-    3: (90, 170, 235),    # stomach / pelvis
-    4: (230, 200, 80),    # left arm
-    5: (235, 150, 60),    # right arm
-    6: (170, 130, 240),   # left leg
-    7: (140, 100, 220),   # right leg
-    8: (200, 200, 200),   # neck
+    1: (235, 74, 74),     # head
+    2: (86, 205, 128),    # chest
+    3: (88, 170, 235),    # stomach / pelvis
+    4: (232, 200, 84),    # left arm
+    5: (236, 150, 62),    # right arm
+    6: (168, 128, 240),   # left leg
+    7: (138, 100, 220),   # right leg
+    8: (205, 205, 205),   # neck
 }
 
+SEGMENTS = 20     # around the axis
+CAP_RINGS = 4     # hemisphere subdivisions
 
-# --- tiny PNG writer + rasteriser ----------------------------------------
+
+# --- tiny PNG writer ------------------------------------------------------
 class Image:
     def __init__(self, width: int, height: int) -> None:
         self.w = width
@@ -52,13 +59,6 @@ class Image:
     def clear(self, color: tuple[int, int, int]) -> None:
         self.rgb = bytearray(bytes(color) * (self.w * self.h))
         self.zbuf = [1e30] * (self.w * self.h)
-
-    def pixel(self, x: int, y: int, color: tuple[int, int, int]) -> None:
-        if 0 <= x < self.w and 0 <= y < self.h:
-            i = (y * self.w + x) * 3
-            self.rgb[i] = color[0]
-            self.rgb[i + 1] = color[1]
-            self.rgb[i + 2] = color[2]
 
     def write_png(self, path: pathlib.Path) -> None:
         raw = bytearray()
@@ -75,108 +75,186 @@ class Image:
         png += chunk(b"IHDR", struct.pack(">IIBBBBB", self.w, self.h, 8, 2, 0, 0, 0))
         png += chunk(b"IDAT", zlib.compress(bytes(raw), 6))
         png += chunk(b"IEND", b"")
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(png)
 
 
-# --- 3D maths -------------------------------------------------------------
-def sub(a, b):
+# --- vector maths ---------------------------------------------------------
+def vsub(a, b):
     return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
 
 
-def add(a, b):
+def vadd(a, b):
     return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 
 
-def mul(a, s):
+def vmul(a, s):
     return (a[0] * s, a[1] * s, a[2] * s)
 
 
-def dot(a, b):
+def vdot(a, b):
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 
-def cross(a, b):
+def vcross(a, b):
     return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
 
 
-def norm(a):
-    length = math.sqrt(dot(a, a)) or 1.0
-    return (a[0] / length, a[1] / length, a[2] / length)
+def vnorm(a):
+    length = math.sqrt(vdot(a, a))
+    return (a[0] / length, a[1] / length, a[2] / length) if length > 1e-12 else (0.0, 0.0, 1.0)
 
 
-class View:
-    """A pinhole camera rendering into a sub-rectangle of the image."""
+# --- capsule mesh ---------------------------------------------------------
+def capsule_mesh(a, b, radius: float):
+    """A closed capsule mesh: ``[(p0, p1, p2, n0, n1, n2), ...]`` (world space).
 
+    A capsule is the Minkowski sum of the segment ``a``-``b`` and a sphere of
+    ``radius``: a cylinder of that radius with two hemispherical caps. This is
+    exactly the shape the engine stores per hitbox (``m_vMinBounds`` /
+    ``m_vMaxBounds`` endpoints + ``m_flShapeRadius``).
+    """
+    axis = vsub(b, a)
+    length = math.sqrt(vdot(axis, axis))
+    if length < 1e-4:
+        # A degenerate capsule is just a sphere.
+        b = vadd(a, (0.0, 0.0, 1.0))
+        length = 1.0
+    n = vnorm(axis)
+    ref = (1.0, 0.0, 0.0) if abs(n[0]) < 0.9 else (0.0, 1.0, 0.0)
+    u = vnorm(vcross(n, ref))
+    v = vcross(n, u)
+
+    def ring(center, ring_radius, normal_from):
+        points = []
+        for i in range(SEGMENTS):
+            theta = 2.0 * math.pi * i / SEGMENTS
+            radial = vadd(vmul(u, math.cos(theta)), vmul(v, math.sin(theta)))
+            position = vadd(center, vmul(radial, ring_radius))
+            points.append((position, vnorm(vsub(position, normal_from))))
+        return points
+
+    rings = []
+    # Bottom cap (sphere at ``a``), sweeping the pole -> equator.
+    rings.append(ring(vadd(a, vmul(n, -radius)), 0.0, a))
+    for k in range(1, CAP_RINGS + 1):
+        phi = (math.pi / 2.0) * k / CAP_RINGS
+        rings.append(ring(vadd(a, vmul(n, -radius * math.cos(phi))), radius * math.sin(phi), a))
+    # Top cap (sphere at ``b``), equator -> pole.
+    for k in range(CAP_RINGS, 0, -1):
+        phi = (math.pi / 2.0) * k / CAP_RINGS
+        rings.append(ring(vadd(b, vmul(n, radius * math.cos(phi))), radius * math.sin(phi), b))
+    rings.append(ring(vadd(b, vmul(n, radius)), 0.0, b))
+
+    triangles = []
+    for i in range(len(rings) - 1):
+        lo, hi = rings[i], rings[i + 1]
+        for j in range(SEGMENTS):
+            k = (j + 1) % SEGMENTS
+            a0, n0 = lo[j]
+            a1, n1 = lo[k]
+            b0, n2 = hi[j]
+            b1, n3 = hi[k]
+            triangles.append((a0, b0, b1, n0, n2, n3))
+            triangles.append((a0, b1, a1, n0, n3, n1))
+    return triangles
+
+
+# --- rasteriser -----------------------------------------------------------
+class Camera:
     def __init__(self, image: Image, x0: int, y0: int, w: int, h: int,
                  eye, target, fov_deg: float = 45.0) -> None:
         self.img = image
         self.x0, self.y0, self.w, self.h = x0, y0, w, h
         self.eye = eye
-        forward = norm(sub(target, eye))
-        self.f = forward
-        right = norm(cross(forward, (0.0, 0.0, 1.0)))
-        self.r = right
-        self.u = cross(right, forward)
+        self.f = vnorm(vsub(target, eye))
+        self.r = vnorm(vcross(self.f, (0.0, 0.0, 1.0)))
+        self.u = vcross(self.r, self.f)
         self.focal = (h * 0.5) / math.tan(math.radians(fov_deg) * 0.5)
+        # Light, in camera space: upper-left, slightly toward the eye.
+        self.light = vnorm(vadd(vadd(vmul(self.r, -0.40), vmul(self.u, 0.50)),
+                                vmul(self.f, -0.77)))
+
+    def to_camera(self, p):
+        d = vsub(p, self.eye)
+        return (vdot(d, self.r), vdot(d, self.u), vdot(d, self.f))
 
     def project(self, p):
-        v = sub(p, self.eye)
-        depth = dot(v, self.f)
+        cx, cy, depth = self.to_camera(p)
         if depth <= 0.05:
             return None
-        x = dot(v, self.r)
-        y = dot(v, self.u)
-        return (self.x0 + self.w * 0.5 + x * self.focal / depth,
-                self.y0 + self.h * 0.5 - y * self.focal / depth,
+        return (self.x0 + self.w * 0.5 + cx * self.focal / depth,
+                self.y0 + self.h * 0.5 - cy * self.focal / depth,
                 depth)
 
-    def line(self, a, b, color, steps: int = 96) -> None:
+    def line(self, a, b, color, steps: int = 90) -> None:
         pa, pb = self.project(a), self.project(b)
         if pa is None or pb is None:
             return
         for i in range(steps + 1):
             t = i / steps
-            self.img.pixel(int(round(pa[0] + (pb[0] - pa[0]) * t)),
-                           int(round(pa[1] + (pb[1] - pa[1]) * t)), color)
+            x = int(round(pa[0] + (pb[0] - pa[0]) * t))
+            y = int(round(pa[1] + (pb[1] - pa[1]) * t))
+            if self.x0 <= x < self.x0 + self.w and self.y0 <= y < self.y0 + self.h:
+                idx = (y * self.img.w + x) * 3
+                self.img.rgb[idx:idx + 3] = bytes(color)
 
-    def sphere(self, center, radius: float, color) -> None:
-        """A shaded, z-buffered sphere."""
-        p = self.project(center)
-        if p is None:
+    def triangle(self, p0, p1, p2, n0, n1, n2, color) -> None:
+        """Gouraud-shaded, z-buffered triangle."""
+        c0, c1, c2 = self.project(p0), self.project(p1), self.project(p2)
+        if c0 is None or c1 is None or c2 is None:
             return
-        cx, cy, depth = p
-        sr = radius * self.focal / depth
-        if sr < 0.6:
+        # Screen-space area sign (backface cull against the eye).
+        area = (c1[0] - c0[0]) * (c2[1] - c0[1]) - (c1[1] - c0[1]) * (c2[0] - c0[0])
+        if area == 0.0:
             return
-        inv = 1.0 / self.focal
-        for py in range(max(self.y0, int(cy - sr)), min(self.y0 + self.h, int(cy + sr) + 1)):
-            for px in range(max(self.x0, int(cx - sr)), min(self.x0 + self.w, int(cx + sr) + 1)):
-                dx = (px - cx) * depth * inv
-                dy = (cy - py) * depth * inv
-                r2 = dx * dx + dy * dy
-                if r2 > radius * radius:
+        inv_area = 1.0 / area
+        w0, w1, w2 = 1.0 / c0[2], 1.0 / c1[2], 1.0 / c2[2]
+        min_x = max(self.x0, int(min(c0[0], c1[0], c2[0])))
+        max_x = min(self.x0 + self.w - 1, int(max(c0[0], c1[0], c2[0])) + 1)
+        min_y = max(self.y0, int(min(c0[1], c1[1], c2[1])))
+        max_y = min(self.y0 + self.h - 1, int(max(c0[1], c1[1], c2[1])) + 1)
+        img, zbuf, light = self.img, self.img.zbuf, self.light
+        base = vmul(color, 1.0 / 255.0)
+        for py in range(min_y, max_y + 1):
+            dy0 = py - c0[1]
+            row = py * img.w
+            for px in range(min_x, max_x + 1):
+                dx0 = px - c0[0]
+                l1 = (dx0 * (c2[1] - c0[1]) - dy0 * (c2[0] - c0[0])) * inv_area
+                l2 = (dy0 * (c1[0] - c0[0]) - dx0 * (c1[1] - c0[1])) * inv_area
+                l0 = 1.0 - l1 - l2
+                if l0 < 0.0 or l1 < 0.0 or l2 < 0.0:
                     continue
-                dz = math.sqrt(radius * radius - r2)
-                z = depth - dz
-                idx = py * self.img.w + px
-                if z >= self.img.zbuf[idx]:
+                inv_depth = l0 * w0 + l1 * w1 + l2 * w2
+                depth = 1.0 / inv_depth
+                index = row + px
+                if depth >= zbuf[index]:
                     continue
-                nx, ny, nz = dx / radius, dy / radius, dz / radius
-                shade = 0.28 + 0.62 * nz + 0.20 * ny
-                shade = 0.0 if shade < 0.0 else (1.0 if shade > 1.0 else shade)
-                self.img.zbuf[idx] = z
-                self.img.pixel(px, py, (int(color[0] * shade), int(color[1] * shade),
-                                        int(color[2] * shade)))
+                nx = l0 * n0[0] + l1 * n1[0] + l2 * n2[0]
+                ny = l0 * n0[1] + l1 * n1[1] + l2 * n2[1]
+                nz = l0 * n0[2] + l1 * n1[2] + l2 * n2[2]
+                mag = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+                nx, ny, nz = nx / mag, ny / mag, nz / mag
+                facing = nx * self.f[0] + ny * self.f[1] + nz * self.f[2]
+                if facing > 0.0:  # two-sided: flip toward the eye
+                    nx, ny, nz = -nx, -ny, -nz
+                lambert = nx * light[0] + ny * light[1] + nz * light[2]
+                if lambert < 0.0:
+                    lambert = 0.0
+                shade = 0.30 + 0.70 * lambert
+                zbuf[index] = depth
+                idx = index * 3
+                img.rgb[idx] = int(base[0] * shade * 255.0)
+                img.rgb[idx + 1] = int(base[1] * shade * 255.0)
+                img.rgb[idx + 2] = int(base[2] * shade * 255.0)
 
-    def capsule(self, a, b, radius: float, color) -> None:
-        axis = sub(b, a)
-        length = math.sqrt(dot(axis, axis))
-        steps = max(2, int(length / max(radius * 0.5, 0.5)) + 1)
-        for i in range(steps + 1):
-            t = i / steps
-            self.sphere(add(a, mul(axis, t)), radius, color)
+    def capsule(self, a, b, radius, color) -> None:
+        for p0, p1, p2, n0, n1, n2 in capsule_mesh(a, b, radius):
+            self.triangle(p0, p1, p2, n0, n1, n2, color)
 
 
+# --- scene ----------------------------------------------------------------
 def render(payload: dict, out: pathlib.Path) -> None:
     origin = payload["origin"]
     boxes = payload["hitboxes"]
@@ -184,48 +262,43 @@ def render(payload: dict, out: pathlib.Path) -> None:
     fwd = (math.cos(yaw), math.sin(yaw), 0.0)
     right = (-math.sin(yaw), math.cos(yaw), 0.0)
 
-    # Rebase everything on the player's origin (feet).
     def rel(p):
         return (p[0] - origin["x"], p[1] - origin["y"], p[2] - origin["z"])
 
     center = (0.0, 0.0, 36.0)
-    dist = 150.0
+    dist = 145.0
     views = [
-        ("front", add(center, mul(fwd, dist))),
-        ("back", add(center, mul(fwd, -dist))),
-        ("left", add(center, mul(right, dist))),
-        ("right", add(center, mul(right, -dist))),
+        ("front", vadd(center, vmul(fwd, dist))),
+        ("back", vadd(center, vmul(fwd, -dist))),
+        ("left", vadd(center, vmul(right, dist))),
+        ("right", vadd(center, vmul(right, -dist))),
     ]
     width, height = 560, 560
     image = Image(width * 2, height * 2)
-    image.clear((16, 16, 20))
+    image.clear((15, 15, 19))
 
     for index, (name, eye) in enumerate(views):
-        vx = (index % 2) * width
-        vy = (index // 2) * height
-        view = View(image, vx, vy, width, height, eye, center)
-
-        # Ground grid + origin frame (drawn first, no depth).
+        camera = Camera(image, (index % 2) * width, (index // 2) * height, width, height,
+                        eye, center)
         for g in range(-80, 81, 20):
-            view.line((g, -80, 0.0), (g, 80, 0.0), (40, 40, 48), steps=2)
-            view.line((-80, g, 0.0), (80, g, 0.0), (40, 40, 48), steps=2)
-        view.line((0, 0, 0), (0, 0, 60), (70, 70, 110))       # z axis
-        view.line((0, 0, 0), (24, 0, 0), (140, 60, 60))       # x axis
-        view.line((0, 0, 0), (0, 24, 0), (60, 140, 60))       # y axis
-        # Heading marker: where the player is looking.
-        view.line((0, 0, 60), add((0, 0, 60), mul(fwd, 25)), (240, 240, 120))
+            camera.line((g, -80, 0.0), (g, 80, 0.0), (44, 44, 52), steps=2)
+            camera.line((-80, g, 0.0), (80, g, 0.0), (44, 44, 52), steps=2)
+        camera.line((0, 0, 0), (0, 0, 62), (70, 70, 110))       # z axis
+        camera.line((0, 0, 0), (24, 0, 0), (140, 60, 60))       # x axis
+        camera.line((0, 0, 0), (0, 24, 0), (60, 140, 60))       # y axis
+        camera.line((0, 0, 62), vadd((0, 0, 62), vmul(fwd, 25)), (235, 235, 120))
 
         for box in boxes:
             color = GROUP_COLORS.get(int(box["group"]), (200, 200, 200))
-            a = rel((box["a_x"], box["a_y"], box["a_z"]))
-            b = rel((box["b_x"], box["b_y"], box["b_z"]))
-            view.capsule(a, b, max(box["radius"], 0.4), color)
+            camera.capsule(rel((box["a_x"], box["a_y"], box["a_z"])),
+                           rel((box["b_x"], box["b_y"], box["b_z"])),
+                           max(float(box["radius"]), 0.5), color)
+        for box in boxes:  # bone origins
+            bone = rel((box["bone_x"], box["bone_y"], box["bone_z"]))
+            camera.capsule(bone, bone, 0.9, (255, 255, 255))
 
-        # Bone origins (small dark markers) — the raw skeleton the boxes ride.
-        for box in boxes:
-            view.sphere(rel((box["bone_x"], box["bone_y"], box["bone_z"])), 0.9, (255, 255, 255))
+        _ = name  # the label order is documented in the docstring
 
-    out.parent.mkdir(parents=True, exist_ok=True)
     image.write_png(out)
     print(f"[hitbox-view] wrote {out} ({out.stat().st_size} bytes)")
 
@@ -269,20 +342,19 @@ def main(argv: list[str]) -> int:
         "hitboxes": boxes,
     }
     if args.json:
-        pathlib.Path(args.json).parent.mkdir(parents=True, exist_ok=True)
-        pathlib.Path(args.json).write_text(json.dumps(payload, indent=2))
+        path = pathlib.Path(args.json)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2))
         print(f"[hitbox-view] wrote {args.json}")
 
     origin = payload["origin"]
     print(f"target {payload['name']} (idx {payload['index']}) "
           f"boxes={len(boxes)} origin=({origin['x']:.1f},{origin['y']:.1f},{origin['z']:.1f})")
-    print(f"{'name':<13}{'bone':>5}{'mesh':>5}{'grp':>4}{'rad':>7}   "
-          f"A(rel) -> B(rel)")
+    print(f"{'name':<13}{'bone':>5}{'grp':>4}{'rad':>6}   A(rel) -> B(rel)")
     for box in boxes:
         a = (box["a_x"] - origin["x"], box["a_y"] - origin["y"], box["a_z"] - origin["z"])
         b = (box["b_x"] - origin["x"], box["b_y"] - origin["y"], box["b_z"] - origin["z"])
-        print(f"{box['name']:<13}{box['bone']:>5}{box['mesh']:>5}{box['group']:>4}"
-              f"{box['radius']:>7.2f}   "
+        print(f"{box['name']:<13}{box['bone']:>5}{box['group']:>4}{box['radius']:>6.2f}   "
               f"({a[0]:7.2f},{a[1]:7.2f},{a[2]:7.2f}) -> ({b[0]:7.2f},{b[1]:7.2f},{b[2]:7.2f})")
 
     render(payload, pathlib.Path(args.out))
