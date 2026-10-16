@@ -448,10 +448,12 @@ were **strings**, now superseded above.
   task → wait for `client.dll` → inject `build-payload/payload.dll` →
   connect → teardown), `control.py` (pipe client + typed helpers),
   `screens.py` (the screen state machine: deduction, capabilities, transitions),
-  `awaiting.py` (readiness: map/round/alive/movable + `measure_move`),
-  `scenarios/*.py` (`join-bot-match`, `move-and-aim`, `game-events`,
+  `awaiting.py` (readiness: map/round/alive/movable, `measure_move`, and the
+  bot-match setup `ensure_bot_match`/`add_bots`/`apply_convars`),
+  `scenarios/*.py` (`bot-match`, `join-bot-match`, `move-and-aim`, `game-events`,
   `usercmd-move`, `bhop`, `subtick-aim`, `subtick-shot`, `subtick-move`,
-  `movement-probe`, `move-to`, `screens`, `aim-probe`);
+  `movement-probe`, `strafe-probe`, `autostrafe`, `move-to`, `screens`, `status`,
+  `aim-probe`, `aim-shot`, `rage`);
   `scripts/run-scenario.py` (CLI).
 - PID/module discovery: `external/dumper/target/release/cs2-dumper.exe
   --process cs2.exe --json`; injection: `build-injector/injector.exe`.
@@ -459,7 +461,16 @@ were **strings**, now superseded above.
 ```
 python scripts/run-scenario.py --list
 python scripts/run-scenario.py join-bot-match
+python scripts/run-scenario.py bot-match      # 5 bots a side + practice convars
 ```
+
+`bot-match` (and `awaiting.ensure_bot_match`, or `game.ensure_bot_match(...)`
+from a scenario) loads the level, applies the practice convars
+(`PLAYGROUND_CONVARS`/`RESPAWN_CONVARS`: `mp_freezetime 0`, `mp_roundtime[_defuse]
+60`, respawn-on-death, `sv_infinite_ammo 2`, `mp_maxmoney`/`mp_startmoney`/
+`mp_afterroundmoney` 60000, a wide buy window), drives to a live round, adds
+`per_team` bots to each side (each add confirmed with `wait_for`), then freezes
+them (`bot_stop 1`). Knobs: `map_name`, `per_team`, `respawn`, `bot_stop`.
 
 ### Console-output capture (open)
 

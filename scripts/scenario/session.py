@@ -283,6 +283,12 @@ class Game:
 
         return ensure_live_round(self, **kwargs)
 
+    def ensure_bot_match(self, **kwargs: Any) -> dict[str, Any]:
+        """Join a map and set up a bot match (see `.awaiting.ensure_bot_match`)."""
+        from .awaiting import ensure_bot_match
+
+        return ensure_bot_match(self, **kwargs)
+
     def wait_airborne(self, timeout: float = 5.0) -> bool:
         from .awaiting import wait_airborne
 

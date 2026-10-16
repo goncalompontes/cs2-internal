@@ -4,12 +4,13 @@ Each scenario is a ``run(game, **kwargs) -> dict`` callable. The runner imports
 this package and looks up the function by name.
 """
 
-from . import (autostrafe, bhop, game_events, join_bot_match, move_and_aim, move_to,
-               movement_probe, screens, status, strafe_probe, subtick_aim, subtick_move,
-               subtick_shot, usercmd_move, aim_probe, aim_shot, rage)
+from . import (autostrafe, bhop, bot_match, game_events, join_bot_match, move_and_aim,
+               move_to, movement_probe, screens, status, strafe_probe, subtick_aim,
+               subtick_move, subtick_shot, usercmd_move, aim_probe, aim_shot, rage)
 
 SCENARIOS = {
     "join-bot-match": join_bot_match.run,
+    "bot-match": bot_match.run,
     "move-and-aim": move_and_aim.run,
     "game-events": game_events.run,
     "usercmd-move": usercmd_move.run,

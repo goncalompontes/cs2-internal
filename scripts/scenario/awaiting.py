@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any
+from typing import Any, Sequence
 
 from . import screens
 from .control import ControlError
@@ -186,11 +186,22 @@ def ensure_map(game: Game, map_name: str = DEFAULT_MAP, timeout: float = 180.0,
     than the re-issue window then never finishes — observed live 2026-10-15).
     ``load_budget`` is how long one attempt may take without progress before the
     command is re-issued.
+
+    A casual/offline server **auto-assigns** the team when the round spawns, so
+    the machine can overshoot team-select straight to warmup/freeze/live. The map
+    *did* load, which is all this helper promises — so an overshoot counts as
+    success and only "no level up at all" raises.
     """
     if in_real_map(game):
         return
-    state_ = screens.Machine(game, map_name=map_name).ensure(
-        screens.Screen.TEAM_SELECT, timeout=timeout, load_budget=load_budget)
+    machine = screens.Machine(game, map_name=map_name)
+    try:
+        state_ = machine.ensure(screens.Screen.TEAM_SELECT, timeout=timeout,
+                                load_budget=load_budget)
+    except SessionError:
+        state_ = machine.state
+        if state_ is None or not state_.in_game:
+            raise
     if not state_.in_game:
         raise SessionError(f"map {map_name!r} did not load within {timeout:.0f}s")
 
@@ -235,6 +246,132 @@ def ensure_live_round(game: Game, *, map_name: str = DEFAULT_MAP, pause_bots: bo
     return screens.Machine(game, map_name=map_name).ensure(
         screens.Screen.LIVE, timeout=timeout, pause_bots=pause_bots,
         verify_movable=verify_movable)
+
+
+# --- bot-match setup ------------------------------------------------------
+#: The practice convars for a bot match: rounds that do not end (roundtime is in
+#: **minutes**, so 60 is "never" for a defuse map; ``mp_roundtime`` covers the
+#: other modes), no warmup/freeze, a wide-open buy window, and infinite ammo /
+#: money. Applied before a round restart so freezetime/roundtime take effect.
+PLAYGROUND_CONVARS: tuple[str, ...] = (
+    "sv_cheats 1",
+    "mp_warmup_end",
+    "mp_freezetime 0",
+    "mp_roundtime 60",
+    "mp_roundtime_defuse 60",
+    "mp_buytime 9999",
+    "mp_buy_anywhere 1",
+    "sv_infinite_ammo 2",
+    "mp_maxmoney 60000",
+    "mp_startmoney 60000",
+    "mp_afterroundmoney 60000",
+)
+
+#: Respawn-on-death convars, appended to :data:`PLAYGROUND_CONVARS` by
+#: :func:`ensure_bot_match` unless ``respawn=False``.
+RESPAWN_CONVARS: tuple[str, ...] = (
+    "mp_respawn_on_death_t 1",
+    "mp_respawn_on_death_ct 1",
+    "mp_respawn_immunitytime 0",
+)
+
+
+def apply_convars(game: Game, convars: Sequence[str]) -> list[str]:
+    """Queue each console line in ``convars`` (``;``-separated lines are fine)."""
+    lines = list(convars)
+    for line in lines:
+        game.exec(line)
+    return lines
+
+
+def _wait_players_at_most(game: Game, count: int, timeout: float = 20.0) -> int:
+    """Poll ``state`` until the player count is <= ``count``; returns the count."""
+    deadline = time.monotonic() + timeout
+    players = len(game.players())
+    while players > count and time.monotonic() < deadline:
+        time.sleep(0.5)
+        players = len(game.players())
+    return players
+
+
+def add_bots(game: Game, *, per_team: int = 5, attempts: int = 3,
+             timeout: float = 25.0) -> int:
+    """Kick the existing bots, then add ``per_team`` bots to **each** side.
+
+    Each ``bot_add_*`` is confirmed with ``wait_for(players_gte=…)`` before the
+    next: firing several adds in one frame races the game's own bot processing
+    and an add can silently not stick (``join-bot-match``). Raises
+    :class:`SessionError` if an add never lands. Returns the final player count.
+    """
+    game.exec("bot_kick")
+    expected = max(_wait_players_at_most(game, 1), 1)
+    for index in range(max(0, per_team) * 2):
+        command = "bot_add_t" if index % 2 == 0 else "bot_add_ct"
+        expected += 1
+        for _ in range(max(1, attempts)):
+            game.exec(command)
+            if game.wait_for(players_gte=expected, timeout=timeout).get("matched"):
+                break
+        else:
+            raise SessionError(
+                f"{command!r} did not raise the player count to {expected}")
+    return len(game.players())
+
+
+def ensure_bot_match(
+    game: Game,
+    *,
+    map_name: str = DEFAULT_MAP,
+    per_team: int = 5,
+    respawn: bool = True,
+    bot_stop: bool = True,
+    verify_movable: bool = True,
+    timeout: float = 300.0,
+    map_timeout: float = 180.0,
+) -> dict[str, Any]:
+    """Join ``map_name`` and set up a ready-to-test bot match.
+
+    Loads the level (a casual offline match), applies the playground convars
+    (:data:`PLAYGROUND_CONVARS`, plus :data:`RESPAWN_CONVARS` when ``respawn``),
+    joins a team and drives to a live round, adds ``per_team`` bots to each side
+    (each add confirmed), then freezes them (``bot_stop 1``) so the world is
+    still. ``map_name``/``per_team``/``respawn``/``bot_stop`` are the knobs;
+    ``verify_movable`` is the state machine's liveness gate.
+
+    Returns ``{map, players, teams, convars, local_name, local_alive, screen}``.
+    """
+    game.exec("sv_cheats 1")
+    ensure_map(game, map_name=map_name, timeout=map_timeout)
+
+    convars = list(PLAYGROUND_CONVARS)
+    if respawn:
+        convars += RESPAWN_CONVARS
+    apply_convars(game, convars)
+    # Restart so freezetime / roundtime / respawn take effect on a fresh round
+    # (the state machine may otherwise see LIVE and return immediately).
+    game.exec("mp_restartgame 1")
+    ensure_live_round(game, map_name=map_name, pause_bots=False,
+                      verify_movable=verify_movable, timeout=timeout)
+
+    count = add_bots(game, per_team=per_team)
+    if bot_stop:
+        game.exec("bot_stop 1")
+
+    teams: dict[int, int] = {}
+    for player in game.players():
+        team = player.get("team")
+        teams[team] = teams.get(team, 0) + 1
+    local_player = local(game)
+    observation = screens.observe(game, events=4)
+    return {
+        "map": map_name,
+        "players": count,
+        "teams": teams,
+        "convars": convars + (["bot_stop 1"] if bot_stop else []),
+        "local_name": local_player.get("name"),
+        "local_alive": bool(local_player.get("alive")),
+        "screen": str(observation.screen),
+    }
 
 
 def round_state(game: Game, *, events: int = 8) -> dict[str, Any]:

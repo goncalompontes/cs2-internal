@@ -2,7 +2,12 @@
 
 from . import awaiting, screens
 from .awaiting import (
+    PLAYGROUND_CONVARS,
+    RESPAWN_CONVARS,
+    add_bots,
+    apply_convars,
     ensure,
+    ensure_bot_match,
     ensure_live_round,
     ensure_map,
     is_movable,
@@ -22,6 +27,8 @@ from .session import Game, SessionError, cs2_session
 
 __all__ = [
     "DEFAULT_PIPE",
+    "PLAYGROUND_CONVARS",
+    "RESPAWN_CONVARS",
     "Can",
     "Control",
     "ControlError",
@@ -30,9 +37,12 @@ __all__ = [
     "Machine",
     "Screen",
     "SessionError",
+    "add_bots",
+    "apply_convars",
     "awaiting",
     "cs2_session",
     "ensure",
+    "ensure_bot_match",
     "ensure_live_round",
     "ensure_map",
     "is_movable",
