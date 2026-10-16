@@ -24,17 +24,18 @@ constexpr std::uintptr_t k_model_state = 0x140;    // CSkeletonInstance::m_model
 constexpr std::uintptr_t k_bone_array = 0x80;      // CModelState::m_pBoneArray
 constexpr std::uintptr_t k_model_handle = 0xA0;    // CModelState::m_hModel (StrongHandle)
 constexpr std::uintptr_t k_hitbox_set_index = 0x3FC;  // CSkeletonInstance::m_nHitboxSet
-constexpr std::uintptr_t k_hitbox_set_mask = 0x348;   // CSkeletonInstance hitbox-set mask
+// `CSkeletonInstance + 0x348` = `CModelState::m_MeshGroupMask` (`modelState + 0x208`):
+// the active mesh-group mask, intersected with each mesh's mask to pick a mesh.
+constexpr std::uintptr_t k_mesh_group_mask = 0x348;
 
 // --- CModel → render meshes → hitbox sets → boxes (verified live) ----------
 constexpr std::uintptr_t k_mesh_count = 0x70;  // model -> mesh count
 constexpr std::uintptr_t k_mesh_array = 0x78;  // model -> mesh array (ptr per mesh)
 constexpr std::uintptr_t k_mesh_mask = 0x90;   // model -> per-mesh enable mask (uint64[])
-constexpr std::uintptr_t k_set_flags = 0x164;  // mesh -> hitbox-set flags (bit 31 = inline?)
-constexpr std::uintptr_t k_set_data = 0x168;   // mesh -> hitbox-set entry array (or data ptr)
+constexpr std::uintptr_t k_set_flags = 0x164;  // mesh -> hitbox-set flags (bit31 = data present)
+constexpr std::uintptr_t k_set_data = 0x168;   // mesh -> CHitBoxSet* array
 constexpr std::uintptr_t k_set_count = 0x174;  // mesh -> hitbox-set count
 constexpr std::uintptr_t k_set_entry_stride = 0x48;
-constexpr std::uintptr_t k_set_entry_name_hash = 0x20;
 constexpr std::uintptr_t k_set_entry_boxes = 0x28;   // hitbox count
 constexpr std::uintptr_t k_set_entry_array = 0x30;   // CHitBox* array
 constexpr std::uintptr_t k_box_stride = 0x70;        // sizeof(CHitBox)
@@ -46,6 +47,10 @@ constexpr std::uintptr_t k_box_group = 0x38;         // m_nGroupId (the hitgroup
 constexpr std::uintptr_t k_box_shape = 0x3C;         // m_nShapeType
 constexpr std::uintptr_t k_box_index = 0x48;         // m_nHitBoxIndex
 
+// `m_nShapeType`: a player hitbox is a capsule (`docs/re/aim.md`). Any other
+// shape is not modelled here.
+constexpr std::uint8_t k_shape_capsule = 2;
+
 // CModel::GetBoneIndexForHitboxForMesh — the hitbox -> bone remap.
 constexpr std::uintptr_t k_remap_count = 0x220;
 constexpr std::uintptr_t k_remap_table = 0x228;  // int16[]
@@ -54,9 +59,8 @@ constexpr std::uintptr_t k_remap_a = 0x2F0;      // uint16[mesh]
 
 constexpr std::uintptr_t k_bone_stride = 0x20;
 
-// `C_BaseEntity::m_nSubclassID` (+0x08) is the weapon's `CCSWeaponBaseVData*`
-// (`docs/re/aim.md`); the VData carries the real damage model.
-constexpr std::uintptr_t k_subclass_vdata = 0x388;
+// `CCSWeaponBaseVData` (reached via `C_BaseEntity::m_nSubclassID` + the entity's
+// VData chain, `docs/re/aim.md`); the VData carries the real damage model.
 constexpr std::uintptr_t k_vdata_damage = 0x820;
 constexpr std::uintptr_t k_vdata_headshot = 0x824;
 constexpr std::uintptr_t k_vdata_penetration = 0x82C;
@@ -88,11 +92,15 @@ auto read_weapon_profile(std::uintptr_t weapon_vdata, WeaponProfile& profile) no
   return true;
 }
 
-// One `CTransform` (`docs/re/aim.md`, the bone array): a position followed by a
-// quaternion `(x, y, z, w)`.
+// One `CTransform` (`docs/re/aim.md`, the bone array): a position, a scale float,
+// then the unit quaternion `(x, y, z, w)`. The rotation is at `+0x10`, **not**
+// `+0x0C` — measured live 2026-10-16: the float at `+0x0C` is a constant `1.0`
+// and reading the naive `{Vector, Quat}` layout yields non-unit quaternions
+// (|q| ~ 1.0-1.4), which stretched every capsule instead of rotating it.
 struct RawBone {
-  Vec3 position{};
-  float quat[4]{};
+  Vec3 position{};      // +0x00
+  float scale = 1.0F;   // +0x0C (constant 1.0 on the player bone array)
+  float quat[4]{};      // +0x10 (x, y, z, w)
 };
 
 // Resolved model addresses for a pawn.
@@ -101,7 +109,7 @@ struct ModelRef {
   std::uintptr_t model = 0;
   std::uintptr_t bones = 0;
   std::uint8_t hitbox_set = 0;
-  std::uint64_t set_mask = 0;
+  std::uint64_t mesh_group_mask = 0;
 };
 
 auto resolve_model(std::uintptr_t pawn) noexcept -> ModelRef {
@@ -127,7 +135,7 @@ auto resolve_model(std::uintptr_t pawn) noexcept -> ModelRef {
   ref.model = model;
   (void)game::read(model_state + k_bone_array, ref.bones);
   (void)game::read(ref.scene + k_hitbox_set_index, ref.hitbox_set);
-  (void)game::read(ref.scene + k_hitbox_set_mask, ref.set_mask);
+  (void)game::read(ref.scene + k_mesh_group_mask, ref.mesh_group_mask);
   return ref;
 }
 
@@ -200,6 +208,11 @@ auto build_input(const game::Snapshot& snapshot, const WeaponProfile& weapon, in
   // bone (`read_model_hitboxes`). Fall back to the collision-AABB proxy only
   // when the model cannot be resolved.
   for (const ModelHitbox& box : read_model_hitboxes(target->pawn)) {
+    // Only capsules are modelled (`m_nShapeType`); a non-capsule hitbox with no
+    // radius (a box) is skipped rather than mis-aimed as a bare segment.
+    if (box.shape != k_shape_capsule && box.radius <= 0.0F) {
+      continue;
+    }
     Hitbox hitbox;
     hitbox.is_capsule = true;
     hitbox.capsule = Capsule{box.world_a, box.world_b, box.radius};
@@ -239,13 +252,13 @@ auto read_model_hitboxes(std::uintptr_t pawn) -> std::vector<ModelHitbox> {
   }
   (void)game::read(ref.model + k_mesh_mask, masks);
 
-  // Use the first render mesh whose enable mask intersects the skeleton's
-  // hitbox-set mask (all player meshes carry the same set).
+  // Use the first render mesh whose mesh-group mask intersects the skeleton's
+  // active mask (all player meshes carry the same hitbox set).
   for (int mesh_index = 0; mesh_index < mesh_count; ++mesh_index) {
     if (masks != 0) {
       std::uint64_t mask = 0;
       if (!game::read(masks + static_cast<std::uintptr_t>(mesh_index) * 8, mask) ||
-          (mask & ref.set_mask) == 0) {
+          (mask & ref.mesh_group_mask) == 0) {
         continue;
       }
     }
@@ -257,13 +270,15 @@ auto read_model_hitboxes(std::uintptr_t pawn) -> std::vector<ModelHitbox> {
     if (!game::read(mesh + k_set_flags, flags)) {
       continue;
     }
+    // A zero flag word means this mesh carries no hitbox-set table (the engine's
+    // own hitbox lookup treats it as absent), so do not read `+0x168` as an
+    // inline array — the sets always live behind the pointer.
+    if ((flags & 0x7FFFFFFFU) == 0U) {
+      continue;
+    }
     std::uintptr_t sets = 0;
-    if ((flags & 0x7FFFFFFFU) != 0) {
-      if (!game::read(mesh + k_set_data, sets) || sets == 0) {
-        continue;
-      }
-    } else {
-      sets = mesh + k_set_data;
+    if (!game::read(mesh + k_set_data, sets) || sets == 0) {
+      continue;
     }
     std::int32_t set_count = 0;
     if (!game::read(mesh + k_set_count, set_count) || set_count <= 0) {
@@ -303,21 +318,26 @@ auto read_model_hitboxes(std::uintptr_t pawn) -> std::vector<ModelHitbox> {
 
       hitbox.bone = bone_for_hitbox(ref, mesh_index, static_cast<int>(hitbox_index));
 
-      // The world capsule endpoints (the bone transform from the bone array).
+      // The world capsule endpoints (the bone transform from the bone array). A
+      // box whose bone cannot be resolved has no world geometry; skip it rather
+      // than leave the endpoints at (0,0,0) — a phantom hitbox at the map origin.
       RawBone raw{};
-      if (hitbox.bone >= 0 &&
-          game::read(ref.bones + static_cast<std::uintptr_t>(hitbox.bone) * k_bone_stride, raw)) {
-        BoneTransform bone{};
-        bone.position = raw.position;
-        std::memcpy(bone.rotation, raw.quat, sizeof(bone.rotation));
-        hitbox.world_a = bone.position + rotate(bone, hitbox.mins);
-        hitbox.world_b = bone.position + rotate(bone, hitbox.maxs);
+      if (hitbox.bone < 0 ||
+          !game::read(ref.bones + static_cast<std::uintptr_t>(hitbox.bone) * k_bone_stride, raw)) {
+        continue;
       }
+      BoneTransform bone{};
+      bone.position = raw.position;
+      std::memcpy(bone.rotation, raw.quat, sizeof(bone.rotation));
+      hitbox.transform = bone;
+      hitbox.mesh = mesh_index;
+      hitbox.world_a = bone.position + rotate(bone, hitbox.mins);
+      hitbox.world_b = bone.position + rotate(bone, hitbox.maxs);
 
       if (const std::string name = game::read_cstring(
               [&]() -> std::uintptr_t {
                 std::uintptr_t name_ptr = 0;
-                game::read(box + k_box_bone_name, name_ptr);
+                (void)game::read(box + k_box_bone_name, name_ptr);
                 return name_ptr;
               }(),
               24);

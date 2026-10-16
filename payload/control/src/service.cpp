@@ -913,7 +913,9 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
   for (const aim::ModelHitbox& box : aim::read_model_hitboxes(input->pawn)) {
     Json item = Json::object();
     item.set("bone", Json::number(static_cast<double>(box.bone)));
+    item.set("mesh", Json::number(static_cast<double>(box.mesh)));
     item.set("group", Json::number(static_cast<double>(box.group)));
+    item.set("shape", Json::number(static_cast<double>(box.shape)));
     item.set("name", Json::string(std::string(box.name)));
     item.set("radius", Json::number(static_cast<double>(box.radius)));
     item.set("min_x", Json::number(box.mins.x));
@@ -922,6 +924,22 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
     item.set("max_x", Json::number(box.maxs.x));
     item.set("max_y", Json::number(box.maxs.y));
     item.set("max_z", Json::number(box.maxs.z));
+    // World capsule endpoints (the bone-transformed min/max) — the exact input
+    // to the solver and the renderer, so an external render can be compared.
+    item.set("a_x", Json::number(box.world_a.x));
+    item.set("a_y", Json::number(box.world_a.y));
+    item.set("a_z", Json::number(box.world_a.z));
+    item.set("b_x", Json::number(box.world_b.x));
+    item.set("b_y", Json::number(box.world_b.y));
+    item.set("b_z", Json::number(box.world_b.z));
+    // The bone transform used: position + quaternion (x, y, z, w).
+    item.set("bone_x", Json::number(box.transform.position.x));
+    item.set("bone_y", Json::number(box.transform.position.y));
+    item.set("bone_z", Json::number(box.transform.position.z));
+    item.set("quat_x", Json::number(box.transform.rotation[0]));
+    item.set("quat_y", Json::number(box.transform.rotation[1]));
+    item.set("quat_z", Json::number(box.transform.rotation[2]));
+    item.set("quat_w", Json::number(box.transform.rotation[3]));
     item.set("world_x", Json::number((box.world_a.x + box.world_b.x) * 0.5));
     item.set("world_y", Json::number((box.world_a.y + box.world_b.y) * 0.5));
     item.set("world_z", Json::number((box.world_a.z + box.world_b.z) * 0.5));

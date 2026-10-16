@@ -187,9 +187,13 @@ live-validation pass.
 VA `0xaafca0`): it reads `*(longlong*)(skel + 0x1C0)` (the bone array — `+0x1C0`
 = `m_modelState(+0x140) + 0x80`) and indexes bones at `boneIndex * 0x20`; it
 reads `m_hModel` at `skel + 0x1E0` (= `m_modelState + 0xA0`), which pins
-`m_modelState = +0x140`. Each bone is a 32-byte transform (`{Vector pos; Quat xyzw}`;
-copied by `FUN_1801c9f40`). Hitgroups: `HITGROUP_HEAD…` (`0x181af2d60`),
-`m_iHitGroupId`.
+`m_modelState = +0x140`. Each bone is a 32-byte `CTransform` — **`{Vector
+m_vPosition; float m_flScale; Quaternion m_xyzw}`**: the position at `+0x00`, a
+constant `1.0` at `+0x0C`, and the rotation at **`+0x10`** (not `+0x0C`). Measured
+live 2026-10-16: the float at `+0x0C` is `1.0000` for every bone and the naive
+`{Vector pos; Quat xyzw}` read yields non-unit quaternions (|q| ~ 1.0-1.4) that
+**stretch** the hitboxes instead of rotating them; copied whole by
+`FUN_1801c9f40`. Hitgroups: `HITGROUP_HEAD…` (`0x181af2d60`), `m_iHitGroupId`.
 
 ### The runtime studio hitbox set (resolved 2026-10-16, build 25947352)
 
@@ -210,7 +214,7 @@ model (from m_hModel)                        CModel
   +0x2f0 ptr   m_pMeshRemapStart             (uint16 per mesh)
 
 mesh                                        CRenderMesh
-  +0x164 uint  flags                         (bit31: +0x168 is a pointer, else inline)
+  +0x164 uint  flags                         (0 = no hitbox-set table; else +0x168 is the array)
   +0x168 ptr   m_pHitboxSets                 (CHitBoxSet[] , stride 0x48)
   +0x174 int   m_nHitboxSets
 

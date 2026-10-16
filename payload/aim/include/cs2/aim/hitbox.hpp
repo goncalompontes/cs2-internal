@@ -57,6 +57,8 @@ struct ModelHitbox {
   int bone = -1;
   int group = 0;  // m_nGroupId — the hitgroup id (1 = head)
   int shape = 0;  // m_nShapeType
+  int mesh = -1;  // the render mesh the box was read from (diagnostics)
+  BoneTransform transform{};  // the bone transform used (diagnostics)
   char name[24]{};
 };
 

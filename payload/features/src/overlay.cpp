@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "cs2/game/log.hpp"
 #include "cs2/game/snapshot.hpp"
@@ -18,6 +20,9 @@ namespace {
 
 // A player's hitbox set is 19 boxes; leave headroom for the visualiser buffer.
 constexpr int k_max_hitboxes = 40;
+
+// Samples around each capsule end cap; the pill outline is the hull of both.
+constexpr int k_capsule_segments = 16;
 
 auto format_vec3(const game::Vec3& value) -> std::string {
   char buffer[80];
@@ -53,83 +58,121 @@ auto hitbox_color(int group, bool active) -> render::Color {
   return active ? render::Color{90, 255, 130, 190} : render::Color{90, 210, 140, 95};
 }
 
-// A screen-space circle, approximated by a polygon (the overlay has only lines).
-void draw_circle(render::DrawList& out, const game::Vec2& centre, float radius,
-                 const render::Color& color, int segments = 12) {
-  if (radius < 0.5F) {
+// A screen-space convex hull (Andrew's monotone chain). Collinear points are
+// dropped, so a degenerate set collapses below 3 vertices and draws nothing.
+auto convex_hull(std::vector<game::Vec2> points) -> std::vector<game::Vec2> {
+  if (points.size() < 3) {
+    return points;
+  }
+  std::sort(points.begin(), points.end(), [](const game::Vec2& a, const game::Vec2& b) noexcept {
+    return a.x < b.x || (a.x == b.x && a.y < b.y);
+  });
+  const auto turn = [](const game::Vec2& o, const game::Vec2& a, const game::Vec2& b) noexcept {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  };
+  std::vector<game::Vec2> hull(points.size() * 2);
+  std::size_t k = 0;
+  for (const game::Vec2& p : points) {
+    while (k >= 2 && turn(hull[k - 2], hull[k - 1], p) <= 0.0F) {
+      --k;
+    }
+    hull[k++] = p;
+  }
+  for (std::size_t i = points.size() - 1, t = k + 1; i-- > 0;) {
+    while (k >= t && turn(hull[k - 2], hull[k - 1], points[i]) <= 0.0F) {
+      --k;
+    }
+    hull[k++] = points[i];
+  }
+  hull.resize(k - 1);  // the last point repeats the first
+  return hull;
+}
+
+// Append the projected outline of a sphere (`radius` at `center`) to `out`: the
+// tangent circle on the sphere as seen from `eye`, sampled and projected. Points
+// behind the eye are dropped. This is the true common-tangent silhouette, not a
+// screen-space approximation (`docs/re/aim.md`).
+void project_sphere_outline(const game::Matrix4x4& view, float width, float height,
+                            const game::Vec3& eye, const game::Vec3& center, float radius,
+                            std::vector<game::Vec2>& out) {
+  const game::Vec3 to_center = center - eye;
+  const float dist = game::length(to_center);
+  if (radius <= 0.0F || dist <= 1e-3F || radius >= dist) {
+    // Degenerate (`radius >= dist`: the eye is inside the sphere) — one point.
+    if (const auto point = view.project(center, width, height)) {
+      out.push_back(*point);
+    }
     return;
   }
+  const game::Vec3 axis = to_center * (1.0F / dist);
+  const float sin_a = radius / dist;
+  const float cos_a = std::sqrt((std::max)(0.0F, 1.0F - sin_a * sin_a));
+  // The contact circle sits `radius*sin_a` toward the eye and has radius
+  // `radius*cos_a` (Pythagoras on the tangent cone from the eye to the sphere).
+  const game::Vec3 circle_center = center - axis * (radius * sin_a);
+  const float circle_radius = radius * cos_a;
+  const game::Vec3 reference = std::fabs(axis.z) < 0.9F ? game::Vec3{0.0F, 0.0F, 1.0F}
+                                                        : game::Vec3{1.0F, 0.0F, 0.0F};
+  const game::Vec3 u = game::normalized(game::cross(axis, reference));
+  const game::Vec3 v = game::cross(axis, u);
   constexpr float k_tau = 6.28318530717958648F;
-  game::Vec2 previous{centre.x + radius, centre.y};
-  for (int i = 1; i <= segments; ++i) {
-    const float theta = k_tau * static_cast<float>(i) / static_cast<float>(segments);
-    const game::Vec2 point{centre.x + radius * std::cos(theta),
-                           centre.y + radius * std::sin(theta)};
-    out.line(previous.x, previous.y, point.x, point.y, color, 1.0F);
-    previous = point;
+  for (int i = 0; i < k_capsule_segments; ++i) {
+    const float theta = k_tau * static_cast<float>(i) / static_cast<float>(k_capsule_segments);
+    const game::Vec3 point = circle_center + u * (circle_radius * std::cos(theta)) +
+                             v * (circle_radius * std::sin(theta));
+    if (const auto screen = view.project(point, width, height)) {
+      out.push_back(*screen);
+    }
   }
 }
 
-// Draw a world capsule as its screen-space stadium (two end circles + the two
-// tangent lines). `eye` is used to pick a screen-perpendicular for the radius.
+// Draw a world capsule as its real silhouette: a capsule is the convex hull of
+// its two end spheres, and projection preserves convexity, so the outline is the
+// hull of the two projected sphere outlines — an honest pill, with the correct
+// tangents and per-endpoint perspective (`docs/re/aim.md`).
 void draw_capsule(render::DrawList& out, const game::Matrix4x4& view, float width, float height,
                   const game::Vec3& eye, const game::HitboxCapsule& capsule,
                   const render::Color& color) {
-  const auto pa = view.project(capsule.a, width, height);
-  const auto pb = view.project(capsule.b, width, height);
-  if (!pa.has_value() || !pb.has_value()) {
-    return;  // an endpoint is behind the eye
-  }
-  // The capsule radius in screen pixels: project a point offset from an endpoint
-  // perpendicular to both the capsule axis and the view ray.
-  game::Vec3 axis = capsule.b - capsule.a;
-  const float axis_len = game::length(axis);
-  game::Vec3 perpendicular{0.0F, 0.0F, 1.0F};
-  if (axis_len > 1e-3F) {
-    axis = axis * (1.0F / axis_len);
-    perpendicular = game::cross(axis, capsule.a - eye);
-    if (game::length(perpendicular) < 1e-3F) {
-      perpendicular = game::Vec3{0.0F, 0.0F, 1.0F};
+  if (capsule.radius <= 0.0F) {
+    // A zero-radius capsule is a segment: draw its axis.
+    const auto a = view.project(capsule.a, width, height);
+    const auto b = view.project(capsule.b, width, height);
+    if (a.has_value() && b.has_value()) {
+      out.line(a->x, a->y, b->x, b->y, color, 1.0F);
     }
-  }
-  float radius = 1.0F;
-  if (capsule.radius > 0.0F) {
-    const auto offset =
-        view.project(capsule.a + game::normalized(perpendicular) * capsule.radius, width, height);
-    if (offset.has_value()) {
-      radius = game::length(*offset - *pa);
-    }
-  }
-  radius = std::clamp(radius, 0.75F, 90.0F);
-
-  // Cull a capsule that is entirely off screen, or one so close to the eye that
-  // it would smear a huge arc across the viewport (a player standing at the
-  // camera). `pa`/`pb` are in front here, so this is purely a framing test.
-  const float min_x = (std::min)(pa->x, pb->x) - radius;
-  const float max_x = (std::max)(pa->x, pb->x) + radius;
-  const float min_y = (std::min)(pa->y, pb->y) - radius;
-  const float max_y = (std::max)(pa->y, pb->y) + radius;
-  if (max_x < 0.0F || min_x > width || max_y < 0.0F || min_y > height ||
-      radius > 0.3F * height) {
     return;
   }
 
-  const float dx = pb->x - pa->x;
-  const float dy = pb->y - pa->y;
-  const float length = std::sqrt(dx * dx + dy * dy);
-  if (length <= radius * 1.5F) {
-    // A short, fat capsule (a joint): one circle is the honest, readable shape
-    // (drawing the two end circles + edges just overloads the view).
-    draw_circle(out, game::Vec2{(pa->x + pb->x) * 0.5F, (pa->y + pb->y) * 0.5F}, radius, color);
+  std::vector<game::Vec2> points;
+  points.reserve(2 * static_cast<std::size_t>(k_capsule_segments));
+  project_sphere_outline(view, width, height, eye, capsule.a, capsule.radius, points);
+  project_sphere_outline(view, width, height, eye, capsule.b, capsule.radius, points);
+  const std::vector<game::Vec2> outline = convex_hull(std::move(points));
+  if (outline.size() < 3) {
+    return;  // behind the eye / degenerate
+  }
+
+  // Cull only the fully off-screen case — a framing test, so nothing visible is
+  // discarded (a capsule near the eye draws its own, large but true, silhouette).
+  float min_x = outline[0].x;
+  float max_x = outline[0].x;
+  float min_y = outline[0].y;
+  float max_y = outline[0].y;
+  for (const game::Vec2& point : outline) {
+    min_x = (std::min)(min_x, point.x);
+    max_x = (std::max)(max_x, point.x);
+    min_y = (std::min)(min_y, point.y);
+    max_y = (std::max)(max_y, point.y);
+  }
+  if (max_x < 0.0F || min_x > width || max_y < 0.0F || min_y > height) {
     return;
   }
-  // The two tangent edges: offset the spine by +/- the screen perpendicular.
-  const float nx = -dy / length * radius;
-  const float ny = dx / length * radius;
-  out.line(pa->x + nx, pa->y + ny, pb->x + nx, pb->y + ny, color, 1.0F);
-  out.line(pa->x - nx, pa->y - ny, pb->x - nx, pb->y - ny, color, 1.0F);
-  draw_circle(out, *pa, radius, color, 14);
-  draw_circle(out, *pb, radius, color, 14);
+
+  for (std::size_t i = 0; i < outline.size(); ++i) {
+    const game::Vec2& a = outline[i];
+    const game::Vec2& b = outline[(i + 1) % outline.size()];
+    out.line(a.x, a.y, b.x, b.y, color, 1.0F);
+  }
 }
 
 auto team_name(int team) -> std::string {

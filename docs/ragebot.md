@@ -48,15 +48,19 @@
     the command `rage_tick` happened to see (the slot-25 `create_move` **copy**
     vs the slot-5 simulated command), so a shot could be released on a command the
     silent write had not reached.
-- **Hitbox renderer — WIP, off by default.** The overlay draws each live enemy's
-  real hitbox capsules (stadium outline: two end circles + tangent edges; short
-  capsules collapse to one circle) on the render thread, coloured by hitgroup with
-  the ragebot target highlighted. **It is not right yet**: the world geometry is
-  verified correct (an external projection of the same boxes lands exactly on the
-  enemy's body — head at the head, legs at the legs), but the on-screen result is
-  an unreadable tangle, and culling the off-screen cases is a *mitigation*, not a
-  fix. `EspConfig::hitboxes` is therefore **off**; toggle it from the menu's ESP
-  tab to look at it. See `docs/handoff.md` for the open question.
+- **Hitbox renderer — off by default, needs a live re-check.** The overlay draws each
+  live enemy's real hitbox capsules (coloured by hitgroup, rage target highlighted) on
+  the render thread. The draw is now the **true silhouette**: a capsule is the convex
+  hull of its two end spheres, so the tangent circle of each sphere as seen from the
+  eye is built in 3D, sampled and projected, and the two are hulled in screen space —
+  an honest pill with the correct tangents and per-endpoint perspective (it replaces
+  the previous screen-space stadium approximation). The read path's degenerate cases
+  are fixed too: a box whose bone cannot be resolved is skipped instead of leaving its
+  endpoints at the origin, and a mesh with no hitbox-set table is skipped instead of
+  being read as an inline array. `EspConfig::hitboxes` is still **off** and has **not
+  been re-validated live** — toggle it from the menu's ESP tab and compare against the
+  engine's own `sv_showplayerhitboxes`. See `docs/re/aim.md` §"The runtime studio
+  hitbox set".
 - **`aim` control command** — solves and returns the aim direction/value and the
   raw hitbox list; with `write: true` it also applies the solve to the silent
   sub-tick view angles.
@@ -216,14 +220,12 @@ save/restore the engine stream) to keep predictions exact.
 
 ## 10. Next actions
 
-1. **Hitbox renderer (open).** The world geometry is right; the on-screen result
-   is not. Open question to settle first: whether the tangles/overshoot come from
-   the *draw* (stadium edges, radius scaling, missing occlusion by the body) or
-   from a subtle mismatch between the boxes we read and the skeleton pose actually
-   rendered (we take the first mesh whose set mask passes and remap the bone per
-   mesh). Reproduce close-up, project the same boxes externally (`aim-probe`'s
-   `hitboxes[]` now carries both bone-local and world centres) and compare pixel
-   for pixel. `EspConfig::hitboxes` stays **off** until then.
+1. **Hitbox renderer (live re-check).** The draw was rewritten to the true capsule
+   silhouette (§0) and the read path's degenerate cases fixed (unresolved-bone boxes
+   skipped; no-hitbox-set meshes skipped). Re-run the close-up comparison: project the
+   same boxes externally (`aim-probe`'s `hitboxes[]` carries bone-local and world
+   centres) and compare pixel for pixel with the drawn image. `EspConfig::hitboxes`
+   stays **off** until it lines up.
 2. **Occlusion / wallbang (Tier 1).** The engine trace call convention is pinned
    from a live call site (`docs/re/aim.md` §"Calling the trace from the payload"):
    `TraceShapeWithSortedResults` is

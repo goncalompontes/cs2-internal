@@ -53,18 +53,17 @@ the **auto-fire timing bug is fixed**. Two things landed on top:
   carries the attack with the silent angle — the manual-fire path worked for the
   same reason. (Previously the press was only on the command `rage_tick` saw.)
 
-**Hitbox renderer — open, off by default.** `EspConfig::hitboxes` draws each live
-enemy's real studio capsules (stadium outline; short capsules collapse to one
-circle) coloured by hitgroup with the rage target highlighted. It is **not right
-yet** — the world geometry is verified correct (an external projection of the same
-boxes lands on the enemy's body: head at the head, legs at the legs), but the
-on-screen result is an unreadable tangle, and culling the off-screen cases (a
-team-0 identity sitting on the camera smeared arcs across the screen) is a
-*mitigation, not a fix*. The owner's read is that something is still genuinely
-wrong. **Next step:** reproduce close-up and compare the external projection with
-the drawn image pixel for pixel; decide whether it is the draw (edges, radius
-scaling, no body occlusion) or a mismatch between the boxes read and the
-skeleton pose actually rendered. `docs/ragebot.md` §10 item 1.
+**Hitbox renderer — rewritten, needs a live re-check, off by default.**
+`EspConfig::hitboxes` draws each live enemy's real studio hitbox capsules, coloured by
+hitgroup with the rage target highlighted. The draw now traces the **true silhouette**:
+a capsule is the convex hull of its two end spheres, so the tangent circle of each
+sphere as seen from the eye is built in 3D, sampled and projected, and the two outlines
+are hulled in screen space — replacing the previous screen-space stadium approximation.
+Two degenerate cases were fixed in the read path as well (a box whose bone cannot be
+resolved is skipped instead of leaving its endpoints at the map origin; a mesh with no
+hitbox-set table is skipped instead of being read as an inline array). It has **not been
+re-validated live**: toggle it from the menu's ESP tab and compare with the engine's
+`sv_showplayerhitboxes`. `docs/ragebot.md` §10 item 1.
 
 **Occlusion (item 3) — RE pinned, not implemented.** The trace call convention is
 resolved from a live call site: `TraceShapeWithSortedResults` =
