@@ -203,6 +203,14 @@ class Game:
         return self.control.look(yaw=yaw, pitch=pitch, roll=roll, via=via,
                                  command=command, raw=raw, step_yaw=step_yaw)
 
+    def aim(self, **kwargs: Any) -> dict[str, Any]:
+        """Ragebot diagnostic solve (``docs/ragebot.md``)."""
+        return self.control.aim(**kwargs)
+
+    def rage(self, **kwargs: Any) -> dict[str, Any]:
+        """Configure the hold-key ragebot (``docs/ragebot.md``)."""
+        return self.control.rage(**kwargs)
+
     def move(self, *, forward: float = 0.0, side: float = 0.0, up: float = 0.0,
              clear: bool = False, quantize: bool = False, step: bool = False,
              raw_entry: bool = False) -> dict[str, Any]:

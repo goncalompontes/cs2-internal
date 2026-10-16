@@ -1,0 +1,334 @@
+#include "cs2/aim/reader.hpp"
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+
+#include "cs2/game/memory.hpp"
+
+namespace cs2::aim {
+namespace {
+
+// The head box half-extent, in units, for the collision-AABB *fallback* only
+// (used when the real studio hitbox set cannot be read).
+constexpr float k_head_half = 4.0F;
+
+// The hitgroup id of the head (`HITGROUP_HEAD`). Only the head has a
+// non-identity damage multiplier.
+constexpr int k_hitgroup_head = 1;
+
+// --- scene graph / model (`docs/re/aim.md`) --------------------------------
+constexpr std::uintptr_t k_scene_node = 0x330;  // C_BaseEntity::m_pGameSceneNode
+constexpr std::uintptr_t k_model_state = 0x140;    // CSkeletonInstance::m_modelState
+constexpr std::uintptr_t k_bone_array = 0x80;      // CModelState::m_pBoneArray
+constexpr std::uintptr_t k_model_handle = 0xA0;    // CModelState::m_hModel (StrongHandle)
+constexpr std::uintptr_t k_hitbox_set_index = 0x3FC;  // CSkeletonInstance::m_nHitboxSet
+constexpr std::uintptr_t k_hitbox_set_mask = 0x348;   // CSkeletonInstance hitbox-set mask
+
+// --- CModel → render meshes → hitbox sets → boxes (verified live) ----------
+constexpr std::uintptr_t k_mesh_count = 0x70;  // model -> mesh count
+constexpr std::uintptr_t k_mesh_array = 0x78;  // model -> mesh array (ptr per mesh)
+constexpr std::uintptr_t k_mesh_mask = 0x90;   // model -> per-mesh enable mask (uint64[])
+constexpr std::uintptr_t k_set_flags = 0x164;  // mesh -> hitbox-set flags (bit 31 = inline?)
+constexpr std::uintptr_t k_set_data = 0x168;   // mesh -> hitbox-set entry array (or data ptr)
+constexpr std::uintptr_t k_set_count = 0x174;  // mesh -> hitbox-set count
+constexpr std::uintptr_t k_set_entry_stride = 0x48;
+constexpr std::uintptr_t k_set_entry_name_hash = 0x20;
+constexpr std::uintptr_t k_set_entry_boxes = 0x28;   // hitbox count
+constexpr std::uintptr_t k_set_entry_array = 0x30;   // CHitBox* array
+constexpr std::uintptr_t k_box_stride = 0x70;        // sizeof(CHitBox)
+constexpr std::uintptr_t k_box_bone_name = 0x10;     // m_sBoneName (CUtlString)
+constexpr std::uintptr_t k_box_mins = 0x18;          // m_vMinBounds (capsule endpoint A)
+constexpr std::uintptr_t k_box_maxs = 0x24;          // m_vMaxBounds (capsule endpoint B)
+constexpr std::uintptr_t k_box_radius = 0x30;        // m_flShapeRadius
+constexpr std::uintptr_t k_box_group = 0x38;         // m_nGroupId (the hitgroup id)
+constexpr std::uintptr_t k_box_shape = 0x3C;         // m_nShapeType
+constexpr std::uintptr_t k_box_index = 0x48;         // m_nHitBoxIndex
+
+// CModel::GetBoneIndexForHitboxForMesh — the hitbox -> bone remap.
+constexpr std::uintptr_t k_remap_count = 0x220;
+constexpr std::uintptr_t k_remap_table = 0x228;  // int16[]
+constexpr std::uintptr_t k_remap_b = 0x240;      // uint16[mesh]
+constexpr std::uintptr_t k_remap_a = 0x2F0;      // uint16[mesh]
+
+constexpr std::uintptr_t k_bone_stride = 0x20;
+
+// `C_BaseEntity::m_nSubclassID` (+0x08) is the weapon's `CCSWeaponBaseVData*`
+// (`docs/re/aim.md`); the VData carries the real damage model.
+constexpr std::uintptr_t k_subclass_vdata = 0x388;
+constexpr std::uintptr_t k_vdata_damage = 0x820;
+constexpr std::uintptr_t k_vdata_headshot = 0x824;
+constexpr std::uintptr_t k_vdata_penetration = 0x82C;
+constexpr std::uintptr_t k_vdata_range_modifier = 0x834;
+
+// Override `profile` with the weapon's real `CCSWeaponBaseVData` values. False
+// when the weapon / VData cannot be read (the caller's profile stands).
+auto read_weapon_profile(std::uintptr_t weapon_vdata, WeaponProfile& profile) noexcept -> bool {
+  if (weapon_vdata == 0) {
+    return false;
+  }
+  std::int32_t damage = 0;
+  if (!game::read(weapon_vdata + k_vdata_damage, damage) || damage <= 0) {
+    return false;
+  }
+  profile.damage = static_cast<float>(damage);
+  if (float headshot = 0.0F; game::read(weapon_vdata + k_vdata_headshot, headshot) &&
+                             headshot > 0.0F) {
+    profile.headshot_multiplier = headshot;
+  }
+  if (float penetration = 0.0F; game::read(weapon_vdata + k_vdata_penetration, penetration) &&
+                                penetration > 0.0F) {
+    profile.penetration = penetration;
+  }
+  if (float range_modifier = 0.0F;
+      game::read(weapon_vdata + k_vdata_range_modifier, range_modifier) && range_modifier > 0.0F) {
+    profile.range_modifier = range_modifier;
+  }
+  return true;
+}
+
+// One `CTransform` (`docs/re/aim.md`, the bone array): a position followed by a
+// quaternion `(x, y, z, w)`.
+struct RawBone {
+  Vec3 position{};
+  float quat[4]{};
+};
+
+// Resolved model addresses for a pawn.
+struct ModelRef {
+  std::uintptr_t scene = 0;
+  std::uintptr_t model = 0;
+  std::uintptr_t bones = 0;
+  std::uint8_t hitbox_set = 0;
+  std::uint64_t set_mask = 0;
+};
+
+auto resolve_model(std::uintptr_t pawn) noexcept -> ModelRef {
+  ModelRef ref;
+  if (pawn == 0) {
+    return ref;
+  }
+  if (!game::read(pawn + k_scene_node, ref.scene) || ref.scene == 0) {
+    ref.scene = 0;
+    return ref;
+  }
+  const std::uintptr_t model_state = ref.scene + k_model_state;
+  std::uintptr_t handle = 0;
+  if (!game::read(model_state + k_model_handle, handle) || handle == 0) {
+    return ref;
+  }
+  // `m_hModel` is a `CStrongHandle`: dereference once to the binding, once to the
+  // model object (verified live).
+  std::uintptr_t model = 0;
+  if (!game::read(handle, model) || model == 0) {
+    return ref;
+  }
+  ref.model = model;
+  (void)game::read(model_state + k_bone_array, ref.bones);
+  (void)game::read(ref.scene + k_hitbox_set_index, ref.hitbox_set);
+  (void)game::read(ref.scene + k_hitbox_set_mask, ref.set_mask);
+  return ref;
+}
+
+// The bone index a hitbox rides: `CModel::GetBoneIndexForHitboxForMesh`.
+auto bone_for_hitbox(const ModelRef& ref, int mesh_index, int hitbox_index) noexcept -> int {
+  std::int32_t remap_count = 0;
+  if (!game::read(ref.model + k_remap_count, remap_count) || remap_count == 0) {
+    return -1;
+  }
+  std::uintptr_t a = 0;
+  std::uintptr_t b = 0;
+  std::uintptr_t table = 0;
+  if (!game::read(ref.model + k_remap_a, a) || a == 0 ||
+      !game::read(ref.model + k_remap_b, b) || b == 0 ||
+      !game::read(ref.model + k_remap_table, table) || table == 0) {
+    return -1;
+  }
+  std::uint16_t start = 0;
+  std::uint16_t offset = 0;
+  const auto mesh = static_cast<std::uintptr_t>(mesh_index);
+  if (!game::read(a + mesh * 2, start) || !game::read(b + mesh * 2, offset)) {
+    return -1;
+  }
+  const auto index = static_cast<std::int32_t>(start) + static_cast<std::int32_t>(offset) +
+                     hitbox_index;
+  std::int16_t bone = -1;
+  if (!game::read(table + static_cast<std::uintptr_t>(index) * 2, bone)) {
+    return -1;
+  }
+  return bone;
+}
+
+}  // namespace
+
+auto build_input(const game::Snapshot& snapshot, const WeaponProfile& weapon, int target_index,
+                 bool weapon_from_game) -> std::optional<SolveInput> {
+  if (!snapshot.valid || !snapshot.local.has_value()) {
+    return std::nullopt;
+  }
+  const game::PlayerSnapshot& local = *snapshot.local;
+
+  const game::PlayerSnapshot* target = nullptr;
+  for (const game::PlayerSnapshot& player : snapshot.players) {
+    if (player.is_local || !player.alive || player.team == local.team) {
+      continue;
+    }
+    if (target_index >= 0 && player.index != target_index) {
+      continue;
+    }
+    if (target == nullptr || player.distance < target->distance) {
+      target = &player;
+    }
+  }
+  if (target == nullptr) {
+    return std::nullopt;
+  }
+
+  SolveInput input;
+  input.eye = local.eye_origin;
+  input.basis = basis_from_angles(local.eye_angles);
+  input.weapon = weapon;
+  // Prefer the shooter's real weapon VData (damage / headshot / penetration /
+  // range modifier) over the caller's profile when available.
+  if (weapon_from_game) {
+    (void)read_weapon_profile(local.weapon_vdata, input.weapon);
+  }
+  input.pawn = target->pawn;
+
+  // The real studio hitboxes: bone-local capsule endpoints transformed by the
+  // bone (`read_model_hitboxes`). Fall back to the collision-AABB proxy only
+  // when the model cannot be resolved.
+  for (const ModelHitbox& box : read_model_hitboxes(target->pawn)) {
+    Hitbox hitbox;
+    hitbox.is_capsule = true;
+    hitbox.capsule = Capsule{box.world_a, box.world_b, box.radius};
+    hitbox.group = box.group;
+    hitbox.bone = box.bone;
+    hitbox.multiplier = box.group == k_hitgroup_head ? weapon.headshot_multiplier : 1.0F;
+    input.hitboxes.push_back(hitbox);
+  }
+
+  if (input.hitboxes.empty()) {
+    // Fallback: the collision AABB split into a head cube on the eye and a body
+    // box (the pre-studio-hitbox proxy).
+    const Vec3 world_mins = target->origin + target->mins;
+    const Vec3 world_maxs = target->origin + target->maxs;
+    const auto boxes = split_player_at_head(world_mins, world_maxs, target->eye_origin,
+                                            k_head_half, weapon.headshot_multiplier, 1.0F);
+    input.hitboxes.assign(boxes.begin(), boxes.end());
+  }
+  return input;
+}
+
+auto read_model_hitboxes(std::uintptr_t pawn) -> std::vector<ModelHitbox> {
+  std::vector<ModelHitbox> out;
+  const ModelRef ref = resolve_model(pawn);
+  if (ref.model == 0 || ref.bones == 0) {
+    return out;
+  }
+
+  std::int32_t mesh_count = 0;
+  std::uintptr_t meshes = 0;
+  std::uintptr_t masks = 0;
+  if (!game::read(ref.model + k_mesh_count, mesh_count) || mesh_count <= 0 || mesh_count > 64) {
+    return out;
+  }
+  if (!game::read(ref.model + k_mesh_array, meshes) || meshes == 0) {
+    return out;
+  }
+  (void)game::read(ref.model + k_mesh_mask, masks);
+
+  // Use the first render mesh whose enable mask intersects the skeleton's
+  // hitbox-set mask (all player meshes carry the same set).
+  for (int mesh_index = 0; mesh_index < mesh_count; ++mesh_index) {
+    if (masks != 0) {
+      std::uint64_t mask = 0;
+      if (!game::read(masks + static_cast<std::uintptr_t>(mesh_index) * 8, mask) ||
+          (mask & ref.set_mask) == 0) {
+        continue;
+      }
+    }
+    std::uintptr_t mesh = 0;
+    if (!game::read(meshes + static_cast<std::uintptr_t>(mesh_index) * 8, mesh) || mesh == 0) {
+      continue;
+    }
+    std::uint32_t flags = 0;
+    if (!game::read(mesh + k_set_flags, flags)) {
+      continue;
+    }
+    std::uintptr_t sets = 0;
+    if ((flags & 0x7FFFFFFFU) != 0) {
+      if (!game::read(mesh + k_set_data, sets) || sets == 0) {
+        continue;
+      }
+    } else {
+      sets = mesh + k_set_data;
+    }
+    std::int32_t set_count = 0;
+    if (!game::read(mesh + k_set_count, set_count) || set_count <= 0) {
+      continue;
+    }
+    const auto set_index = static_cast<std::uintptr_t>(ref.hitbox_set < set_count
+                                                           ? ref.hitbox_set
+                                                           : set_count - 1);
+    const std::uintptr_t set = sets + set_index * k_set_entry_stride;
+
+    std::int32_t box_count = 0;
+    std::uintptr_t boxes = 0;
+    if (!game::read(set + k_set_entry_boxes, box_count) || box_count <= 0 || box_count > 128) {
+      continue;
+    }
+    if (!game::read(set + k_set_entry_array, boxes) || boxes == 0) {
+      continue;
+    }
+
+    out.reserve(static_cast<std::size_t>(box_count));
+    for (int i = 0; i < box_count; ++i) {
+      const std::uintptr_t box = boxes + static_cast<std::uintptr_t>(i) * k_box_stride;
+      ModelHitbox hitbox;
+      std::uint16_t hitbox_index = 0;
+      if (!game::read(box + k_box_mins, hitbox.mins) ||
+          !game::read(box + k_box_maxs, hitbox.maxs) ||
+          !game::read(box + k_box_radius, hitbox.radius)) {
+        continue;
+      }
+      (void)game::read(box + k_box_index, hitbox_index);
+      std::int32_t group = 0;
+      (void)game::read(box + k_box_group, group);
+      hitbox.group = group;
+      std::uint8_t shape = 0;
+      (void)game::read(box + k_box_shape, shape);
+      hitbox.shape = shape;
+
+      hitbox.bone = bone_for_hitbox(ref, mesh_index, static_cast<int>(hitbox_index));
+
+      // The world capsule endpoints (the bone transform from the bone array).
+      RawBone raw{};
+      if (hitbox.bone >= 0 &&
+          game::read(ref.bones + static_cast<std::uintptr_t>(hitbox.bone) * k_bone_stride, raw)) {
+        BoneTransform bone{};
+        bone.position = raw.position;
+        std::memcpy(bone.rotation, raw.quat, sizeof(bone.rotation));
+        hitbox.world_a = bone.position + rotate(bone, hitbox.mins);
+        hitbox.world_b = bone.position + rotate(bone, hitbox.maxs);
+      }
+
+      if (const std::string name = game::read_cstring(
+              [&]() -> std::uintptr_t {
+                std::uintptr_t name_ptr = 0;
+                game::read(box + k_box_bone_name, name_ptr);
+                return name_ptr;
+              }(),
+              24);
+          !name.empty()) {
+        std::snprintf(hitbox.name, sizeof(hitbox.name), "%s", name.c_str());
+      }
+      out.push_back(hitbox);
+    }
+    break;  // one mesh is enough — player meshes share the hitbox set
+  }
+  return out;
+}
+
+}  // namespace cs2::aim

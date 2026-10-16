@@ -2,9 +2,12 @@
 //
 // Boots the payload: interposes the DXGI swapchain (ADR-0015) and drives the
 // ImGui debug HUD, which reads local-player/player state via `payload/game`.
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "cs2/control/service.hpp"
 #include "cs2/diag/crash_handler.hpp"
@@ -76,16 +79,100 @@ auto parse_movement_env() noexcept -> MovementConfig {
   return config;
 }
 
+// Split a comma-separated token list (trimming spaces and empty tokens).
+auto split_tokens(const std::string& value) noexcept -> std::vector<std::string> {
+  std::vector<std::string> tokens;
+  std::size_t start = 0;
+  while (start <= value.size()) {
+    const std::size_t end = value.find(',', start);
+    std::string token = value.substr(start, end == std::string::npos ? std::string::npos
+                                                                    : end - start);
+    while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) {
+      token.erase(token.begin());
+    }
+    while (!token.empty() && (token.back() == ' ' || token.back() == '\t')) {
+      token.pop_back();
+    }
+    if (!token.empty()) {
+      tokens.push_back(std::move(token));
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    start = end + 1;
+  }
+  return tokens;
+}
+
+// `CS2_PAYLOAD_RAGE` — the payload's own switch for the ragebot keybind
+// (`docs/ragebot.md`). Comma-separated tokens: `on` (enable), `fire` (auto-fire),
+// `key=<vk>` (a decimal virtual-key code; the default is `X`). These become the
+// *defaults* published to the overlay menu, which then owns the feature.
+struct RageConfig {
+  bool enabled = false;
+  bool fire = false;
+  int key = 0x58;  // VK_X
+};
+
+auto parse_rage_env() noexcept -> RageConfig {
+  RageConfig config;
+  const char* value = std::getenv("CS2_PAYLOAD_RAGE");
+  if (value == nullptr) {
+    return config;
+  }
+  for (const std::string& token : split_tokens(std::string(value))) {
+    if (token == "on") {
+      config.enabled = true;
+    } else if (token == "fire") {
+      config.fire = true;
+    } else if (token.rfind("key=", 0) == 0) {
+      config.key = std::atoi(token.c_str() + 4);
+    } else {
+      const int key = std::atoi(token.c_str());
+      if (key > 0) {
+        config.key = key;
+      }
+    }
+  }
+  return config;
+}
+
 // The overlay menu's `Movement` tab writes the shared settings; the publisher calls
 // this when they *change*, and the payload's movement features follow.
-void on_movement_settings(void* context, bool auto_strafe, bool bhop) noexcept {
-  static_cast<Runtime*>(context)->control.set_movement_features(auto_strafe, bhop);
+void on_movement_settings(void* context, bool auto_strafe, bool bhop, bool rage, int rage_key,
+                          bool rage_fire) noexcept {
+  auto* runtime = static_cast<Runtime*>(context);
+  runtime->control.set_movement_features(auto_strafe, bhop);
+  runtime->control.set_rage_features(rage, rage_key, rage_fire);
 }
 
 // The per-frame overlay refresh forwards the local pawn so the movement features
 // (strafe/bhop prediction) see it fresh during menu-only play.
 void on_local_pawn(void* context, std::uintptr_t pawn) noexcept {
   static_cast<Runtime*>(context)->control.note_local_pawn(pawn);
+}
+
+// The per-frame overlay refresh also forwards the full snapshot: the ragebot solve
+// runs there and stashes the silent aim for the per-tick `Input::apply()`.
+void on_snapshot(void* context, const cs2::game::Snapshot& snapshot) noexcept {
+  static_cast<Runtime*>(context)->control.on_snapshot(snapshot);
+}
+
+// The overlay HUD asks for the ragebot's one-line status while it is enabled.
+bool on_rage_status(void* context, char* out, std::size_t size) noexcept {
+  return static_cast<Runtime*>(context)->control.rage_status(out, size);
+}
+
+// The overlay's hitbox visualiser asks the payload for a pawn's real studio
+// hitbox capsules (`docs/re/aim.md`).
+int on_hitboxes(void* context, std::uintptr_t pawn, cs2::game::HitboxCapsule* out,
+                int max) noexcept {
+  return static_cast<Runtime*>(context)->control.read_hitboxes(pawn, out, max);
+}
+
+// The overlay highlights the ragebot's current target.
+int on_rage_target(void* context) noexcept {
+  return static_cast<Runtime*>(context)->control.rage_target_index();
 }
 
 // The overlay asks for the bhop prediction's position to draw the demo box.
@@ -126,10 +213,23 @@ DWORD WINAPI install_thread(void*) {
                           " OVERLAY_LOG=" + env_value("CS2_OVERLAY_LOG"));
     cs2::payload::runtime().control.set_movement_features(movement.strafe, movement.bhop);
     cs2::payload::runtime().publisher.set_movement_defaults(movement.strafe, movement.bhop);
+    const RageConfig rage = parse_rage_env();
+    cs2::game::append_log(std::string("[cs2-payload] rage: enabled=") +
+                          (rage.enabled ? "1" : "0") + " key=" + std::to_string(rage.key) +
+                          " fire=" + (rage.fire ? "1" : "0"));
+    cs2::payload::runtime().control.set_rage_features(rage.enabled, rage.key, rage.fire);
+    cs2::payload::runtime().publisher.set_rage_defaults(rage.enabled, rage.key, rage.fire);
     cs2::payload::runtime().publisher.set_settings_sink(&on_movement_settings,
                                                         &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_local_pawn_sink(&on_local_pawn,
                                                         &cs2::payload::runtime());
+    cs2::payload::runtime().overlay.set_snapshot_sink(&on_snapshot, &cs2::payload::runtime());
+    cs2::payload::runtime().overlay.set_rage_status_provider(&on_rage_status,
+                                                             &cs2::payload::runtime());
+    cs2::payload::runtime().overlay.set_hitbox_provider(&on_hitboxes,
+                                                        &cs2::payload::runtime());
+    cs2::payload::runtime().overlay.set_rage_target_provider(&on_rage_target,
+                                                             &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_predicted_origin_provider(
         &on_predicted_origin, &cs2::payload::runtime());
   }

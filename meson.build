@@ -37,6 +37,62 @@ game_matrix_test = executable('game_matrix_test', 'payload/game/tests/test_matri
 )
 test('game-matrix', game_matrix_test)
 
+# Ragebot aim geometry (the angular chart, hulls, optima) — platform-independent,
+# built natively so the aim model has a host regression test.
+aim_geometry_test = executable('aim_geometry_test',
+  files(
+    'payload/aim/tests/test_aim_geometry.cpp',
+    'payload/aim/src/geometry.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-geometry', aim_geometry_test)
+
+aim_field_test = executable('aim_field_test',
+  files(
+    'payload/aim/tests/test_aim_field.cpp',
+    'payload/aim/src/geometry.cpp',
+    'payload/aim/src/field.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-field', aim_field_test)
+
+aim_solver_test = executable('aim_solver_test',
+  files(
+    'payload/aim/tests/test_aim_solver.cpp',
+    'payload/aim/src/geometry.cpp',
+    'payload/aim/src/field.cpp',
+    'payload/aim/src/hitbox.cpp',
+    'payload/aim/src/solver.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-solver', aim_solver_test)
+
+aim_records_test = executable('aim_records_test',
+  files(
+    'payload/aim/tests/test_aim_records.cpp',
+    'payload/aim/src/records.cpp',
+    'payload/aim/src/hitbox.cpp',
+    'payload/aim/src/geometry.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-records', aim_records_test)
+
 # Control-channel core (ADR-0020): the platform-independent parts of
 # payload/control (JSON value, `wait_for` predicate, snapshot serialization are
 # built here; the pipe/console/thread parts are Windows-only and live in the

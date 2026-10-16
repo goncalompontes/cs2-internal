@@ -266,6 +266,22 @@ void toggle(const char* label, std::uint8_t& value) {
   }
 }
 
+// Ragebot trigger-key choices (Win32 virtual-key codes).
+const char* const k_rage_key_names[] = {"X",   "C",    "V",        "Z",       "F",
+                                        "E",   "Q",    "Left Alt", "Left Shift",
+                                        "Mouse 4", "Mouse 5"};
+const int k_rage_key_vks[] = {0x58, 0x43,     0x56, 0x5A, 0x46,
+                              0x45, 0x51,     0xA4, 0xA0, 0x05,  0x06};
+
+auto rage_key_index(std::uint8_t vk) -> int {
+  for (int i = 0; i < IM_ARRAYSIZE(k_rage_key_vks); ++i) {
+    if (k_rage_key_vks[i] == vk) {
+      return i;
+    }
+  }
+  return 0;
+}
+
 // Draws the menu; returns false when the user closed it with the window button.
 auto draw_window(wire::Settings& settings) -> bool {
   bool open = true;
@@ -284,6 +300,8 @@ auto draw_window(wire::Settings& settings) -> bool {
         ImGui::Separator();
         toggle("Only enemies", settings.only_enemies);
         toggle("Show dead", settings.show_dead);
+        ImGui::Separator();
+        toggle("Hitboxes (studio)", settings.hitboxes);
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("Interface")) {
@@ -297,6 +315,19 @@ auto draw_window(wire::Settings& settings) -> bool {
         ImGui::Separator();
         ImGui::TextDisabled("Applied by the payload per tick while airborne (strafe)");
         ImGui::TextDisabled("or grounded (bhop). The camera does not move.");
+        ImGui::EndTabItem();
+      }
+      if (ImGui::BeginTabItem("Ragebot")) {
+        toggle("Ragebot (hold key)", settings.rage);
+        int key_index = rage_key_index(settings.rage_key);
+        if (ImGui::Combo("Trigger key", &key_index, k_rage_key_names,
+                         IM_ARRAYSIZE(k_rage_key_names))) {
+          settings.rage_key = static_cast<std::uint8_t>(k_rage_key_vks[key_index]);
+        }
+        toggle("Auto fire", settings.rage_fire);
+        ImGui::Separator();
+        ImGui::TextDisabled("Hold the key to aim at the nearest enemy (silent).");
+        ImGui::TextDisabled("Fires while held when Auto fire is on.");
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("About")) {

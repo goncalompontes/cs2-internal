@@ -38,6 +38,114 @@ agent guide `docs/re/README.md`.
 > command build and the movement consumer) and
 > [`docs/re/client-dll.md`](re/client-dll.md) (the input path + game events).
 
+## ⏸ Wrap-up (2026-10-16, session 2) — weapon model, auto-fire fix, hitbox renderer
+
+**State:** `payload.dll`, `cs2_overlay_layer.dll`, `injector.exe` all build; the 12
+host tests pass. The ragebot is **working** (real studio hitboxes + keybind) and
+the **auto-fire timing bug is fixed**. Two things landed on top:
+
+- **Weapon model from the game.** The solve now reads the shooter's real
+  `CCSWeaponBaseVData` (`weapon + 0x388`, `m_nDamage`/`m_flHeadshotMultiplier`/
+  `m_flPenetration`/`m_flRangeModifier`); explicit `aim`/`rage` args still win.
+  Live: `aim-probe` reports a Glock `weapon_damage 50` (was the hard-coded 100).
+- **Auto-fire fix.** The attack is asserted **persistently** in `Input::apply()`
+  step 1 (backend-independent) while a solve is active, so every simulated command
+  carries the attack with the silent angle — the manual-fire path worked for the
+  same reason. (Previously the press was only on the command `rage_tick` saw.)
+
+**Hitbox renderer — open, off by default.** `EspConfig::hitboxes` draws each live
+enemy's real studio capsules (stadium outline; short capsules collapse to one
+circle) coloured by hitgroup with the rage target highlighted. It is **not right
+yet** — the world geometry is verified correct (an external projection of the same
+boxes lands on the enemy's body: head at the head, legs at the legs), but the
+on-screen result is an unreadable tangle, and culling the off-screen cases (a
+team-0 identity sitting on the camera smeared arcs across the screen) is a
+*mitigation, not a fix*. The owner's read is that something is still genuinely
+wrong. **Next step:** reproduce close-up and compare the external projection with
+the drawn image pixel for pixel; decide whether it is the draw (edges, radius
+scaling, no body occlusion) or a mismatch between the boxes read and the
+skeleton pose actually rendered. `docs/ragebot.md` §10 item 1.
+
+**Occlusion (item 3) — RE pinned, not implemented.** The trace call convention is
+resolved from a live call site: `TraceShapeWithSortedResults` =
+`(iface, <rdx descriptor>, start, end, filter, &results)` on
+`*client_base + 0x221f058`, filter vtable `+0x1ace848`, mask `0x1c1003`, static
+default filter at `+0x221f070` (`docs/re/aim.md` §"The call convention, pinned from
+a live site"). It was **not** wired up: it needs a dumper signature for the
+singleton + the function (ADR-0012) and live validation, and a wrong call aborts
+the process (the payload has no exception tables), so it deserves its own pass.
+
+**Tooling added:** `scripts/capture-screen.ps1` and `scripts/capture-game.ps1`
+capture the interactive session (run them via a scheduled task —
+`schtasks /create … /it`, like `CS2Launch`; session 0 has no visible desktop).
+`capture-game.ps1` restores + foregrounds the game window and crops to its client
+area.
+
+---
+
+## ⏸ Wrap-up (2026-10-16) — ragebot: real studio hitboxes + hold-key ragebot
+
+**Resume here for the ragebot.** Design + direction: **ADR-0022** and
+[`docs/ragebot.md`](ragebot.md) (which carries an implementation-status §0 and
+the next actions). RE: [`docs/re/aim.md`](re/aim.md) (the shot model + the trace
+recipe + **the runtime studio hitbox set**), [`docs/re/lagcomp.md`](re/lagcomp.md)
+(backtracking), [`docs/re/vphysics2.md`](re/vphysics2.md) (collision geometry).
+
+**Implemented + host-tested** (`payload/aim/`, 4 tests: `aim-geometry`,
+`aim-field`, `aim-solver`, `aim-records`):
+
+- `geometry` — the angular chart (gnomonic projection), OBB/sphere projection,
+  convex hulls, half-plane clipping, and the two optima (nearest point,
+  Chebyshev centre).
+- `field` — the damage field (cells, the weapon value model, the pose-blurred
+  maximum), `solver` — build the field and pick the aim.
+- `hitbox` — bone/AABB → oriented box; `reader` — the snapshot → solver bridge;
+  `records` — the backtrack ring + the rewind-tick formula.
+
+**Live-validated** (`payload.dll` builds; `aim` + `rage` wired into the control
+service; scenarios `aim-probe`, `aim-shot`, `rage`):
+
+- `aim-probe` — the solve points at a bot's head within **0.02°**, using the real
+  studio hitbox set (`hitcount` 19).
+- `rage` — **the hold-key ragebot works**: with the feature enabled (the overlay
+  menu's `Ragebot` tab, or the `rage` command) the payload solves each frame and
+  the per-tick `Input::apply()` writes the silent sub-tick aim + `IN_ATTACK`;
+  solves/writes/shots climb and the bot's health drops. **Firing manually while
+  the ragebot holds the aim always hits.**
+
+### The real studio hitboxes (done 2026-10-16)
+
+`aim::read_model_hitboxes` now walks pawn → scene node → `CModelState` → (double
+deref) `CModel` → render mesh → hitbox set → **19 capsules** (bone-local endpoints
+`m_vMinBounds`/`m_vMaxBounds` + `m_flShapeRadius`), resolves each box's bone
+through `CModel::GetBoneIndexForHitboxForMesh`, transforms the endpoints by the
+bone (`{pos, quat}`, stride `0x20`) and reads the hitgroup from `m_nGroupId`
+(head ⇒ `m_flHeadshotMultiplier`). Full layout + the live verification:
+**`docs/re/aim.md` §"The runtime studio hitbox set"**. The collision-AABB head/body
+proxy is now only a fallback. New geometry: `project_capsule` (a capsule is the
+convex hull of two spheres, so its silhouette is the hull of the two circle
+projections); `aim-solver` grew a capsule case.
+
+**What is NOT done (the resume points, in priority order):**
+
+1. **Ragebot auto-fire timing (minor).** With `fire` on, a shot is *sometimes*
+   released on a command whose history the silent write did not reach that tick,
+   so it follows the camera. Cause: `apply()` runs for both the slot-25
+   `create_move` **copy** and the slot-5 simulated command, and the attack press is
+   asserted per-`apply()`; manual fire works because the press is **persistent**
+   across every command. Fix: assert the attack into `set_mask_` while the rage is
+   active (or gate the press to the slot-5 command).
+2. **Occlusion / wallbang** — the solver consumes occluders
+   (`SolveInput::occluders` → `DamageField::clip`) but nothing produces them. The
+   engine trace recipe (interface singleton `client_base+0x221f058`, the direct
+   `FUN_180a1a0a0` call, the static filter at `+0x221f070`) is in
+   `docs/re/aim.md` §"Calling the trace from the payload"; the struct layouts /
+   arg order still need pinning from **assembly** (a wrong call faults the game).
+3. **Backtracking** — `records` is host-tested but not sampled per frame.
+4. **Pose blur** wiring; pellet-pattern registration (`K>1`); pulling the weapon's
+   real damage/headshot/range from `CCSWeaponBaseVData` (the `aim`/`rage` commands
+   still take a fixed profile).
+
 ## ⏸ Wrap-up (2026-10-15/16) — sub-tick bhop implemented from the RE
 
 The menu-enabled movement features **engage** (`Input::apply()` runs them

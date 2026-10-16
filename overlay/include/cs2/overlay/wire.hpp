@@ -20,7 +20,7 @@
 namespace cs2::overlay::wire {
 
 inline constexpr uint32_t k_magic = 0x324F5343U;  // 'CSO2'
-inline constexpr uint32_t k_version = 4;
+inline constexpr uint32_t k_version = 6;
 
 inline constexpr int k_max_sections = 16;
 inline constexpr int k_max_lines = 64;
@@ -86,7 +86,10 @@ struct Settings {
   uint8_t menu_open;      // written by the layer; the payload may suppress input
   uint8_t auto_strafe;    // payload movement features (`docs/re/subtick.md`):
   uint8_t bhop;           //   silent airborne air-strafe / auto-jump
-  uint8_t reserved[4];
+  uint8_t rage;           // ragebot enabled (`docs/ragebot.md`)
+  uint8_t rage_key;       //   the virtual-key code held to trigger (0 = none)
+  uint8_t rage_fire;      //   auto-fire while aiming
+  uint8_t hitboxes;       // draw the real studio hitboxes (`docs/re/aim.md`)
 };
 
 struct Model {

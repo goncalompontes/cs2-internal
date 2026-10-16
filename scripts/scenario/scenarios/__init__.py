@@ -6,7 +6,7 @@ this package and looks up the function by name.
 
 from . import (autostrafe, bhop, game_events, join_bot_match, move_and_aim, move_to,
                movement_probe, screens, status, strafe_probe, subtick_aim, subtick_move,
-               subtick_shot, usercmd_move)
+               subtick_shot, usercmd_move, aim_probe, aim_shot, rage)
 
 SCENARIOS = {
     "join-bot-match": join_bot_match.run,
@@ -23,6 +23,9 @@ SCENARIOS = {
     "move-to": move_to.run,
     "screens": screens.run,
     "status": status.run,
+    "aim-probe": aim_probe.run,
+    "aim-shot": aim_shot.run,
+    "rage": rage.run,
 }
 
 __all__ = ["SCENARIOS"]

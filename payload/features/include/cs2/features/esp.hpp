@@ -16,6 +16,11 @@ struct EspConfig {
   bool flags = true;
   bool only_enemies = true;  // skip the local player
   bool show_dead = false;
+  // Draw the real studio hitbox capsules (`docs/re/aim.md`). **Off by default**:
+  // the renderer draws the true capsule set, but at present it comes out as an
+  // unreadable tangle (and the off-screen culling is a mitigation, not a fix) —
+  // see `docs/ragebot.md` §0. Re-enable from the menu's ESP tab to look at it.
+  bool hitboxes = false;
 };
 
 // Per-build counters, for diagnostics/logging (never used for rendering).

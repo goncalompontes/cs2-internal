@@ -41,6 +41,30 @@ class Service {
   // control commands set the same flags (the last writer wins).
   void set_movement_features(bool auto_strafe, bool bhop) noexcept;
 
+  // Drive the ragebot (`docs/ragebot.md`): the overlay menu's Ragebot tab and the
+  // `rage` control command set the same state. `key` is a Win32 virtual-key code
+  // (0 = none), held to trigger the solve.
+  void set_rage_features(bool on, int key, bool fire) noexcept;
+
+  // Run the ragebot for one state refresh. The overlay's per-frame sink calls this
+  // with the current snapshot; the solve runs on the render thread and stashes the
+  // aim, which `Input::apply()` writes per tick as the silent sub-tick view angles.
+  void on_snapshot(const game::Snapshot& snapshot) noexcept;
+
+  // The ragebot's one-line status for the HUD (false when there is nothing to
+  // show, e.g. the feature is off).
+  auto rage_status(char* out, std::size_t size) const noexcept -> bool;
+
+  // The ragebot's current target entity index (-1 = none), so the overlay can
+  // highlight it.
+  [[nodiscard]] int rage_target_index() const noexcept { return input_.rage_target(); }
+
+  // Fill `out` (up to `max`) with `pawn`'s real studio hitbox capsules in world
+  // space, for the overlay's hitbox visualiser (`docs/re/aim.md`). Returns the
+  // count written.
+  auto read_hitboxes(std::uintptr_t pawn, game::HitboxCapsule* out, int max) const noexcept
+      -> int;
+
   // Note the local pawn for the movement features (the `usercmd` on-ground test
   // and the bhop prediction). Called from the per-frame overlay refresh, so the
   // pawn stays fresh even when no scenario is polling `state`.
@@ -78,6 +102,12 @@ class Service {
   void do_predict(const Json& args, Json& out) noexcept;
   // Auto-strafe (`set_strafe`): airborne-only silent air-strafing.
   void do_strafe(const Json& args, Json& out) noexcept;
+  // Ragebot aim (docs/ragebot.md): solve the damage field for the nearest enemy
+  // and report the aim direction. Diagnostic — does not write the view yet.
+  void do_aim(const Json& args, Json& out) noexcept;
+  // Ragebot keybind: enable / configure the hold-key ragebot (`on`, `key`,
+  // `fire`, `damage`, `headshot`, `objective`).
+  void do_rage(const Json& args, Json& out) noexcept;
   // The common `input`/`press`/`bhop` status payload.
   [[nodiscard]] Json input_status() noexcept;
 
@@ -93,6 +123,20 @@ class Service {
 #endif
   std::atomic<bool> running_{false};
   std::uint64_t start_tick_ = 0;  // ms, from `GetTickCount64` at construction
+  // Ragebot configuration (menu / control command). The solve runs in
+  // `on_snapshot`; the aim is stashed in `input_`.
+  std::atomic<bool> rage_enabled_{false};
+  std::atomic<int> rage_key_{0};
+  std::atomic<bool> rage_fire_{false};
+  // Bypass the physical key check (a scenario cannot synthesize one).
+  std::atomic<bool> rage_force_{false};
+  std::atomic<float> rage_damage_{100.0F};
+  std::atomic<float> rage_headshot_{4.0F};
+  std::atomic<float> rage_range_modifier_{0.98F};
+  std::atomic<int> rage_objective_{1};  // 0 damage, 1 hitchance, 2 expected
+  std::atomic<float> rage_sigma_{0.0F};
+  std::atomic<std::uint64_t> rage_solves_{0};
+  std::atomic<int> rage_last_target_{-1};
   Channel channel_;
   Console console_;
   EventLog events_;

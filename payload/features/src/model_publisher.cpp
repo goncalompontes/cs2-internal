@@ -47,6 +47,7 @@ auto to_wire_settings(const EspConfig& config) -> wire::Settings {
   settings.flags = config.flags ? 1 : 0;
   settings.only_enemies = config.only_enemies ? 1 : 0;
   settings.show_dead = config.show_dead ? 1 : 0;
+  settings.hitboxes = config.hitboxes ? 1 : 0;
   settings.show_hud = 1;
   return settings;
 }
@@ -61,6 +62,7 @@ auto from_wire_settings(const wire::Settings& settings) -> EspConfig {
   config.flags = settings.flags != 0;
   config.only_enemies = settings.only_enemies != 0;
   config.show_dead = settings.show_dead != 0;
+  config.hitboxes = settings.hitboxes != 0;
   return config;
 }
 
@@ -207,6 +209,9 @@ void ModelPublisher::publish_settings() noexcept {
   // owns them (see `apply_settings`).
   defaults.auto_strafe = movement_auto_strafe_ ? 1 : 0;
   defaults.bhop = movement_bhop_ ? 1 : 0;
+  defaults.rage = rage_ ? 1 : 0;
+  defaults.rage_key = static_cast<uint8_t>(rage_key_);
+  defaults.rage_fire = rage_fire_ ? 1 : 0;
   const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_relaxed);
   shared->settings_sequence.store(sequence + 1, std::memory_order_relaxed);  // odd: writing
   std::memcpy(&shared->settings, &defaults, sizeof(defaults));
@@ -250,7 +255,8 @@ void ModelPublisher::apply_settings() noexcept {
   // leftover from an earlier session — is corrected on the next frame instead of
   // sticking.
   if (settings_sink_ != nullptr) {
-    settings_sink_(settings_sink_context_, copy.auto_strafe != 0, copy.bhop != 0);
+    settings_sink_(settings_sink_context_, copy.auto_strafe != 0, copy.bhop != 0,
+                   copy.rage != 0, copy.rage_key, copy.rage_fire != 0);
   }
 }
 

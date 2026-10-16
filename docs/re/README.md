@@ -6,8 +6,11 @@ REA, headless). Findings are recorded per subsystem.
 - [`interface-system.md`](interface-system.md) — `CreateInterface` registration
 - [`schema-system.md`](schema-system.md) — schema system
 - [`client-dll.md`](client-dll.md) — entity system, local player, view matrix (WIP)
+- [`aim.md`](aim.md) — shot model: spread/inaccuracy, the shot seed, trace API, hitboxes, penetration params
+- [`lagcomp.md`](lagcomp.md) — lag compensation & backtracking: rewind tick, per-entity records, interp history
 - [`subtick.md`](subtick.md) — sub-tick input: view-angle history, move steps, button steps
 - [`engine2.md`](engine2.md) — console-command path (`exec`), game event system
+- [`vphysics2.md`](vphysics2.md) — collision geometry (Rubikon `Rn` hulls/meshes) for the ragebot
 
 > Addresses are absolute VAs for the module as loaded at its PE image base
 > (`client.dll`/`engine2.dll`/`schemasystem.dll` → `0x180000000`).
@@ -212,6 +215,8 @@ The payload must never hard-code an RVA (ADR-0012).
 |---|---|---|
 | `engine2.dll` | `C:\Users\gpmpo\ghidra-analysis\engine2.dll` | `4b8fe29ecdef4f492a602d9013cbfe5226561c9c0ba4361ce82e6f46d4f9bc04` |
 | `client.dll` | `C:\Users\gpmpo\ghidra-analysis\client.dll` | `44af2aa0d2c64f90d273444cb393b8b679094f0b02136dbdb89d4ec82a560008` |
+| `vphysics2.dll` | `C:\Users\gpmpo\ghidra-analysis\vphysics2.dll` | `1d7680455eb1ca3ad7c9b92165515351f607e96db66cf466140aaf3f00946dba` |
+| `server.dll` | `C:\Users\gpmpo\ghidra-analysis\server.dll` | `09e8c04c5f44040155d04fa79a3f43491d542a386f45807ed77785729e5925a9` |
 
 Source of the copies: the Steam depot
 (`…\game\bin\win64\engine2.dll`, `…\game\csgo\bin\win64\client.dll`). Copy to the
@@ -360,6 +365,45 @@ every warm target.
   `(*vtable+0x150)()`), and the `SetupMove` button gate (an axis is copied only when
   `IN_FORWARD|IN_BACK` / `IN_MOVELEFT|IN_MOVERIGHT` is held). **Consumed by the
   payload's `Input::strafe_tick` / `write_strafe_wish` (the silent auto-strafe).**
+
+- **`client.dll` — shot model / aim** (`docs/re/aim.md`): `FX_FireBullets`
+  (`0xd22c50`) → the cone sampler `FUN_180d23460` (`0xd23460`): **`RandomSeed(seed)`**
+  then `r~U(0,1)`, `a~U(0,2π)`, `offset = r1·(cos a1,sin a1) + r2·(cos a2,sin a2)`
+  (spread + inaccuracy), with revolver/negev/shotgun patterns. Seed =
+  `CBaseUserCmdPB::random_seed` (`MD5_PseudoRandom(sequence)`). Inaccuracy:
+  `FUN_18080b880` (base virtual, VData terms + convars, jump initial↔apex by
+  `|v_z|`, clamp ≤1) + `FUN_18080cba0` (move term = speed × `1−|cos(vel,view)|`).
+  Weapon params in `CCSWeaponBaseVData` (spread 1872, damage 2080, penetration
+  2092, range 2096, range_modifier 2100). Trace API =
+  `CGamePhysicsQueryInterface` (`TraceShapeWithSortedResults` `0xa1a0a0` all-hits,
+  `TraceLineIntervals` `0xa18fd0` 56-B intervals, `EntitiesInShape` `0x9db220`,
+  `FilterOverlapResults` `0x9de620`); `CGameTrace` ~0xB8 (`start+0x78`, `end+0x84`,
+  `fraction+0xac`); overlap records `0x70` B. Hitboxes: `m_pGameSceneNode +0x330`
+  → `CSkeletonInstance::m_modelState +0x140`, `m_nHitboxSet +0x3FC`.
+  **Consumed by the ragebot design (`docs/ragebot.md`).**
+- **`client.dll` — lag compensation / backtracking** (`docs/re/lagcomp.md`): the
+  rewind-tick computation `FUN_1808a0390` (`0x8a0390`):
+  `rewind = tickbase - (min(0.07, sv_maxunlag·0.95) + interp + 1/64 + 0.1)·64`,
+  then `FUN_180c90b90` (`0xc90b90`) trims each entity's lag-record list (count
+  `+0x34D0`, array `+0x34D8`, 8-B tick-keyed entries) to the window. Interp
+  history: 32 × `0x14` ring at `+0xE8` (head `+0x368`, count `+0x36C`,
+  `FUN_180903020`). `m_flSimulationTime` `+0x3B8`, `m_nTickBase` `+0x6B8`.
+  Convars `sv_maxunlag`/`cl_interp`/`cl_interp_ratio`; server feedback via
+  `CUserMessageLagCompensationError`. The **server** side (`server.dll`,
+  `CLagCompensationManager`, `game/server/player_lagcompensation.cpp`) is
+  authoritative: `StartLagCompensation` (`0x180ed6f10`) rewinds to the command's
+  target time clamped to `sv_maxunlag`/`sv_maxunlag_player`;
+  `RecordDataIntoTrack` (`0x180ed1910`) keeps `EntityLagData` records (`0x480` B,
+  tick `+0x34`, origin `+0x04`). **Feeds the ragebot's backtrack records.**
+- **`vphysics2.dll` — collision geometry** (`docs/re/vphysics2.md`): the Rubikon
+  `Rn` model — convex half-edge hulls (`RnHull_t` = `0xF8` B: vertices at
+  `+0x70`/`+0x78`, AABB `+0x14`/`+0x20`), meshes (`RnMesh_t`), compounds
+  (`RnCompound_t`); named `RnHullCreate`/`Clone`/`Destroy` etc. Game-facing shape
+  layer: `FUN_180254ac0` stores the **type at `shape+0x18`**; hull ctor
+  `FUN_180250030` (vtable `0x3e1140`) stores the **`RnHull_t*` at `shape+0xC0`**
+  (+scale `+0xB8`); mesh `+0xC8`; compound vtable `0x3e1398`. Reached from the
+  client as `VPhysics2_Interface_001` (`CVPhysics2Interface`). **Enables the
+  ragebot's zero-trace occlusion/penetration heat map (Tier 2).**
 
 When you finish a subsystem, update this map and the per-module doc.
 

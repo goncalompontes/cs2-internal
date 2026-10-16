@@ -28,7 +28,9 @@ payload's new `level` block is the **main-screen rule** (the level's
 main menu too), and its `rules` block (from `C_CSGameRules`) gives the
 authoritative `warmup`/`freeze`/`round_win_status`/buy-window signals; scenarios
 gate on capabilities (`require("move")`) or drive transitions
-(`ensure(Screen.LIVE)`).
+(`ensure(Screen.LIVE)`). **The ragebot aim solve** (`docs/ragebot.md`) is exposed
+as the `aim` control command and **validated live** (`aim-probe`): it points at an
+enemy's head within ~0.2° and the returned damage matches the headshot model.
 
 This is the resume document for the feature we are actively working on: a way to
 programmatically drive CS2 for testing — launch, inject, join a bot match, add /
@@ -98,6 +100,8 @@ Requests are `{"id": <n>, "cmd": <name>, "args": {…}}`; responses are
 | `input` | `via` (`"console"`\|`"usercmd"`) | backend + hook status `{backend, ready, hooked, slot, slot5, buttons_set, buttons_clear, bhop, calls, writes, move_*, angles, base_has_bits, base_move, raw_move, entry_move, steps, step_dump, entry_writes, step_writes, cmd_words, base_words}` plus the bhop block `{bhop_writes, bhop_presses, bhop_a, bhop_b, bhop_skipped, bhop_landed_tick, bhop_landed_frac, bhop_build, bhop_age, bhop_tick_base, bhop_client_tick, bhop_cmd_number, bhop_mode, bhop_when, bhop_holding_ticks, bhop_air_ticks}` (`bhop_a`/`bhop_b` = landings answered with placement A / the B catch-up; **A firing is the phase proof**, validated live) and the strafe block `{strafe, strafe_airborne, strafe_speed, strafe_delta, strafe_goal, strafe_wish, strafe_rot, strafe_side, strafe_steps, strafe_reason, strafe_clamped, strafe_wishspeed, strafe_writes}` (`strafe_rot` = the basis rotation written, `strafe_steps` the yaw steps queued, `strafe_reason` why the tick did/did not act (1 ground, 2 slow, 3 no angles, 4 wrote, 5 no room), `strafe_clamped` how often the rotation had to be clamped so the gate could not drop the shared step array) |
 | `press` / `release` | `buttons` (name, array, or mask); `reset` | hold / release command buttons on the active backend |
 | `look` | `pitch`, `yaw`, `roll`; `clear` | write the sub-tick `view_angles` (silent; `usercmd` backend) |
+| `aim` | `target` (entity index; default nearest), `objective` (`damage`\|`hitchance`\|`expected`), `sigma`, `damage`, `range_modifier`, `penetration`, `headshot`, `write` | **ragebot solve** (`docs/ragebot.md`): solve the damage field for the enemy and return `{valid, yaw, pitch, value, cells, aim_u, aim_v, wrote_view, hitcount, hitboxes[…]}`. `write: true` applies the solve to the **silent** sub-tick `view_angles`. `hitboxes` is the pawn's **real studio hitbox set** (bone, hitgroup, name, radius, bone-local `min/max`, world centre). |
+| `rage` | `on`, `key` (VK code, 0 = none), `fire`, `force` (bypass the key check), `objective`, `damage`, `headshot`, `range_modifier`, `sigma` | **hold-key ragebot** (`docs/ragebot.md`): the payload solves per frame (render thread) and writes the result per tick as the silent sub-tick aim, pressing attack while the key is held. Returns `{enabled, key, fire, force, active, target, hitbox, solves, writes, shots}`. **The overlay menu's `Ragebot` tab owns the same state**, so a control-side enable is reverted by the next published frame — use `force` to drive it from a scenario. |
 | `bhop` | `on` | toggle the payload auto-jump |
 | `move` | `forward`, `side`, `up`; `clear`; `quantize`, `step`, `raw_entry` | set the analog move; the three flags opt into the community ingredients (`docs/re/subtick.md` §"Community cross-check, second pass") |
 | `quit` | — | closes the channel |
@@ -447,7 +451,7 @@ were **strings**, now superseded above.
   `awaiting.py` (readiness: map/round/alive/movable + `measure_move`),
   `scenarios/*.py` (`join-bot-match`, `move-and-aim`, `game-events`,
   `usercmd-move`, `bhop`, `subtick-aim`, `subtick-shot`, `subtick-move`,
-  `movement-probe`, `move-to`, `screens`);
+  `movement-probe`, `move-to`, `screens`, `aim-probe`);
   `scripts/run-scenario.py` (CLI).
 - PID/module discovery: `external/dumper/target/release/cs2-dumper.exe
   --process cs2.exe --json`; injection: `build-injector/injector.exe`.

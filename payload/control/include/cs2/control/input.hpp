@@ -390,6 +390,24 @@ class Input {
   }
   [[nodiscard]] std::uint64_t bhop_air_ticks() const noexcept { return bhop_air_ticks_.load(); }
 
+  // --- ragebot (`docs/ragebot.md`) ----------------------------------------
+  // The aim solve runs on the render thread (the overlay's per-frame state
+  // refresh, which owns the snapshot) and stashes the result here; `apply()`
+  // writes it into the command each tick as the **silent** sub-tick view angles
+  // and, when `set_rage_fire(true)`, presses attack. Independent of the control
+  // backend (like the movement features) and owned by the overlay menu / the
+  // `rage` control command.
+  void set_rage_aim(float pitch, float yaw, int target, int hitbox) noexcept;
+  void clear_rage_aim() noexcept;
+  void set_rage_fire(bool on) noexcept { rage_fire_.store(on); }
+  [[nodiscard]] bool rage_fire() const noexcept { return rage_fire_.load(); }
+  [[nodiscard]] bool rage_active() const noexcept { return rage_active_.load(); }
+  [[nodiscard]] int rage_target() const noexcept { return rage_target_.load(); }
+  [[nodiscard]] int rage_hitbox() const noexcept { return rage_hitbox_.load(); }
+  // Ticks a rage aim was written, and attack presses issued.
+  [[nodiscard]] std::uint64_t rage_writes() const noexcept { return rage_writes_.load(); }
+  [[nodiscard]] std::uint64_t rage_shots() const noexcept { return rage_shots_.load(); }
+
   // --- record-based bunnyhop (UC 771389) ---------------------------------
   // Read-only post-hook state (`docs/re/research-bhop.md`). `bhop_landed_tick` /
   // `bhop_landed_frac` are the engine's own `m_ModernJump` landing record (its
@@ -528,6 +546,12 @@ class Input {
   void write_entry_move() noexcept;
   // Write every raw per-sub-tick angle-history entry's angles (silent candidate).
   void write_raw_angles() noexcept;
+  // Overwrite every `input_history` entry's `view_angles` sub-message (the silent
+  // aim seam; used by both the `look` command and the ragebot).
+  void write_silent_angles(void* cmd, float pitch, float yaw, float roll) noexcept;
+  // One tick of the ragebot: write the render-thread solve as the silent sub-tick
+  // view angles and (optionally) press attack.
+  void rage_tick(std::uint8_t* cmd, std::uint64_t* buttons) noexcept;
   // One tick of the auto-strafe (see `set_strafe`); called from `apply()` with the
   // `CBaseUserCmdPB` (`base`) and the owning `CUserCmd` (`cmd`).
   void strafe_tick(void* base, void* cmd) noexcept;
@@ -557,6 +581,9 @@ class Input {
   void* original5_ = nullptr;     // its previous value
   std::size_t slot5_index_ = 0;
   bool installed_ = false;
+  // One-shot guard so `refresh()` (called from the control thread *and* the
+  // per-frame state refresh) cannot patch the vtable twice.
+  std::atomic<bool> refresh_claimed_{false};
   Backend backend_ = Backend::console;
   std::uint32_t flags_offset_ = 0x3f4;  // C_BaseEntity::m_fFlags
   std::uint32_t velocity_offset_ = 0x3f8;  // C_BaseEntity::m_vecAbsVelocity
@@ -593,6 +620,15 @@ class Input {
   std::atomic<std::uint64_t> bhop_presses_{0};
   std::atomic<std::uint64_t> bhop_holding_ticks_{0};
   std::atomic<std::uint64_t> bhop_air_ticks_{0};
+  // Ragebot: the render-thread solve -> the per-tick silent write.
+  std::atomic<bool> rage_active_{false};
+  std::atomic<float> rage_pitch_{0.0F};
+  std::atomic<float> rage_yaw_{0.0F};
+  std::atomic<int> rage_target_{-1};
+  std::atomic<int> rage_hitbox_{-1};
+  std::atomic<bool> rage_fire_{false};
+  std::atomic<std::uint64_t> rage_writes_{0};
+  std::atomic<std::uint64_t> rage_shots_{0};
   // Record-based bunnyhop: diagnostics + the per-command decision cache (the hook
   // can run more than once per frame, and the `fresh` phase must only be sampled
   // once — see `bhop_tick`).

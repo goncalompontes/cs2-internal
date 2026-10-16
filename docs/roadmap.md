@@ -159,3 +159,48 @@
       tests the main-screen rule, then walks `→ LIVE → kill → DEAD → LIVE`.
 - [ ] Tick/frame hook
 - [ ] Full scripted/interactive session instrumentation
+
+## Phase 6 — Ragebot (aim)
+- [x] Shot-model RE — the spread cone is **deterministic**
+      (`RandomSeed(cmd_seed)`); inaccuracy terms, trace API, hitboxes and
+      penetration parameters (`docs/re/aim.md`)
+- [x] Collision-geometry RE — `vphysics2` Rubikon hulls/meshes are readable
+      (shape type `+0x18`, hull pointer `+0xC0`; `docs/re/vphysics2.md`)
+- [x] Design / direction locked — a deterministic-spread **damage field +
+      heat map** (not multipoint): Tier 1 few-trace, Tier 2 zero-trace
+      (**ADR-0022**, `docs/ragebot.md`)
+- [x] Lag-comp / backtracking RE — rewind tick, per-entity lag records,
+      interpolation history (`docs/re/lagcomp.md`)
+- [~] Tier 1 — `payload/aim` implements the hitbox OBB projection + the damage
+      field + the optima (host-tested: `aim-geometry`, `aim-field`, `aim-solver`);
+      the engine trace probe (`TraceShapeWithSortedResults`) and harness
+      validation remain
+- [ ] Tier 2 — map the overlap record → shape pointer, cut build signatures
+      (`RnHull_t` arrays resolved, `docs/re/vphysics2.md`)
+- [ ] Backtracking — per-enemy record ring + lag-comp window/selection
+      (`payload/aim/records.hpp` done + host-tested; wire it into the per-frame
+      path)
+- [ ] Occlusion — the engine trace probe (`docs/re/aim.md` §"Calling the trace
+      from the payload"); the solver already consumes occluders
+- [x] Studio hitbox set — the real per-hitbox **capsules** (bone-local endpoints +
+      radius, resolved bone + hitgroup), live-validated (`docs/re/aim.md`
+      §"The runtime studio hitbox set"); the collision-AABB proxy is now only a
+      fallback
+- [x] `aim` control command — the solve, live-validated (`aim-probe`, 19 boxes,
+      **0.02°** to the head); `write: true` applies it to the silent sub-tick view
+      angles
+- [x] Ragebot keybind — a hold-key ragebot (`rage` command + the overlay menu's
+      **Ragebot** tab): render-thread solve, per-tick silent angle write +
+      `IN_ATTACK` (asserted **persistently**, so auto fire is reliable); live-
+      validated (`rage` scenario)
+- [x] Weapon model from the game — the solve reads the shooter's real
+      `CCSWeaponBaseVData` (damage / headshot / penetration / range modifier)
+      instead of a fixed profile (`docs/re/aim.md`)
+- [~] Hitbox renderer — draws the real studio capsules on screen, but the result
+      is an unreadable tangle; **off by default**, open problem (`docs/ragebot.md`
+      §0/§10)
+- [ ] Occlusion — the engine trace probe: the call convention is pinned from a
+      live site (`docs/re/aim.md` §"The call convention"), but it still needs
+      signatures + live validation; the solver already consumes occluders
+- [ ] Pose-uncertainty model + analytic polygon blur; pellet-pattern
+      registration (`K>1`)

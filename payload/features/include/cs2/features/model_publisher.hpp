@@ -52,9 +52,17 @@ class ModelPublisher {
     movement_auto_strafe_ = auto_strafe;
     movement_bhop_ = bhop;
   }
-  using SettingsSink = void (*)(void* context, bool auto_strafe, bool bhop);
+  // The ragebot's defaults (`docs/ragebot.md`): enabled, hold key (a VK code) and
+  // auto-fire. Set from the payload's own env (`CS2_PAYLOAD_RAGE`).
+  void set_rage_defaults(bool on, int key, bool fire) noexcept {
+    rage_ = on;
+    rage_key_ = key;
+    rage_fire_ = fire;
+  }
+  using SettingsSink = void (*)(void* context, bool auto_strafe, bool bhop, bool rage,
+                                int rage_key, bool rage_fire);
   // Called **every published frame** with the settings' state, so the menu is the
-  // single owner of the movement features (an out-of-band change is corrected
+  // single owner of the payload features (an out-of-band change is corrected
   // rather than sticking).
   void set_settings_sink(SettingsSink sink, void* context) noexcept {
     settings_sink_ = sink;
@@ -75,6 +83,9 @@ class ModelPublisher {
   Overlay* overlay_;
   bool movement_auto_strafe_ = false;
   bool movement_bhop_ = false;
+  bool rage_ = false;
+  int rage_key_ = 0;
+  bool rage_fire_ = false;
   SettingsSink settings_sink_ = nullptr;
   void* settings_sink_context_ = nullptr;
 #if defined(_WIN32)

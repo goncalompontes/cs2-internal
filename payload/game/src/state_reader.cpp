@@ -237,10 +237,14 @@ auto StateReader::read_player(int index, std::uintptr_t controller) const -> Pla
     const auto weapon_handle = read_or<std::uint32_t>(services + o.active_weapon, 0);
     const std::uintptr_t weapon = entities_.resolve(weapon_handle);
     if (weapon != 0) {
+      player.weapon_entity = weapon;
       player.clip = read_or<std::int32_t>(weapon + o.clip1, 0);
       player.reserve = read_or<std::int32_t>(weapon + o.reserve_ammo, 0);
       player.weapon = entities_.designer_name(static_cast<int>(weapon_handle & 0x7fffU));
       player.has_bomb = player.weapon == "weapon_c4";
+      // `C_BaseEntity::m_nSubclassID` (+0x08) is the weapon's
+      // `CCSWeaponBaseVData*` (`docs/re/aim.md`; the ragebot's damage model).
+      player.weapon_vdata = read_or<std::uintptr_t>(weapon + 0x388, 0);
     }
   }
   return player;

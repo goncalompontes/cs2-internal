@@ -335,6 +335,69 @@ class Control:
             args["subtick"] = subtick
         return self.request("strafe", args)
 
+    def aim(self, *, target: int | None = None, objective: str | None = None,
+            sigma: float | None = None, damage: float | None = None,
+            range_modifier: float | None = None, penetration: float | None = None,
+            headshot: float | None = None, write: bool | None = None) -> dict[str, Any]:
+        """Ragebot solve (``docs/ragebot.md``).
+
+        Solves the damage field for the nearest enemy (or the one at entity index
+        ``target``) and returns the aim: ``{valid, yaw, pitch, value, cells,
+        aim_u, aim_v, wrote_view}``. ``objective`` is ``"damage"`` (default),
+        ``"hitchance"`` or ``"expected"`` (the latter uses ``sigma``).
+        ``write=True`` applies the solve to the **silent** sub-tick view angles.
+        """
+        args: dict[str, Any] = {}
+        if target is not None:
+            args["target"] = target
+        if objective is not None:
+            args["objective"] = objective
+        if sigma is not None:
+            args["sigma"] = sigma
+        if damage is not None:
+            args["damage"] = damage
+        if range_modifier is not None:
+            args["range_modifier"] = range_modifier
+        if penetration is not None:
+            args["penetration"] = penetration
+        if headshot is not None:
+            args["headshot"] = headshot
+        if write is not None:
+            args["write"] = write
+        return self.request("aim", args)
+
+    def rage(self, *, on: bool | None = None, key: int | None = None,
+             fire: bool | None = None, force: bool | None = None,
+             objective: str | None = None, damage: float | None = None,
+             headshot: float | None = None,
+             range_modifier: float | None = None) -> dict[str, Any]:
+        """Configure the hold-key ragebot (``docs/ragebot.md``).
+
+        ``on`` enables the feature; ``key`` is the Win32 virtual-key code held to
+        trigger it; ``fire`` presses attack while aiming; ``force`` bypasses the
+        physical key check (the harness cannot synthesize one). Returns
+        ``{enabled, key, fire, force, active, target, hitbox, solves, writes,
+        shots}``.
+        """
+        args: dict[str, Any] = {}
+        if on is not None:
+            args["on"] = on
+        if key is not None:
+            args["key"] = key
+        if fire is not None:
+            args["fire"] = fire
+        if force is not None:
+            args["force"] = force
+        if objective is not None:
+            args["objective"] = objective
+        if damage is not None:
+            args["damage"] = damage
+        if headshot is not None:
+            args["headshot"] = headshot
+        if range_modifier is not None:
+            args["range_modifier"] = range_modifier
+        return self.request("rage", args)
+
     def look(self, *, yaw: float | None = None, pitch: float | None = None,
              roll: float | None = None, timeout: float = 5.0,
              via: str | None = None, command: bool = False, raw: bool = False,

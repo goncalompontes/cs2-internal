@@ -1,12 +1,16 @@
 #include "cs2/control/service.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <string_view>
 
+#include "cs2/aim/reader.hpp"
+#include "cs2/aim/solver.hpp"
 #include "cs2/control/predicate.hpp"
 #include "cs2/control/snapshot_json.hpp"
 #include "cs2/diag/watchdog.hpp"
@@ -165,6 +169,10 @@ auto Service::handle(const std::string& line, std::string& response) noexcept ->
     do_bhop(arguments, out);
   } else if (command == "strafe") {
     do_strafe(arguments, out);
+  } else if (command == "aim") {
+    do_aim(arguments, out);
+  } else if (command == "rage") {
+    do_rage(arguments, out);
   } else if (command == "predict") {
     do_predict(arguments, out);
   } else {
@@ -693,6 +701,293 @@ void Service::do_strafe(const Json& args, Json& out) noexcept {
 void Service::set_movement_features(bool auto_strafe, bool bhop) noexcept {
   input_.set_strafe(auto_strafe);
   input_.set_bhop(bhop);
+}
+
+void Service::set_rage_features(bool on, int key, bool fire) noexcept {
+  rage_enabled_.store(on);
+  rage_key_.store(key);
+  rage_fire_.store(fire);
+}
+
+// The hitgroup / hitbox id of the box whose centre is angularly closest to
+// `direction` — a diagnostic (which hitbox the solve effectively picked).
+auto rage_hitbox_for(const aim::SolveInput& solve_input, const game::Vec3& direction) -> int {
+  int best = -1;
+  float best_dot = -2.0F;
+  for (const aim::Hitbox& hitbox : solve_input.hitboxes) {
+    const game::Vec3 center = hitbox.is_capsule
+                                  ? (hitbox.capsule.a + hitbox.capsule.b) * 0.5F
+                                  : hitbox.box.center;
+    const game::Vec3 to_center = game::normalized(center - solve_input.eye);
+    const float d = game::dot(direction, to_center);
+    if (d > best_dot) {
+      best_dot = d;
+      best = hitbox.group;
+    }
+  }
+  return best;
+}
+
+void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
+  const bool forced = rage_force_.load();
+  if (!rage_enabled_.load() && !forced) {
+    input_.clear_rage_aim();
+    return;
+  }
+  // The hook is what runs `apply()` per tick; install it on first use so the
+  // ragebot works during menu-only play (no scenario attached).
+  input_.refresh();
+  const int key = rage_key_.load();
+  if (!forced && (key <= 0 || (GetAsyncKeyState(key) & 0x8000) == 0)) {
+    input_.clear_rage_aim();
+    return;
+  }
+  if (!snapshot.valid || !snapshot.local.has_value() || !snapshot.local->alive) {
+    input_.clear_rage_aim();
+    return;
+  }
+
+  aim::WeaponProfile weapon;
+  weapon.damage = rage_damage_.load();
+  weapon.range_modifier = rage_range_modifier_.load();
+  weapon.headshot_multiplier = rage_headshot_.load();
+
+  auto solve_input = aim::build_input(snapshot, weapon, -1);
+  if (!solve_input.has_value()) {
+    input_.clear_rage_aim();
+    return;
+  }
+  solve_input->pose_sigma = rage_sigma_.load();
+  switch (rage_objective_.load()) {
+    case 0:
+      solve_input->objective = aim::AimObjective::damage;
+      break;
+    case 2:
+      solve_input->objective = aim::AimObjective::expected;
+      break;
+    default:
+      solve_input->objective = aim::AimObjective::hitchance;
+      break;
+  }
+
+  const aim::SolveResult result = aim::solve(*solve_input);
+  if (!result.valid) {
+    input_.clear_rage_aim();
+    return;
+  }
+
+  constexpr float k_rad_to_deg = 57.295779513082320876F;
+  const float yaw = std::atan2(result.direction.y, result.direction.x) * k_rad_to_deg;
+  const float pitch = -std::asin(std::clamp(result.direction.z, -1.0F, 1.0F)) * k_rad_to_deg;
+
+  int target_index = -1;
+  for (const game::PlayerSnapshot& player : snapshot.players) {
+    if (player.pawn == solve_input->pawn) {
+      target_index = player.index;
+      break;
+    }
+  }
+  const int hitbox = rage_hitbox_for(*solve_input, result.direction);
+
+  input_.set_rage_aim(pitch, yaw, target_index, hitbox);
+  // The menu owns `fire` in normal play; the forced (test) path bypasses the key
+  // and therefore also fires, since the menu's per-frame push clears `fire`.
+  input_.set_rage_fire(rage_fire_.load() || forced);
+  rage_last_target_.store(target_index);
+  rage_solves_.fetch_add(1);
+}
+
+auto Service::read_hitboxes(std::uintptr_t pawn, game::HitboxCapsule* out, int max) const noexcept
+    -> int {
+  if (out == nullptr || max <= 0 || pawn == 0) {
+    return 0;
+  }
+  int count = 0;
+  for (const aim::ModelHitbox& box : aim::read_model_hitboxes(pawn)) {
+    if (count >= max) {
+      break;
+    }
+    out[count].a = box.world_a;
+    out[count].b = box.world_b;
+    out[count].radius = box.radius;
+    out[count].group = box.group;
+    ++count;
+  }
+  return count;
+}
+
+auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
+  if ((!rage_enabled_.load() && !rage_force_.load()) || out == nullptr || size == 0) {
+    return false;
+  }
+  const int target = input_.rage_target();
+  std::snprintf(out, size, "rage: %s target %d box %d w%llu s%llu fire %d",
+                input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(),
+                static_cast<unsigned long long>(input_.rage_writes()),
+                static_cast<unsigned long long>(input_.rage_shots()),
+                input_.rage_fire() ? 1 : 0);
+  return true;
+}
+
+void Service::do_aim(const Json& args, Json& out) noexcept {
+  refresh_reader(true);
+  if (!reader_.has_value()) {
+    set_error(out, "aim unavailable: client.dll / entity system not ready");
+    return;
+  }
+  const game::Snapshot snapshot = reader_->snapshot();
+  refresh_reader(snapshot.valid);
+
+  const auto number = [&](const char* key, float fallback) -> float {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
+                                                  : fallback;
+  };
+
+  int target = -1;
+  if (const Json* value = args.find("target"); value != nullptr && value->is_number()) {
+    target = static_cast<int>(value->as_number());
+  }
+
+  aim::WeaponProfile weapon;
+  weapon.damage = number("damage", 100.0F);
+  weapon.range_modifier = number("range_modifier", 0.98F);
+  weapon.penetration = number("penetration", 1.0F);
+  weapon.headshot_multiplier = number("headshot", 4.0F);
+  // When the caller passes explicit values, honour them; otherwise take the
+  // shooter's real weapon VData (`docs/re/aim.md`).
+  const bool explicit_weapon = args.find("damage") != nullptr ||
+                               args.find("range_modifier") != nullptr ||
+                               args.find("penetration") != nullptr ||
+                               args.find("headshot") != nullptr;
+
+  auto input = aim::build_input(snapshot, weapon, target, !explicit_weapon);
+  if (!input.has_value()) {
+    set_error(out, "aim unavailable: no local player / live enemy");
+    return;
+  }
+  input->pose_sigma = number("sigma", 0.0F);
+  if (const Json* objective = args.find("objective");
+      objective != nullptr && objective->is_string()) {
+    const std::string_view name = objective->as_string();
+    if (name == "hitchance") {
+      input->objective = aim::AimObjective::hitchance;
+    } else if (name == "expected") {
+      input->objective = aim::AimObjective::expected;
+    } else {
+      input->objective = aim::AimObjective::damage;
+    }
+  }
+
+  const aim::SolveResult result = aim::solve(*input);
+  if (!result.valid) {
+    set_error(out, "aim unavailable: no hittable target");
+    return;
+  }
+
+  constexpr float k_rad_to_deg = 57.295779513082320876F;
+  const float yaw = std::atan2(result.direction.y, result.direction.x) * k_rad_to_deg;
+  const float pitch =
+      -std::asin(std::clamp(result.direction.z, -1.0F, 1.0F)) * k_rad_to_deg;
+
+  // `write: true` applies the solve to the (silent) sub-tick view angles.
+  const Json* write_arg = args.find("write");
+  const bool write = write_arg != nullptr && write_arg->is_bool() && write_arg->as_bool();
+  if (write) {
+    input_.refresh();
+    input_.set_view_angles(pitch, yaw, 0.0F);
+  }
+
+  Json payload = Json::object();
+  payload.set("valid", Json::boolean(true));
+  payload.set("yaw", Json::number(yaw));
+  payload.set("pitch", Json::number(pitch));
+  payload.set("value", Json::number(result.value));
+  payload.set("cells", Json::number(static_cast<double>(result.cells)));
+  payload.set("aim_u", Json::number(result.aim.x));
+  payload.set("aim_v", Json::number(result.aim.y));
+  payload.set("wrote_view", Json::boolean(write));
+
+  // Raw model hitboxes (validation for the exact-hitbox path).
+  Json hitboxes = Json::array();
+  for (const aim::ModelHitbox& box : aim::read_model_hitboxes(input->pawn)) {
+    Json item = Json::object();
+    item.set("bone", Json::number(static_cast<double>(box.bone)));
+    item.set("group", Json::number(static_cast<double>(box.group)));
+    item.set("name", Json::string(std::string(box.name)));
+    item.set("radius", Json::number(static_cast<double>(box.radius)));
+    item.set("min_x", Json::number(box.mins.x));
+    item.set("min_y", Json::number(box.mins.y));
+    item.set("min_z", Json::number(box.mins.z));
+    item.set("max_x", Json::number(box.maxs.x));
+    item.set("max_y", Json::number(box.maxs.y));
+    item.set("max_z", Json::number(box.maxs.z));
+    item.set("world_x", Json::number((box.world_a.x + box.world_b.x) * 0.5));
+    item.set("world_y", Json::number((box.world_a.y + box.world_b.y) * 0.5));
+    item.set("world_z", Json::number((box.world_a.z + box.world_b.z) * 0.5));
+    hitboxes.push_back(std::move(item));
+  }
+  payload.set("hitboxes", std::move(hitboxes));
+  payload.set("hitcount", Json::number(static_cast<double>(input->hitboxes.size())));
+  // The weapon damage model actually used (the real VData, or the caller's).
+  payload.set("weapon_damage", Json::number(static_cast<double>(input->weapon.damage)));
+  payload.set("weapon_headshot",
+              Json::number(static_cast<double>(input->weapon.headshot_multiplier)));
+  payload.set("weapon_range_modifier",
+              Json::number(static_cast<double>(input->weapon.range_modifier)));
+  payload.set("weapon_penetration",
+              Json::number(static_cast<double>(input->weapon.penetration)));
+  set_ok(out, std::move(payload));
+}
+
+void Service::do_rage(const Json& args, Json& out) noexcept {
+  bool on = rage_enabled_.load();
+  if (const Json* value = args.find("on"); value != nullptr && value->is_bool()) {
+    on = value->as_bool();
+  }
+  int key = rage_key_.load();
+  if (const Json* value = args.find("key"); value != nullptr && value->is_number()) {
+    key = static_cast<int>(value->as_number());
+  }
+  bool fire = rage_fire_.load();
+  if (const Json* value = args.find("fire"); value != nullptr && value->is_bool()) {
+    fire = value->as_bool();
+  }
+  if (const Json* value = args.find("force"); value != nullptr && value->is_bool()) {
+    rage_force_.store(value->as_bool());
+  }
+  if (const Json* value = args.find("damage"); value != nullptr && value->is_number()) {
+    rage_damage_.store(static_cast<float>(value->as_number()));
+  }
+  if (const Json* value = args.find("headshot"); value != nullptr && value->is_number()) {
+    rage_headshot_.store(static_cast<float>(value->as_number()));
+  }
+  if (const Json* value = args.find("range_modifier");
+      value != nullptr && value->is_number()) {
+    rage_range_modifier_.store(static_cast<float>(value->as_number()));
+  }
+  if (const Json* value = args.find("sigma"); value != nullptr && value->is_number()) {
+    rage_sigma_.store(static_cast<float>(value->as_number()));
+  }
+  if (const Json* value = args.find("objective"); value != nullptr && value->is_string()) {
+    const std::string_view name = value->as_string();
+    rage_objective_.store(name == "damage" ? 0 : (name == "expected" ? 2 : 1));
+  }
+  input_.refresh();
+  set_rage_features(on, key, fire);
+
+  Json payload = Json::object();
+  payload.set("enabled", Json::boolean(on));
+  payload.set("key", Json::number(static_cast<double>(key)));
+  payload.set("fire", Json::boolean(fire));
+  payload.set("force", Json::boolean(rage_force_.load()));
+  payload.set("active", Json::boolean(input_.rage_active()));
+  payload.set("target", Json::number(static_cast<double>(input_.rage_target())));
+  payload.set("hitbox", Json::number(static_cast<double>(input_.rage_hitbox())));
+  payload.set("solves", Json::number(static_cast<double>(rage_solves_.load())));
+  payload.set("writes", Json::number(static_cast<double>(input_.rage_writes())));
+  payload.set("shots", Json::number(static_cast<double>(input_.rage_shots())));
+  set_ok(out, std::move(payload));
 }
 
 auto Service::start() noexcept -> bool {

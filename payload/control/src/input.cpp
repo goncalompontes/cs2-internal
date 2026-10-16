@@ -264,6 +264,73 @@ void Input::set_strafe(bool on) noexcept {
   strafe_enabled_.store(on);
 }
 
+void Input::set_rage_aim(float pitch, float yaw, int target, int hitbox) noexcept {
+  rage_pitch_.store(pitch);
+  rage_yaw_.store(yaw);
+  rage_target_.store(target);
+  rage_hitbox_.store(hitbox);
+  rage_active_.store(true);
+}
+
+void Input::clear_rage_aim() noexcept {
+  rage_active_.store(false);
+}
+
+void Input::write_silent_angles(void* cmd, float pitch, float yaw, float roll) noexcept {
+  if (cmd == nullptr) {
+    return;
+  }
+  auto* bytes = static_cast<std::uint8_t*>(cmd);
+  const std::uintptr_t pb = reinterpret_cast<std::uintptr_t>(bytes) + k_cmd_pb_offset;
+  const auto size = *reinterpret_cast<std::uint32_t*>(pb + k_pb_history_size_offset);
+  const auto rep = *reinterpret_cast<std::uintptr_t*>(pb + k_pb_history_rep_offset);
+  if (rep == 0 || size == 0 || size >= 64) {
+    return;
+  }
+  for (std::uint32_t i = 0; i < size; ++i) {
+    const auto entry = *reinterpret_cast<std::uintptr_t*>(rep + 8 + i * 8);
+    if (!writable(entry, k_history_entry_angles_offset + 8)) {
+      continue;
+    }
+    const auto angles = *reinterpret_cast<std::uintptr_t*>(entry + k_history_entry_angles_offset);
+    if (!writable(angles, k_angles_values_offset + 12)) {
+      continue;
+    }
+    auto* xyz = reinterpret_cast<float*>(angles + k_angles_values_offset);
+    xyz[0] = pitch;
+    xyz[1] = yaw;
+    xyz[2] = roll;
+    *reinterpret_cast<std::uint32_t*>(angles + k_angles_has_bits_offset) |= k_angles_bits;
+    angle_writes_.fetch_add(1);
+  }
+}
+
+void Input::rage_tick(std::uint8_t* cmd, std::uint64_t* buttons) noexcept {
+  if (!rage_active_.load()) {
+    return;
+  }
+  write_silent_angles(cmd, rage_pitch_.load(), rage_yaw_.load(), 0.0F);
+  rage_writes_.fetch_add(1);
+  if (buttons == nullptr) {
+    return;
+  }
+  // Mirror the (persistently asserted) attack into the command's
+  // `CInButtonStatePB` so the sub-tick records agree with the legacy mask.
+  const auto base =
+      *reinterpret_cast<std::uintptr_t*>(cmd + k_cmd_pb_offset + k_pb_base_offset);
+  const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
+  if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
+    auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
+    const std::uint64_t attack = *buttons & button::k_attack;
+    state[0] = (state[0] & ~button::k_attack) | attack;  // held
+    state[1] = (state[1] & ~button::k_attack) | attack;  // changed (a press edge)
+    *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3u;
+  }
+  if ((*buttons & button::k_attack) != 0) {
+    rage_shots_.fetch_add(1);
+  }
+}
+
 void Input::set_strafe_config(float wishspeed, int subticks) noexcept {
   if (wishspeed > 0.0F) {
     strafe_wishspeed_.store(wishspeed);
@@ -1451,6 +1518,17 @@ void Input::apply(void* cmd) noexcept {
   const std::uint64_t current = *buttons;
   std::uint64_t value =
       control ? (current | set_mask_.load()) & ~clear_mask_.load() : current;
+  // The ragebot's attack is a **persistent** press while a solve is active — a
+  // payload feature (like the movement features) that must hold on *every*
+  // command the engine simulates, not just the command `rage_tick` happens to
+  // see. Verified subtlety: pressing attack only on the command whose history we
+  // wrote that tick let a shot be released on a command the silent write had not
+  // reached, so it followed the camera (the auto-fire timing bug). A persistent
+  // press is exactly why manual `press("attack")` always hit.
+  const bool rage_firing = rage_active_.load() && rage_fire_.load();
+  if (rage_firing) {
+    value |= button::k_attack;
+  }
   if (value != current) {
     *buttons = value;
     writes_.fetch_add(1);
@@ -1556,32 +1634,13 @@ void Input::apply(void* cmd) noexcept {
   //    `docs/re/subtick.md`). NOTE: these do **not** steer movement (measured
   //    2026-10-15) — that is what the command's own `viewangles` above are for.
   if (control && angles_enabled_.load()) {
-    const std::uintptr_t pb = reinterpret_cast<std::uintptr_t>(bytes) + k_cmd_pb_offset;
-    const auto size = *reinterpret_cast<std::uint32_t*>(pb + k_pb_history_size_offset);
-    const auto rep = *reinterpret_cast<std::uintptr_t*>(pb + k_pb_history_rep_offset);
-    if (rep != 0 && size > 0 && size < 64) {
-      const auto pitch = angle_pitch_.load();
-      const auto yaw = angle_yaw_.load();
-      const auto roll = angle_roll_.load();
-      for (std::uint32_t i = 0; i < size; ++i) {
-        const auto entry = *reinterpret_cast<std::uintptr_t*>(rep + 8 + i * 8);
-        if (!writable(entry, k_history_entry_angles_offset + 8)) {
-          continue;
-        }
-        const auto angles =
-            *reinterpret_cast<std::uintptr_t*>(entry + k_history_entry_angles_offset);
-        if (!writable(angles, k_angles_values_offset + 12)) {
-          continue;
-        }
-        auto* xyz = reinterpret_cast<float*>(angles + k_angles_values_offset);
-        xyz[0] = pitch;
-        xyz[1] = yaw;
-        xyz[2] = roll;
-        *reinterpret_cast<std::uint32_t*>(angles + k_angles_has_bits_offset) |= k_angles_bits;
-        angle_writes_.fetch_add(1);
-      }
-    }
+    write_silent_angles(cmd, angle_pitch_.load(), angle_yaw_.load(), angle_roll_.load());
   }
+
+  // 6. Ragebot: the render-thread solve written as the silent sub-tick aim, plus
+  //    the optional attack. Independent of the control backend (like the movement
+  //    features) — nothing is written unless a solve is active.
+  rage_tick(bytes, buttons);
 }
 
 auto Input::on_ground() const noexcept -> bool {
@@ -1600,6 +1659,18 @@ void Input::refresh() noexcept {
   if (installed_) {
     return;
   }
+  // One-shot guard: `refresh()` is called from both the control thread and the
+  // per-frame state refresh. Only one caller may run the patch at a time; a
+  // caller that loses the race returns, and the claim is released on exit so a
+  // later call retries when the target was not ready yet.
+  bool expected = false;
+  if (!refresh_claimed_.compare_exchange_strong(expected, true)) {
+    return;
+  }
+  struct ClaimReset {
+    std::atomic<bool>& flag;
+    ~ClaimReset() { flag.store(false); }
+  } claim_reset{refresh_claimed_};
   const cs2::game::ModuleInfo module = cs2::game::find_module("client.dll");
   if (!module.valid()) {
     return;

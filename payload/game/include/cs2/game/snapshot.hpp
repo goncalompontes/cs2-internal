@@ -18,6 +18,8 @@ struct PlayerSnapshot {
   std::uintptr_t controller = 0;
   std::string name;
   std::string weapon;      // active weapon designer name (e.g. "weapon_ak47")
+  std::uintptr_t weapon_entity = 0;  // the active weapon entity (`C_CSWeaponBase`)
+  std::uintptr_t weapon_vdata = 0;   // its `CCSWeaponBaseVData` (`m_pWeaponVData`)
   int team = 0;            // 2 = T, 3 = CT
   int health = 0;
   int max_health = 0;
