@@ -204,6 +204,61 @@ pub fn known_signatures() -> Vec<Signature> {
             Some(1),
             Some(5),
         ),
+        // ---- occlusion / physics query (docs/re/occlusion.md) -------------
+        // `CGamePhysicsQueryInterface` singleton — `*(client_base + 0x2227058)`.
+        // Anchor on a load in the query's own call path (a `MOV RCX, [singleton]`
+        // in the trace caller the occlusion RE was pinned from). Resolved RVA on
+        // build 659940c1: `0x2227058`.
+        sig(
+            "client.dll",
+            "physics_query_interface",
+            "48 8B 0D ?? ?? ?? ?? 0F 57 C0 48 89",
+            Some(3),
+            Some(7),
+        ),
+        // The static default trace filter (`client_base + 0x2227070`) — anchor on the
+        // `LEA RAX, [filter]` in the function that builds the query filter inline
+        // (`docs/re/occlusion.md` §"the singleton + call form"). RVA: `0x2227070`.
+        sig(
+            "client.dll",
+            "physics_query_filter",
+            "48 8D 05 ?? ?? ?? ?? 4D 8B CE 48 8D",
+            Some(3),
+            Some(7),
+        ),
+        // `CGamePhysicsQueryInterface::EntitiesInBox` entry (`client_base +
+        // 0x9dbd20`) — resolve the match start (a function entry; the prologue is
+        // distinctive enough to be unique). RVA: `0x9dbd20`.
+        sig(
+            "client.dll",
+            "entities_in_box",
+            "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 48 89 4C 24 08 55 41 54 41 55 41 56 41 57 48 8D AC 24 10 CC FF",
+            None,
+            None,
+        ),
+        // `CGamePhysicsQueryInterface::EntitiesAlongLinearSweep` entry
+        // (`client_base + 0x9db9a0`) — the swept enumeration the occlusion layer
+        // intends to use instead of a box (`docs/re/occlusion.md` §"the enumeration
+        // primitive"). Resolve the match start (function-entry prologue).
+        sig(
+            "client.dll",
+            "entities_along_linear_sweep",
+            "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 55 41 54 41 55 41 56 41 57 48 8D AC 24 30",
+            None,
+            None,
+        ),
+        // `SurfacePropertiesList` manager (`DAT_18254e100`, `client_base + 0x254e100`),
+        // the game's surface-property table (`CGameSurfaceProperties`, docs/re/
+        // penetration.md). Anchor on its resolver `FUN_1809e3560`
+        // (`*(int*)(param+0x10)*0x20 + [list+0x28]`); the `MOV RCX,[list]` load is
+        // unique. RVA on 659940c1: `0x254e100`.
+        sig(
+            "client.dll",
+            "surface_properties_list",
+            "48 8B 0D ?? ?? ?? ?? 48 C1 E0 05 48 03 41 28 C3",
+            Some(3),
+            Some(7),
+        ),
         // ---- engine2.dll --------------------------------------------------
         // `CInputService` singleton (`DAT_1808dbf20`), anchor on
         // `LEA RCX, [g_InputService]; MOV EDX, 5; CALL Cbuf_AddText` inside

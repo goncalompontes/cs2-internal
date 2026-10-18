@@ -196,6 +196,42 @@ fn curated_signatures_resolve_offsets_offline() {
             Some(5),
             Some(0x4f7120),
         ),
+        // Occlusion / physics query (docs/re/occlusion.md).
+        (
+            "physics_query_interface",
+            "48 8B 0D ?? ?? ?? ?? 0F 57 C0 48 89",
+            Some(3),
+            Some(7),
+            Some(0x2227058),
+        ),
+        (
+            "physics_query_filter",
+            "48 8D 05 ?? ?? ?? ?? 4D 8B CE 48 8D",
+            Some(3),
+            Some(7),
+            Some(0x2227070),
+        ),
+        (
+            "entities_in_box",
+            "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 48 89 4C 24 08 55 41 54 41 55 41 56 41 57 48 8D AC 24 10 CC FF",
+            None,
+            None,
+            None,
+        ),
+        (
+            "entities_along_linear_sweep",
+            "48 89 5C 24 08 48 89 74 24 10 48 89 7C 24 18 55 41 54 41 55 41 56 41 57 48 8D AC 24 30",
+            None,
+            None,
+            None,
+        ),
+        (
+            "surface_properties_list",
+            "48 8B 0D ?? ?? ?? ?? 48 C1 E0 05 48 03 41 28 C3",
+            Some(3),
+            Some(7),
+            Some(0x254e100),
+        ),
     ];
 
     let base = 0x180000000usize;
