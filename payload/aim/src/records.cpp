@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
+#include <utility>
 
 namespace cs2::aim {
 
@@ -47,6 +49,50 @@ auto rewind_tick(std::int32_t local_tick, float max_unlag, float interp) noexcep
   const float unlag = std::min(0.07F, max_unlag * 0.95F);
   const float seconds = unlag + interp + (1.0F / 64.0F) + 0.1F;
   return local_tick - static_cast<std::int32_t>(seconds * 64.0F);
+}
+
+void RecordStore::push(std::uintptr_t pawn, Record record) {
+  if (pawn == 0) {
+    return;
+  }
+  newest_tick_ = std::max(newest_tick_, record.tick);
+  RecordRing& ring = rings_[pawn];
+  ring.capacity = capacity_;
+  ring.push(std::move(record));
+}
+
+void RecordStore::retain(const std::vector<std::uintptr_t>& pawns) {
+  if (rings_.empty()) {
+    return;
+  }
+  const std::unordered_set<std::uintptr_t> keep(pawns.begin(), pawns.end());
+  std::erase_if(rings_, [&keep](const auto& entry) { return keep.count(entry.first) == 0U; });
+}
+
+void RecordStore::clear() noexcept {
+  rings_.clear();
+  newest_tick_ = 0;
+}
+
+void RecordStore::trim(std::int32_t floor_tick) {
+  for (auto& entry : rings_) {
+    entry.second.trim(floor_tick);
+  }
+}
+
+auto RecordStore::records(std::uintptr_t pawn) const -> const std::vector<Record>& {
+  static const std::vector<Record> empty;
+  const auto it = rings_.find(pawn);
+  return it == rings_.end() ? empty : it->second.records();
+}
+
+auto RecordStore::pawns() const -> std::vector<std::uintptr_t> {
+  std::vector<std::uintptr_t> out;
+  out.reserve(rings_.size());
+  for (const auto& entry : rings_) {
+    out.push_back(entry.first);
+  }
+  return out;
 }
 
 }  // namespace cs2::aim

@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 #include "cs2/aim/solver.hpp"
 
@@ -31,8 +32,9 @@ auto main() -> int {
   using cs2::aim::Vec2;
   using cs2::aim::Vec3;
 
-  const Basis basis{
-      .forward = Vec3{1.0F, 0.0F, 0.0F}, .right = Vec3{0.0F, 1.0F, 0.0F}, .up = Vec3{0.0F, 0.0F, 1.0F}};
+  const Basis basis{.forward = Vec3{1.0F, 0.0F, 0.0F},
+                    .right = Vec3{0.0F, 1.0F, 0.0F},
+                    .up = Vec3{0.0F, 0.0F, 1.0F}};
 
   // --- hitbox construction -------------------------------------------------
   {
@@ -43,9 +45,9 @@ auto main() -> int {
     expect(near(boxes[0].multiplier, 4.0F), "head multiplier");
 
     // The head box rides the eye (a real reference), not the AABB top.
-    const auto at_head = cs2::aim::split_player_at_head(Vec3{-16.0F, -16.0F, 0.0F},
-                                                        Vec3{16.0F, 16.0F, 72.0F},
-                                                        Vec3{0.0F, 0.0F, 60.0F}, 4.0F, 4.0F, 1.0F);
+    const auto at_head =
+        cs2::aim::split_player_at_head(Vec3{-16.0F, -16.0F, 0.0F}, Vec3{16.0F, 16.0F, 72.0F},
+                                       Vec3{0.0F, 0.0F, 60.0F}, 4.0F, 4.0F, 1.0F);
     expect(near(at_head[0].box.center.z, 60.0F), "head box rides the eye");
     expect(near(at_head[0].box.half.x, 4.0F), "head box is small");
     expect(near(at_head[1].box.center.z, 28.0F), "body box below the head");
@@ -57,9 +59,9 @@ auto main() -> int {
     input.eye = Vec3{};
     input.basis = basis;
     input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F, .range_modifier = 0.98F};
-    input.hitboxes.push_back(Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F},
-                                                              Vec3{11.0F, 1.0F, 1.0F}),
-                                    .multiplier = 1.0F});
+    input.hitboxes.push_back(
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F}, Vec3{11.0F, 1.0F, 1.0F}),
+               .multiplier = 1.0F});
 
     const auto result = cs2::aim::solve(input);
     expect(result.valid, "single hitbox solves");
@@ -82,9 +84,8 @@ auto main() -> int {
     input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F, .range_modifier = 0.98F};
     Hitbox capsule;
     capsule.is_capsule = true;
-    capsule.capsule = cs2::aim::Capsule{.a = Vec3{10.0F, -3.0F, 0.0F},
-                                        .b = Vec3{10.0F, 3.0F, 0.0F},
-                                        .radius = 1.0F};
+    capsule.capsule = cs2::aim::Capsule{
+        .a = Vec3{10.0F, -3.0F, 0.0F}, .b = Vec3{10.0F, 3.0F, 0.0F}, .radius = 1.0F};
     capsule.multiplier = 4.0F;
     input.hitboxes.push_back(capsule);
     const auto result = cs2::aim::solve(input);
@@ -100,12 +101,12 @@ auto main() -> int {
     input.eye = Vec3{};
     input.basis = basis;
     input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F, .range_modifier = 0.98F};
-    input.hitboxes.push_back(Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F},
-                                                              Vec3{11.0F, 1.0F, 1.0F}),
-                                    .multiplier = 1.0F});
-    input.hitboxes.push_back(Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.5F, -0.5F, 4.5F},
-                                                              Vec3{10.5F, 0.5F, 5.5F}),
-                                    .multiplier = 4.0F});
+    input.hitboxes.push_back(
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F}, Vec3{11.0F, 1.0F, 1.0F}),
+               .multiplier = 1.0F});
+    input.hitboxes.push_back(
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.5F, -0.5F, 4.5F}, Vec3{10.5F, 0.5F, 5.5F}),
+               .multiplier = 4.0F});
 
     const auto result = cs2::aim::solve(input);
     expect(result.valid, "two hitboxes solve");
@@ -119,12 +120,12 @@ auto main() -> int {
     input.eye = Vec3{};
     input.basis = basis;
     input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F, .range_modifier = 0.98F};
-    input.hitboxes.push_back(Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F},
-                                                              Vec3{11.0F, 1.0F, 1.0F}),
-                                    .multiplier = 1.0F});
-    input.hitboxes.push_back(Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.5F, -0.5F, 4.5F},
-                                                              Vec3{10.5F, 0.5F, 5.5F}),
-                                    .multiplier = 4.0F});
+    input.hitboxes.push_back(
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F}, Vec3{11.0F, 1.0F, 1.0F}),
+               .multiplier = 1.0F});
+    input.hitboxes.push_back(
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.5F, -0.5F, 4.5F}, Vec3{10.5F, 0.5F, 5.5F}),
+               .multiplier = 4.0F});
     // Keep v <= 0.4 (an occluder below the head).
     input.occluders.push_back(Occluder{.normal = Vec2{0.0F, 1.0F}, .offset = 0.4F});
 
@@ -141,12 +142,73 @@ auto main() -> int {
     input.basis = basis;
     input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F};
     input.objective = AimObjective::hitchance;
-    input.hitboxes.push_back(Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F},
-                                                              Vec3{11.0F, 1.0F, 1.0F}),
-                                    .multiplier = 1.0F});
+    input.hitboxes.push_back(
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F}, Vec3{11.0F, 1.0F, 1.0F}),
+               .multiplier = 1.0F});
     const auto result = cs2::aim::solve(input);
     expect(result.valid, "hitchance solves");
-    expect(near(result.aim.x, 0.0F) && near(result.aim.y, 0.0F), "hitchance centre at the box centre");
+    expect(near(result.aim.x, 0.0F) && near(result.aim.y, 0.0F),
+           "hitchance centre at the box centre");
+  }
+
+  // --- backtracking: the best record wins (docs/ragebot.md §8) --------------
+  {
+    SolveInput input;
+    input.eye = Vec3{};
+    input.basis = basis;
+    input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F, .range_modifier = 0.98F};
+
+    std::vector<cs2::aim::PoseCandidate> poses;
+    // Live pose: a body box only (multiplier 1).
+    poses.push_back(cs2::aim::PoseCandidate{
+        .record = -1,
+        .age = 0.0F,
+        .hitboxes = {
+            Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F}, Vec3{11.0F, 1.0F, 1.0F}),
+                   .multiplier = 1.0F}}});
+    // A lag record carrying a head (multiplier 4) — the server can rewind to it.
+    poses.push_back(cs2::aim::PoseCandidate{
+        .record = 53,
+        .age = 4.0F,
+        .hitboxes = {
+            Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.5F, -0.5F, 4.5F}, Vec3{10.5F, 0.5F, 5.5F}),
+                   .multiplier = 4.0F}}});
+
+    const auto best = cs2::aim::solve_backtrack(input, poses);
+    expect(best.valid, "a pose is selected");
+    expect(best.record == 53 && near(best.age, 4.0F), "the higher-damage record wins over live");
+    expect(near(best.solve.value, 400.0F * std::pow(0.98F, 10.0F / 500.0F), 2.0F),
+           "the winning record's value is used");
+
+    // A tie keeps the earlier (live) pose.
+    std::vector<cs2::aim::PoseCandidate> tie = poses;
+    tie[1].hitboxes = poses[0].hitboxes;
+    const auto tied = cs2::aim::solve_backtrack(input, tie);
+    expect(tied.valid && tied.record == -1, "a tie keeps the live pose");
+
+    // No usable pose -> invalid.
+    const auto empty = cs2::aim::solve_backtrack(input, {});
+    expect(!empty.valid, "no poses -> no backtrack aim");
+  }
+
+  // --- the pellet objective (docs/ragebot.md §3) ---------------------------
+  {
+    SolveInput input;
+    input.eye = Vec3{};
+    input.basis = basis;
+    input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F, .range_modifier = 1.0F};
+    input.objective = cs2::aim::AimObjective::pellets;
+    // Two boxes a pellet-offset apart along the view-up axis (z ~ 1.1 at x ~ 10).
+    input.hitboxes.push_back(
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -0.5F, -0.1F}, Vec3{11.0F, 0.5F, 0.1F}),
+               .multiplier = 1.0F});
+    input.hitboxes.push_back(
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -0.5F, 1.0F}, Vec3{11.0F, 0.5F, 1.2F}),
+               .multiplier = 1.0F});
+    input.pellet_offsets = {Vec2{0.0F, 0.0F}, Vec2{0.0F, 0.11F}};
+    const auto result = cs2::aim::solve(input);
+    expect(result.valid, "the pellet objective solves");
+    expect(result.value > 150.0F, "the pellet aim sums two hitboxes");
   }
 
   if (failures == 0) {

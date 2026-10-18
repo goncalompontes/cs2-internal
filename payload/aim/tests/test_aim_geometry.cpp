@@ -37,18 +37,21 @@ auto main() -> int {
   using cs2::aim::Vec3;
 
   // --- chart projection round-trip ----------------------------------------
-  const Basis basis{
-      .forward = Vec3{1.0F, 0.0F, 0.0F}, .right = Vec3{0.0F, 1.0F, 0.0F}, .up = Vec3{0.0F, 0.0F, 1.0F}};
+  const Basis basis = Basis::world();
   {
     const auto p = basis.project(Vec3{10.0F, 1.0F, 2.0F});
-    expect(p.has_value(), "in-front direction projects");
+    expect(p.has_value(), "a direction projects");
     if (p.has_value()) {
-      expect(near(p->x, 0.1F), "project u");
-      expect(near(p->y, 0.2F), "project v");
+      // Absolute world yaw/pitch (radians): u = atan2(y, x), v = asin(z / |d|).
+      expect(near(p->x, std::atan2(1.0F, 10.0F)), "project u (world yaw)");
+      expect(near(p->y, std::asin(2.0F / std::sqrt(105.0F))), "project v (world pitch)");
       const Vec3 back = basis.unproject(*p);
       expect(near(back.x, 10.0F / std::sqrt(105.0F), 1e-4F), "unproject round-trip x");
     }
-    expect(!basis.project(Vec3{-1.0F, 0.0F, 0.0F}).has_value(), "behind direction rejected");
+    // The chart is absolute, so a direction behind the eye still has yaw/pitch.
+    const auto behind = basis.project(Vec3{-1.0F, 0.0F, 0.0F});
+    expect(behind.has_value() && near(std::fabs(behind->x), 3.14159265F, 1e-3F),
+           "a behind direction projects to yaw ~ pi");
   }
 
   // --- convex hull ---------------------------------------------------------
@@ -97,7 +100,13 @@ auto main() -> int {
            "head-on box area");
 
     const Obb behind{.center = Vec3{-10.0F, 0.0F, 0.0F}, .half = Vec3{1.0F, 1.0F, 1.0F}};
-    expect(cs2::aim::project_obb(Vec3{}, behind, basis).empty(), "box behind the eye is empty");
+    const Polygon behind_poly = cs2::aim::project_obb(Vec3{}, behind, basis);
+    expect(!behind_poly.empty(), "a box behind the eye still projects (absolute chart)");
+    float max_yaw = 0.0F;
+    for (const Vec2& p : behind_poly.points) {
+      max_yaw = std::fabs(p.x) > max_yaw ? std::fabs(p.x) : max_yaw;
+    }
+    expect(max_yaw > 3.0F, "the behind box sits at |yaw| ~ pi");
   }
 
   // --- sphere projection ---------------------------------------------------

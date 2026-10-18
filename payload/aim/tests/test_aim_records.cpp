@@ -63,6 +63,19 @@ auto main() -> int {
     expect(ring.nearest(0) != nullptr && ring.nearest(0)->tick == 100, "nearest below range");
   }
 
+  // The store trims every ring to the lag-comp window (`FUN_180c90b90`).
+  {
+    cs2::aim::RecordStore store(32);
+    for (std::int32_t tick = 100; tick <= 110; ++tick) {
+      store.push(7, make_record(tick));
+    }
+    expect(store.records(7).size() == 11, "the store holds every record before the trim");
+    store.trim(105);
+    expect(store.records(7).size() == 6, "the store trims to the window floor");
+    expect(store.records(7).front().tick == 105, "the trim floor is kept");
+    expect(store.records(7).back().tick == 110, "the newest record survives the trim");
+  }
+
   // The rewind-tick formula (docs/re/lagcomp.md).
   {
     // unlag = min(0.07, 0.2*0.95) = 0.07; + interp 0.03 + 1/64 + 0.1 = 0.215625 s

@@ -39,7 +39,8 @@ void DamageField::add(const Polygon& polygon, float value) {
 
 void DamageField::add_hitbox(const Polygon& polygon, float hitgroup_multiplier, float distance,
                              const WeaponProfile& weapon) {
-  add(polygon, weapon.damage * hitgroup_multiplier * range_falloff(weapon.range_modifier, distance));
+  add(polygon,
+      weapon.damage * hitgroup_multiplier * range_falloff(weapon.range_modifier, distance));
 }
 
 void DamageField::clip(const Vec2& normal, float offset) {
@@ -54,6 +55,68 @@ auto DamageField::value_at(const Vec2& point) const noexcept -> float {
   for (const Cell& cell : cells) {
     if (polygon_contains(cell.polygon, point)) {
       best = std::max(best, cell.value);
+    }
+  }
+  return best;
+}
+
+auto DamageField::value_at_pellets(const Vec2& aim, std::span<const Vec2> offsets) const noexcept
+    -> float {
+  if (offsets.empty()) {
+    return value_at(aim);
+  }
+  float sum = 0.0F;
+  for (const Vec2& offset : offsets) {
+    sum += value_at(aim + offset);
+  }
+  return sum;
+}
+
+auto DamageField::argmax_pellets(std::span<const Vec2> offsets) const -> Vec2 {
+  if (cells.empty()) {
+    return Vec2{};
+  }
+  // One pellet (or an all-zero offset set) is exactly the damage optimum.
+  bool trivial = true;
+  for (const Vec2& offset : offsets) {
+    if (offset.x != 0.0F || offset.y != 0.0F) {
+      trivial = false;
+      break;
+    }
+  }
+  if (trivial) {
+    return argmax_damage();
+  }
+
+  // Candidate aims: each cell's own optima and vertices, and each of those shifted by
+  // `-offset_k` so a candidate sits on a cell boundary reached by a pellet. The
+  // pellet sum is constant on each region these points bound, so the maximum is one
+  // of them (the design's "the optimum lies in a finite candidate set").
+  std::vector<Vec2> candidates;
+  candidates.reserve(cells.size() * (2 + 8) * (offsets.size() + 1));
+  candidates.push_back(Vec2{});
+  for (const Cell& cell : cells) {
+    std::vector<Vec2> anchors;
+    anchors.push_back(nearest_point(cell.polygon));
+    anchors.push_back(chebyshev_center(cell.polygon));
+    for (const Vec2& point : cell.polygon.points) {
+      anchors.push_back(point);
+    }
+    for (const Vec2& anchor : anchors) {
+      candidates.push_back(anchor);
+      for (const Vec2& offset : offsets) {
+        candidates.push_back(Vec2{anchor.x - offset.x, anchor.y - offset.y});
+      }
+    }
+  }
+
+  Vec2 best{};
+  float best_value = -1.0F;
+  for (const Vec2& candidate : candidates) {
+    const float value = value_at_pellets(candidate, offsets);
+    if (value > best_value + k_epsilon) {
+      best_value = value;
+      best = candidate;
     }
   }
   return best;

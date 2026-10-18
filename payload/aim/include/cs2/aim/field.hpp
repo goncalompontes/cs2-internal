@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <span>
 #include <vector>
 
 #include "cs2/aim/geometry.hpp"
@@ -15,10 +16,11 @@ namespace cs2::aim {
 
 // A weapon's damage model (docs/re/aim.md — the `CCSWeaponBaseVData` fields).
 struct WeaponProfile {
-  float damage = 0.0F;             // m_nDamage
-  float range_modifier = 1.0F;     // m_flRangeModifier
-  float penetration = 1.0F;        // m_flPenetration
+  float damage = 0.0F;          // m_nDamage
+  float range_modifier = 1.0F;  // m_flRangeModifier
+  float penetration = 1.0F;     // m_flPenetration
   float headshot_multiplier = 4.0F;
+  float spread = 0.0F;  // m_flSpread (+0x750, FiringModeFloat primary)
 };
 
 // Damage retained over `distance` world units (`range_modifier^(d/500)`).
@@ -47,7 +49,9 @@ struct Cell {
 struct DamageField {
   std::vector<Cell> cells;
 
-  [[nodiscard]] auto empty() const noexcept -> bool { return cells.empty(); }
+  [[nodiscard]] auto empty() const noexcept -> bool {
+    return cells.empty();
+  }
 
   // Add a convex cell; empty polygons and non-positive values are dropped.
   void add(const Polygon& polygon, float value);
@@ -62,6 +66,19 @@ struct DamageField {
 
   // The damage at a chart point (max over containing cells), or 0.
   [[nodiscard]] auto value_at(const Vec2& point) const noexcept -> float;
+
+  // The pellet-sum field `Σ_k D(aim + offset_k)` — the deterministic spread model
+  // (`docs/ragebot.md` §2/§3: a shot fires K pellets whose directions are
+  // `f(a) + o_k`, so the aim maximizes the *sum*, not a single ray). An empty or
+  // all-zero offset set reduces to `value_at`.
+  [[nodiscard]] auto value_at_pellets(const Vec2& aim, std::span<const Vec2> offsets) const noexcept
+      -> float;
+
+  // The aim maximizing the pellet-sum field. With one pellet (or all-zero offsets)
+  // this is exactly `argmax_damage`; otherwise the optimum lies on the arrangement of
+  // the cells shifted by each `-offset_k`, so it is searched over the finite
+  // candidate set of each cell's optima and vertices shifted by every `-offset_k`.
+  [[nodiscard]] auto argmax_pellets(std::span<const Vec2> offsets) const -> Vec2;
 
   // The highest-value cell (nullptr when empty).
   [[nodiscard]] auto best_cell() const noexcept -> const Cell*;

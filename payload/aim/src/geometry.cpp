@@ -34,15 +34,21 @@ constexpr float k_epsilon = 1e-6F;
 }  // namespace
 
 auto Basis::project(const Vec3& direction) const noexcept -> std::optional<Vec2> {
-  const float depth = game::dot(direction, forward);
-  if (depth <= k_epsilon) {
-    return std::nullopt;
+  const float len = game::length(direction);
+  if (len <= k_epsilon) {
+    return std::nullopt;  // a point at the eye has no direction
   }
-  return Vec2{game::dot(direction, right) / depth, game::dot(direction, up) / depth};
+  const float nx = direction.x / len;
+  const float ny = direction.y / len;
+  const float nz = direction.z / len;
+  // Absolute world yaw/pitch (radians): a function of the world only, never the
+  // camera. `u` is yaw about +Z, `v` is pitch above the XY plane.
+  return Vec2{std::atan2(ny, nx), std::asin(std::clamp(nz, -1.0F, 1.0F))};
 }
 
 auto Basis::unproject(const Vec2& point) const noexcept -> Vec3 {
-  return game::normalized(forward + right * point.x + up * point.y);
+  const float cp = std::cos(point.y);
+  return Vec3{cp * std::cos(point.x), cp * std::sin(point.x), std::sin(point.y)};
 }
 
 auto Obb::corners() const noexcept -> std::array<Vec3, 8> {
@@ -268,7 +274,9 @@ auto project_sphere(const Vec3& eye, const Vec3& center, float radius, const Bas
     return Polygon{};
   }
   const float ratio = std::clamp(radius / dist, -1.0F, 1.0F);
-  const float rho = std::tan(std::asin(ratio));
+  // The chart is yaw/pitch in radians, so the sphere's angular radius is exactly
+  // `asin(radius / dist)` (no tangent expansion — that was the gnomonic chart).
+  const float rho = std::asin(ratio);
 
   Polygon out;
   const std::size_t n = std::max<std::size_t>(segments, 3);
@@ -306,21 +314,6 @@ auto project_capsule(const Vec3& eye, const Vec3& a, const Vec3& b, float radius
     return Polygon{};
   }
   return convex_hull(points);
-}
-
-auto basis_from_angles(const game::Angle& angles) noexcept -> Basis {
-  constexpr float k_deg_to_rad = 0.01745329251994329577F;
-  const float pitch = angles.pitch * k_deg_to_rad;
-  const float yaw = angles.yaw * k_deg_to_rad;
-  const float sp = std::sin(pitch);
-  const float cp = std::cos(pitch);
-  const float sy = std::sin(yaw);
-  const float cy = std::cos(yaw);
-  return Basis{
-      .forward = Vec3{cp * cy, cp * sy, -sp},
-      .right = Vec3{-sy, cy, 0.0F},
-      .up = Vec3{sp * cy, sp * sy, cp},
-  };
 }
 
 }  // namespace cs2::aim

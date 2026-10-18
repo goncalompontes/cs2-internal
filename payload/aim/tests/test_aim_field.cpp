@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 #include "cs2/aim/field.hpp"
 
@@ -73,6 +74,32 @@ auto main() -> int {
   expect(near(field.argmax_expected(0.0F).x, 0.04F, 5e-2F), "zero-sigma matches damage optimum");
   const Vec2 blurred = field.argmax_expected(0.05F);
   expect(blurred.x < 0.03F, "wide blur prefers the large body cell");
+
+  // --- the pellet-sum objective (docs/ragebot.md §2/§3) --------------------
+  {
+    DamageField pellet_field;
+    pellet_field.add(square(-0.01F, -0.01F, 0.01F, 0.01F), 100.0F);  // a cell at the origin
+    pellet_field.add(square(0.09F, -0.01F, 0.11F, 0.01F), 100.0F);   // a cell at x = 0.1
+    const std::vector<Vec2> apart{Vec2{0.0F, 0.0F}, Vec2{0.1F, 0.0F}};
+
+    // From the origin, pellet 1 (aim + 0.1) lands on the far cell: 100 + 100.
+    expect(near(pellet_field.value_at_pellets(Vec2{0.0F, 0.0F}, apart), 200.0F),
+           "two pellets sum over two cells");
+    // A single pellet is the single-ray value.
+    expect(
+        near(pellet_field.value_at_pellets(Vec2{0.0F, 0.0F}, std::vector<Vec2>{Vec2{0.0F, 0.0F}}),
+             100.0F),
+        "one pellet is the single-ray value");
+    // The optimum reaches the two-pellet sum.
+    const Vec2 pellet_aim = pellet_field.argmax_pellets(apart);
+    expect(near(pellet_field.value_at_pellets(pellet_aim, apart), 200.0F),
+           "the pellet optimum reaches the sum");
+    // K=1 reduces to the damage optimum.
+    const Vec2 single = pellet_field.argmax_pellets(std::vector<Vec2>{Vec2{0.0F, 0.0F}});
+    expect(near(single.x, pellet_field.argmax_damage().x) &&
+               near(single.y, pellet_field.argmax_damage().y),
+           "K=1 reduces to argmax_damage");
+  }
 
   if (failures == 0) {
     std::printf("aim-field: ok\n");

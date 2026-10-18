@@ -38,6 +38,9 @@ auto solve(const SolveInput& input) -> SolveResult {
     case AimObjective::expected:
       aim = field.argmax_expected(input.pose_sigma);
       break;
+    case AimObjective::pellets:
+      aim = field.argmax_pellets(input.pellet_offsets);
+      break;
     case AimObjective::damage:
     default:
       aim = field.argmax_damage();
@@ -47,9 +50,36 @@ auto solve(const SolveInput& input) -> SolveResult {
   result.valid = true;
   result.aim = aim;
   result.direction = input.basis.unproject(aim);
-  result.value = field.value_at(aim);
+  result.value = input.objective == AimObjective::pellets
+                     ? field.value_at_pellets(aim, input.pellet_offsets)
+                     : field.value_at(aim);
   result.cells = field.cells.size();
   return result;
+}
+
+auto solve_backtrack(const SolveInput& base, const std::vector<PoseCandidate>& poses)
+    -> BacktrackResult {
+  BacktrackResult best;
+  for (const PoseCandidate& pose : poses) {
+    if (pose.hitboxes.empty()) {
+      continue;
+    }
+    SolveInput input = base;
+    input.hitboxes = pose.hitboxes;
+    const SolveResult result = solve(input);
+    if (!result.valid) {
+      continue;
+    }
+    // Strict `>` keeps the earlier pose on a tie, so the list must be newest-first
+    // (live, then records) for the live aim to win ties.
+    if (!best.valid || result.value > best.solve.value) {
+      best.valid = true;
+      best.solve = result;
+      best.record = pose.record;
+      best.age = pose.age;
+    }
+  }
+  return best;
 }
 
 }  // namespace cs2::aim

@@ -2,15 +2,17 @@
 
 // Angular geometry for the ragebot aim model (docs/ragebot.md, ADR-0022).
 //
-// Everything here works in a *chart*: the gnomonic (tangent-plane) projection of
-// world directions about an aim direction. A direction `d` maps to
-// (u, v) = (dot(d, right) / dot(d, forward), dot(d, up) / dot(d, forward)); for
-// the small angles a shot covers this is (approximately) radians. The aim
-// decision lives here: a hitbox is an oriented box whose silhouette is a convex
-// polygon in the chart, and the damage field (field.hpp) is a set of such cells.
+// The chart is the **absolute world yaw/pitch** of a direction from the eye: a
+// direction `d` maps to `(u, v) = (atan2(d.y, d.x), asin(d.z / |d|))` — yaw about the
+// world Z axis, pitch above the world XY plane, both in radians. It is a function of
+// the world geometry only, never the camera angles, so the projected hitbox/occluder
+// cells do not move when the player looks around. (It used to be a gnomonic tangent
+// plane about the camera forward, which made the whole field view-relative.) For the
+// small angles a shot covers the two agree to first order, so the local geometry math
+// (convex hulls, clipping, the optima) is unchanged.
 //
-// The projection of a convex solid from a point is the convex hull of its
-// projected vertices, so an oriented box reduces to 8 projections + a hull.
+// The projection of a convex solid from a point is the convex hull of its projected
+// vertices, so an oriented box reduces to 8 projections + a hull.
 
 #include <array>
 #include <cstddef>
@@ -25,17 +27,22 @@ namespace cs2::aim {
 using game::Vec2;
 using game::Vec3;
 
-// An orthonormal view basis about the aim direction (all unit length).
+// The absolute-world chart frame. `forward`/`right`/`up` are the world axes the chart
+// is measured from (`+X` is the chart origin, `+Y` is increasing yaw, `+Z` increasing
+// pitch); they are carried for diagnostics and the JSON, not for the projection.
 struct Basis {
-  Vec3 forward{0.0F, 1.0F, 0.0F};
-  Vec3 right{1.0F, 0.0F, 0.0F};
+  Vec3 forward{1.0F, 0.0F, 0.0F};
+  Vec3 right{0.0F, 1.0F, 0.0F};
   Vec3 up{0.0F, 0.0F, 1.0F};
 
-  // Gnomonic projection of a world direction (relative to the eye). `std::nullopt`
-  // when the direction is at or behind the eye plane.
+  // The single absolute-world chart frame (yaw/pitch about the world axes).
+  [[nodiscard]] static auto world() noexcept -> Basis { return Basis{}; }
+
+  // The absolute world yaw/pitch (radians) of a direction from the eye. `std::nullopt`
+  // only for a zero-length direction (a point at the eye).
   [[nodiscard]] auto project(const Vec3& direction) const noexcept -> std::optional<Vec2>;
 
-  // Inverse: a chart point back to a unit world direction.
+  // Inverse: a chart point (yaw, pitch) back to a unit world direction.
   [[nodiscard]] auto unproject(const Vec2& point) const noexcept -> Vec3;
 };
 
@@ -90,14 +97,12 @@ struct Polygon {
                                   const Basis& basis, std::size_t segments = 16) -> Polygon;
 
 // Project a capsule — the segment `a`-`b` thickened by `radius` — from `eye`.
-// A capsule is the convex hull of two spheres and the gnomonic chart preserves
-// convexity, so its silhouette is the convex hull of the two endpoint-sphere
-// silhouettes. This is the real studio hitbox shape (`docs/re/aim.md`): the
-// engine stores each hitbox as a capsule (two bone-local endpoints + a radius).
+// A capsule is the convex hull of two spheres and the yaw/pitch chart preserves
+// convexity for the small angles of a shot, so its silhouette is the convex hull of
+// the two endpoint-sphere silhouettes. This is the real studio hitbox shape
+// (`docs/re/aim.md`): the engine stores each hitbox as a capsule (two bone-local
+// endpoints + a radius).
 [[nodiscard]] auto project_capsule(const Vec3& eye, const Vec3& a, const Vec3& b, float radius,
                                    const Basis& basis, std::size_t segments = 16) -> Polygon;
-
-// The view basis for Source eye angles (degrees) — the standard `AngleVectors`.
-[[nodiscard]] auto basis_from_angles(const game::Angle& angles) noexcept -> Basis;
 
 }  // namespace cs2::aim

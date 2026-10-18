@@ -19,10 +19,10 @@ constexpr float k_head_half = 4.0F;
 constexpr int k_hitgroup_head = 1;
 
 // --- scene graph / model (`docs/re/aim.md`) --------------------------------
-constexpr std::uintptr_t k_scene_node = 0x330;  // C_BaseEntity::m_pGameSceneNode
-constexpr std::uintptr_t k_model_state = 0x140;    // CSkeletonInstance::m_modelState
-constexpr std::uintptr_t k_bone_array = 0x80;      // CModelState::m_pBoneArray
-constexpr std::uintptr_t k_model_handle = 0xA0;    // CModelState::m_hModel (StrongHandle)
+constexpr std::uintptr_t k_scene_node = 0x330;        // C_BaseEntity::m_pGameSceneNode
+constexpr std::uintptr_t k_model_state = 0x140;       // CSkeletonInstance::m_modelState
+constexpr std::uintptr_t k_bone_array = 0x80;         // CModelState::m_pBoneArray
+constexpr std::uintptr_t k_model_handle = 0xA0;       // CModelState::m_hModel (StrongHandle)
 constexpr std::uintptr_t k_hitbox_set_index = 0x3FC;  // CSkeletonInstance::m_nHitboxSet
 // `CSkeletonInstance + 0x348` = `CModelState::m_MeshGroupMask` (`modelState + 0x208`):
 // the active mesh-group mask, intersected with each mesh's mask to pick a mesh.
@@ -36,16 +36,16 @@ constexpr std::uintptr_t k_set_flags = 0x164;  // mesh -> hitbox-set flags (bit3
 constexpr std::uintptr_t k_set_data = 0x168;   // mesh -> CHitBoxSet* array
 constexpr std::uintptr_t k_set_count = 0x174;  // mesh -> hitbox-set count
 constexpr std::uintptr_t k_set_entry_stride = 0x48;
-constexpr std::uintptr_t k_set_entry_boxes = 0x28;   // hitbox count
-constexpr std::uintptr_t k_set_entry_array = 0x30;   // CHitBox* array
-constexpr std::uintptr_t k_box_stride = 0x70;        // sizeof(CHitBox)
-constexpr std::uintptr_t k_box_bone_name = 0x10;     // m_sBoneName (CUtlString)
-constexpr std::uintptr_t k_box_mins = 0x18;          // m_vMinBounds (capsule endpoint A)
-constexpr std::uintptr_t k_box_maxs = 0x24;          // m_vMaxBounds (capsule endpoint B)
-constexpr std::uintptr_t k_box_radius = 0x30;        // m_flShapeRadius
-constexpr std::uintptr_t k_box_group = 0x38;         // m_nGroupId (the hitgroup id)
-constexpr std::uintptr_t k_box_shape = 0x3C;         // m_nShapeType
-constexpr std::uintptr_t k_box_index = 0x48;         // m_nHitBoxIndex
+constexpr std::uintptr_t k_set_entry_boxes = 0x28;  // hitbox count
+constexpr std::uintptr_t k_set_entry_array = 0x30;  // CHitBox* array
+constexpr std::uintptr_t k_box_stride = 0x70;       // sizeof(CHitBox)
+constexpr std::uintptr_t k_box_bone_name = 0x10;    // m_sBoneName (CUtlString)
+constexpr std::uintptr_t k_box_mins = 0x18;         // m_vMinBounds (capsule endpoint A)
+constexpr std::uintptr_t k_box_maxs = 0x24;         // m_vMaxBounds (capsule endpoint B)
+constexpr std::uintptr_t k_box_radius = 0x30;       // m_flShapeRadius
+constexpr std::uintptr_t k_box_group = 0x38;        // m_nGroupId (the hitgroup id)
+constexpr std::uintptr_t k_box_shape = 0x3C;        // m_nShapeType
+constexpr std::uintptr_t k_box_index = 0x48;        // m_nHitBoxIndex
 
 // `m_nShapeType`: a player hitbox is a capsule (`docs/re/aim.md`). Any other
 // shape is not modelled here.
@@ -61,36 +61,11 @@ constexpr std::uintptr_t k_bone_stride = 0x20;
 
 // `CCSWeaponBaseVData` (reached via `C_BaseEntity::m_nSubclassID` + the entity's
 // VData chain, `docs/re/aim.md`); the VData carries the real damage model.
+constexpr std::uintptr_t k_vdata_spread = 0x750;  // m_flSpread (FiringModeFloat)
 constexpr std::uintptr_t k_vdata_damage = 0x820;
 constexpr std::uintptr_t k_vdata_headshot = 0x824;
 constexpr std::uintptr_t k_vdata_penetration = 0x82C;
 constexpr std::uintptr_t k_vdata_range_modifier = 0x834;
-
-// Override `profile` with the weapon's real `CCSWeaponBaseVData` values. False
-// when the weapon / VData cannot be read (the caller's profile stands).
-auto read_weapon_profile(std::uintptr_t weapon_vdata, WeaponProfile& profile) noexcept -> bool {
-  if (weapon_vdata == 0) {
-    return false;
-  }
-  std::int32_t damage = 0;
-  if (!game::read(weapon_vdata + k_vdata_damage, damage) || damage <= 0) {
-    return false;
-  }
-  profile.damage = static_cast<float>(damage);
-  if (float headshot = 0.0F; game::read(weapon_vdata + k_vdata_headshot, headshot) &&
-                             headshot > 0.0F) {
-    profile.headshot_multiplier = headshot;
-  }
-  if (float penetration = 0.0F; game::read(weapon_vdata + k_vdata_penetration, penetration) &&
-                                penetration > 0.0F) {
-    profile.penetration = penetration;
-  }
-  if (float range_modifier = 0.0F;
-      game::read(weapon_vdata + k_vdata_range_modifier, range_modifier) && range_modifier > 0.0F) {
-    profile.range_modifier = range_modifier;
-  }
-  return true;
-}
 
 // One `CTransform` (`docs/re/aim.md`, the bone array): a position, a scale float,
 // then the unit quaternion `(x, y, z, w)`. The rotation is at `+0x10`, **not**
@@ -98,9 +73,9 @@ auto read_weapon_profile(std::uintptr_t weapon_vdata, WeaponProfile& profile) no
 // and reading the naive `{Vector, Quat}` layout yields non-unit quaternions
 // (|q| ~ 1.0-1.4), which stretched every capsule instead of rotating it.
 struct RawBone {
-  Vec3 position{};      // +0x00
-  float scale = 1.0F;   // +0x0C (constant 1.0 on the player bone array)
-  float quat[4]{};      // +0x10 (x, y, z, w)
+  Vec3 position{};     // +0x00
+  float scale = 1.0F;  // +0x0C (constant 1.0 on the player bone array)
+  float quat[4]{};     // +0x10 (x, y, z, w)
 };
 
 // Resolved model addresses for a pawn.
@@ -148,9 +123,8 @@ auto bone_for_hitbox(const ModelRef& ref, int mesh_index, int hitbox_index) noex
   std::uintptr_t a = 0;
   std::uintptr_t b = 0;
   std::uintptr_t table = 0;
-  if (!game::read(ref.model + k_remap_a, a) || a == 0 ||
-      !game::read(ref.model + k_remap_b, b) || b == 0 ||
-      !game::read(ref.model + k_remap_table, table) || table == 0) {
+  if (!game::read(ref.model + k_remap_a, a) || a == 0 || !game::read(ref.model + k_remap_b, b) ||
+      b == 0 || !game::read(ref.model + k_remap_table, table) || table == 0) {
     return -1;
   }
   std::uint16_t start = 0;
@@ -159,8 +133,8 @@ auto bone_for_hitbox(const ModelRef& ref, int mesh_index, int hitbox_index) noex
   if (!game::read(a + mesh * 2, start) || !game::read(b + mesh * 2, offset)) {
     return -1;
   }
-  const auto index = static_cast<std::int32_t>(start) + static_cast<std::int32_t>(offset) +
-                     hitbox_index;
+  const auto index =
+      static_cast<std::int32_t>(start) + static_cast<std::int32_t>(offset) + hitbox_index;
   std::int16_t bone = -1;
   if (!game::read(table + static_cast<std::uintptr_t>(index) * 2, bone)) {
     return -1;
@@ -169,6 +143,33 @@ auto bone_for_hitbox(const ModelRef& ref, int mesh_index, int hitbox_index) noex
 }
 
 }  // namespace
+
+auto read_weapon_profile(std::uintptr_t weapon_vdata, WeaponProfile& profile) noexcept -> bool {
+  if (weapon_vdata == 0) {
+    return false;
+  }
+  std::int32_t damage = 0;
+  if (!game::read(weapon_vdata + k_vdata_damage, damage) || damage <= 0) {
+    return false;
+  }
+  profile.damage = static_cast<float>(damage);
+  if (float headshot = 0.0F;
+      game::read(weapon_vdata + k_vdata_headshot, headshot) && headshot > 0.0F) {
+    profile.headshot_multiplier = headshot;
+  }
+  if (float penetration = 0.0F;
+      game::read(weapon_vdata + k_vdata_penetration, penetration) && penetration > 0.0F) {
+    profile.penetration = penetration;
+  }
+  if (float range_modifier = 0.0F;
+      game::read(weapon_vdata + k_vdata_range_modifier, range_modifier) && range_modifier > 0.0F) {
+    profile.range_modifier = range_modifier;
+  }
+  if (float spread = 0.0F; game::read(weapon_vdata + k_vdata_spread, spread) && spread > 0.0F) {
+    profile.spread = spread;
+  }
+  return true;
+}
 
 auto build_input(const game::Snapshot& snapshot, const WeaponProfile& weapon, int target_index,
                  bool weapon_from_game) -> std::optional<SolveInput> {
@@ -195,7 +196,8 @@ auto build_input(const game::Snapshot& snapshot, const WeaponProfile& weapon, in
 
   SolveInput input;
   input.eye = local.eye_origin;
-  input.basis = basis_from_angles(local.eye_angles);
+  // The chart is the absolute world yaw/pitch — never the camera (docs/ragebot.md).
+  input.basis = Basis::world();
   input.weapon = weapon;
   // Prefer the shooter's real weapon VData (damage / headshot / penetration /
   // range modifier) over the caller's profile when available.
@@ -207,34 +209,20 @@ auto build_input(const game::Snapshot& snapshot, const WeaponProfile& weapon, in
   // The real studio hitboxes: bone-local capsule endpoints transformed by the
   // bone (`read_model_hitboxes`). Fall back to the collision-AABB proxy only
   // when the model cannot be resolved.
-  for (const ModelHitbox& box : read_model_hitboxes(target->pawn)) {
-    // Only capsules are modelled (`m_nShapeType`); a non-capsule hitbox with no
-    // radius (a box) is skipped rather than mis-aimed as a bare segment.
-    if (box.shape != k_shape_capsule && box.radius <= 0.0F) {
-      continue;
-    }
-    Hitbox hitbox;
-    hitbox.is_capsule = true;
-    hitbox.capsule = Capsule{box.world_a, box.world_b, box.radius};
-    hitbox.group = box.group;
-    hitbox.bone = box.bone;
-    hitbox.multiplier = box.group == k_hitgroup_head ? weapon.headshot_multiplier : 1.0F;
-    input.hitboxes.push_back(hitbox);
-  }
-
+  input.hitboxes = read_solver_hitboxes(target->pawn, input.weapon);
   if (input.hitboxes.empty()) {
     // Fallback: the collision AABB split into a head cube on the eye and a body
     // box (the pre-studio-hitbox proxy).
     const Vec3 world_mins = target->origin + target->mins;
     const Vec3 world_maxs = target->origin + target->maxs;
-    const auto boxes = split_player_at_head(world_mins, world_maxs, target->eye_origin,
-                                            k_head_half, weapon.headshot_multiplier, 1.0F);
+    const auto boxes = split_player_at_head(world_mins, world_maxs, target->eye_origin, k_head_half,
+                                            weapon.headshot_multiplier, 1.0F);
     input.hitboxes.assign(boxes.begin(), boxes.end());
   }
   return input;
 }
 
-auto read_model_hitboxes(std::uintptr_t pawn) -> std::vector<ModelHitbox> {
+auto read_model_hitboxes(std::uintptr_t pawn, bool read_names) -> std::vector<ModelHitbox> {
   std::vector<ModelHitbox> out;
   const ModelRef ref = resolve_model(pawn);
   if (ref.model == 0 || ref.bones == 0) {
@@ -284,9 +272,8 @@ auto read_model_hitboxes(std::uintptr_t pawn) -> std::vector<ModelHitbox> {
     if (!game::read(mesh + k_set_count, set_count) || set_count <= 0) {
       continue;
     }
-    const auto set_index = static_cast<std::uintptr_t>(ref.hitbox_set < set_count
-                                                           ? ref.hitbox_set
-                                                           : set_count - 1);
+    const auto set_index =
+        static_cast<std::uintptr_t>(ref.hitbox_set < set_count ? ref.hitbox_set : set_count - 1);
     const std::uintptr_t set = sets + set_index * k_set_entry_stride;
 
     std::int32_t box_count = 0;
@@ -334,19 +321,40 @@ auto read_model_hitboxes(std::uintptr_t pawn) -> std::vector<ModelHitbox> {
       hitbox.world_a = bone.position + rotate(bone, hitbox.mins);
       hitbox.world_b = bone.position + rotate(bone, hitbox.maxs);
 
-      if (const std::string name = game::read_cstring(
-              [&]() -> std::uintptr_t {
-                std::uintptr_t name_ptr = 0;
-                (void)game::read(box + k_box_bone_name, name_ptr);
-                return name_ptr;
-              }(),
-              24);
-          !name.empty()) {
-        std::snprintf(hitbox.name, sizeof(hitbox.name), "%s", name.c_str());
+      if (read_names) {
+        if (const std::string name = game::read_cstring(
+                [&]() -> std::uintptr_t {
+                  std::uintptr_t name_ptr = 0;
+                  (void)game::read(box + k_box_bone_name, name_ptr);
+                  return name_ptr;
+                }(),
+                24);
+            !name.empty()) {
+          std::snprintf(hitbox.name, sizeof(hitbox.name), "%s", name.c_str());
+        }
       }
       out.push_back(hitbox);
     }
     break;  // one mesh is enough — player meshes share the hitbox set
+  }
+  return out;
+}
+
+auto read_solver_hitboxes(std::uintptr_t pawn, const WeaponProfile& weapon) -> std::vector<Hitbox> {
+  std::vector<Hitbox> out;
+  for (const ModelHitbox& box : read_model_hitboxes(pawn, /*read_names=*/false)) {
+    // Only capsules are modelled (`m_nShapeType`); a non-capsule hitbox with no
+    // radius (a box) is skipped rather than mis-aimed as a bare segment.
+    if (box.shape != k_shape_capsule && box.radius <= 0.0F) {
+      continue;
+    }
+    Hitbox hitbox;
+    hitbox.is_capsule = true;
+    hitbox.capsule = Capsule{box.world_a, box.world_b, box.radius};
+    hitbox.group = box.group;
+    hitbox.bone = box.bone;
+    hitbox.multiplier = box.group == k_hitgroup_head ? weapon.headshot_multiplier : 1.0F;
+    out.push_back(hitbox);
   }
   return out;
 }

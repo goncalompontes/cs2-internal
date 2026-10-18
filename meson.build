@@ -64,6 +64,19 @@ aim_field_test = executable('aim_field_test',
 )
 test('aim-field', aim_field_test)
 
+aim_spread_test = executable('aim_spread_test',
+  files(
+    'payload/aim/tests/test_aim_spread.cpp',
+    'payload/aim/src/spread.cpp',
+    'payload/aim/src/geometry.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-spread', aim_spread_test)
+
 aim_solver_test = executable('aim_solver_test',
   files(
     'payload/aim/tests/test_aim_solver.cpp',
@@ -92,6 +105,54 @@ aim_records_test = executable('aim_records_test',
   ],
 )
 test('aim-records', aim_records_test)
+
+aim_heatmap_test = executable('aim_heatmap_test',
+  files(
+    'payload/aim/tests/test_aim_heatmap.cpp',
+    'payload/aim/src/geometry.cpp',
+    'payload/aim/src/heatmap.cpp',
+    'payload/aim/src/occlusion.cpp',
+    'payload/aim/src/penetration.cpp',
+    'payload/aim/src/records.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-heatmap', aim_heatmap_test)
+
+aim_occlusion_test = executable('aim_occlusion_test',
+  files(
+    'payload/aim/tests/test_aim_occlusion.cpp',
+    'payload/aim/src/geometry.cpp',
+    'payload/aim/src/field.cpp',
+    'payload/aim/src/heatmap.cpp',
+    'payload/aim/src/occlusion.cpp',
+    'payload/aim/src/penetration.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-occlusion', aim_occlusion_test)
+
+aim_penetration_test = executable('aim_penetration_test',
+  files(
+    'payload/aim/tests/test_aim_penetration.cpp',
+    'payload/aim/src/geometry.cpp',
+    'payload/aim/src/field.cpp',
+    'payload/aim/src/heatmap.cpp',
+    'payload/aim/src/occlusion.cpp',
+    'payload/aim/src/penetration.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-penetration', aim_penetration_test)
 
 # Control-channel core (ADR-0020): the platform-independent parts of
 # payload/control (JSON value, `wait_for` predicate, snapshot serialization are

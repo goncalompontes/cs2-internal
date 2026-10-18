@@ -23,7 +23,23 @@ namespace cs2::aim {
 
 // Read a pawn's model studio hitbox set (real capsules, bone-transformed to world
 // space), for the exact-hitbox path and for validation. Empty when the model /
-// hitbox set cannot be read.
-[[nodiscard]] auto read_model_hitboxes(std::uintptr_t pawn) -> std::vector<ModelHitbox>;
+// hitbox set cannot be read. `read_names` fills `ModelHitbox::name` (a string read
+// per box); pass false where the caller does not need it (the per-frame record
+// sampling) to skip that cost.
+[[nodiscard]] auto read_model_hitboxes(std::uintptr_t pawn, bool read_names = true)
+    -> std::vector<ModelHitbox>;
+
+// A pawn's hitboxes as the solver consumes them: the real studio capsules valued
+// by the weapon's headshot multiplier. Empty when the model cannot be resolved
+// (the caller may then fall back to the collision-AABB proxy). This is the shared
+// read for both the single-target solve and the per-tick record sampling.
+[[nodiscard]] auto read_solver_hitboxes(std::uintptr_t pawn, const WeaponProfile& weapon)
+    -> std::vector<Hitbox>;
+
+// Override `profile` with a weapon's real `CCSWeaponBaseVData` values (damage,
+// headshot multiplier, penetration, range modifier). False when the weapon /
+// VData cannot be read (the caller's profile stands).
+[[nodiscard]] auto read_weapon_profile(std::uintptr_t weapon_vdata, WeaponProfile& profile) noexcept
+    -> bool;
 
 }  // namespace cs2::aim
