@@ -386,14 +386,19 @@ class Control:
              fire: bool | None = None, force: bool | None = None,
              objective: str | None = None, damage: float | None = None,
              headshot: float | None = None,
-             range_modifier: float | None = None) -> dict[str, Any]:
+             range_modifier: float | None = None, hitbox: int | None = None,
+             fov: float | None = None, min_damage: float | None = None,
+             min_hitchance: float | None = None) -> dict[str, Any]:
         """Configure the hold-key ragebot (``docs/ragebot.md``).
 
         ``on`` enables the feature; ``key`` is the Win32 virtual-key code held to
         trigger it; ``fire`` presses attack while aiming; ``force`` bypasses the
-        physical key check (the harness cannot synthesize one). Returns
-        ``{enabled, key, fire, force, active, target, hitbox, solves, writes,
-        shots}``.
+        physical key check (the harness cannot synthesize one). ``objective`` is
+        ``"damage"``/``"hitchance"``/``"expected"``; ``hitbox`` filters the solve
+        (0 auto/head-first, 1 head only, 2 body only); ``fov`` limits the target cone
+        (degrees); ``min_damage``/``min_hitchance`` gate the aim and fire. Returns
+        ``{enabled, key, fire, force, active, target, hitbox, objective, fov,
+        min_damage, min_hitchance, occluders, solves, writes, shots}``.
         """
         args: dict[str, Any] = {}
         if on is not None:
@@ -412,6 +417,14 @@ class Control:
             args["headshot"] = headshot
         if range_modifier is not None:
             args["range_modifier"] = range_modifier
+        if hitbox is not None:
+            args["hitbox"] = hitbox
+        if fov is not None:
+            args["fov"] = fov
+        if min_damage is not None:
+            args["min_damage"] = min_damage
+        if min_hitchance is not None:
+            args["min_hitchance"] = min_hitchance
         return self.request("rage", args)
 
     def heatmap(self, *, target: int | None = None, fov: float | None = None,

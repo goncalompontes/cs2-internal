@@ -352,7 +352,29 @@ auto draw_window(wire::Settings& settings) -> bool {
         }
         toggle("Auto fire", settings.rage_fire);
         ImGui::Separator();
-        ImGui::TextDisabled("Hold the key to aim at the nearest enemy (silent).");
+        // Objective: what the solve maximizes.
+        static const char* const k_objectives[] = {"Damage", "Hitchance", "Expected damage"};
+        int objective = settings.rage_objective <= 2 ? settings.rage_objective : 0;
+        ImGui::SetNextItemWidth(160.0F);
+        if (ImGui::Combo("Objective", &objective, k_objectives, IM_ARRAYSIZE(k_objectives))) {
+          settings.rage_objective = static_cast<std::uint8_t>(objective);
+        }
+        // Hitbox: which boxes the solve may pick.
+        static const char* const k_boxes[] = {"Auto (head first)", "Head only", "Body only"};
+        int hitbox = settings.rage_hitbox <= 2 ? settings.rage_hitbox : 0;
+        ImGui::SetNextItemWidth(160.0F);
+        if (ImGui::Combo("Hitbox", &hitbox, k_boxes, IM_ARRAYSIZE(k_boxes))) {
+          settings.rage_hitbox = static_cast<std::uint8_t>(hitbox);
+        }
+        ImGui::SetNextItemWidth(160.0F);
+        ImGui::SliderFloat("FOV", &settings.rage_fov, 0.0F, 180.0F, "%.0f deg");
+        ImGui::SetNextItemWidth(160.0F);
+        ImGui::SliderFloat("Min damage", &settings.rage_min_damage, 0.0F, 200.0F, "%.0f");
+        ImGui::SetNextItemWidth(160.0F);
+        ImGui::SliderFloat("Min hitchance", &settings.rage_min_hitchance, 0.0F, 1.0F, "%.2f");
+        ImGui::Separator();
+        ImGui::TextDisabled("Hold the key to aim at the best enemy in FOV (silent),");
+        ImGui::TextDisabled("through walls with the real penetration model.");
         ImGui::TextDisabled("Fires while held when Auto fire is on.");
         ImGui::EndTabItem();
       }

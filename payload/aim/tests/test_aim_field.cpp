@@ -101,6 +101,17 @@ auto main() -> int {
            "K=1 reduces to argmax_damage");
   }
 
+  // --- the inaccuracy composition (stepped by the engine value) ------------
+  {
+    cs2::aim::WeaponProfile w;
+    w.inaccuracy_stand = 0.02F;
+    w.inaccuracy_move = 0.10F;
+    expect(near(cs2::aim::inaccuracy(w, 0.0F, true, false), 0.02F), "standing inaccuracy");
+    expect(near(cs2::aim::inaccuracy(w, 250.0F, true, false), 0.12F), "moving adds the move term");
+    w.inaccuracy = 0.005F;  // the engine's effective value (m_flInterpolatedInaccuracy)
+    expect(near(cs2::aim::inaccuracy(w, 250.0F, true, false), 0.005F), "the effective value wins");
+  }
+
   // --- the hitchance: the cone (hit) probability (docs/ragebot.md §2) -------
   {
     DamageField cone;

@@ -17,6 +17,7 @@
 #include "cs2/features/overlay.hpp"
 #include "cs2/features/present_hook.hpp"
 #include "cs2/game/log.hpp"
+#include "cs2/overlay/wire.hpp"
 #include "cs2/render/imgui_backend.hpp"
 #include "cs2/tls/bootstrap.hpp"
 
@@ -137,13 +138,16 @@ auto parse_rage_env() noexcept -> RageConfig {
   return config;
 }
 
-// The overlay menu's `Movement` tab writes the shared settings; the publisher calls
-// this when they *change*, and the payload's movement features follow.
-void on_movement_settings(void* context, bool auto_strafe, bool bhop, bool rage, int rage_key,
-                          bool rage_fire) noexcept {
+// The overlay menu's `Movement`/`Ragebot` tabs write the shared settings; the
+// publisher calls this on every published frame, and the payload's features follow (so
+// the menu is the single owner).
+void on_movement_settings(void* context, const cs2::overlay::wire::Settings& settings) noexcept {
   auto* runtime = static_cast<Runtime*>(context);
-  runtime->control.set_movement_features(auto_strafe, bhop);
-  runtime->control.set_rage_features(rage, rage_key, rage_fire);
+  runtime->control.set_movement_features(settings.auto_strafe != 0, settings.bhop != 0);
+  runtime->control.set_rage_features(settings.rage != 0, settings.rage_key,
+                                     settings.rage_fire != 0, settings.rage_objective,
+                                     settings.rage_hitbox, settings.rage_fov,
+                                     settings.rage_min_damage, settings.rage_min_hitchance);
 }
 
 // The per-frame overlay refresh forwards the local pawn so the movement features
@@ -217,7 +221,8 @@ DWORD WINAPI install_thread(void*) {
     cs2::game::append_log(std::string("[cs2-payload] rage: enabled=") +
                           (rage.enabled ? "1" : "0") + " key=" + std::to_string(rage.key) +
                           " fire=" + (rage.fire ? "1" : "0"));
-    cs2::payload::runtime().control.set_rage_features(rage.enabled, rage.key, rage.fire);
+    cs2::payload::runtime().control.set_rage_features(rage.enabled, rage.key, rage.fire,
+                                                      1 /*hitchance*/, 0 /*auto*/, 0.0F, 0.0F, 0.0F);
     cs2::payload::runtime().publisher.set_rage_defaults(rage.enabled, rage.key, rage.fire);
     cs2::payload::runtime().publisher.set_settings_sink(&on_movement_settings,
                                                         &cs2::payload::runtime());

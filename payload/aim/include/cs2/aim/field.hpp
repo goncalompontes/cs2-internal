@@ -22,10 +22,12 @@ struct WeaponProfile {
   float penetration = 1.0F;     // m_flPenetration
   float headshot_multiplier = 4.0F;
   float spread = 0.0F;  // m_flSpread (+0x750, FiringModeFloat primary)
-  // The inaccuracy terms (`m_flInaccuracy*`, `docs/re/aim.md`): the cone a shot's
-  // direction is perturbed by before the spread offset. The engine composes the ones
-  // that apply from the shooter's state (`FUN_18080b880`, not yet re-reversed on the
-  // current build); `inaccuracy()` below is the first-order stand+move estimate.
+  // The **effective** inaccuracy the engine computed for the current shot
+  // (`CsPlayerPawn::m_flInterpolatedInaccuracy`, client `+0x1F50`) — the crosshair
+  // value, in the same units as the `m_flInaccuracy*` terms. This is the engine's own
+  // composition of the stance/move/jump terms, so it needs no formula. 0 when unknown.
+  float inaccuracy = 0.0F;
+  // The raw `m_flInaccuracy*` terms (fallback when the effective value is unavailable).
   float inaccuracy_stand = 0.0F;       // +0x760
   float inaccuracy_crouch = 0.0F;      // +0x758
   float inaccuracy_move = 0.0F;        // +0x788
@@ -33,14 +35,15 @@ struct WeaponProfile {
   float inaccuracy_jump_apex = 0.0F;     // +0x7BC
 };
 
-// The first-order inaccuracy for the shooter's state (radians-ish; the engine's cone
-// magnitude). `speed` is the horizontal speed (units/s), `on_ground`/`crouched` the
-// stance. This is a *model* — the exact composition (`FUN_18080b880`, the air scale
-// convar, the jump initial↔apex blend) still needs a live cross-check
-// (`docs/re/aim.md` §"Inaccuracy"). It is used only when the caller passes no explicit
-// cone, so an explicit `sigma`/`spread` always wins.
+// The inaccuracy for the shooter's state: the engine's effective value when the payload
+// read it (`m_flInterpolatedInaccuracy`), else a first-order stand/move estimate from the
+// raw VData terms (the exact composition `FUN_18080b880` still needs a live cross-check,
+// `docs/re/aim.md` §"Inaccuracy").
 [[nodiscard]] inline auto inaccuracy(const WeaponProfile& weapon, float speed, bool on_ground,
                                      bool crouched) noexcept -> float {
+  if (weapon.inaccuracy > 0.0F) {
+    return weapon.inaccuracy;
+  }
   float base = on_ground ? (crouched ? weapon.inaccuracy_crouch : weapon.inaccuracy_stand)
                          : weapon.inaccuracy_jump_apex;
   // The move term scales with speed (the engine's `move = (speed/250) * …`).

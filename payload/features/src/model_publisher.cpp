@@ -53,6 +53,11 @@ auto to_wire_settings(const EspConfig& config) -> wire::Settings {
   for (int i = 0; i < 4; ++i) {
     settings.hitbox_color[i] = config.hitbox_color[i];
   }
+  settings.rage_objective = config.rage_objective;
+  settings.rage_hitbox = config.rage_hitbox;
+  settings.rage_fov = config.rage_fov;
+  settings.rage_min_damage = config.rage_min_damage;
+  settings.rage_min_hitchance = config.rage_min_hitchance;
   settings.show_hud = 1;
   return settings;
 }
@@ -75,6 +80,11 @@ auto from_wire_settings(const wire::Settings& settings) -> EspConfig {
   for (int i = 0; i < 4; ++i) {
     config.hitbox_color[i] = settings.hitbox_color[i];
   }
+  config.rage_objective = settings.rage_objective <= 2 ? settings.rage_objective : 1;
+  config.rage_hitbox = settings.rage_hitbox <= 2 ? settings.rage_hitbox : 0;
+  config.rage_fov = settings.rage_fov;
+  config.rage_min_damage = settings.rage_min_damage;
+  config.rage_min_hitchance = settings.rage_min_hitchance;
   return config;
 }
 
@@ -282,8 +292,7 @@ void ModelPublisher::apply_settings() noexcept {
   // leftover from an earlier session — is corrected on the next frame instead of
   // sticking.
   if (settings_sink_ != nullptr) {
-    settings_sink_(settings_sink_context_, copy.auto_strafe != 0, copy.bhop != 0,
-                   copy.rage != 0, copy.rage_key, copy.rage_fire != 0);
+    settings_sink_(settings_sink_context_, copy);
   }
 }
 

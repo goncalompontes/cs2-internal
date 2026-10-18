@@ -15,6 +15,12 @@
 
 #include "cs2/features/overlay.hpp"
 
+// The sink receives the menu's shared settings block by reference; the definition is in
+// `model_publisher.cpp` (which includes the full `wire.hpp`).
+namespace cs2::overlay::wire {
+struct Settings;
+}
+
 #if defined(_WIN32)
 #include <windows.h>
 #endif
@@ -59,8 +65,7 @@ class ModelPublisher {
     rage_key_ = key;
     rage_fire_ = fire;
   }
-  using SettingsSink = void (*)(void* context, bool auto_strafe, bool bhop, bool rage,
-                                int rage_key, bool rage_fire);
+  using SettingsSink = void (*)(void* context, const cs2::overlay::wire::Settings& settings);
   // Called **every published frame** with the settings' state, so the menu is the
   // single owner of the payload features (an out-of-band change is corrected
   // rather than sticking).

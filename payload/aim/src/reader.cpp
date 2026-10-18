@@ -70,6 +70,11 @@ constexpr std::uintptr_t k_vdata_inaccuracy_stand = 0x760;
 constexpr std::uintptr_t k_vdata_inaccuracy_move = 0x788;
 constexpr std::uintptr_t k_vdata_inaccuracy_jump_initial = 0x7B8;
 constexpr std::uintptr_t k_vdata_inaccuracy_jump_apex = 0x7BC;
+// The **effective** inaccuracy the engine computed for the local pawn
+// (`CsPlayerPawn::m_flInterpolatedInaccuracy`, client `+0x1F50`, `docs/re/aim.md`
+// §"Inaccuracy"): the crosshair value — the engine's own composition of the stance/move/
+// jump terms, so the spread cone needs no formula.
+constexpr std::uintptr_t k_pawn_interpolated_inaccuracy = 0x1F50;
 constexpr std::uintptr_t k_vdata_damage = 0x820;
 constexpr std::uintptr_t k_vdata_headshot = 0x824;
 constexpr std::uintptr_t k_vdata_penetration = 0x82C;
@@ -217,6 +222,12 @@ auto build_input(const game::Snapshot& snapshot, const WeaponProfile& weapon, in
   // range modifier) over the caller's profile when available.
   if (weapon_from_game) {
     (void)read_weapon_profile(local.weapon_vdata, input.weapon);
+    // The engine's effective inaccuracy for the current shot (the crosshair value):
+    // the exact composition of the stance/move/jump terms, read from the local pawn.
+    if (float effective = 0.0F;
+        game::read(local.pawn + k_pawn_interpolated_inaccuracy, effective) && effective >= 0.0F) {
+      input.weapon.inaccuracy = effective;
+    }
   }
   input.pawn = target->pawn;
 

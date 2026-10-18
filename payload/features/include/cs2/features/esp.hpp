@@ -32,6 +32,13 @@ struct EspConfig {
   // false = the automatic per-hitgroup scheme; true = `hitbox_color`.
   bool hitbox_custom_color = false;
   std::uint8_t hitbox_color[4] = {90, 255, 130, 220};
+
+  // Ragebot tuning (`docs/ragebot.md`), menu-owned via `wire::Settings`.
+  std::uint8_t rage_objective = 1;      // 0 = damage, 1 = hitchance, 2 = expected
+  std::uint8_t rage_hitbox = 0;         // 0 = auto (head→body), 1 = head, 2 = body
+  float rage_fov = 0.0F;                // target cone (degrees; 0 = unlimited)
+  float rage_min_damage = 0.0F;         // don't aim/fire below this damage
+  float rage_min_hitchance = 0.0F;      // don't aim/fire below this hitchance
 };
 
 // Per-build counters, for diagnostics/logging (never used for rendering).

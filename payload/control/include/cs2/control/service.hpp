@@ -48,7 +48,8 @@ class Service {
   // Drive the ragebot (`docs/ragebot.md`): the overlay menu's Ragebot tab and the
   // `rage` control command set the same state. `key` is a Win32 virtual-key code
   // (0 = none), held to trigger the solve.
-  void set_rage_features(bool on, int key, bool fire) noexcept;
+  void set_rage_features(bool on, int key, bool fire, int objective, int hitbox, float fov,
+                         float min_damage, float min_hitchance) noexcept;
 
   // Run the ragebot for one state refresh. The overlay's per-frame sink calls this
   // with the current snapshot; the solve runs on the render thread and stashes the
@@ -156,6 +157,12 @@ class Service {
   std::atomic<float> rage_range_modifier_{0.98F};
   std::atomic<int> rage_objective_{1};  // 0 damage, 1 hitchance, 2 expected
   std::atomic<float> rage_sigma_{0.0F};
+  // The ragebot's usability gate (`docs/ragebot.md`): the target FOV (degrees; 0 =
+  // unlimited), the hitbox filter (0 auto, 1 head, 2 body) and the aim/fire thresholds.
+  std::atomic<int> rage_hitbox_{0};
+  std::atomic<float> rage_fov_{0.0F};
+  std::atomic<float> rage_min_damage_{0.0F};
+  std::atomic<float> rage_min_hitchance_{0.0F};
   std::atomic<std::uint64_t> rage_solves_{0};
   std::atomic<int> rage_last_target_{-1};
   // Backtracking (`docs/ragebot.md` §8): how many solves chose a lag record over the

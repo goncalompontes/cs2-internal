@@ -175,6 +175,17 @@
   **Next:** re-reverse the exact inaccuracy composition (+ the `weapon_air_spread_scale`
   convar, the jump initial↔apex `|v_z|` blend) and the shotgun/negev pattern table
   (`FUN_1807cd1b0`) on the current build, then live cross-check the pellet seed.
+- **The ragebot is usable (2026-10-18).** Fleshed out end to end: **target selection**
+  (nearest enemy within a configurable **FOV**, `docs/ragebot.md` §3), a **hitbox filter**
+  (auto head-first / head-only / body-only), an **objective** selector (damage /
+  hitchance / expected), and **min-damage / min-hitchance** gates on the aim and fire.
+  The **effective inaccuracy is read live** from the pawn
+  (`CsPlayerPawn::m_flInterpolatedInaccuracy`, client `+0x1F50` — the engine's own
+  composition, so no formula), driving the cone for the hitchance objective and the
+  pellet offsets. All of it is menu-owned (the overlay's `Ragebot` tab: objective /
+  hitbox / FOV / min-damage / min-hitchance sliders) and mirrored on the `rage` control
+  command; `rage` reports `objective`/`hitbox`/`fov`/`min_*`/`occluders`/`backtracks`/
+  `record`. The solve stays occlusion-aware (`docs/handoff.md`).
 - **The enumeration is camera-independent (2026-10-18).** The query box had been
   `eye → camera_forward·1400 ±96`, so the enumerated solid set (and therefore the
   render *and* the attenuation) changed as the player looked around. It is now the

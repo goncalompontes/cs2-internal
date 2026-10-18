@@ -737,10 +737,16 @@ void Service::set_movement_features(bool auto_strafe, bool bhop) noexcept {
   input_.set_bhop(bhop);
 }
 
-void Service::set_rage_features(bool on, int key, bool fire) noexcept {
+void Service::set_rage_features(bool on, int key, bool fire, int objective, int hitbox, float fov,
+                                float min_damage, float min_hitchance) noexcept {
   rage_enabled_.store(on);
   rage_key_.store(key);
   rage_fire_.store(fire);
+  rage_objective_.store(objective);
+  rage_hitbox_.store(hitbox);
+  rage_fov_.store(fov);
+  rage_min_damage_.store(min_damage);
+  rage_min_hitchance_.store(min_hitchance);
 }
 
 // The hitgroup / hitbox id of the box whose centre is angularly closest to
@@ -965,10 +971,65 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     }
   }
 
-  auto solve_input = aim::build_input(snapshot, weapon, -1);
+  // Target selection (`docs/ragebot.md` §3): the nearest enemy within the FOV cone
+  // (degrees; 0 = unlimited) and within the weapon's range. `build_input`'s own pick is
+  // by distance, so the FOV is applied here.
+  constexpr float k_deg_to_rad = 0.01745329251994329577F;
+  int selected_target = -1;
+  {
+    const float fov = rage_fov_.load();
+    const float cos_limit = fov > 0.0F ? std::cos(fov * 0.5F * k_deg_to_rad) : -1.0F;
+    const game::Vec3& eye = snapshot.local->eye_origin;
+    const float yaw = snapshot.local->eye_angles.yaw * k_deg_to_rad;
+    const float pitch = snapshot.local->eye_angles.pitch * k_deg_to_rad;
+    const game::Vec3 forward{std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw),
+                             -std::sin(pitch)};
+    float best = 1.0e30F;
+    for (const game::PlayerSnapshot& player : snapshot.players) {
+      if (player.is_local || !player.alive || player.pawn == 0) {
+        continue;
+      }
+      if (player.team != 2 && player.team != 3) {
+        continue;
+      }
+      const game::Vec3& to = player.eye_origin;
+      const float dx = to.x - eye.x;
+      const float dy = to.y - eye.y;
+      const float dz = to.z - eye.z;
+      const float len = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (len <= 1.0F) {
+        continue;
+      }
+      const float dot = (dx * forward.x + dy * forward.y + dz * forward.z) / len;
+      if (dot < cos_limit) {
+        continue;  // outside the FOV cone
+      }
+      if (player.distance < best) {
+        best = player.distance;
+        selected_target = player.index;
+      }
+    }
+  }
+  if (selected_target < 0) {
+    input_.clear_rage_aim();
+    return;
+  }
+
+  auto solve_input = aim::build_input(snapshot, weapon, selected_target);
   if (!solve_input.has_value()) {
     input_.clear_rage_aim();
     return;
+  }
+  // The hitbox filter (`rage_hitbox`): 1 = head only, 2 = body only.
+  if (const int mode = rage_hitbox_.load(); mode != 0) {
+    std::erase_if(solve_input->hitboxes, [mode](const aim::Hitbox& hitbox) {
+      const bool head = hitbox.group == 1;
+      return mode == 1 ? !head : head;
+    });
+    if (solve_input->hitboxes.empty()) {
+      input_.clear_rage_aim();
+      return;
+    }
   }
   // Occlusion (`docs/ragebot.md` §3): project the world solids the game thread
   // enumerated into the solve's chart. The solver then splits each hitbox by them and
@@ -1003,6 +1064,12 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   solve_input->penetration_params.weapon_penetration = solve_input->weapon.penetration;
   rage_occluders_.store(static_cast<int>(solve_input->occlusion.size()));
   solve_input->pose_sigma = rage_sigma_.load();
+  // The hitchance cone: the weapon's inaccuracy + spread (`docs/re/aim.md`).
+  {
+    const float inacc = aim::inaccuracy(solve_input->weapon, 0.0F, true, false);
+    solve_input->spread_sigma =
+        std::sqrt(inacc * inacc + solve_input->weapon.spread * solve_input->weapon.spread);
+  }
   switch (rage_objective_.load()) {
     case 0:
       solve_input->objective = aim::AimObjective::damage;
@@ -1046,6 +1113,13 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     return;
   }
   const aim::SolveResult& result = backtrack.solve;
+
+  // The aim/fire gate (`docs/ragebot.md` §3): only aim and fire when the solve meets
+  // the user's minimum damage and hitchance.
+  if (result.value < rage_min_damage_.load() || result.hitchance < rage_min_hitchance_.load()) {
+    input_.clear_rage_aim();
+    return;
+  }
 
   constexpr float k_rad_to_deg = 57.295779513082320876F;
   const float yaw = std::atan2(result.direction.y, result.direction.x) * k_rad_to_deg;
@@ -1164,11 +1238,13 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
         seed = aim::md5_pseudo_random(static_cast<std::uint32_t>(integer("sequence", 1)));
       }
       const int pellets = integer("pellets", 1);
-      // Spread defaults to the shooter's real `m_flSpread` (read into the weapon
-      // profile by `build_input`); inaccuracy still comes from the caller.
+      // Spread defaults to the shooter's real `m_flSpread`; inaccuracy to the engine's
+      // effective value (`m_flInterpolatedInaccuracy`) — both read into the weapon
+      // profile by `build_input`.
       const float spread = number("spread", input->weapon.spread);
+      const float inaccuracy = number("inaccuracy", input->weapon.inaccuracy);
       input->pellet_offsets =
-          aim::pellet_offsets(seed, spread, number("inaccuracy", 0.0F), pellets > 0 ? pellets : 1);
+          aim::pellet_offsets(seed, spread, inaccuracy, pellets > 0 ? pellets : 1);
     } else {
       input->objective = aim::AimObjective::damage;
     }
@@ -1211,6 +1287,8 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
   payload.set("value", Json::number(result.value));
   payload.set("hitchance", Json::number(static_cast<double>(result.hitchance)));
   payload.set("cone", Json::number(static_cast<double>(input->spread_sigma)));
+  payload.set("weapon_spread", Json::number(static_cast<double>(input->weapon.spread)));
+  payload.set("weapon_inaccuracy", Json::number(static_cast<double>(input->weapon.inaccuracy)));
   payload.set("cells", Json::number(static_cast<double>(result.cells)));
   payload.set("aim_u", Json::number(result.aim.x));
   payload.set("aim_v", Json::number(result.aim.y));
@@ -1297,8 +1375,21 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
     const std::string_view name = value->as_string();
     rage_objective_.store(name == "damage" ? 0 : (name == "expected" ? 2 : 1));
   }
+  if (const Json* value = args.find("fov"); value != nullptr && value->is_number()) {
+    rage_fov_.store(static_cast<float>(value->as_number()));
+  }
+  if (const Json* value = args.find("min_damage"); value != nullptr && value->is_number()) {
+    rage_min_damage_.store(static_cast<float>(value->as_number()));
+  }
+  if (const Json* value = args.find("min_hitchance"); value != nullptr && value->is_number()) {
+    rage_min_hitchance_.store(static_cast<float>(value->as_number()));
+  }
+  if (const Json* value = args.find("hitbox"); value != nullptr && value->is_number()) {
+    rage_hitbox_.store(static_cast<int>(value->as_number()));
+  }
   input_.refresh();
-  set_rage_features(on, key, fire);
+  set_rage_features(on, key, fire, rage_objective_.load(), rage_hitbox_.load(), rage_fov_.load(),
+                    rage_min_damage_.load(), rage_min_hitchance_.load());
 
   Json payload = Json::object();
   payload.set("enabled", Json::boolean(on));
@@ -1314,6 +1405,11 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   payload.set("occluders", Json::number(static_cast<double>(rage_occluders_.load())));
   payload.set("backtracks", Json::number(static_cast<double>(rage_backtracks_.load())));
   payload.set("record", Json::number(static_cast<double>(rage_last_record_.load())));
+  payload.set("objective", Json::number(static_cast<double>(rage_objective_.load())));
+  payload.set("hitbox_mode", Json::number(static_cast<double>(rage_hitbox_.load())));
+  payload.set("fov", Json::number(static_cast<double>(rage_fov_.load())));
+  payload.set("min_damage", Json::number(static_cast<double>(rage_min_damage_.load())));
+  payload.set("min_hitchance", Json::number(static_cast<double>(rage_min_hitchance_.load())));
   set_ok(out, std::move(payload));
 }
 
@@ -1760,3 +1856,4 @@ void Service::stop() noexcept {}
 #endif
 
 }  // namespace cs2::control
+

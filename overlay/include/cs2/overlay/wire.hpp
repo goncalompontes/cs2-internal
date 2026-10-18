@@ -101,6 +101,14 @@ struct Settings {
   uint8_t hitbox_mode;
   uint8_t hitbox_color_mode;
   uint8_t hitbox_color[4];  // RGBA, used when `hitbox_color_mode == 1`
+  // Ragebot tuning (`docs/ragebot.md`), menu-owned like the rest. `rage_fov` is the
+  // target cone in degrees (0 = unlimited); `rage_min_damage`/`rage_min_hitchance` gate
+  // the aim/fire; `rage_objective` selects the solve objective; `rage_hitbox` filters it.
+  uint8_t rage_objective;    // 0 = damage, 1 = hitchance, 2 = expected
+  uint8_t rage_hitbox;       // 0 = auto (head→body), 1 = head only, 2 = body only
+  float rage_fov;            // degrees; 0 = no limit
+  float rage_min_damage;     // don't aim/fire below this damage (0 = any)
+  float rage_min_hitchance;  // don't fire below this hitchance (0-1; 0 = any)
 };
 
 struct Model {
