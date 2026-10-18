@@ -1035,9 +1035,27 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   // enumerated into the solve's chart. The solver then splits each hitbox by them and
   // attenuates with the engine penetration model — the same field the heatmap renders
   // — so the aim is wallbang-aware instead of aiming at a fully-occluded hitbox.
+  //
+  // Only the solids whose AABB can lie between the eye and *this* target are projected:
+  // the enumeration box spans every target's hitbox geometry (thousands of solids), and
+  // projecting them all on the publish thread every frame stalls the overlay (the freeze
+  // watchdog tripped once). The per-hull AABB is cached (`OcclusionHull::has_bounds`).
   {
+    game::Vec3 lo = solve_input->eye;
+    game::Vec3 hi = solve_input->eye;
+    for (const aim::Hitbox& hitbox : solve_input->hitboxes) {
+      extend_box(lo, hi, hitbox);
+    }
+    constexpr float k_margin = 8.0F;
+    lo = game::Vec3{lo.x - k_margin, lo.y - k_margin, lo.z - k_margin};
+    hi = game::Vec3{hi.x + k_margin, hi.y + k_margin, hi.z + k_margin};
     std::lock_guard<std::mutex> lock(occlusion_mutex_);
     for (const OcclusionHull& hull : occlusion_hulls_) {
+      if (hull.has_bounds && !(hull.bounds_max.x >= lo.x && hull.bounds_min.x <= hi.x &&
+                               hull.bounds_max.y >= lo.y && hull.bounds_min.y <= hi.y &&
+                               hull.bounds_max.z >= lo.z && hull.bounds_min.z <= hi.z)) {
+        continue;  // cannot lie between the eye and this target
+      }
       std::optional<aim::OccluderCell> cell;
       if (hull.kind == aim::SolidKind::sphere) {
         cell = aim::project_sphere_occluder(solve_input->eye, solve_input->basis, hull.a,

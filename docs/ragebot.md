@@ -185,7 +185,12 @@
   pellet offsets. All of it is menu-owned (the overlay's `Ragebot` tab: objective /
   hitbox / FOV / min-damage / min-hitchance sliders) and mirrored on the `rage` control
   command; `rage` reports `objective`/`hitbox`/`fov`/`min_*`/`occluders`/`backtracks`/
-  `record`. The solve stays occlusion-aware (`docs/handoff.md`).
+  `record`. The solve stays occlusion-aware (`docs/handoff.md`). The solve projects only
+  the solids whose cached AABB can lie between the eye and the target (the enumeration
+  box spans every target, and projecting it in full on the publish thread froze the
+  overlay once). The menu's settings block grew, so `wire::k_version` was bumped to 8 —
+  a stale `cs2-overlay.shm` from an older layout must be deleted (or the version bump
+  makes the layer ignore it).
 - **The enumeration is camera-independent (2026-10-18).** The query box had been
   `eye → camera_forward·1400 ±96`, so the enumerated solid set (and therefore the
   render *and* the attenuation) changed as the player looked around. It is now the

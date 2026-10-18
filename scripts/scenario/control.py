@@ -341,7 +341,7 @@ class Control:
             headshot: float | None = None, write: bool | None = None,
             seed: int | None = None, sequence: int | None = None,
             spread: float | None = None, inaccuracy: float | None = None,
-            pellets: int | None = None) -> dict[str, Any]:
+            pellets: int | None = None, cone: float | None = None) -> dict[str, Any]:
         """Ragebot solve (``docs/ragebot.md``).
 
         Solves the damage field for the nearest enemy (or the one at entity index
@@ -378,6 +378,8 @@ class Control:
             args["inaccuracy"] = inaccuracy
         if pellets is not None:
             args["pellets"] = pellets
+        if cone is not None:
+            args["cone"] = cone
         if write is not None:
             args["write"] = write
         return self.request("aim", args)
