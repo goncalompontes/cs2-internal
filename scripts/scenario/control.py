@@ -338,13 +338,19 @@ class Control:
     def aim(self, *, target: int | None = None, objective: str | None = None,
             sigma: float | None = None, damage: float | None = None,
             range_modifier: float | None = None, penetration: float | None = None,
-            headshot: float | None = None, write: bool | None = None) -> dict[str, Any]:
+            headshot: float | None = None, write: bool | None = None,
+            seed: int | None = None, sequence: int | None = None,
+            spread: float | None = None, inaccuracy: float | None = None,
+            pellets: int | None = None) -> dict[str, Any]:
         """Ragebot solve (``docs/ragebot.md``).
 
         Solves the damage field for the nearest enemy (or the one at entity index
         ``target``) and returns the aim: ``{valid, yaw, pitch, value, cells,
         aim_u, aim_v, wrote_view}``. ``objective`` is ``"damage"`` (default),
-        ``"hitchance"`` or ``"expected"`` (the latter uses ``sigma``).
+        ``"hitchance"``, ``"expected"`` (uses ``sigma``) or ``"pellets"`` (the
+        deterministic pellet-sum; the RNG seed is ``seed`` or ``sequence`` →
+        ``MD5_PseudoRandom``, and ``spread``/``inaccuracy``/``pellets`` describe the
+        cone — ``spread`` defaults to the weapon's real ``m_flSpread``).
         ``write=True`` applies the solve to the **silent** sub-tick view angles.
         """
         args: dict[str, Any] = {}
@@ -362,6 +368,16 @@ class Control:
             args["penetration"] = penetration
         if headshot is not None:
             args["headshot"] = headshot
+        if seed is not None:
+            args["seed"] = seed
+        if sequence is not None:
+            args["sequence"] = sequence
+        if spread is not None:
+            args["spread"] = spread
+        if inaccuracy is not None:
+            args["inaccuracy"] = inaccuracy
+        if pellets is not None:
+            args["pellets"] = pellets
         if write is not None:
             args["write"] = write
         return self.request("aim", args)
@@ -397,6 +413,80 @@ class Control:
         if range_modifier is not None:
             args["range_modifier"] = range_modifier
         return self.request("rage", args)
+
+    def heatmap(self, *, target: int | None = None, fov: float | None = None,
+                history: int | None = None, sample: bool | None = None,
+                clear: bool | None = None, all: bool | None = None,
+                walls: bool | None = None, walls_call: bool | None = None,
+                max_unlag: float | None = None, interp: float | None = None,
+                damage: float | None = None,
+                range_modifier: float | None = None, penetration: float | None = None,
+                headshot: float | None = None, pen: str | None = None,
+                pen_mod: float | None = None, dmg_mod: float | None = None,
+                max_pen: int | None = None, material: int | None = None,
+                grate: bool | None = None) -> dict[str, Any]:
+        """The multi-target damage heatmap (``docs/ragebot.md``).
+
+        Projects every enemy's hitboxes — and their sampled lag records — into one
+        shared angular chart and returns the tagged silhouette cells, so the Python
+        side can render an image. ``target`` centres the chart on an enemy's entity
+        index; ``fov`` is the horizontal field of view covered by the chart (degrees);
+        ``history`` is how many lag records per player to include; ``sample`` toggles
+        the payload's continuous record sampling; ``clear`` empties the record store;
+        ``all`` includes teammates as well as enemies; ``max_unlag``/``interp`` set
+        the lag-comp window (`sv_maxunlag` / the interp seconds, default 0.2 /
+        0.03125).
+
+        ``pen`` selects the penetration model that values the occluded hitboxes
+        (``docs/re/penetration.md``): ``"simple"`` (default) is the first-pass
+        ``prod(1 - t*mod/m_flPenetration)``; ``"engine"`` is the engine's real
+        per-surface loss with the per-surface modifiers (``pen_mod`` penetration
+        modifier, ``dmg_mod`` damage modifier), the ``max_pen`` 4-wall budget and the
+        ~90-unit thickness cap. Returns ``{valid, eye, basis, fov, extent, weapon,
+        tick_base, rewind_tick, window_ticks, targets, cells, ...}``.
+        """
+        args: dict[str, Any] = {}
+        if target is not None:
+            args["target"] = target
+        if fov is not None:
+            args["fov"] = fov
+        if history is not None:
+            args["history"] = history
+        if sample is not None:
+            args["sample"] = sample
+        if clear is not None:
+            args["clear"] = clear
+        if all is not None:
+            args["all"] = all
+        if walls is not None:
+            args["walls"] = walls
+        if walls_call is not None:
+            args["walls_call"] = walls_call
+        if max_unlag is not None:
+            args["max_unlag"] = max_unlag
+        if interp is not None:
+            args["interp"] = interp
+        if damage is not None:
+            args["damage"] = damage
+        if range_modifier is not None:
+            args["range_modifier"] = range_modifier
+        if penetration is not None:
+            args["penetration"] = penetration
+        if headshot is not None:
+            args["headshot"] = headshot
+        if pen is not None:
+            args["pen"] = pen
+        if pen_mod is not None:
+            args["pen_mod"] = pen_mod
+        if dmg_mod is not None:
+            args["dmg_mod"] = dmg_mod
+        if max_pen is not None:
+            args["max_pen"] = max_pen
+        if material is not None:
+            args["material"] = material
+        if grate is not None:
+            args["grate"] = grate
+        return self.request("heatmap", args)
 
     def look(self, *, yaw: float | None = None, pitch: float | None = None,
              roll: float | None = None, timeout: float = 5.0,

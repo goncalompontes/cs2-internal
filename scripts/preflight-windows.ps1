@@ -132,6 +132,24 @@ if ($layer) {
 if ($registered) { Result 'PASS' 'Vulkan layer' 'cs2_overlay_layer.json registered under HKLM' }
 else { Result 'WARN' 'Vulkan layer' 'not registered (needed for the overlay; see docs/setup-windows.md)' }
 
+# Payload import hygiene (docs/handoff.md gotchas): a non-POD payload global or a
+# function-local `static` drags in a CRT import the manual-map injector cannot
+# resolve (e.g. KERNEL32!SleepConditionVariableSRW), and injection fails with
+# `unresolved import`. Import names sit in the DLL as ASCII, so scan the bytes.
+$payloadDll = Join-Path $RepoRoot 'build-payload\payload.dll'
+if (Test-Path $payloadDll) {
+  $payloadText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($payloadDll))
+  $badImports = @('SleepConditionVariableSRW', 'SleepConditionVariableCS', 'InitOnceExecuteOnce') |
+    Where-Object { $payloadText.Contains($_) }
+  if ($badImports.Count -gt 0) {
+    Result 'WARN' 'payload imports' ("unresolvable CRT import(s): {0} (manual-map injection will fail; keep globals POD)" -f ($badImports -join ', '))
+  } else {
+    Result 'PASS' 'payload imports' 'no known-unresolvable CRT imports'
+  }
+} else {
+  Result 'WARN' 'payload.dll' 'not built (meson compile -C build-payload)'
+}
+
 Write-Host ""
 Write-Host "-- static RE (warn only) --" -ForegroundColor Cyan
 Tool 'rea (REA)' 'rea' '--version' $false
