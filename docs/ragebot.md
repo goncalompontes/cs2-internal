@@ -66,9 +66,139 @@
 - **`aim` control command** — solves and returns the aim direction/value and the
   raw hitbox list; with `write: true` it also applies the solve to the silent
   sub-tick view angles.
-- **Remaining:** occlusion/penetration (the engine trace — RE pinned, see
-  `docs/re/aim.md` §"Calling the trace"), wiring the backtrack ring into the
-  per-frame path, the pose blur, and the hitbox renderer.
+- **Multi-target damage heatmap (Layer 1).** `payload/aim/heatmap.hpp`
+  (`build_heatmap`) projects **every** player's hitbox capsules — and their sampled
+  **lag records** — into one shared angular chart about the eye, tagging each
+  silhouette cell with its player (`target`), hitgroup, record id and age, and
+  valuing it by damage (host test `aim-heatmap`). The `heatmap` control command
+  returns the tagged cells with the eye/basis/weapon; the Python side rasterises
+  them (`scripts/scenario/heatmap.py` + `scripts/heatmap-view.py` + the `heatmap`
+  scenario) to a **damage** PNG and a **record-age** PNG. The render thread samples
+  each enemy's capsules per frame into `aim::RecordStore` (a bounded 32-entry ring,
+  `sample_records`), so the per-player lag records are always warm. The world
+  `occluders` slot is wired through `HeatmapOptions` but nothing fills it yet.
+- **Occlusion / penetration (Layer 2, in progress).** `payload/aim/occlusion.hpp`
+  (`OccluderCell` + `thickness_along`, `project_occluder`, `clip_convex`/
+  `subtract_convex`) projects the world solids into the chart; `build_heatmap` then
+  **splits each hitbox silhouette** by them and scales every fragment by
+  `Π(1 − t(u)·mod/m_flPenetration)` — **no rays** (host test `aim-occlusion`). The
+  payload enumerates the solids with `CGamePhysicsQueryInterface::EntitiesInBox`
+  (`payload/control/occlusion_query.cpp`, the `walls: true` arg), wrapped in
+  `diag::call_guarded` — a setjmp/longjmp recovery guard, because the manually-mapped
+  payload has no exception tables (a wrong engine ABI faults back instead of killing
+  the process). **The record → shape chain is resolved live** (`docs/re/occlusion.md`):
+  the record's `+0x58` is a **`CPhysicsBody`**, `body+8` is its data, `data+0x68` the
+  shape array (`data+0x60` the count) of `IPhysicsShape`s (`+0x18` type 2 hull,
+  `+0xC0` `RnHull_t*`). Entity bodies get the world transform from
+  `body->vtbl[0x1b0]`; the **world body** (handle `0x8000`, 10149 brush shapes) is
+  cached and AABB-filtered. Live: `hulls=4 occluders=3`. **Remaining:** confirm the
+  world-brush hulls are world-space (per-shape transform / `RnCompound_t` recursion),
+  signatures (ADR-0012), and the per-direction thickness refinement.
+- **Occlusion correctness pass (2026-10-17, second session).** (a) The heatmap's
+  **broad phase** was wrong — it kept a solid only when the ray to the hitbox
+  *centre* entered it, dropping solids that cover only *part* of a silhouette. It is
+  now a true overlap broad phase (silhouette overlap ∧ a **conservative** depth lower
+  bound, `OccluderCell::lower_bound_distance`), with the exact per-fragment
+  `ray_span` test deciding attenuation (new `aim-occlusion` regressions). (b) The
+  world-hull cache is now keyed on the level's geometry identity (body data + first
+  shape pointer), so a map change cannot serve stale brush hulls. (c) The per-query
+  RE scaffolding (`offset_type_hits`/`deep_type_hits` and the wide per-record
+  `record_dump` string building) is gone — it allocated per record every tick.
+  (d) The payload now reads **sphere (type 0), capsule (type 1) and mesh (type 3)**
+  collision shapes from the game (`shape+0xB8`/`+0xC4`/`+0xD0` for the primitives;
+  `shape+0xC8` → `RnMesh_t` vertices `+0x38`/count `+0x30` for meshes —
+  `docs/re/vphysics2.md`) and projects them: spheres/capsules analytically
+  (`project_sphere_occluder`/`project_capsule_occluder`) and meshes as the exact
+  convex hull of their vertices (`convex_hull_3d`), all host-tested. A capsule- or
+  mesh-bodied prop now occludes. **Compound (4)** shapes are still skipped (their
+  `RnCompound_t` child layout is unresolved).
+- **Bullet trace reversed; mesh occluders fixed (2026-10-18).** The engine's own
+  bullet path was reversed with the `rea` plugin: `FX_FireBullets` (`FUN_180d237d0`)
+  → per pellet `FUN_180887d60` (filter mask **`0x1c300b`**, filter vtable
+  `client+0x1ad4838`) → `TraceLineIntervals` (`FUN_180a19e90`) and the penetration
+  loop `FUN_18089ca80` (repeated interval traces, ≈90 units total). Full write-up:
+  `docs/re/bullet-trace.md`. A live probe found the **missing wall is a collision
+  mesh**: the worldspawn body's shape histogram is `{hull 10143, mesh 6}`, and the
+  payload **skipped every mesh** (a 160-vertex cap + an O(n⁴) hull). Fixed: the
+  payload reads meshes as a triangle soup (`RnMesh_t` vertices `+0x38`/count `+0x30`,
+  triangle indices `+0x50`), `aim::project_mesh_occluder` projects them, and
+  `OccluderCell::ray_span` intersects their triangles (Möller–Trumbore). The bullet
+  mask was corrected to `0x1c300b`, and a mesh broad-phase guard keeps the chart from
+  fragmenting on map-wide meshes. **Live-validated:** a wall between the eye and an
+  enemy now yields head damage `0` (was full); an open line of sight is unchanged.
+- **Real penetration model + a `penetration` render mode (2026-10-18).** The occluded
+  cells were valued with the first-pass approximation `∏(1 − t·mod/m_flPenetration)`.
+  `payload/aim/penetration.hpp` now implements the engine's real per-wall loss — the CS2
+  `HandleBulletPenetration` (`client.dll` `FUN_1808a1820`, `sv_penetration_type 2`):
+  `combined = min` of the crossed surfaces' `bulletPenetrationDistanceModifier`, with
+  the material special cases, `lost = t²·(1/combined)/24 + (3/pen·1.25)·(1/combined)·3 +
+  entry_fraction·damage` (`entry_fraction` 0.16, 0.05 through a grate/glass, 1e-5
+  through a grate-contents span), a `< 0.1` distance-modifier gate, and the 4-wall
+  budget + the reversed loop's ≈90-unit crossed-thickness cap (`FUN_18089ca80`).
+  **The per-surface modifiers are read from the game** (`occlusion_query.cpp`
+  `read_shape_surface`): each shape's material object is at `shape+0x48` → its `+0x10`
+  indexes the `SurfacePropertiesList` (`CGameSurfaceProperties` 0x20 B,
+  `FUN_1809e3560`/`FUN_1809cd960`), giving the distance modifier `+0x08`, damage
+  modifier `+0x0C` and `gamematerial` (`CHAR_TEX_*`) `+0x14`. **Live-verified:** the
+  world's 10149 brushes resolve to 29 distinct surfaces (concrete 0.5, metal 0.4, wood
+  0.9, glass 0.99). `OccluderCell`/`OcclusionHull` carry the surface;
+  `HeatmapOptions::penetration` selects `simple`/`engine`; `HeatCell::base_value` is the
+  unoccluded damage. The `heatmap` command takes `pen`(+`pen_mod`/`dmg_mod`/`max_pen`/
+  `material`/`grate` overrides) and the Python debug renderer gained a **`penetration`**
+  mode (`scenario/heatmap.py :: render(mode="penetration")`, `heatmap-view.py --mode
+  penetration --pen engine`, the live viewer's *penetration* mode) that fills by the
+  engine-model damage, overlays the solids and outlines each cell by its attenuation
+  fraction. Host test `aim-penetration` (16/16). Full decompile:
+  `docs/re/penetration.md`.
+- **The enumeration is camera-independent (2026-10-18).** The query box had been
+  `eye → camera_forward·1400 ±96`, so the enumerated solid set (and therefore the
+  render *and* the attenuation) changed as the player looked around. It is now the
+  **AABB over the eye and every enemy's hitbox geometry** — the live pose *and* every
+  sampled lag record — with an **8-unit** padding, built from world positions only.
+  The hitboxes are the ones `sample_records` already read this frame, so the box needs
+  no extra memory walk. **Live-validated:** the overlap `records` / `world_box_kept`
+  (1909 / 1887) and the per-cell damage values are identical across camera yaws (only
+  the chart window — an inherently view-relative projection — changes which
+  solids/hitboxes fall inside it).
+- **The chart is absolute world yaw/pitch (2026-10-18).** The angular chart (into which
+  the hitbox and occluder cells are projected) was a gnomonic tangent plane about the
+  **camera forward**, so the whole damage field rotated with the view. `aim::Basis` is
+  now the absolute world yaw/pitch map — `(u,v) = (atan2(d.y,d.x), asin(d.z/|d|))` —
+  a function of the world geometry only (`Basis::world()`; `basis_from_angles` is
+  gone). The heatmap clips yaw to `±extent` (default the full `±π`) and pitch to `±π/2`.
+  **Live-validated:** the projected `occluder_polygons` and the enumeration are
+  byte-identical across camera yaws; the cells vary only with the enemy pose (idle
+  animation), not the camera. The **render** is still centred on the camera direction
+  (`view_yaw`/`view_pitch` in the JSON): the payload clips the chart to a `fov`-wide
+  window around it (a view concern, not the computation), and the Python/JS renderers
+  map absolute yaw/pitch to pixels with screen-right = decreasing yaw, so it looks like
+  the in-game view. Follow-ups: a solid straddling the `±π` yaw seam over-covers, and
+  the per-solid silhouette is a convex hull (a BVH / tighter silhouette is the perf
+  step).
+- **The render reports only the solids *between* the eye and a target (2026-10-18).**
+  The enumeration box is a superset, so it also caught solids behind or beside the
+  enemies, which the renderer drew. `Heatmap` now carries `used_occluders` — the subset
+  that passed the per-hitbox broad phase (silhouette overlap ∧ in-front depth bound) —
+  and `heatmap.walls.occluder_polygons` reports only those. **Live:** looking at an
+  enemy, 652 solids projected into the view window but only **26** were between (and
+  they attenuate: head 105). The remaining enumeration cost (walking the world body's
+  shapes) is the `EntitiesAlongLinearSweep`/BVH step.
+- **Deterministic spread / pellet model (2026-10-17, second session).**
+  `payload/aim/spread.hpp` replicates the engine's `CUniformRandomStream` (Park–Miller
+  + Bays–Durham shuffle) and `MD5_PseudoRandom(sequence)`, and `pellet_offsets(...)`
+  draws the `K` pellet offsets (`spread·r1·(cos a1, sin a1) + inacc·r2·(cos a2, sin a2)`,
+  revolver `r→1−r²`); host test `aim-spread` (the MD5 vector and the RNG's first draws
+  are pinned to an independent Python model). The field gained the **pellet-sum**
+  objective `DamageField::value_at_pellets`/`argmax_pellets` and `AimObjective::pellets`
+  (handled by `solve`), reachable from the `aim` command
+  (`objective: "pellets"`, args `seed`/`sequence`/`spread`/`inaccuracy`/`pellets`).
+  **Not live-validated:** the exact `MD5_PseudoRandom` input construction and the
+  per-weapon inaccuracy (`FUN_18080b880`; `m_flSpread` is now read into the weapon
+  profile) still need a live cross-check; the shotgun/negev pattern table
+  (`FUN_1807cd1b0`) is not modelled.
+- **Remaining:** wiring the recorded window into the *solve* (the heatmap reads it;
+  `DamageField`/`solve` does not yet), the pose blur, and pellet-pattern
+  registration.
 
 
 

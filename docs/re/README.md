@@ -11,6 +11,9 @@ REA, headless). Findings are recorded per subsystem.
 - [`subtick.md`](subtick.md) — sub-tick input: view-angle history, move steps, button steps
 - [`engine2.md`](engine2.md) — console-command path (`exec`), game event system
 - [`vphysics2.md`](vphysics2.md) — collision geometry (Rubikon `Rn` hulls/meshes) for the ragebot
+- [`occlusion.md`](occlusion.md) — world-solids enumeration for the occlusion heatmap (query interface, sweep ABI)
+- [`bullet-trace.md`](bullet-trace.md) — the engine's own bullet trace: `FX_FireBullets`, the filter mask `0x1c300b`, `TraceLineIntervals`, the penetration loop
+- [`penetration.md`](penetration.md) — the penetration / damage model: the per-surface `HandleBulletPenetration` loss, the CS2 trace-advance cap
 
 > Addresses are absolute VAs for the module as loaded at its PE image base
 > (`client.dll`/`engine2.dll`/`schemasystem.dll` → `0x180000000`).

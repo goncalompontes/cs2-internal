@@ -75,9 +75,34 @@ stores the shape **type** at `shape + 0x18` and installs the base vtable
 | 3 | mesh | `FUN_1802416f0` | `0x1803e0d60` | `*(RnMesh_t**)(shape+0xC8)` |
 | 4 | compound | `FUN_18025a360` | `0x1803e1398` | `shape+0xC0` (+ array) |
 
-Common fields: uniform **scale** at `shape + 0xB8` (float; mesh uses a 3-vector
-`+0xB8/+0xC0`). The type is also a schema field (`PhysGenericShapeType_t`,
-`m_nShapeType`, `GENERIC_SHAPE_HULL`).
+Common fields: the shape **type** at `shape + 0x18`; the uniform **scale** is stored
+at a **per-type** offset (hull `+0xB8`, sphere `+0xD8`, capsule `+0xF0`; the mesh
+uses a 3-vector at `+0xB8/+0xBC/+0xC0`). The type is also a schema field
+(`PhysGenericShapeType_t`, `m_nShapeType`, `GENERIC_SHAPE_HULL`).
+
+### Shape geometry offsets (resolved 2026-10-17)
+
+From the shape constructors and the vtables' own point tests on this build
+(`vphysics2.dll` `1d768045…`). The constructors **pre-multiply** the geometry by the
+shape's own scale, so the stored centre / endpoints / radius are already scaled — the
+payload reads them directly (and applies only the owning body's rigid transform):
+
+| type | shape | geometry |
+|---|---|---|
+| 0 | sphere | centre `(Vec3)` at `+0xB8`, radius at `+0xC4` — ctor `FUN_18024b920`, point test `FUN_18024ca60` |
+| 1 | capsule | endpoint A at `+0xB8`, endpoint B at `+0xC4` (each a `Vec3`), radius at `+0xD0` — ctor `FUN_18024d610`, point test `FUN_18024faa0` |
+| 2 | hull | `RnHull_t*` at `+0xC0`; scale at `+0xB8` |
+| 3 | mesh | `RnMesh_t*` at `+0xC8`, scale (`Vec3`) at `+0xB8`; in `RnMesh_t`: vertex count `+0x30` / vertices `+0x38` (stride `0xC`), triangle count `+0x18` / array `+0x20` (stride `0x20`), index count `+0x48` / array `+0x50` (from `RnMeshClone`/`RnMeshUpdateChangedVertices`) |
+| 4 | compound | `RnCompound_t*` (0x160 B) at `+0xC0`: a **pool of typed geometry stored by value** — `RnMesh_t[]` (stride `0xC0`) at `+0x28`/`+0x30`, **`RnHull_t[]` (stride `0xF8`)** at `+0xF0`/`+0xF8`, and groups at `+0x100`, `+0x110` (stride `0x10` → sphere: `Vec3`+radius) and `+0x120` (stride `0x1C` → capsule: two `Vec3` + radius). The compound *shape* carries a 0x30-byte **instance-record** vector at `+0xD0` (count) / `+0xD8` (POD block) that selects pool entries: each record is `{6 floats; u32 kind|index; u32 index; 4 floats}`. The strides match the consumers (`FUN_180252670` reads `+0xA8` of a hull entry = `RnHull_t`; `RnMeshDestroy` frees `0xC0`). **Unresolved:** the instance record's transform — enumerating the pool assumes shape-local geometry |
+
+The payload consumes sphere (0), capsule (1) and **mesh (3, as the convex hull of the
+mesh's scaled, transformed vertices — `aim::convex_hull_3d`)** into the occlusion chart
+(`payload/control/src/occlusion_query.cpp` → `OcclusionHull` →
+`aim::project_*_occluder`). **Compounds (4)** are still skipped: the pool geometry is
+readable but the 0x30-byte instance record's transform is not pinned, and enumerating
+the pool without it assumes the sub-shapes are shape-local. A live probe
+(`walls.compound` — the first type-4 shape's group counts) is emitted so a session can
+finish it.
 
 Every hull vtable method reads the geometry the same way, e.g.
 `FUN_180250100` (VA `0x250100`) / `FUN_180250460` (`0x250460`):
@@ -180,10 +205,29 @@ if type == 4:  compound -> recurse sub-shapes
    planes / faces / half-edges.~~ **Done** — see the `RnHull_t` layout above
    (planes `+0x88/+0x90`, half-edges `+0xC8/+0xD0`, face→half-edge `+0xE0/+0xE8`,
    vertex→half-edge `+0xB0/+0xB8`).
-2. Map the overlap record → shape pointer (finish the client-side
-   `ConvertOverlapMultiple` mapping).
-3. Map surface-property lookup → penetration modifier.
-4. Cut signatures for `shape+0x18` / `+0xC0` and the `RnHull_t` offsets.
+2. ~~Map the overlap record → shape pointer.~~ **Done** (2026-10-17): the record's
+   `+0x58` is a `CPhysicsBody`; see `docs/re/occlusion.md` §"the record → shape chain".
+3. ~~Resolve the sphere/capsule/mesh geometry.~~ **Done** (2026-10-17): the shape
+   geometry offsets in §"Shape geometry offsets"; the payload reads types 0/1/3.
+   **Compound (4) — implemented (2026-10-18).** `RnCompound_t` (0x160 B, at
+   `shape+0xC0`; `RnCompoundClone`/`RnCompoundDestroy`) is the geometry pool: the
+   `RnHull_t[]` children at `+0xF0` (count)/`+0xF8` (block), stride **`0xF8`**, and the
+   `RnMesh_t[]` at `+0x28`/`+0x30`, stride **`0xC0`** (`RnCompoundClone` copies both;
+   `RnCompoundDestroy` frees `0x160`). The payload now recurses into both by value
+   (`occlusion_query.cpp` `case 4`), transforming the children by the owning body's
+   transform, with every count/pointer bounds-checked. **Finding:** CS2 gameplay props
+   are multi-hull **bodies** (many `RnHull_t` shapes in one `CPhysicsBody`), *not*
+   compound shapes — the world body is `{hull 10143, mesh 6}`, spawned `prop_physics`
+   and dropped weapons are all hulls, and no live type-4 shape was found — so this path
+   is implemented but **not live-validated** (it contributes nothing when absent). The
+   remaining ambiguity (the shape's separate 0x30-byte child table at `shape+0xD0`, and
+   per-child transforms) needs a live compound to settle.
+4. ~~Map surface-property lookup → penetration modifier~~ **Resolved (2026-10-18).** The
+   per-shape surface is `shape+0x48` → the material object → `+0x10` index →
+   `SurfacePropertiesList` (`CGameSurfaceProperties`: distance modifier `+0x08`,
+   damage modifier `+0x0C`, `gamematerial` `+0x14`). See `docs/re/penetration.md`.
+5. Cut signatures for `shape+0x18` / `+0xC0` / `+0xC8` and the `RnHull_t`/`RnMesh_t`
+   offsets (ADR-0012).
 
 ## Target inventory
 

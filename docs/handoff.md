@@ -1,5 +1,10 @@
 # Hand-off — overlay / payload state
 
+> **▶ NEXT SESSION (occlusion): start at [`NEXT_SESSION_OCCLUSION.md`](../NEXT_SESSION_OCCLUSION.md).**
+> It is self-contained: the goal (make the Tier-2 enumeration match the engine's trace
+> **exactly**, no inference, using the `rea` plugin), what is already reversed, how to
+> reverse the big DLLs, the live workflow + saved position, and the acceptance criteria.
+
 > **Validated on native Windows (2026-10).** The payload was
 > manual-mapped into CS2 on a real Windows host and read live player state; the
 > Vulkan overlay layer rendered the HUD + ESP into the swapchain; a
@@ -37,6 +42,446 @@ agent guide `docs/re/README.md`.
 > actions), [`docs/re/subtick.md`](re/subtick.md) (the sub-tick structures, the
 > command build and the movement consumer) and
 > [`docs/re/client-dll.md`](re/client-dll.md) (the input path + game events).
+>
+> **As of 2026-10-17 the active work is the ragebot heatmap + the occlusion layer**
+> — see the wrap-up immediately below (`docs/ragebot.md` §0, `docs/re/occlusion.md`,
+> `docs/re/lagcomp.md`).
+
+## ⏸ Wrap-up (2026-10-18) — enumeration AABB cache + compound recursion
+
+**Resume here.** Two perf/coverage passes on the occlusion layer.
+
+- **Per-hull AABB cache (`occlusion_query.cpp`).** The per-query broad phase used to
+  recompute each hull's AABB **from its vertex array** (`hull_bounds`, O(vertices)). Each
+  cached hull now carries its own `RnHull_t` header AABB (`+0x14`/`+0x20`, read once at
+  parse time; `OcclusionHull::has_bounds`), so the filter is **O(1) per solid**.
+  **Live-verified exact:** the header AABB equals the vertex-derived AABB for **all
+  10143** world hulls (worst error `0.0000`).
+- **Compound (4) recursion (`occlusion_query.cpp` `case 4`).** The pool is now read:
+  `RnCompound_t` (0x160 B at `shape+0xC0`) stores children **by value** — `RnHull_t[]`
+  at `+0xF0`/`+0xF8` (stride `0xF8`), `RnMesh_t[]` at `+0x28`/`+0x30` (stride `0xC0`) —
+  and the payload recurses into both (`parse_hull`/`parse_mesh`), transformed by the body
+  transform, with bounds checks. **Finding:** CS2 gameplay props are multi-hull **bodies**
+  (many `RnHull_t` shapes in one `CPhysicsBody`), **not** compound shapes — the world
+  body is `{hull 10143, mesh 6}`, spawned `prop_physics`/dropped weapons are all hulls,
+  and no type-4 shape was found live — so the path is inert in practice (implemented, not
+  live-validated). The shape's separate 0x30-byte child table at `shape+0xD0` and the
+  per-child transforms remain unpinned (need a live compound).
+- **BVH sweep — still blocked.** `EntitiesAlongLinearSweep` (`FUN_1809db9a0`) takes a
+  caller **`Ray_t`/shape descriptor** as `param_2` (passed to `world->vtbl[0x5a8]`),
+  exactly like `TraceShape` — and that descriptor is not yet pinned (`docs/re/aim.md`
+  §"The call convention"). The box query is already BVH-accelerated at the record level,
+  so guessing the descriptor risks a misbehaving engine call for no gain; pin it, then
+  swap the box for the swept query (P1.8).
+- Verified: `meson test -C build` **16/16**, payload builds, preflight clean; live
+  (viewer `--pen engine`, ~23 ms/poll warm). Docs: `docs/re/occlusion.md`,
+  `docs/re/vphysics2.md`.
+
+## ⏸ Wrap-up (2026-10-18) — the real penetration model + the `penetration` render mode
+
+**Resume here.** Adds the engine's real penetration/damage model and surfaces it as a
+new debug-renderer mode.
+
+- **Real penetration (`payload/aim/penetration.hpp`).** The occluded cells used the
+  first-pass `∏(1 − t·mod/m_flPenetration)`; now `pen=engine` applies the engine's
+  per-wall loss (the community-verified `CBaseEntity::HandleBulletPenetration`
+  arithmetic): a fixed entering fraction (0.16; 0.05 through a grate/glass), a
+  `modifier·3·max(0, 3.75/m_flPenetration)` term and a `thickness²·modifier/24` term,
+  over a **combined penetration modifier** from the entry/exit surface properties, with
+  the 4-wall budget and the reversed loop's ≈90-unit crossed-thickness cap
+  (`FUN_18089ca80`, re-decompiled this session). `OccluderCell` carries the surface
+  (`surface_modifier`/`damage_modifier`/`material`/`grate`); `HeatCell::base_value` is
+  the unoccluded damage; `HeatmapOptions::penetration` selects `simple`/`engine`. Full
+  write-up + citations: **`docs/re/penetration.md`**. Host test `aim-penetration`,
+  **16/16 pass**; payload builds; preflight clean.
+- **New render mode `penetration`.** `scenario/heatmap.py :: render(mode="penetration")`
+  fills each cell with the engine-model damage, overlays the projected solids, and
+  outlines each cell by its attenuation fraction (`value/base_value`; blue = untouched,
+  red = removed). Wired into `heatmap-view.py --mode penetration --pen [engine|simple]`,
+  the live viewer (`heatmap-live.py`, a *penetration* mode + `pen`/`pen_mod`/`dmg_mod`
+  controls), `heatmap-walls.py` (a `*_pen.png` per view) and the `heatmap` scenario
+  (`artifacts/heatmap_pen.png`). The `heatmap` command gained
+  `pen`/`pen_mod`/`dmg_mod`/`max_pen`/`material`/`grate` and reports
+  `walls.penetration_model` (+ per-cell `base_value`).
+- **The exact CS2 formula + the real per-surface modifiers (closed, same session).**
+  `HandleBulletPenetration` was found and decompiled (`client.dll` `FUN_1808a1820`):
+  `combined = min` of the crossed surfaces' `bulletPenetrationDistanceModifier` (with the
+  material special cases), `lost = t²·(1/combined)/24 + (3/pen·1.25)·(1/combined)·3 +
+  entry_fraction·damage`, a `< 0.1` distance-modifier gate, 0.16/0.05/1e-5 entry
+  fractions. The **per-shape surface** is now read live: each shape's material object at
+  `shape+0x48` → its `+0x10` indexes the `SurfacePropertiesList`
+  (`CGameSurfaceProperties` 0x20 B: distance modifier `+0x08`, damage modifier `+0x0C`,
+  `gamematerial` `+0x14`) — parser `FUN_1809cd960`, resolver `FUN_1809e3560`, manager
+  `client+0x254e100`. **Live-verified**: the world's 10149 brushes resolve to 29 distinct
+  surfaces (concrete 0.5, metal 0.4, wood 0.9, glass 0.99). The payload reads them
+  (`occlusion_query.cpp` `read_shape_surface`); the args are now overrides. Full
+  write-up + decompile: `docs/re/penetration.md`. **Remaining tightening:** the
+  `surface_properties_list` global is still a literal RVA (ADR-0012 signature pending),
+  and a live `subtick-shot` damage reading should confirm the predicted post-wall damage.
+
+## ⏸ Wrap-up (2026-10-18) — the bullet trace reversed; the missing wall was a mesh
+
+## ⏸ Wrap-up (2026-10-18) — the bullet trace reversed; the missing wall was a mesh
+
+**Resume here for the ragebot.** The occlusion "missing world geometry" is fixed.
+
+- **The engine's bullet path is reversed** (`docs/re/bullet-trace.md`, build
+  `659940c1`): `FX_FireBullets` = `FUN_180d237d0` → per pellet `FUN_180887d60`
+  (filter mask **`0x1c300b`**, filter vtable `client+0x1ad4838`, group `3`) →
+  `TraceLineIntervals` (`FUN_180a19e90`) and the penetration loop `FUN_18089ca80`
+  (repeated interval traces, ≈90 units total, `0x38`-byte interval records).
+- **REA now works on `client.dll`.** Its project cache was corrupt on reopen (the
+  known `LocalBufferFile.readHeader` bug) and a cold re-analysis then failed to
+  launch from the MCP. Fixed by seeding the cache from the healthy persistent
+  `clientoccl` project: a `rea-project`-layout copy with the program duplicated as
+  `target-659940c1db36.dll` and a manifest (`scripts/ghidra/DuplicateProgram.java`).
+  `rea cache-verify` ok; `tools.rea.*` then returns the full 76,948-procedure
+  analysis.
+- **The missing wall is a collision MESH.** The worldspawn body's shape histogram is
+  `{hull 10143, mesh 6}` (live), and the payload **skipped every mesh** (a 160-vertex
+  cap + an O(n⁴) convex hull). Ray-testing the meshes' triangles hit the wall at
+  94.8 / 323.2 / 267.6 units on the eye→head rays. **Fixed:** `occlusion_query.cpp`
+  reads meshes as a triangle soup (`RnMesh_t` vertices `+0x38`/count `+0x30`,
+  triangle indices `+0x50`); `aim::project_mesh_occluder` + `OccluderCell::ray_span`
+  (Möller–Trumbore) give the exact depth; the query mask is the engine's `0x1c300b`;
+  a mesh broad-phase guard prevents map-wide meshes from fragmenting the chart.
+  **Live-validated** (de_dust2): a wall between the eye and an enemy → head damage
+  `0` (was full); an open line of sight is unchanged. `meson test` 15/15, payload
+  builds, preflight clean.
+- **Camera-independent enumeration.** The query box was `eye → camera_forward·1400`,
+  so the solid set moved with the camera. It is now the **AABB over the eye and every
+  enemy's hitbox geometry** (live pose + all lag records), with **8-unit** padding,
+  built from world positions only. Live: `records`/`world_kept` (1909/1887) and the
+  cell values are identical across camera yaws.
+- **Absolute world yaw/pitch chart.** The chart the hitbox/occluder cells are projected
+  into was a gnomonic plane about the **camera forward**; it is now the absolute world
+  yaw/pitch map (`aim::Basis::world()`), a function of the world only. Live: the
+  projected `occluder_polygons` are byte-identical across camera yaws.
+- **The render uses the view angles.** The payload emits `view_yaw`/`view_pitch` and
+  clips the chart to a `fov`-wide window around the camera (`aim::clip_to_view`, yaw
+  unwrapped about the centre); the Python/JS renderers centre on it with screen-right =
+  decreasing yaw. The *data* stays absolute — only the shown window is a view.
+- **The render shows only the solids *between* the eye and a target.** `Heatmap` gained
+  `used_occluders` (the per-hitbox broad-phase survivors) and
+  `walls.occluder_polygons` reports only those. Live: 652 solids projected into the view
+  window → **26** reported between (they attenuate the head to 105).
+- **Live debug viewer:** `python scripts/heatmap-live.py --fov 90 --png artifacts/live.png`
+  → `http://127.0.0.1:8765/`; opened on the game monitor with `schtasks /run /tn CS2LiveView`.
+
+### Next (priority order)
+1. **Feed the occluders into the ragebot solve.** `build_input` (`payload/aim/src/reader.cpp`)
+   never fills `SolveInput::occluders`, so the rage path still aims at a walled hitbox —
+   only the `heatmap` command consumes them. This is the one real functional gap: run the
+   same enumeration (`query_world_occluders` → `project_*_occluder`) on the solve's target
+   and pass the cells in.
+2. **Enumeration efficiency — the AABB/BVH step.** Replace `EntitiesInBox` (a box of whole
+   bodies) + walking the world body's ~10k shapes with **`EntitiesAlongLinearSweep`**
+   (`0x1809db9a0`, the BVH-accelerated swept query), plus a per-shape AABB reject. The
+   render already prunes to "between", but the enumeration itself is still O(world shapes).
+3. **Compound (4) shapes.** Still skipped (`docs/re/occlusion.md` "Still to pin" 3) — the
+   `RnCompound_t` instance transform is unresolved.
+4. **Surface / penetration modifiers.** `OccluderCell::surface_modifier` is hard-coded
+   `1.0`; the record's `+0x50` material token type is unresolved.
+5. **Live cross-validation against the engine trace.** Fire the engine's own
+   `TraceLineIntervals` (mask `0x1c300b`) for a segment and diff the solids — needs the
+   `0x38`-byte interval record mapped end-to-end (`docs/re/bullet-trace.md`).
+6. **Chart robustness:** a solid straddling the `±π` yaw seam over-covers; the per-solid
+   silhouette is a convex hull (tighter silhouette / BVH for meshes).
+7. **Signatures (ADR-0012)** for the trace functions and the `CPhysicsBody`/`RnHull_t`/
+   `RnMesh_t` struct offsets (still literals).
+8. **Commit.** Nothing is committed across the last several sessions.
+9. **REA `client.dll` cache:** the seeded cache works, but the underlying
+   `feat/ghidra-project-cache` reopen bug remains (a cold re-analysis from the MCP still
+   fails to launch).
+
+`NEXT_SESSION_OCCLUSION.md` is now **done** (its goal — make the enumeration match the
+engine — is addressed by the mesh fix + camera-independence + between-pruning); treat
+this wrap-up as the resume point.
+
+## ⏸ Wrap-up (2026-10-17, second session) — occlusion correctness pass
+
+**Resume here for the ragebot.** Built on the layer-1/layer-2 wrap-up below. This
+session audited the implementation against `docs/ragebot.md` / ADR-0022 and fixed
+the divergences that were host-testable:
+
+- **Broad-phase bug (correctness).** `build_heatmap` kept a solid only when the ray
+  to the hitbox **centre** entered it, so a solid covering only *part* of a
+  silhouette was dropped and its covered part kept full damage — contradicting the
+  design ("occluders cut `Ω_i` into cells", by overlap then by depth). Now a real
+  overlap broad phase (silhouette AABB overlap ∧ `OccluderCell::lower_bound_distance
+  < hitbox_distance`), with the exact per-fragment `ray_span` deciding attenuation.
+  `lower_bound_distance` is a **conservative** bound (hull plane distances), so
+  pruning can never drop a solid that is in front. New `aim-occlusion` regressions.
+- **World-cache lifetime.** `g_world_cache` is now keyed on the level's geometry
+  identity (body data block + first shape pointer), so a map change that reuses the
+  body allocation cannot serve stale brush hulls.
+- **Stale diagnostics removed.** `offset_type_hits`, `deep_type_hits` and the wide
+  per-record `record_dump` string building (a heap alloc per record **per tick**) are
+  gone; the JSON keeps `type_counts`. `scripts/heatmap-view.py` updated.
+- **Sphere/capsule/mesh occluders (design §10 item 4).** The payload reads **sphere
+  (0)**, **capsule (1)** and **mesh (3)** collision shapes and the aim side projects
+  them: spheres/capsules analytically and meshes as the exact convex hull of their
+  vertices (`convex_hull_3d`) — all host-tested. The `vphysics2` geometry was RE'd this
+  session: sphere centre `+0xB8`/radius `+0xC4`; capsule A `+0xB8`, B `+0xC4`, radius
+  `+0xD0`; mesh `RnMesh_t` vertices `+0x38`/count `+0x30` (from the shape ctors,
+  vtables' point tests and `RnMeshClone` — `docs/re/vphysics2.md`). **Still skipped:**
+  compounds (4), whose `RnCompound_t` child layout is unresolved.
+- **Backtracking into the solve (design §8).** `aim::solve_backtrack` scores the live
+  pose and every sampled lag record (newest-first, live wins ties) and the rage path
+  now aims at the best record instead of only the live pose; `rage_status` reports
+  `bt<count>` / `rec<tick>`. Host-tested (`aim-solver`). Feedback: the render thread
+  samples each enemy into `RecordStore` (already wired by the heatmap).
+- **Deterministic spread / pellet model (plan P3.16).** `payload/aim/spread.hpp`
+  replicates the engine's `CUniformRandomStream` + `MD5_PseudoRandom(sequence)` and
+  draws the `K` pellet offsets; `DamageField` gained `value_at_pellets`/`argmax_pellets`
+  and `solve` handles `AimObjective::pellets`, reachable from the `aim` command
+  (`objective: "pellets"` + `seed`/`sequence`/`spread`/`inaccuracy`/`pellets`). New
+  host test `aim-spread` (MD5 + RNG pinned to an independent Python model) — **15/15**.
+  Not live-validated (the `MD5_PseudoRandom` input construction and the weapon
+  magnitudes need a live cross-check). A `set_seed` sign bug (Source stores `-seed`)
+  was caught by the new test.
+- **Occlusion RVAs are now signatures (ADR-0012).** `physics_query_interface`
+  (`0x2227058`), `physics_query_filter` (`0x2227070`) and `entities_in_box`
+  (`0x9dbd20`) are curated signatures in `external/dumper/src/analysis.rs` — anchors
+  derived **statically** from the build-659940c1 `client.dll` and uniqueness-verified
+  with a PE/capstone script. They flow through `calibration/offsets.json` →
+  `payload/sdk/offsets.hpp`, and `occlusion_query.cpp` reads them via
+  `sdk_client_offset(name, literal)` (literal fallback), so a game update no longer
+  needs a source edit. The dumper test fixture was extended (`pattern.rs`); `cargo
+  test` 32/32.
+- **Live session 2 (2026-10-18): the engine's own trace reversed; player boxes fixed.**
+  Reversed `CGamePhysicsQueryInterface::TraceShape` (`FUN_180a1a000`): the engine
+  traces, sorts the layers, keeps worldspawn `0x8000`, and calls the filter's
+  `ShouldHitEntity` (vtable `+8`) for the rest. **The static default filter we passed
+  is `mov al,1; ret` (`client+0x22d900`) — it accepts every entity**, so the players'
+  collision bodies (and the local player's own) were enumerated as occluders. Fixed by
+  dropping the players payload-side (`resolve_entity`, mirroring `FilterOverlapResults`)
+  — verified live: standing in front of an enemy, `records=4 → excluded=4,
+  bodies=0`. A payload-built filter is unsafe (the engine reads more of the filter
+  vtable than slot `+8`; a minimal one returns nothing and crashes). **Remaining (the
+  missing world geometry):** we enumerate with `EntitiesInBox` (box overlap of *bodies*)
+  and walk shapes, whereas the engine **traces** — so the Tier-1
+  `TraceShapeWithSortedResults` path is the faithful fix. Occluder polygons are also
+  now clipped to the chart (near geometry projected far off-canvas). Also this session:
+  the enumeration box was widened to a **view volume** (eye → camera-forward·1400 ±96,
+  Tier 2, no traces) and the caps raised (`k_max_occluders`/`k_max_records` = 8192) —
+  `world_box_kept` jumped 512 → ~4000. **Still open:** standing with a wall between,
+  the enemy head cells stay at full damage and the render shows scattered brush
+  fragments (not a coherent wall/floor); verified *not* empty planes
+  (`hulls_no_planes=0`). The next session makes our enumeration **exactly** the engine's
+  trace — see **`NEXT_SESSION_OCCLUSION.md`**.
+- **Live session (2026-10-18).** Launched the game via `CS2Launch` + injected
+  (session 1) and ran a bot-match probe with `heatmap(walls=True, walls_call=True)`.
+  The text says: `ok=true records=7 bodies=2 hulls=2 occluders=2 type_counts=[0,0,2,…]`.
+  **`record+0x50` is a pointer, not a float** (`material_token 0x26c45d77d00`,
+  `material_float` garbage) — the material object read live shows surface-like fields
+  (`+0x28=0.8`, `+0x2C=0.25`, `+0x30=900`, `+0x34=0.1`) but the penetration field is
+  unidentified and the record is **per hit**, so per-brush penetration stays unwired.
+  The `compound` probe was zero (no type-4 shape in the box). Found + fixed a real
+  scenario bug: `scenarios/heatmap.py` never passed `walls_call`, so it never actually
+  ran the engine query. Use `walls_call=walls` (docs/re/occlusion.md §"Still to pin").
+- **client.dll pass (2026-10-17).** Re-decompiled the overlap-record build
+  (`ConvertOverlapMultiple` `FUN_1809d2dc0`) statically (PE + capstone — REA's Ghidra
+  analysis fails on the 39 MB target). The record's `+0x50` material token is
+  `*(hit->vtbl[0x30]() + 0x28)` — slot `0x30` is on the **client-side hit object**
+  (its `[0x10]` yields the body), correcting the earlier "shape vtbl[0x30]" note; the
+  `+0x28` type is still unresolved (an 8-byte load), so a one-record probe
+  (`walls.material_token`/`material_float`) is emitted live to settle it. The record
+  fields are now pinned to their producers (`+0x18`←`body->[0x478]()`, `+0x58`←
+  `hit->[0x10]()`, `+0x00..0x20`←`hit->[0x50]()`).
+- **Per-tick enumeration: deliberately NOT cached.** `cache_occlusion_targets`
+  re-runs the physics query every frame — the eye→target segment is the exact query
+  box, so caching it would make the solid set stale. Only the *parse* of the static
+  world body is cached; the per-query AABB filter and the chart projection always run
+  fresh. (Correctness over cost.)
+- **Surface modifiers — corrected finding.** The docs attributed the material lookup
+  to `shape->vtbl[0x30]()`; a check on `vphysics2.dll 1d768045…` shows `vtbl[0x30]` is
+  a **cast/intersect** routine on hull/sphere/capsule (`FUN_180254870`/`FUN_18024cac0`/
+  `FUN_18024fd30`), so `record+0x50` cannot supply per-brush materials. Leave
+  `surface_modifier` at 1.0 until the real per-shape field is resolved
+  (`docs/re/occlusion.md` "Still to pin" 5) — do not guess it.
+
+Verified: `meson test -C build` **14/14**, `meson compile -C build-payload` clean.
+Nothing is committed (still uncommitted from both sessions).
+
+### Remaining (priority order from `.opencode/plan/occlusion-handoff.md`)
+1. `vphysics2` **compound (4)** — geometry pool mapped, **instance transform not**.
+   `RnCompound_t` stores typed geometry by value (`RnHull_t[]` stride `0xF8`,
+   `RnMesh_t[]` stride `0xC0`, spheres `0x10`, capsules `0x1C`), and the compound shape
+   has a 0x30-byte instance-record vector at `shape+0xD0`/`+0xD8`. Return the instance
+   record's transform (its first 6 floats) before enumerating the pool — otherwise the
+   sub-shapes might be instanced, not shape-local. A live probe (`walls.compound`)
+   reports the group counts (`docs/re/vphysics2.md`).
+2. Surface/penetration modifiers — **the recorded recipe was wrong**: `vtbl[0x30]`
+   is a cast routine, not the material accessor (see the wrap-up above). The material is
+   **game-side** (no surface accessor in vphysics2), so resolving the real per-shape
+   surface-properties field needs a **client.dll** pass on `ConvertOverlapMultiple`.
+3. Signatures (ADR-0012): the query interface/filter + `EntitiesInBox` are **done**
+   (`physics_query_interface`/`physics_query_filter`/`entities_in_box` in
+   `external/dumper/src/analysis.rs`, read from `cs2/sdk/offsets.hpp`). The
+   `CPhysicsBody`/`RnHull_t`/`RnMesh_t` *struct offsets* remain literals (struct
+   offsets don't move like RVAs).
+4. `EntitiesAlongLinearSweep` for the enumeration (perf). **Do not cache the
+   eye→target enumeration** — accuracy over cost.
+5. Accuracy: the record window now feeds `solve`; the **pellet model (K>1) + the
+   deterministic RNG/seed are implemented and host-tested** — remaining is the live
+   cross-check of `MD5_PseudoRandom` / the weapon spread/inaccuracy magnitudes, the
+   shotgun/negev pattern table, and pose blur.
+6. Cross-validate the attenuation and the backtrack aim against the engine trace
+   (`subtick-shot`) — everything here is host-verified only, not live-validated.
+
+---
+
+## ⏸ Wrap-up (2026-10-17) — heatmap layer 1 (shipped) + occlusion layer 2 (**next session starts here**)
+
+**Resume here for the ragebot heatmap / occlusion.**
+
+### Layer 1 — the multi-target damage heatmap (shipped, live-validated)
+- `heatmap` control command (`docs/control-harness.md`): projects **every** enemy's
+  real studio hitbox capsules *and* their sampled **lag records** into one shared
+  angular chart, valued by damage, returning tagged cells. Args: `target`, `fov`,
+  `history`, `sample`, `clear`, `all`, `walls`/`walls_call`, weapon overrides.
+- **Lag records are real**: the render thread samples each enemy every frame into
+  `aim::RecordStore`, keyed by the game tick (`m_nTickBase`) with
+  `m_flSimulationTime`, and trimmed to the lag-comp window via `aim::rewind_tick`
+  (`docs/re/lagcomp.md`). `PlayerSnapshot` gained `simulation_time`/`tick_base`.
+- Python: `scripts/scenario/heatmap.py` (pure-stdlib rasteriser, modes `damage` /
+  `record`, `fit`/`focus`), `scenarios/heatmap.py` (the `heatmap` scenario),
+  `scripts/heatmap-view.py`. New host tests `aim-heatmap` (+ `aim-occlusion`);
+  **14/14 pass**; `payload.dll` builds.
+- Session images (4 enemies): damage <https://files.catbox.moe/3tfzfl.png>,
+  records <https://files.catbox.moe/oimap8.png>.
+
+### Layer 2 — occlusion/penetration (**record → shape chain resolved live**)
+The design (ADR-0022 Tier 2) is **project the world solids into the chart**, never
+trace rays.
+- **Working:** `payload/aim/occlusion.hpp` (`OccluderCell`, `project_occluder`,
+  `thickness_along`, `clip_convex`/`subtract_convex`) + `build_heatmap` splits each
+  hitbox silhouette by the projected solids and scales each fragment by
+  `Π(1 − t(u)·mod/m_flPenetration)`. Host test `aim-occlusion`.
+- **Working live:** `payload/control/occlusion_query.cpp` calls
+  `CGamePhysicsQueryInterface::EntitiesInBox`
+  (`*(client_base + 0x2227058)`, RVA `0x9dbd20`, static filter
+  `client_base + 0x2227070`), then walks each record's **`CPhysicsBody`** at `+0x58`
+  → `body+8` data → shape array at `data+0x68` (count `data+0x60`) → the `IPhysicsShape`
+  hulls (`+0x18` type 2, `+0xC0` `RnHull_t*`). Entity bodies get their world
+  transform from `body->vtbl[0x1b0]`; the **world body** (handle `0x8000`, **10149
+  brush shapes**) is parsed once into a cache and filtered by the query AABB.
+  Live: `walls: ok=True faulted=False records=8 hulls=4 occluders=3` (real hulls in
+  the chart). Full detail: `docs/re/occlusion.md` §"the record → shape chain".
+- **Superseded:** the old blocker ("the record carries entities, not shapes") — the
+  `+0x58` pointer is a `CPhysicsBody`, **not** an entity (RTTI-confirmed).
+
+### Occlusion corrected + orientation fixed (this session)
+- **The occlusion is now the intended design** (`docs/ragebot.md` §3, ADR-0022
+  Tier 2): the solids between the eye and a hitbox are decided **per cell by depth**,
+  using the hull's own planes — `OccluderCell::ray_span(eye, dir)` clips the ray
+  against the half-spaces (planar arithmetic, no ray casts). `build_heatmap` keeps
+  only solids with `entry < hitbox_distance` and applies the in-front thickness
+  `min(exit, distance) − entry`. The floor under a target and walls behind it no
+  longer attenuate (new host test; **14/14 pass**).
+- **Deleted the band-aids**: `walls_radius` (payload arg + member + Python + viewer
+  control), the `separates` eye→target AABB test, the 24-unit minimum distance, and
+  the `reach > 8·extent` projection drop. The enumeration is now a plain box around
+  eye→(farthest target) with an 8-unit margin — completeness only.
+- **Chart was mirrored**: `basis_from_angles` had `right = (-sin yaw, cos yaw, 0)`,
+  the negation of Source's `AngleVectors` `(sin yaw, -cos yaw, 0)`. Fixed; verified
+  `dot(right, forward×up) = 1.000` and the payload's cell `u` now matches an
+  independently computed projection for 3/3 targets. This mirrored the whole chart
+  (hitboxes *and* occluders), so any older render is mirrored.
+- Plane winding is **not assumed**: the planes are oriented inward from the hull's
+  vertex centroid, so an inward- or outward-stored `RnHull_t` both work.
+- Live numbers: `base 21818 → walls 10909` (×0.50) with **190 cells surviving**
+  (before, the floor blanked everything). Renders: `artifacts/walls_level_{base,
+  cells,walls,occluders}.png`.
+
+### Live debug viewer (shipped this session)
+`scripts/heatmap-live.py` — a **local HTTP server the agent runs** (session 0) that
+polls the payload's `heatmap` command (with the world solids) and serves a canvas page
+the user opens in **session 1** (`localhost` and the named pipe both cross sessions for
+the same user):
+
+```powershell
+python scripts/heatmap-live.py --png artifacts/live.png      # http://127.0.0.1:8765
+```
+
+Live controls: `mode` (cells / cells+occluders / occluders), `fov`, `history`,
+`target`, poll `rate`, walls on/off, include-teammates, pause, sample/clear.
+`--png` also writes each frame for headless inspection. Endpoints: `/` (page),
+`/_data` (latest payload + status), `/_set?k=v`, `/_frame.png`, and — because the
+payload's pipe is single-client — the passthrough `/_look?yaw=&pitch=` and
+`/_exec?line=` for driving the game while the viewer runs.
+
+Verified live: ~10 Hz (14 ms/poll with the warm world cache), 200 cells, 115 occluder
+polygons, the frame renders the map interior + enemy silhouettes (`artifacts/live.png`).
+Second new script: `scripts/heatmap-walls.py` (offline base/cells/walls/occluders
+comparison renders for verification).
+
+**The full prioritised plan for the occlusion layer (viewer first, then perf, then
+correctness) is at `C:\Users\gpmpo\.opencode\plan\occlusion-handoff.md`** — it lists the
+perf work (batch reads, per-hull AABB reject, `EntitiesAlongLinearSweep`, stop the
+per-tick recompute), the correctness work (hull-accurate separation, all shape types,
+surface modifiers), the RE hardening (signatures, slot policy, POD-only globals) and
+the accuracy work (spread/records, trace cross-validation).
+
+### Exactly what the next session should do
+1. **Verify the world-brush hulls are world-space** (the entity/prop path applies
+   `body->[0x1b0]`; the world body currently assumes identity) and confirm the
+   occluded enemies look right in the rendered image.
+2. **Per-shape transform / compound recursion** if the world geo needs it (do not
+   call `shape->[0x50]` — it is a collision routine; find the real accessor or use
+   the record's own `+0x00..+0x28` transform).
+3. **Signatures (ADR-0012)** for `EntitiesInBox`, the `CPhysicsBody` shape-count/
+   shape-array offsets and the `RnHull_t` offsets; the payload still hard-codes RVAs.
+4. **Cost**: the world cache is per-level; re-validate that the per-frame query
+   stays cheap (cap 512 occluders, AABB filter) and that the cache invalidates on a
+   level change.
+5. Then the per-direction thickness refinement (`docs/ragebot.md`).
+
+### Gotchas (learned this session)
+- **A payload global with a non-trivial constructor, or a function-local `static`,
+  adds a CRT import the manual-map injector cannot resolve.** A namespace-scope
+  `std::vector` (needs dynamic init) and a function-local `static std::vector`
+  (magic-static guard) both pulled in `KERNEL32.dll!SleepConditionVariableSRW`, and
+  the injector failed with `unresolved import`. Keep payload globals **POD**
+  (pointers/ints) and allocate heap arrays explicitly.
+- **Do not call an unvalidated per-shape vtable slot.** Calling `shape->[0x50]` on
+  every world brush aborted the process (it is a collision routine for hulls, not a
+  transform getter). Validate a slot on one entity-shaped body before looping it
+  over the world's ~10k shapes.
+- **Walking the world's ~10k brush shapes every tick stalls the game** (CPU pinned,
+  control pipe unresponsive). Parse once into a cache; filter per query.
+- **REA's Ghidra cache is corrupt on reopen** (`LocalBufferFile.readHeader:
+  Unrecognized file format`); `rea cache-verify` still says ok. **Use the persistent
+  project** instead:
+  `analyzeHeadless C:\Users\gpmpo\ghidra-analysis clientoccl -process client.dll
+  -noanalysis -scriptPath scripts/ghidra -postScript DumpTargets.java` (warm once
+  with `-import`; `-process -noanalysis` is fast). `scripts/ghidra/DumpOne.java`
+  takes `outPath addr…` args.
+- **Engine calls that allocate must run on a game thread.** With
+  `CS2_PAYLOAD_PUB_THREAD=1` (set in `scripts/launch-cs2.cmd`) the overlay refresh —
+  and any query in `on_snapshot` — runs on the payload's *own* thread, which has **no
+  tier0 TLS**: the allocator (`FUN_1801ffe10` = `*(*(GS:[0x58]) + _tls_index*8) + …`)
+  faults with `read addr=0x40`. Fix (done): a `GameThreadSink` on `Input`; the
+  CreateMove hook (`Input::apply`) runs the query. `diag::call_guarded`
+  (VEH + `setjmp/longjmp`, no unwind tables needed) is the safety net and is proven.
+- **The game relaunch is flaky** — the map load sometimes crashes on startup; just
+  run `scripts/run-scenario.py` again.
+- The game auto-updated mid-session: `client.dll` sha `659940c1…` (was `44af2aa0…`);
+  the RVAs in `docs/re/occlusion.md` are for the new build.
+- Showing images on the game's monitor (session 0 can't): `scripts/photo-view.ps1`
+  (Photos) / `scripts/open-on-game.ps1` (Paint) via a scheduled task with an
+  Interactive principal; `scripts/capture-screen.ps1` to verify.
+
+### Repro
+```powershell
+meson compile -C build-payload
+python scripts/run-scenario.py heatmap --keep-running           # layer-1 images
+python scripts/heatmap-view.py --walls --walls-call --json artifacts/walls.json
+curl.exe -s -F reqtype=fileupload -F fileToUpload=@artifacts/heatmap.png https://catbox.moe/user/api.php
+```
+
+---
 
 ## ⏸ Wrap-up (2026-10-16, session 2) — weapon model, auto-fire fix, hitbox renderer
 

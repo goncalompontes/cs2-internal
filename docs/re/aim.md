@@ -42,6 +42,9 @@ The offset is applied in the `(right, up)` tangent frame of the aim direction.
 - `CBaseUserCmdPB::random_seed` (`+0x6c`, field 10) = **`MD5_PseudoRandom(sequence)`**
   (`docs/re/subtick.md` §"The command build"). So the seed is a pure function of
   the command number → the offsets of the next shots are computable too.
+  Replicated in `payload/aim/spread.hpp` (`md5_pseudo_random` + `UniformRandomStream`
+  + `pellet_offsets`); host-tested (`aim-spread`), **pending a live cross-check** of
+  the exact input construction.
 - The pawn carries per-attack seed words (`FUN_180940ff0` / `FUN_180941020`
   read `pawn+0x1918` / `+0x1920`).
 - `CCSPlayerController::m_bFireBulletsSeedSynchronized` (`+2617`) = the
@@ -92,7 +95,9 @@ server-side** (`server.dll`); the client has the parameters and the trace.
 m_pWeaponVData)` (YouGame.Biz 378413) and `m_nSubclassID + 0x08` (MitilcC
 CS2-Internal-Cheat). The payload reads it in `StateReader::read_player`
 (`weapon_vdata`) and `aim::read_weapon_profile` applies it, so the damage model is
-the real weapon (`docs/ragebot.md` §0).
+the real weapon (`docs/ragebot.md` §0). `read_weapon_profile` also reads
+`m_flSpread` (`+0x750`) into `WeaponProfile::spread`, used by the deterministic
+pellet objective when no explicit `spread` is passed.
 
 ## Trace API — `CGamePhysicsQueryInterface`
 
