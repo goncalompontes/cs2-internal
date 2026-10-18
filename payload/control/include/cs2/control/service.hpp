@@ -9,14 +9,18 @@
 // client module moves (game restart / level change).
 
 #include <atomic>
+#include <mutex>
 #include <optional>
 #include <string>
 
+#include "cs2/aim/heatmap.hpp"
+#include "cs2/aim/records.hpp"
 #include "cs2/control/channel.hpp"
 #include "cs2/control/console.hpp"
 #include "cs2/control/events.hpp"
 #include "cs2/control/input.hpp"
 #include "cs2/control/json.hpp"
+#include "cs2/control/occlusion_query.hpp"
 #include "cs2/game/state_reader.hpp"
 
 namespace cs2::control {
@@ -57,18 +61,21 @@ class Service {
 
   // The ragebot's current target entity index (-1 = none), so the overlay can
   // highlight it.
-  [[nodiscard]] int rage_target_index() const noexcept { return input_.rage_target(); }
+  [[nodiscard]] int rage_target_index() const noexcept {
+    return input_.rage_target();
+  }
 
   // Fill `out` (up to `max`) with `pawn`'s real studio hitbox capsules in world
   // space, for the overlay's hitbox visualiser (`docs/re/aim.md`). Returns the
   // count written.
-  auto read_hitboxes(std::uintptr_t pawn, game::HitboxCapsule* out, int max) const noexcept
-      -> int;
+  auto read_hitboxes(std::uintptr_t pawn, game::HitboxCapsule* out, int max) const noexcept -> int;
 
   // Note the local pawn for the movement features (the `usercmd` on-ground test
   // and the bhop prediction). Called from the per-frame overlay refresh, so the
   // pawn stays fresh even when no scenario is polling `state`.
-  void note_local_pawn(std::uintptr_t pawn) noexcept { input_.note_local_pawn(pawn); }
+  void note_local_pawn(std::uintptr_t pawn) noexcept {
+    input_.note_local_pawn(pawn);
+  }
 
   // The bhop prediction's current position, for the overlay's demonstration box.
   auto predicted_origin(float out[3]) const noexcept -> bool {
@@ -108,6 +115,20 @@ class Service {
   // Ragebot keybind: enable / configure the hold-key ragebot (`on`, `key`,
   // `fire`, `damage`, `headshot`, `objective`).
   void do_rage(const Json& args, Json& out) noexcept;
+  // The multi-target damage heatmap (`docs/ragebot.md`, ADR-0022): project every
+  // enemy's hitboxes — and their sampled lag records — into one shared angular
+  // chart, valued by damage, and return the cells for the Python renderer.
+  void do_heatmap(const Json& args, Json& out) noexcept;
+  // Append one record per live enemy to the store (called from the render thread
+  // each frame, before the ragebot's own early-out).
+  void sample_records(const game::Snapshot& snapshot) noexcept;
+  // Cache the eye + nearest enemy for the game-thread query (runs on the payload's
+  // publish thread — no engine call here).
+  void cache_occlusion_targets(const game::Snapshot& snapshot) noexcept;
+  // Perform the enumeration on the game's main thread (the CreateMove hook), which
+  // — unlike the publish thread — has the game's TLS, so tier0's allocator works.
+  void on_game_thread() noexcept;
+  static void game_thread_entry(void* context) noexcept;
   // The common `input`/`press`/`bhop` status payload.
   [[nodiscard]] Json input_status() noexcept;
 
@@ -137,6 +158,44 @@ class Service {
   std::atomic<float> rage_sigma_{0.0F};
   std::atomic<std::uint64_t> rage_solves_{0};
   std::atomic<int> rage_last_target_{-1};
+  // Backtracking (`docs/ragebot.md` §8): how many solves chose a lag record over the
+  // live pose, and the tick of the last chosen record (-1 = live).
+  std::atomic<std::uint64_t> rage_backtracks_{0};
+  std::atomic<int> rage_last_record_{-1};
+  // The multi-target heatmap (`docs/ragebot.md`, ADR-0022). The render thread
+  // samples each live enemy's hitboxes per frame into `records_`; the control
+  // thread reads a copy to build the heatmap. Sampling is on by default (so the
+  // records are always warm); the `heatmap` command's `sample` flag can toggle it.
+  static constexpr std::uintptr_t k_heatmap_capacity = 32;
+  std::atomic<bool> heatmap_sampling_{true};
+  std::atomic<std::int32_t> record_tick_{0};
+  std::mutex records_mutex_;
+  aim::RecordStore records_{k_heatmap_capacity};
+  // The lag-comp window parameters (`docs/re/lagcomp.md`): the rewind is measured
+  // from the local `m_nTickBase` against `sv_maxunlag` and the player interp. The
+  // heatmap command can override them; the defaults are the common 64-tick values.
+  std::atomic<float> lag_max_unlag_{0.2F};
+  std::atomic<float> lag_interp_{0.03125F};
+  // Occlusion solids, enumerated on the render thread (`sample_occlusion`) and read
+  // by the `heatmap` command under this lock.
+  std::atomic<bool> occlusion_live_{false};
+  std::atomic<bool> occlusion_invoke_{false};
+  std::atomic<bool> occlusion_request_{false};
+  std::mutex occlusion_mutex_;
+  game::Vec3 occlusion_eye_{};
+  // The enumeration AABB: the eye plus **every** target's eye position. It is
+  // deliberately independent of the camera angles — the solids between the eye and
+  // the targets do not depend on where the player is looking (`docs/ragebot.md` §3).
+  game::Vec3 occlusion_lo_{};
+  game::Vec3 occlusion_hi_{};
+  // Entity-handle indices (`handle & 0x7fff`) of the players, so the occlusion query
+  // skips their collision bodies (a player is a target, not an occluder).
+  static constexpr int k_max_occlusion_exclude = 64;
+  std::uint16_t occlusion_exclude_[k_max_occlusion_exclude] = {};
+  std::uintptr_t occlusion_pawns_[k_max_occlusion_exclude] = {};
+  int occlusion_exclude_count_ = 0;
+  std::vector<OcclusionHull> occlusion_hulls_;
+  OcclusionQueryStats occlusion_stats_;
   Channel channel_;
   Console console_;
   EventLog events_;

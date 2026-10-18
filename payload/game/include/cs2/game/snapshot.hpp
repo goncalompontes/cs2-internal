@@ -51,6 +51,12 @@ struct PlayerSnapshot {
   Vec3 velocity{};
   Angle eye_angles{};
   float distance = 0.0F;   // distance from the local player (0 for local)
+  // Lag compensation / backtracking (`docs/re/lagcomp.md`). `simulation_time` is
+  // `C_BaseEntity::m_flSimulationTime` (+0x3B8); `tick_base` is
+  // `CBasePlayerController::m_nTickBase` (+0x6B8) — the tick the client is
+  // simulating, from which the rewind window is measured.
+  float simulation_time = 0.0F;
+  int tick_base = 0;
 };
 
 // Authoritative round/game state, read from the level's `C_CSGameRules`

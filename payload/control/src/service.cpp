@@ -6,11 +6,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <string_view>
 
 #include "cs2/aim/reader.hpp"
 #include "cs2/aim/solver.hpp"
+#include "cs2/aim/spread.hpp"
+#include "cs2/control/occlusion_query.hpp"
 #include "cs2/control/predicate.hpp"
 #include "cs2/control/snapshot_json.hpp"
 #include "cs2/diag/watchdog.hpp"
@@ -33,6 +36,34 @@ namespace {
 
 constexpr DWORD k_poll_ms = 100;
 constexpr std::int64_t k_default_timeout_ms = 30000;
+
+// Extend an AABB (`lo`/`hi`) to contain `point`.
+void extend_point(game::Vec3& lo, game::Vec3& hi, const game::Vec3& p) noexcept {
+  lo.x = p.x < lo.x ? p.x : lo.x;
+  lo.y = p.y < lo.y ? p.y : lo.y;
+  lo.z = p.z < lo.z ? p.z : lo.z;
+  hi.x = p.x > hi.x ? p.x : hi.x;
+  hi.y = p.y > hi.y ? p.y : hi.y;
+  hi.z = p.z > hi.z ? p.z : hi.z;
+}
+
+// Extend an AABB to contain a hitbox's world geometry: a capsule's endpoints ± its
+// radius, or an oriented box's corners.
+void extend_box(game::Vec3& lo, game::Vec3& hi, const aim::Hitbox& hitbox) noexcept {
+  if (hitbox.is_capsule) {
+    const float r = hitbox.capsule.radius;
+    const game::Vec3 a = hitbox.capsule.a;
+    const game::Vec3 b = hitbox.capsule.b;
+    extend_point(lo, hi, game::Vec3{a.x - r, a.y - r, a.z - r});
+    extend_point(lo, hi, game::Vec3{a.x + r, a.y + r, a.z + r});
+    extend_point(lo, hi, game::Vec3{b.x - r, b.y - r, b.z - r});
+    extend_point(lo, hi, game::Vec3{b.x + r, b.y + r, b.z + r});
+    return;
+  }
+  for (const game::Vec3& corner : hitbox.box.corners()) {
+    extend_point(lo, hi, corner);
+  }
+}
 
 void set_error(Json& out, std::string_view message) {
   out.set("ok", Json::boolean(false));
@@ -173,6 +204,8 @@ auto Service::handle(const std::string& line, std::string& response) noexcept ->
     do_aim(arguments, out);
   } else if (command == "rage") {
     do_rage(arguments, out);
+  } else if (command == "heatmap") {
+    do_heatmap(arguments, out);
   } else if (command == "predict") {
     do_predict(arguments, out);
   } else {
@@ -186,6 +219,9 @@ Service::Service() {
 #if defined(_WIN32)
   start_tick_ = static_cast<std::uint64_t>(GetTickCount64());
 #endif
+  // The occlusion query must run on a game thread; `Input::apply` (the CreateMove
+  // hook) is one.
+  input_.set_game_thread_sink(&game_thread_entry, this);
 }
 
 auto Service::uptime_ms() const noexcept -> std::uint64_t {
@@ -454,8 +490,7 @@ auto Service::input_status() noexcept -> Json {
   result.set("strafe_wishspeed", Json::number(input_.strafe_wishspeed()));
   result.set("strafe_subticks", Json::number(static_cast<double>(input_.strafe_subticks())));
   result.set("strafe_writes", Json::number(static_cast<double>(input_.strafe_writes())));
-  result.set("strafe_raw_writes",
-             Json::number(static_cast<double>(input_.strafe_raw_writes())));
+  result.set("strafe_raw_writes", Json::number(static_cast<double>(input_.strafe_raw_writes())));
   result.set("bhop_presses", Json::number(static_cast<double>(input_.bhop_presses())));
   result.set("bhop_writes", Json::number(static_cast<double>(input_.bhop_writes())));
   result.set("bhop_landed_tick", Json::number(static_cast<double>(input_.bhop_landed_tick())));
@@ -470,8 +505,7 @@ auto Service::input_status() noexcept -> Json {
   result.set("bhop_a", Json::number(static_cast<double>(input_.bhop_a())));
   result.set("bhop_b", Json::number(static_cast<double>(input_.bhop_b())));
   result.set("bhop_skipped", Json::number(static_cast<double>(input_.bhop_skipped())));
-  result.set("bhop_holding_ticks",
-             Json::number(static_cast<double>(input_.bhop_holding_ticks())));
+  result.set("bhop_holding_ticks", Json::number(static_cast<double>(input_.bhop_holding_ticks())));
   result.set("bhop_air_ticks", Json::number(static_cast<double>(input_.bhop_air_ticks())));
   result.set("input_local_pawn", Json::number(static_cast<double>(input_.local_pawn())));
   result.set("predict_ready", Json::boolean(input_.predict_ready()));
@@ -715,9 +749,8 @@ auto rage_hitbox_for(const aim::SolveInput& solve_input, const game::Vec3& direc
   int best = -1;
   float best_dot = -2.0F;
   for (const aim::Hitbox& hitbox : solve_input.hitboxes) {
-    const game::Vec3 center = hitbox.is_capsule
-                                  ? (hitbox.capsule.a + hitbox.capsule.b) * 0.5F
-                                  : hitbox.box.center;
+    const game::Vec3 center =
+        hitbox.is_capsule ? (hitbox.capsule.a + hitbox.capsule.b) * 0.5F : hitbox.box.center;
     const game::Vec3 to_center = game::normalized(center - solve_input.eye);
     const float d = game::dot(direction, to_center);
     if (d > best_dot) {
@@ -728,7 +761,173 @@ auto rage_hitbox_for(const aim::SolveInput& solve_input, const game::Vec3& direc
   return best;
 }
 
+void Service::sample_records(const game::Snapshot& snapshot) noexcept {
+  if (!snapshot.valid || !snapshot.local.has_value()) {
+    return;
+  }
+  // Key the record by the tick the client is simulating (the local controller's
+  // `m_nTickBase`), so records line up with the server's lag-comp rewind
+  // (`docs/re/lagcomp.md`). Fall back to a sample counter before a level is up.
+  const std::int32_t tick_base = snapshot.local->tick_base;
+  const std::int32_t tick = tick_base > 0 ? tick_base : (record_tick_.fetch_add(1) + 1);
+  aim::WeaponProfile weapon;  // the heatmap re-values heads with its own weapon
+
+  // Read every enemy's hitboxes **outside** the lock (the memory walk is slow and
+  // must not stall a concurrent `heatmap` read), then publish them together.
+  struct Sampled {
+    std::uintptr_t pawn = 0;
+    game::Vec3 origin{};
+    float simulation_time = 0.0F;
+    std::vector<aim::Hitbox> hitboxes;
+  };
+  std::vector<Sampled> samples;
+  for (const game::PlayerSnapshot& player : snapshot.players) {
+    if (player.is_local || !player.alive || player.pawn == 0) {
+      continue;
+    }
+    if (player.team != 2 && player.team != 3) {
+      continue;  // real combatants only
+    }
+    std::vector<aim::Hitbox> hitboxes = aim::read_solver_hitboxes(player.pawn, weapon);
+    if (hitboxes.empty()) {
+      continue;
+    }
+    samples.push_back(
+        Sampled{player.pawn, player.origin, player.simulation_time, std::move(hitboxes)});
+  }
+
+  std::vector<std::uintptr_t> alive;
+  alive.reserve(samples.size());
+  std::lock_guard<std::mutex> lock(records_mutex_);
+  for (Sampled& sample : samples) {
+    aim::Record record;
+    record.tick = tick;
+    record.simulation_time = sample.simulation_time;
+    record.origin = sample.origin;
+    record.hitboxes = std::move(sample.hitboxes);
+    records_.push(sample.pawn, std::move(record));
+    alive.push_back(sample.pawn);
+  }
+  records_.retain(alive);
+  // Trim to the lag-comp window — exactly what the client does (`FUN_180c90b90`),
+  // so the store holds only the records the server could still rewind to.
+  if (tick_base > 0) {
+    records_.trim(aim::rewind_tick(tick_base, lag_max_unlag_.load(), lag_interp_.load()));
+  }
+}
+
+void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
+  if (!snapshot.valid || !snapshot.local.has_value() || !snapshot.local->alive) {
+    return;
+  }
+  const game::PlayerSnapshot& local = *snapshot.local;
+  // The enumeration box must contain **all the world geometry between the eye and the
+  // enemies' hitboxes**: the eye, plus every enemy's hitbox geometry — the live pose
+  // *and* every lag record (a backtrack pose can sit behind the live one). It is built
+  // from world positions only, never the camera angles (`docs/ragebot.md` §3). The
+  // hitboxes are the ones `sample_records` already read this frame (live + records),
+  // so no extra memory walk is needed.
+  game::Vec3 lo = local.eye_origin;
+  game::Vec3 hi = local.eye_origin;
+  bool have_geometry = false;
+  {
+    std::lock_guard<std::mutex> lock(records_mutex_);
+    for (const std::uintptr_t pawn : records_.pawns()) {
+      for (const aim::Record& record : records_.records(pawn)) {
+        for (const aim::Hitbox& hitbox : record.hitboxes) {
+          extend_box(lo, hi, hitbox);
+          have_geometry = true;
+        }
+      }
+    }
+  }
+  if (!have_geometry) {
+    // No records yet (sampling just started / a fresh spawn): fall back to the
+    // enemies' eye positions so a box is still enumerated.
+    for (const game::PlayerSnapshot& player : snapshot.players) {
+      if (player.is_local || !player.alive || player.pawn == 0) {
+        continue;
+      }
+      if (player.team != 2 && player.team != 3) {
+        continue;
+      }
+      extend_point(lo, hi, player.eye_origin);
+      have_geometry = true;
+    }
+  }
+  if (!have_geometry) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(occlusion_mutex_);
+  // Enumerate every frame: the eye→hitboxes box is the exact query box, and caching it
+  // would make the solid set stale (docs/ragebot.md — correctness over cost). Only the
+  // *parse* of the static world body is cached, per query AABB.
+  occlusion_eye_ = local.eye_origin;
+  occlusion_lo_ = lo;
+  occlusion_hi_ = hi;
+  // Exclude the players' own collision bodies (targets, not occluders). `index` is the
+  // entity identity index, exactly the record handle's `& 0x7fff`.
+  int n = 0;
+  for (const game::PlayerSnapshot& player : snapshot.players) {
+    if (n >= k_max_occlusion_exclude || player.index < 0) {
+      continue;
+    }
+    occlusion_exclude_[n] = static_cast<std::uint16_t>(player.index & 0x7fff);
+    occlusion_pawns_[n] = player.pawn;
+    ++n;
+  }
+  occlusion_exclude_count_ = n;
+  occlusion_request_.store(true);
+}
+
+void Service::game_thread_entry(void* context) noexcept {
+  static_cast<Service*>(context)->on_game_thread();
+}
+
+void Service::on_game_thread() noexcept {
+  if (!occlusion_request_.exchange(false)) {
+    return;
+  }
+  game::Vec3 eye{};
+  game::Vec3 box_min{};
+  game::Vec3 box_max{};
+  std::uint16_t exclude[k_max_occlusion_exclude] = {};
+  std::uintptr_t pawns[k_max_occlusion_exclude] = {};
+  int exclude_count = 0;
+  {
+    std::lock_guard<std::mutex> lock(occlusion_mutex_);
+    eye = occlusion_eye_;
+    box_min = occlusion_lo_;
+    box_max = occlusion_hi_;
+    exclude_count = occlusion_exclude_count_;
+    for (int i = 0; i < exclude_count; ++i) {
+      exclude[i] = occlusion_exclude_[i];
+      pawns[i] = occlusion_pawns_[i];
+    }
+  }
+  // The payload trace filter rejects the players (a target, not a solid) — the engine
+  // calls it for every non-worldspawn overlap (`docs/re/occlusion.md`).
+  set_occlusion_exclude_pawns(pawns, exclude_count);
+  OcclusionQueryStats stats;
+  std::vector<OcclusionHull> hulls = query_world_occluders(
+      eye, box_min, box_max, occlusion_invoke_.load(), &stats, exclude, exclude_count);
+  std::lock_guard<std::mutex> lock(occlusion_mutex_);
+  occlusion_hulls_ = std::move(hulls);
+  occlusion_stats_ = stats;
+}
+
 void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
+  // Sample the per-enemy lag records every frame (the heatmap's history), before
+  // the ragebot's early-out so records accrue even when the ragebot is idle. The
+  // occlusion enumeration also consumes them (the eye→hitboxes box needs the live pose
+  // and every lag record), so sample whenever either feature is live.
+  if (heatmap_sampling_.load() || occlusion_live_.load()) {
+    sample_records(snapshot);
+  }
+  // The occlusion enumeration also must run on a game thread (tier0 TLS).
+  if (occlusion_live_.load()) {
+    cache_occlusion_targets(snapshot);
+  }
   const bool forced = rage_force_.load();
   if (!rage_enabled_.load() && !forced) {
     input_.clear_rage_aim();
@@ -770,11 +969,37 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
       break;
   }
 
-  const aim::SolveResult result = aim::solve(*solve_input);
-  if (!result.valid) {
+  // Backtracking (`docs/ragebot.md` §8): score the live pose and every sampled lag
+  // record of this target and take the best. The record set is the discrete
+  // replacement for the continuous pose distribution — the server rewinds the target
+  // to a past pose inside the lag-comp window, so a record can beat the live pose.
+  // Records are tried newest-first and the live pose first, so the live aim wins ties.
+  std::vector<aim::PoseCandidate> poses;
+  poses.push_back(aim::PoseCandidate{-1, 0.0F, solve_input->hitboxes});
+  const std::int32_t backtrack_tick_base = snapshot.local->tick_base;
+  {
+    std::lock_guard<std::mutex> lock(records_mutex_);
+    const std::int32_t newest =
+        backtrack_tick_base > 0 ? backtrack_tick_base : records_.newest_tick();
+    const std::int32_t floor_tick =
+        backtrack_tick_base > 0
+            ? aim::rewind_tick(backtrack_tick_base, lag_max_unlag_.load(), lag_interp_.load())
+            : 0;
+    const std::vector<aim::Record>& ring = records_.records(solve_input->pawn);
+    for (auto it = ring.rbegin(); it != ring.rend(); ++it) {
+      if (backtrack_tick_base > 0 && it->tick <= floor_tick) {
+        continue;  // outside the lag-comp window
+      }
+      poses.push_back(
+          aim::PoseCandidate{it->tick, static_cast<float>(newest - it->tick), it->hitboxes});
+    }
+  }
+  const aim::BacktrackResult backtrack = aim::solve_backtrack(*solve_input, poses);
+  if (!backtrack.valid) {
     input_.clear_rage_aim();
     return;
   }
+  const aim::SolveResult& result = backtrack.solve;
 
   constexpr float k_rad_to_deg = 57.295779513082320876F;
   const float yaw = std::atan2(result.direction.y, result.direction.x) * k_rad_to_deg;
@@ -794,6 +1019,10 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   // and therefore also fires, since the menu's per-frame push clears `fire`.
   input_.set_rage_fire(rage_fire_.load() || forced);
   rage_last_target_.store(target_index);
+  rage_last_record_.store(backtrack.record);
+  if (backtrack.record != -1) {
+    rage_backtracks_.fetch_add(1);
+  }
   rage_solves_.fetch_add(1);
 }
 
@@ -821,10 +1050,11 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
     return false;
   }
   const int target = input_.rage_target();
-  std::snprintf(out, size, "rage: %s target %d box %d w%llu s%llu fire %d",
+  std::snprintf(out, size, "rage: %s target %d box %d w%llu s%llu bt%llu rec%d fire %d",
                 input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(),
                 static_cast<unsigned long long>(input_.rage_writes()),
                 static_cast<unsigned long long>(input_.rage_shots()),
+                static_cast<unsigned long long>(rage_backtracks_.load()), rage_last_record_.load(),
                 input_.rage_fire() ? 1 : 0);
   return true;
 }
@@ -843,6 +1073,10 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
     return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
                                                   : fallback;
   };
+  const auto integer = [&](const char* key, int fallback) -> int {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<int>(value->as_number()) : fallback;
+  };
 
   int target = -1;
   if (const Json* value = args.find("target"); value != nullptr && value->is_number()) {
@@ -856,10 +1090,9 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
   weapon.headshot_multiplier = number("headshot", 4.0F);
   // When the caller passes explicit values, honour them; otherwise take the
   // shooter's real weapon VData (`docs/re/aim.md`).
-  const bool explicit_weapon = args.find("damage") != nullptr ||
-                               args.find("range_modifier") != nullptr ||
-                               args.find("penetration") != nullptr ||
-                               args.find("headshot") != nullptr;
+  const bool explicit_weapon =
+      args.find("damage") != nullptr || args.find("range_modifier") != nullptr ||
+      args.find("penetration") != nullptr || args.find("headshot") != nullptr;
 
   auto input = aim::build_input(snapshot, weapon, target, !explicit_weapon);
   if (!input.has_value()) {
@@ -874,6 +1107,22 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
       input->objective = aim::AimObjective::hitchance;
     } else if (name == "expected") {
       input->objective = aim::AimObjective::expected;
+    } else if (name == "pellets") {
+      // The deterministic pellet-sum objective (docs/ragebot.md §2/§3). The seed is
+      // `MD5_PseudoRandom(sequence)` unless an explicit `seed` is passed; the
+      // spread/inaccuracy magnitudes come from the caller until the weapon's
+      // inaccuracy (`FUN_18080b880`) is wired live (`docs/re/aim.md` §9).
+      input->objective = aim::AimObjective::pellets;
+      int seed = integer("seed", 0);
+      if (seed == 0) {
+        seed = aim::md5_pseudo_random(static_cast<std::uint32_t>(integer("sequence", 1)));
+      }
+      const int pellets = integer("pellets", 1);
+      // Spread defaults to the shooter's real `m_flSpread` (read into the weapon
+      // profile by `build_input`); inaccuracy still comes from the caller.
+      const float spread = number("spread", input->weapon.spread);
+      input->pellet_offsets =
+          aim::pellet_offsets(seed, spread, number("inaccuracy", 0.0F), pellets > 0 ? pellets : 1);
     } else {
       input->objective = aim::AimObjective::damage;
     }
@@ -887,8 +1136,7 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
 
   constexpr float k_rad_to_deg = 57.295779513082320876F;
   const float yaw = std::atan2(result.direction.y, result.direction.x) * k_rad_to_deg;
-  const float pitch =
-      -std::asin(std::clamp(result.direction.z, -1.0F, 1.0F)) * k_rad_to_deg;
+  const float pitch = -std::asin(std::clamp(result.direction.z, -1.0F, 1.0F)) * k_rad_to_deg;
 
   // `write: true` applies the solve to the (silent) sub-tick view angles.
   const Json* write_arg = args.find("write");
@@ -953,8 +1201,7 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
               Json::number(static_cast<double>(input->weapon.headshot_multiplier)));
   payload.set("weapon_range_modifier",
               Json::number(static_cast<double>(input->weapon.range_modifier)));
-  payload.set("weapon_penetration",
-              Json::number(static_cast<double>(input->weapon.penetration)));
+  payload.set("weapon_penetration", Json::number(static_cast<double>(input->weapon.penetration)));
   set_ok(out, std::move(payload));
 }
 
@@ -980,8 +1227,7 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   if (const Json* value = args.find("headshot"); value != nullptr && value->is_number()) {
     rage_headshot_.store(static_cast<float>(value->as_number()));
   }
-  if (const Json* value = args.find("range_modifier");
-      value != nullptr && value->is_number()) {
+  if (const Json* value = args.find("range_modifier"); value != nullptr && value->is_number()) {
     rage_range_modifier_.store(static_cast<float>(value->as_number()));
   }
   if (const Json* value = args.find("sigma"); value != nullptr && value->is_number()) {
@@ -1005,6 +1251,402 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   payload.set("solves", Json::number(static_cast<double>(rage_solves_.load())));
   payload.set("writes", Json::number(static_cast<double>(input_.rage_writes())));
   payload.set("shots", Json::number(static_cast<double>(input_.rage_shots())));
+  set_ok(out, std::move(payload));
+}
+
+void Service::do_heatmap(const Json& args, Json& out) noexcept {
+  refresh_reader(true);
+  if (!reader_.has_value()) {
+    set_error(out, "heatmap unavailable: client.dll / entity system not ready");
+    return;
+  }
+  game::Snapshot snapshot = reader_->snapshot();
+  refresh_reader(snapshot.valid);
+  if (!snapshot.valid || !snapshot.local.has_value()) {
+    set_error(out, "heatmap unavailable: no local player");
+    return;
+  }
+  const game::PlayerSnapshot& local = *snapshot.local;
+
+  const auto number = [&](const char* key, float fallback) -> float {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
+                                                  : fallback;
+  };
+  const auto integer = [&](const char* key, int fallback) -> int {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<int>(value->as_number()) : fallback;
+  };
+  const auto flag = [&](const char* key) -> std::optional<bool> {
+    const Json* value = args.find(key);
+    if (value == nullptr || !value->is_bool()) {
+      return std::nullopt;
+    }
+    return value->as_bool();
+  };
+
+  if (const std::optional<bool> sample = flag("sample"); sample.has_value()) {
+    heatmap_sampling_.store(*sample);
+  }
+  if (const std::optional<bool> clear = flag("clear"); clear.has_value() && *clear) {
+    std::lock_guard<std::mutex> lock(records_mutex_);
+    records_.clear();
+  }
+
+  aim::WeaponProfile weapon;
+  weapon.damage = number("damage", 100.0F);
+  weapon.range_modifier = number("range_modifier", 0.98F);
+  weapon.penetration = number("penetration", 1.0F);
+  weapon.headshot_multiplier = number("headshot", 4.0F);
+  const bool explicit_weapon =
+      args.find("damage") != nullptr || args.find("range_modifier") != nullptr ||
+      args.find("penetration") != nullptr || args.find("headshot") != nullptr;
+  if (!explicit_weapon) {
+    (void)aim::read_weapon_profile(local.weapon_vdata, weapon);
+  }
+
+  // The chart is the **absolute world yaw/pitch** of the eye→direction (docs/ragebot.md):
+  // a function of the world geometry only and never the camera, so the projected
+  // hitbox/occluder cells (and their values) do not move when the player looks around.
+  const game::Vec3 eye = local.eye_origin;
+  const aim::Basis basis = aim::Basis::world();
+
+  constexpr float k_deg_to_rad = 0.01745329251994329577F;
+  constexpr float k_pi = 3.14159265358979323846F;
+  // The **view window** (a render concern, not the computation): centred on the camera
+  // direction, `fov` degrees wide. The values are absolute; only the shown window moves
+  // with the camera. The camera direction in chart coords is (yaw, -pitch) — Source
+  // pitch is positive downwards.
+  const float fov = number("fov", 90.0F);
+  const float half_span = fov > 0.0F ? fov * 0.5F * k_deg_to_rad : k_pi;
+  const float extent = half_span < k_pi ? half_span : k_pi;
+  const aim::Vec2 view{local.eye_angles.yaw * k_deg_to_rad,
+                       -local.eye_angles.pitch * k_deg_to_rad};
+  const int history = std::clamp(integer("history", 6), 0, 64);
+  const bool include_all = flag("all").value_or(false);
+  // The lag-comp window (`docs/re/lagcomp.md`): the rewind floor is measured from
+  // the local `m_nTickBase`; records at or below it are outside the window.
+  if (const Json* value = args.find("max_unlag"); value != nullptr && value->is_number()) {
+    lag_max_unlag_.store(static_cast<float>(value->as_number()));
+  }
+  if (const Json* value = args.find("interp"); value != nullptr && value->is_number()) {
+    lag_interp_.store(static_cast<float>(value->as_number()));
+  }
+  const float max_unlag = lag_max_unlag_.load();
+  const float interp = lag_interp_.load();
+  const std::int32_t tick_base = local.tick_base;
+  const std::int32_t floor_tick = aim::rewind_tick(tick_base, max_unlag, interp);
+
+  // Every live enemy's current pose (read outside the lock — the memory walk is
+  // slow and must not stall the render thread's sampling).
+  std::vector<aim::TargetPose> poses;
+  std::vector<const game::PlayerSnapshot*> targets;
+  for (const game::PlayerSnapshot& player : snapshot.players) {
+    if (player.is_local || !player.alive || player.pawn == 0) {
+      continue;
+    }
+    if (player.team != 2 && player.team != 3) {
+      continue;
+    }
+    if (!include_all && player.team == local.team) {
+      continue;  // enemies only unless `all`
+    }
+    std::vector<aim::Hitbox> hitboxes = aim::read_solver_hitboxes(player.pawn, weapon);
+    if (hitboxes.empty()) {
+      continue;
+    }
+    aim::TargetPose pose;
+    pose.target = player.index;
+    pose.record = -1;
+    pose.hitboxes = std::move(hitboxes);
+    poses.push_back(std::move(pose));
+    targets.push_back(&player);
+  }
+
+  // The sampled lag records, newest first, up to `history` per enemy. The store
+  // is already trimmed to the window; skip anything at or below the floor as a
+  // guard, and age the records against the current tick base.
+  std::vector<std::size_t> record_counts(targets.size(), 0);
+  {
+    std::lock_guard<std::mutex> lock(records_mutex_);
+    const std::int32_t newest = tick_base > 0 ? tick_base : records_.newest_tick();
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+      const std::vector<aim::Record>& ring = records_.records(targets[i]->pawn);
+      int taken = 0;
+      for (auto it = ring.rbegin(); it != ring.rend() && taken < history; ++it) {
+        if (tick_base > 0 && it->tick <= floor_tick) {
+          continue;  // outside the lag-comp window
+        }
+        aim::TargetPose pose;
+        pose.target = targets[i]->index;
+        pose.record = it->tick;
+        pose.age = static_cast<float>(newest - it->tick);
+        pose.hitboxes = it->hitboxes;
+        poses.push_back(std::move(pose));
+        ++taken;
+      }
+      record_counts[i] = static_cast<std::size_t>(taken);
+    }
+  }
+
+  aim::HeatmapOptions options;
+  options.weapon = weapon;
+
+  // The penetration model (docs/re/penetration.md): `pen` = "simple" keeps the
+  // first-pass approximation, "engine" applies the engine's real per-surface loss.
+  const bool engine_pen = [&]() {
+    const Json* value = args.find("pen");
+    return value != nullptr && value->is_string() && value->as_string() == "engine";
+  }();
+  options.penetration = engine_pen ? aim::PenetrationModel::engine
+                                   : aim::PenetrationModel::simple;
+  options.penetration_params.weapon_penetration = weapon.penetration;
+  options.penetration_params.max_penetrations = std::clamp(integer("max_pen", 4), 0, 16);
+  // The per-surface modifiers (docs/re/penetration.md). The payload now reads each
+  // shape's real surface from the game (`occlusion_query.cpp`); these args override
+  // it when passed, for a sweep or a fallback when the surface read fails.
+  const bool have_pen_mod = args.find("pen_mod") != nullptr;
+  const bool have_dmg_mod = args.find("dmg_mod") != nullptr;
+  const bool have_material = args.find("material") != nullptr;
+  const bool have_grate = args.find("grate") != nullptr;
+  const float pen_mod = number("pen_mod", 1.0F);
+  const float dmg_mod = number("dmg_mod", 1.0F);
+  const int material = integer("material", -1);
+  const bool grate = flag("grate").value_or(false);
+
+  // Occlusion (docs/re/occlusion.md): enumerate the world solids between the eye
+  // and each target, project them into the chart, and let `build_heatmap` split the
+  // hitbox silhouettes and attenuate. No rays. Fault-guarded engine call.
+  OcclusionQueryStats walls_stats;
+  const bool walls = flag("walls").value_or(false);
+  const bool walls_call = flag("walls_call").value_or(false);
+  occlusion_live_.store(walls);
+  occlusion_invoke_.store(walls_call);
+  std::vector<aim::Polygon> occluder_polygons;  // projected silhouettes, parallel to options.occlusion
+  if (walls) {
+    input_.refresh();  // install the CreateMove hook (the game-thread query site)
+    // The solids were enumerated on the game thread; project the cached hulls.
+    std::lock_guard<std::mutex> lock(occlusion_mutex_);
+    walls_stats = occlusion_stats_;
+    for (const OcclusionHull& hull : occlusion_hulls_) {
+      std::optional<aim::OccluderCell> cell;
+      if (hull.kind == aim::SolidKind::sphere) {
+        cell = aim::project_sphere_occluder(eye, basis, hull.a, hull.radius, hull.surface_modifier);
+      } else if (hull.kind == aim::SolidKind::capsule) {
+        cell = aim::project_capsule_occluder(eye, basis, hull.a, hull.b, hull.radius,
+                                             hull.surface_modifier);
+      } else if (hull.kind == aim::SolidKind::mesh) {
+        // A collision mesh (the map's large/merged wall surfaces) is a triangle
+        // soup; project its vertices as the silhouette and keep the triangles for
+        // the exact ray test (`docs/re/bullet-trace.md`).
+        cell = aim::project_mesh_occluder(eye, basis, hull.vertices, hull.triangles,
+                                          hull.surface_modifier);
+      } else {
+        cell = aim::project_occluder(eye, basis, hull.vertices, hull.planes, hull.surface_modifier);
+      }
+      if (cell) {
+        // Clip to the view window (centred on the camera direction): near geometry
+        // projects far outside it, and the render is a camera-centred view of the
+        // absolute chart.
+        cell->polygon = aim::clip_to_view(cell->polygon, view, extent);
+        if (cell->polygon.empty()) {
+          continue;  // entirely outside the view — it cannot occlude a chart cell
+        }
+        // Keep the projected silhouette; the JSON reports only the solids that end up
+        // between the eye and a target (`map.used_occluders`, below), not every solid
+        // the enumeration box caught.
+        occluder_polygons.push_back(cell->polygon);
+        // The per-surface penetration properties (docs/re/penetration.md): the shape's
+        // real `CGameSurfaceProperties` read by `occlusion_query.cpp`, or the
+        // `pen_mod`/`dmg_mod`/`material`/`grate` args when passed.
+        if (have_pen_mod) {
+          cell->surface_modifier = pen_mod;
+        }
+        cell->damage_modifier = have_dmg_mod ? dmg_mod : hull.damage_modifier;
+        cell->material = have_material ? material : hull.material;
+        cell->grate = have_grate ? grate : hull.grate;
+        // Every enumerated solid is offered to the heat map; `build_heatmap` keeps
+        // only those the shot to a given hitbox actually reaches *before* the hitbox
+        // (`OccluderCell::ray_span`) — that per-cell depth test is what makes
+        // "between the eye and the hitbox" exact, with no bounding-box heuristic.
+        options.occlusion.push_back(std::move(*cell));
+      }
+    }
+  }
+
+  const aim::Heatmap map = aim::build_heatmap(eye, basis, extent, poses, options, view);
+
+  // Report only the solids that are actually **between the eye and a target** — the
+  // ones `build_heatmap` kept as candidates — so the render (and the JSON) do not show
+  // solids behind or beside the enemies that the enumeration box merely enclosed.
+  Json occluder_polys = Json::array();
+  for (const aim::OccluderCell* used : map.used_occluders) {
+    const std::size_t index = static_cast<std::size_t>(used - options.occlusion.data());
+    if (index >= occluder_polygons.size()) {
+      continue;
+    }
+    Json poly = Json::array();
+    for (const aim::Vec2& p : occluder_polygons[index].points) {
+      Json point = Json::array();
+      point.push_back(Json::number(static_cast<double>(p.x)));
+      point.push_back(Json::number(static_cast<double>(p.y)));
+      poly.push_back(std::move(point));
+    }
+    occluder_polys.push_back(std::move(poly));
+  }
+
+  const auto vec3_json = [](const game::Vec3& v) -> Json {
+    Json item = Json::object();
+    item.set("x", Json::number(static_cast<double>(v.x)));
+    item.set("y", Json::number(static_cast<double>(v.y)));
+    item.set("z", Json::number(static_cast<double>(v.z)));
+    return item;
+  };
+
+  Json payload = Json::object();
+  payload.set("valid", Json::boolean(true));
+  payload.set("eye", vec3_json(eye));
+  Json basis_json = Json::object();
+  basis_json.set("forward", vec3_json(basis.forward));
+  basis_json.set("right", vec3_json(basis.right));
+  basis_json.set("up", vec3_json(basis.up));
+  payload.set("basis", std::move(basis_json));
+  payload.set("fov", Json::number(static_cast<double>(fov)));
+  payload.set("extent", Json::number(static_cast<double>(extent)));
+  // The camera direction in absolute chart coords (radians) — the render is centred on
+  // it; the chart data itself is absolute (docs/ragebot.md).
+  payload.set("view_yaw", Json::number(static_cast<double>(view.x)));
+  payload.set("view_pitch", Json::number(static_cast<double>(view.y)));
+  Json weapon_json = Json::object();
+  weapon_json.set("damage", Json::number(static_cast<double>(weapon.damage)));
+  weapon_json.set("headshot", Json::number(static_cast<double>(weapon.headshot_multiplier)));
+  weapon_json.set("range_modifier", Json::number(static_cast<double>(weapon.range_modifier)));
+  weapon_json.set("penetration", Json::number(static_cast<double>(weapon.penetration)));
+  payload.set("weapon", std::move(weapon_json));
+  payload.set("sampling", Json::boolean(heatmap_sampling_.load()));
+  payload.set("history", Json::integer(static_cast<std::int64_t>(history)));
+  payload.set("capacity", Json::integer(static_cast<std::int64_t>(k_heatmap_capacity)));
+  // The lag-comp window the records were trimmed to (`docs/re/lagcomp.md`).
+  payload.set("tick_base", Json::integer(tick_base));
+  payload.set("rewind_tick", Json::integer(floor_tick));
+  payload.set("max_unlag", Json::number(static_cast<double>(max_unlag)));
+  payload.set("interp", Json::number(static_cast<double>(interp)));
+  payload.set("window_ticks", Json::integer(tick_base - floor_tick));
+
+  // Occlusion enumeration report (docs/re/occlusion.md): whether the engine query
+  // ran, how many solids came back, and how many made it into the chart.
+  const auto hex = [](std::uintptr_t value) -> std::string {
+    char buffer[24];
+    std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(value));
+    return std::string(buffer);
+  };
+
+  Json walls_json = Json::object();
+  walls_json.set("enabled", Json::boolean(walls));
+  walls_json.set("called", Json::boolean(walls_call));
+  walls_json.set("ok", Json::boolean(walls_stats.ok));
+  walls_json.set("faulted", Json::boolean(walls_stats.faulted));
+  walls_json.set("records", Json::integer(walls_stats.records));
+  walls_json.set("bodies", Json::integer(walls_stats.bodies));
+  walls_json.set("shapes", Json::integer(walls_stats.shapes));
+  walls_json.set("hulls", Json::integer(walls_stats.hulls));
+  Json type_counts = Json::array();
+  for (int t = 0; t < 8; ++t) {
+    type_counts.push_back(Json::integer(walls_stats.type_counts[t]));
+  }
+  walls_json.set("type_counts", std::move(type_counts));
+  walls_json.set("iface", Json::string(hex(walls_stats.iface)));
+  walls_json.set("world", Json::string(hex(walls_stats.world)));
+  walls_json.set("filter", Json::string(hex(walls_stats.filter)));
+  walls_json.set("filter_vtable", Json::string(hex(walls_stats.filter_vtable)));
+  walls_json.set("occluders", Json::integer(static_cast<std::int64_t>(options.occlusion.size())));
+  // The penetration model this chart was valued with (docs/re/penetration.md).
+  walls_json.set("penetration_model", Json::string(engine_pen ? "engine" : "simple"));
+  walls_json.set("max_penetrations", Json::integer(options.penetration_params.max_penetrations));
+  walls_json.set("pen_mod", Json::number(static_cast<double>(pen_mod)));
+  walls_json.set("dmg_mod", Json::number(static_cast<double>(dmg_mod)));
+  // The per-shape surface read (docs/re/penetration.md): the resolved
+  // SurfacePropertiesList array and the first shape's surface, so a live run can
+  // confirm the read.
+  walls_json.set("surface_array", Json::string(hex(walls_stats.surface_array)));
+  walls_json.set("surface_index", Json::integer(walls_stats.surface_index));
+  walls_json.set("surface_distance", Json::number(static_cast<double>(walls_stats.surface_distance)));
+  walls_json.set("surface_material", Json::integer(walls_stats.surface_material));
+  walls_json.set("surface_hits", Json::integer(walls_stats.surface_hits));
+  // RE probe (docs/re/occlusion.md): the record's `+0x50` material token, raw and
+  // reinterpreted as a float, so a live run can settle whether it is a float modifier
+  // or a pointer (a sane 0.2-1.0 float vs a denormal/pointer).
+  walls_json.set("material_token", Json::string(hex(walls_stats.material_token)));
+  {
+    const std::uint32_t low = static_cast<std::uint32_t>(walls_stats.material_token);
+    float as_float = 0.0F;
+    std::memcpy(&as_float, &low, sizeof(as_float));
+    walls_json.set("material_float", Json::number(static_cast<double>(as_float)));
+  }
+  walls_json.set("material_records", Json::integer(walls_stats.material_records));
+  // Compound probe (docs/re/vphysics2.md): the first type-4 shape's group counts.
+  Json compound_json = Json::object();
+  compound_json.set("address", Json::string(hex(walls_stats.compound)));
+  compound_json.set("instances", Json::integer(walls_stats.compound_instances));
+  compound_json.set("meshes", Json::integer(walls_stats.compound_meshes));
+  compound_json.set("hulls", Json::integer(walls_stats.compound_hulls));
+  compound_json.set("g100", Json::integer(walls_stats.compound_g100));
+  compound_json.set("g110", Json::integer(walls_stats.compound_g110));
+  compound_json.set("g120", Json::integer(walls_stats.compound_g120));
+  walls_json.set("compound", std::move(compound_json));
+  // Player-exclusion + world-cache diagnostics.
+  walls_json.set("excluded_records", Json::integer(walls_stats.excluded_records));
+  walls_json.set("world_cache_body", Json::string(hex(walls_stats.world_cache_body)));
+  walls_json.set("world_cache_hulls", Json::integer(walls_stats.world_cache_hulls));
+  walls_json.set("world_box_kept", Json::integer(walls_stats.world_box_kept));
+  walls_json.set("world_box_rejected", Json::integer(walls_stats.world_box_rejected));
+  walls_json.set("hulls_no_planes", Json::integer(walls_stats.hulls_no_planes));
+  Json handles = Json::array();
+  for (int i = 0; i < walls_stats.record_handle_count; ++i) {
+    char buffer[16] = {};
+    std::snprintf(buffer, sizeof(buffer), "0x%x", walls_stats.record_handles[i]);
+    handles.push_back(Json::string(buffer));
+  }
+  walls_json.set("record_handles", std::move(handles));
+  walls_json.set("occluder_polygons", std::move(occluder_polys));
+  payload.set("walls", std::move(walls_json));
+
+  Json targets_json = Json::array();
+  for (std::size_t i = 0; i < targets.size(); ++i) {
+    const game::PlayerSnapshot& player = *targets[i];
+    Json item = Json::object();
+    item.set("index", Json::integer(player.index));
+    item.set("name", Json::string(player.name));
+    item.set("team", Json::integer(player.team));
+    item.set("health", Json::integer(player.health));
+    item.set("distance", Json::number(static_cast<double>(player.distance)));
+    item.set("origin", vec3_json(player.origin));
+    item.set("records", Json::integer(static_cast<std::int64_t>(record_counts[i])));
+    targets_json.push_back(std::move(item));
+  }
+  payload.set("targets", std::move(targets_json));
+
+  Json cells = Json::array();
+  for (const aim::HeatCell& cell : map.cells) {
+    Json item = Json::object();
+    Json poly = Json::array();
+    for (const aim::Vec2& p : cell.polygon.points) {
+      Json point = Json::array();
+      point.push_back(Json::number(static_cast<double>(p.x)));
+      point.push_back(Json::number(static_cast<double>(p.y)));
+      poly.push_back(std::move(point));
+    }
+    item.set("poly", std::move(poly));
+    item.set("value", Json::number(static_cast<double>(cell.value)));
+    item.set("base_value", Json::number(static_cast<double>(cell.base_value)));
+    item.set("target", Json::integer(cell.target));
+    item.set("hitgroup", Json::integer(cell.hitgroup));
+    item.set("record", Json::integer(cell.record));
+    item.set("age", Json::number(static_cast<double>(cell.age)));
+    cells.push_back(std::move(item));
+  }
+  payload.set("cell_count", Json::integer(static_cast<std::int64_t>(map.cells.size())));
+  payload.set("cells", std::move(cells));
   set_ok(out, std::move(payload));
 }
 

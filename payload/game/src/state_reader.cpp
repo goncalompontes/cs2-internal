@@ -76,6 +76,7 @@ auto StateReader::FieldOffsets::resolve() -> StateReader::FieldOffsets {
   o.scene_node = field("C_BaseEntity", "m_pGameSceneNode", o.scene_node);
   o.collision = field("C_BaseEntity", "m_pCollision", o.collision);
   o.velocity = field("C_BaseEntity", "m_vecAbsVelocity", o.velocity);
+  o.simulation_time = field("C_BaseEntity", "m_flSimulationTime", o.simulation_time);
   o.collision_mins = field("CCollisionProperty", "m_vecMins", o.collision_mins);
   o.collision_maxs = field("CCollisionProperty", "m_vecMaxs", o.collision_maxs);
   o.view_offset = field("C_BaseModelEntity", "m_vecViewOffset", o.view_offset);
@@ -90,6 +91,7 @@ auto StateReader::FieldOffsets::resolve() -> StateReader::FieldOffsets {
   o.is_local_controller =
       field("CBasePlayerController", "m_bIsLocalPlayerController", o.is_local_controller);
   o.connected = field("CBasePlayerController", "m_iConnected", o.connected);
+  o.tick_base = field("CBasePlayerController", "m_nTickBase", o.tick_base);
   o.pawn = field("CBasePlayerController", "m_hPawn", o.pawn);
   o.player_name = field("CBasePlayerController", "m_iszPlayerName", o.player_name);
   o.ping = field("CCSPlayerController", "m_iPing", o.ping);
@@ -174,6 +176,7 @@ auto StateReader::read_player(int index, std::uintptr_t controller) const -> Pla
   (void)read(controller + o.pawn_has_defuser, defuser);
   (void)read(controller + o.pawn_has_helmet, helmet);
   player.connected = read_or<std::int32_t>(controller + o.connected, 0);
+  player.tick_base = read_or<std::int32_t>(controller + o.tick_base, 0);
   player.defuser = defuser != 0;
   player.helmet = helmet != 0;
   player.ping = static_cast<int>(read_or<std::uint32_t>(controller + o.ping, 0));
@@ -215,6 +218,7 @@ auto StateReader::read_player(int index, std::uintptr_t controller) const -> Pla
 
   (void)read(pawn + o.eye_angles, player.eye_angles);
   (void)read(pawn + o.velocity, player.velocity);
+  player.simulation_time = read_or<float>(pawn + o.simulation_time, 0.0F);
 
   const auto scene = read_or<std::uintptr_t>(pawn + o.scene_node, 0);
   Vec3 view_offset{};

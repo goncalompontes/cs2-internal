@@ -45,6 +45,9 @@ class StateReader {
     std::uint32_t scene_node = 0x330;
     std::uint32_t collision = 0x340;
     std::uint32_t velocity = 0x3f8;
+    // `C_BaseEntity::m_flSimulationTime` — the enemy's simulated time, the key the
+    // lag-comp records are indexed by (`docs/re/lagcomp.md`, +0x3B8).
+    std::uint32_t simulation_time = 0x3b8;
     // CCollisionProperty (m_pCollision ->)
     std::uint32_t collision_mins = 0x40;
     std::uint32_t collision_maxs = 0x4c;
@@ -69,6 +72,9 @@ class StateReader {
     std::uint32_t connected = 0x6f4;
     std::uint32_t player_name = 0x6fc;
     std::uint32_t ping = 0x838;
+    // `CBasePlayerController::m_nTickBase` (+0x6B8) — the tick the client is
+    // simulating; the lag-comp rewind window is measured from it.
+    std::uint32_t tick_base = 0x6b8;
     // CCSPlayerController
     std::uint32_t player_pawn = 0x92c;
     std::uint32_t pawn_has_defuser = 0x940;

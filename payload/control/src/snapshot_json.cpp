@@ -44,6 +44,8 @@ namespace {
   out.set("velocity", to_json(player.velocity));
   out.set("eye_angles", to_json(player.eye_angles));
   out.set("distance", Json::number(player.distance));
+  out.set("simulation_time", Json::number(player.simulation_time));
+  out.set("tick_base", Json::integer(player.tick_base));
   return out;
 }
 

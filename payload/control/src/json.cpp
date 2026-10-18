@@ -342,8 +342,11 @@ void dump_into(const Json& value, std::string& out) {
         std::snprintf(buffer, sizeof(buffer), "%lld", static_cast<long long>(number));
         out += buffer;
       } else {
+        // 9 significant digits, not 17: the harness needs ~7 (float) digits, and a
+        // heatmap response carries thousands of chart coordinates — `%.17g` would
+        // print the float noise and roughly double the wire size for no gain.
         char buffer[32];
-        std::snprintf(buffer, sizeof(buffer), "%.17g", number);
+        std::snprintf(buffer, sizeof(buffer), "%.9g", number);
         out += buffer;
       }
       return;

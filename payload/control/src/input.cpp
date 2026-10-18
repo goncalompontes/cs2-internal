@@ -1499,6 +1499,12 @@ void Input::apply(void* cmd) noexcept {
   if (cmd == nullptr) {
     return;
   }
+  // Run the game-thread sink first: engine calls that need the game's TLS (the
+  // physics query allocates through tier0) must run on this thread, not the
+  // payload's publish thread.
+  if (game_thread_sink_ != nullptr) {
+    game_thread_sink_(game_thread_context_);
+  }
   // The **control commands** (`press`/`move`/`look`) are a backend choice: in the
   // `console` backend the runner drives the engine's own `+button`/`setang`
   // commands through `exec`, so the command must be left untouched here. The

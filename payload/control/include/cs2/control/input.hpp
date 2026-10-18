@@ -225,6 +225,16 @@ class Input {
   void set_backend(Backend backend) noexcept { backend_ = backend; }
   [[nodiscard]] static const char* backend_name(Backend backend) noexcept;
 
+  // A per-tick sink that runs on the **game's** main thread (inside the CreateMove
+  // hook, immediately before `apply()`). Unlike the payload's publish thread, a
+  // game thread has the game's TLS, so engine calls that allocate through tier0
+  // (e.g. the physics query) only work from here.
+  using GameThreadSink = void (*)(void* context);
+  void set_game_thread_sink(GameThreadSink sink, void* context) noexcept {
+    game_thread_sink_ = sink;
+    game_thread_context_ = context;
+  }
+
   // Hold / release buttons. `set_mask` bits are forced on every tick, `clear_mask`
   // bits forced off; a press removes the bit from the clear mask and vice versa.
   void press(std::uint64_t bits) noexcept;
@@ -585,6 +595,8 @@ class Input {
   // per-frame state refresh) cannot patch the vtable twice.
   std::atomic<bool> refresh_claimed_{false};
   Backend backend_ = Backend::console;
+  GameThreadSink game_thread_sink_ = nullptr;
+  void* game_thread_context_ = nullptr;
   std::uint32_t flags_offset_ = 0x3f4;  // C_BaseEntity::m_fFlags
   std::uint32_t velocity_offset_ = 0x3f8;  // C_BaseEntity::m_vecAbsVelocity
   alloc_step_fn alloc_step_ = nullptr;

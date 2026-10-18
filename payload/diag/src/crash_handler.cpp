@@ -1,5 +1,7 @@
 #include "cs2/diag/crash_handler.hpp"
 
+#include <csetjmp>
+
 #include "cs2/diag/text.hpp"
 #include "cs2/game/log.hpp"
 
@@ -22,6 +24,27 @@ constexpr int k_first_chance_limit = 64;
 // Not all of these are in <windows.h>.
 constexpr DWORD k_status_stack_buffer_overrun = 0xC0000409UL;
 constexpr DWORD k_status_fatal_app_exit = 0x40000015UL;
+
+// The recovery guard (`call_guarded`). One in-flight guarded call per process is
+// enough (the payload's engine probes are serialised on the control thread).
+std::jmp_buf g_guard_jmp;
+volatile long g_guard_active = 0;
+unsigned long g_guard_thread = 0;
+
+[[nodiscard]] auto is_recoverable(DWORD code) noexcept -> bool {
+  switch (code) {
+    case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+    case EXCEPTION_PRIV_INSTRUCTION:
+    case EXCEPTION_STACK_OVERFLOW:
+    case k_status_stack_buffer_overrun:
+    case k_status_fatal_app_exit:
+      return true;
+    default:
+      return false;
+  }
+}
 
 void resolve_backtrace() noexcept {
   const HMODULE ntdll = GetModuleHandleA("ntdll.dll");
@@ -106,7 +129,15 @@ void log_exception(const char* phase, EXCEPTION_POINTERS* info) noexcept {
 }
 
 LONG CALLBACK vectored_handler(EXCEPTION_POINTERS* info) noexcept {
-  switch (info->ExceptionRecord->ExceptionCode) {
+  const DWORD code = info->ExceptionRecord->ExceptionCode;
+  // A guarded call is in flight on this thread and the fault is recoverable:
+  // unwind to `call_guarded` (no exception tables needed for `longjmp`).
+  if (g_guard_active != 0 && g_guard_thread == GetCurrentThreadId() && is_recoverable(code)) {
+    g_guard_active = 0;
+    log_exception("guarded", info);
+    std::longjmp(g_guard_jmp, 1);
+  }
+  switch (code) {
     case EXCEPTION_ACCESS_VIOLATION:
     case EXCEPTION_ILLEGAL_INSTRUCTION:
     case EXCEPTION_INT_DIVIDE_BY_ZERO:
@@ -142,6 +173,27 @@ void install_crash_handler() noexcept {
   cs2::game::append_log("[crash] handler installed");
   AddVectoredExceptionHandler(1, &vectored_handler);
   SetUnhandledExceptionFilter(&unhandled_filter);
+#endif
+}
+
+auto call_guarded(void (*fn)(void*), void* arg) noexcept -> bool {
+#if defined(_WIN32)
+  if (fn == nullptr || g_guard_active != 0) {
+    return false;
+  }
+  g_guard_thread = GetCurrentThreadId();
+  if (std::setjmp(g_guard_jmp) != 0) {
+    g_guard_active = 0;
+    return false;  // recovered from a fault inside `fn`
+  }
+  g_guard_active = 1;
+  fn(arg);
+  g_guard_active = 0;
+  return true;
+#else
+  (void)fn;
+  (void)arg;
+  return false;
 #endif
 }
 
