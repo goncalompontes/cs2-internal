@@ -921,11 +921,16 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   // the ragebot's early-out so records accrue even when the ragebot is idle. The
   // occlusion enumeration also consumes them (the eye→hitboxes box needs the live pose
   // and every lag record), so sample whenever either feature is live.
-  if (heatmap_sampling_.load() || occlusion_live_.load()) {
+  // The ragebot also consumes the occluders (the wallbang-aware solve), so the record
+  // sampling and the enumeration must run when it is active too — not only for the
+  // heatmap.
+  const bool rage_requested = rage_enabled_.load() || rage_force_.load();
+  if (heatmap_sampling_.load() || occlusion_live_.load() || rage_requested) {
     sample_records(snapshot);
   }
   // The occlusion enumeration also must run on a game thread (tier0 TLS).
-  if (occlusion_live_.load()) {
+  if (occlusion_live_.load() || rage_requested) {
+    occlusion_invoke_.store(true);  // the engine query must actually run
     cache_occlusion_targets(snapshot);
   }
   const bool forced = rage_force_.load();
@@ -950,12 +955,53 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   weapon.damage = rage_damage_.load();
   weapon.range_modifier = rage_range_modifier_.load();
   weapon.headshot_multiplier = rage_headshot_.load();
+  // The penetration power is not a menu setting: take it from the shooter's real
+  // weapon (`docs/re/penetration.md`) so the wallbang math uses the right budget.
+  {
+    aim::WeaponProfile from_game;
+    if (aim::read_weapon_profile(snapshot.local->weapon_vdata, from_game) &&
+        from_game.penetration > 0.0F) {
+      weapon.penetration = from_game.penetration;
+    }
+  }
 
   auto solve_input = aim::build_input(snapshot, weapon, -1);
   if (!solve_input.has_value()) {
     input_.clear_rage_aim();
     return;
   }
+  // Occlusion (`docs/ragebot.md` §3): project the world solids the game thread
+  // enumerated into the solve's chart. The solver then splits each hitbox by them and
+  // attenuates with the engine penetration model — the same field the heatmap renders
+  // — so the aim is wallbang-aware instead of aiming at a fully-occluded hitbox.
+  {
+    std::lock_guard<std::mutex> lock(occlusion_mutex_);
+    for (const OcclusionHull& hull : occlusion_hulls_) {
+      std::optional<aim::OccluderCell> cell;
+      if (hull.kind == aim::SolidKind::sphere) {
+        cell = aim::project_sphere_occluder(solve_input->eye, solve_input->basis, hull.a,
+                                            hull.radius, hull.surface_modifier);
+      } else if (hull.kind == aim::SolidKind::capsule) {
+        cell = aim::project_capsule_occluder(solve_input->eye, solve_input->basis, hull.a, hull.b,
+                                             hull.radius, hull.surface_modifier);
+      } else if (hull.kind == aim::SolidKind::mesh) {
+        cell = aim::project_mesh_occluder(solve_input->eye, solve_input->basis, hull.vertices,
+                                          hull.triangles, hull.surface_modifier);
+      } else {
+        cell = aim::project_occluder(solve_input->eye, solve_input->basis, hull.vertices,
+                                     hull.planes, hull.surface_modifier);
+      }
+      if (cell) {
+        cell->damage_modifier = hull.damage_modifier;
+        cell->material = hull.material;
+        cell->grate = hull.grate;
+        solve_input->occlusion.push_back(std::move(*cell));
+      }
+    }
+  }
+  solve_input->penetration = aim::PenetrationModel::engine;
+  solve_input->penetration_params.weapon_penetration = solve_input->weapon.penetration;
+  rage_occluders_.store(static_cast<int>(solve_input->occlusion.size()));
   solve_input->pose_sigma = rage_sigma_.load();
   switch (rage_objective_.load()) {
     case 0:
@@ -1050,12 +1096,12 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
     return false;
   }
   const int target = input_.rage_target();
-  std::snprintf(out, size, "rage: %s target %d box %d w%llu s%llu bt%llu rec%d fire %d",
+  std::snprintf(out, size, "rage: %s target %d box %d w%llu s%llu bt%llu rec%d occ%d fire %d",
                 input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(),
                 static_cast<unsigned long long>(input_.rage_writes()),
                 static_cast<unsigned long long>(input_.rage_shots()),
                 static_cast<unsigned long long>(rage_backtracks_.load()), rage_last_record_.load(),
-                input_.rage_fire() ? 1 : 0);
+                rage_occluders_.load(), input_.rage_fire() ? 1 : 0);
   return true;
 }
 
@@ -1251,6 +1297,9 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   payload.set("solves", Json::number(static_cast<double>(rage_solves_.load())));
   payload.set("writes", Json::number(static_cast<double>(input_.rage_writes())));
   payload.set("shots", Json::number(static_cast<double>(input_.rage_shots())));
+  payload.set("occluders", Json::number(static_cast<double>(rage_occluders_.load())));
+  payload.set("backtracks", Json::number(static_cast<double>(rage_backtracks_.load())));
+  payload.set("record", Json::number(static_cast<double>(rage_last_record_.load())));
   set_ok(out, std::move(payload));
 }
 

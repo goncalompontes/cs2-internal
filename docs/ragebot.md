@@ -150,6 +150,16 @@
   engine-model damage, overlays the solids and outlines each cell by its attenuation
   fraction. Host test `aim-penetration` (16/16). Full decompile:
   `docs/re/penetration.md`.
+- **The rage solve is occlusion-aware (2026-10-18).** `build_input` never filled
+  `SolveInput::occluders`, so the rage path still aimed at fully-occluded hitboxes —
+  only the `heatmap` command consumed the walls. The shared `occlude_polygon`
+  (`payload/aim/damage.hpp`, extracted from `build_heatmap`) now splits a hitbox
+  silhouette by the world solids and values each fragment with the engine penetration
+  model, and `solve` uses it whenever `SolveInput::occlusion` is non-empty. The rage
+  path projects the game-thread enumeration into the solve's chart (exactly as the
+  heatmap does) and takes the weapon's real `m_flPenetration`; the `rage` command
+  reports `occluders`/`backtracks`/`record`. Host test `aim-solver` gained the
+  thin-wall-attenuates and `< 0.1`-gate-blocks cases.
 - **The enumeration is camera-independent (2026-10-18).** The query box had been
   `eye → camera_forward·1400 ±96`, so the enumerated solid set (and therefore the
   render *and* the attenuation) changed as the player looked around. It is now the

@@ -9,6 +9,8 @@
 
 #include "cs2/aim/field.hpp"
 #include "cs2/aim/hitbox.hpp"
+#include "cs2/aim/occlusion.hpp"
+#include "cs2/aim/penetration.hpp"
 
 namespace cs2::aim {
 
@@ -31,6 +33,14 @@ struct SolveInput {
   Basis basis{};
   std::vector<Hitbox> hitboxes;
   std::vector<Occluder> occluders;
+  // The world solids between the eye and the target, projected into the chart
+  // (`docs/ragebot.md` §3, `payload/control/src/occlusion_query.cpp`). When non-empty
+  // the solver splits each hitbox silhouette by them and attenuates with the chosen
+  // penetration model — the same field the heatmap renders, so the rage aim is
+  // wallbang-aware instead of aiming at a fully-occluded hitbox.
+  std::vector<OccluderCell> occlusion;
+  PenetrationModel penetration = PenetrationModel::engine;
+  PenetrationParams penetration_params{};
   WeaponProfile weapon{};
   AimObjective objective = AimObjective::damage;
   float pose_sigma = 0.0F;  // pose-uncertainty blur (0 = none)

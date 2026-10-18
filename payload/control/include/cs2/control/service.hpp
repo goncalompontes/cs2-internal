@@ -162,6 +162,9 @@ class Service {
   // live pose, and the tick of the last chosen record (-1 = live).
   std::atomic<std::uint64_t> rage_backtracks_{0};
   std::atomic<int> rage_last_record_{-1};
+  // The number of world solids projected into the last rage solve's chart (the
+  // wallbang-aware occlusion, `docs/ragebot.md` §3). 0 = no solids enumerated.
+  std::atomic<int> rage_occluders_{0};
   // The multi-target heatmap (`docs/ragebot.md`, ADR-0022). The render thread
   // samples each live enemy's hitboxes per frame into `records_`; the control
   // thread reads a copy to build the heatmap. Sampling is on by default (so the

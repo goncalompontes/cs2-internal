@@ -31,6 +31,13 @@
 
 namespace cs2::aim {
 
+// How a wall stack reduces a hitbox's damage (`docs/re/penetration.md`).
+//  - `simple`: the first-pass approximation, `prod(1 - t*mod/m_flPenetration)`.
+//  - `engine`: the engine's real per-wall loss (`penetration_after_walls`), with the
+//    per-surface penetration/damage modifiers, the 4-wall budget and the ≈90-unit
+//    thickness cap.
+enum class PenetrationModel : std::uint8_t { simple, engine };
+
 // One surface's penetration properties — the engine's `CGameSurfaceProperties`:
 // `bulletPenetrationDistanceModifier`, `bulletPenetrationDamageModifier` and
 // `gamematerial` (a `CHAR_TEX_*` id).

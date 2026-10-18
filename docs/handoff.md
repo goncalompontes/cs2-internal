@@ -47,6 +47,22 @@ agent guide `docs/re/README.md`.
 > — see the wrap-up immediately below (`docs/ragebot.md` §0, `docs/re/occlusion.md`,
 > `docs/re/lagcomp.md`).
 
+## ⏸ Wrap-up (2026-10-18) — the rage solve is occlusion-aware
+
+**Resume here.** Closes the #1 functional gap (`docs/handoff.md` 2026-10-18 "Next").
+
+- **The occluders now feed the solve.** `build_input` never filled
+  `SolveInput::occluders`, so the ragebot aimed at fully-occluded hitboxes; only the
+  `heatmap` command used the walls. The hitbox-occlusion logic was extracted from
+  `build_heatmap` into a shared **`occlude_polygon`** (`payload/aim/{include/cs2/aim/
+  damage.hpp,src/damage.cpp}`), used by both the heatmap and `solve` (when
+  `SolveInput::occlusion` is non-empty). `service.cpp` projects the game-thread
+  enumeration into the solve's chart (the same projection the heatmap does), sets
+  `PenetrationModel::engine` + the weapon's real `m_flPenetration`, and the rage path
+  samples/enumerates whenever it is active. `rage` reports `occluders`/`backtracks`/
+  `record`; `aim-solver` gained thin-wall-block/gate cases. Host **16/16**, payload
+  builds, preflight clean.
+
 ## ⏸ Wrap-up (2026-10-18) — enumeration AABB cache + compound recursion
 
 **Resume here.** Two perf/coverage passes on the occlusion layer.

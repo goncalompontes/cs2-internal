@@ -21,6 +21,31 @@ auto near(float a, float b, float tolerance = 1e-2F) -> bool {
   return std::fabs(a - b) <= tolerance;
 }
 
+// A world-space AABB as 8 convex-hull vertices / its inward half-spaces.
+auto box_vertices(float cx, float cy, float cz, float hx, float hy, float hz)
+    -> std::vector<cs2::game::Vec3> {
+  std::vector<cs2::game::Vec3> v;
+  for (int i = 0; i < 8; ++i) {
+    v.push_back(cs2::game::Vec3{cx + ((i & 1) != 0 ? hx : -hx), cy + ((i & 2) != 0 ? hy : -hy),
+                                cz + ((i & 4) != 0 ? hz : -hz)});
+  }
+  return v;
+}
+
+auto box_planes(float cx, float cy, float cz, float hx, float hy, float hz)
+    -> std::vector<cs2::aim::OccluderPlane> {
+  using cs2::aim::OccluderPlane;
+  using cs2::game::Vec3;
+  return {
+      OccluderPlane{Vec3{1.0F, 0.0F, 0.0F}, cx + hx},
+      OccluderPlane{Vec3{-1.0F, 0.0F, 0.0F}, -(cx - hx)},
+      OccluderPlane{Vec3{0.0F, 1.0F, 0.0F}, cy + hy},
+      OccluderPlane{Vec3{0.0F, -1.0F, 0.0F}, -(cy - hy)},
+      OccluderPlane{Vec3{0.0F, 0.0F, 1.0F}, cz + hz},
+      OccluderPlane{Vec3{0.0F, 0.0F, -1.0F}, -(cz - hz)},
+  };
+}
+
 }  // namespace
 
 auto main() -> int {
@@ -133,6 +158,45 @@ auto main() -> int {
     expect(result.valid, "occluded field still solves");
     expect(result.aim.y < 0.2F, "occluded aim falls to the body");
     expect(near(result.value, 100.0F * std::pow(0.98F, 10.0F / 500.0F), 1.0F), "body damage");
+  }
+
+  // --- a real world solid (`OccluderCell`) attenuates / blocks ---------------
+  {
+    auto wall = [&](float surface) {
+      return cs2::aim::project_occluder(Vec3{}, basis, box_vertices(10.0F, 0.0F, 0.0F, 0.25F, 2.0F, 2.0F),
+                                        box_planes(10.0F, 0.0F, 0.0F, 0.25F, 2.0F, 2.0F), surface);
+    };
+
+    SolveInput head;
+    head.eye = Vec3{};
+    head.basis = basis;
+    head.weapon = cs2::aim::WeaponProfile{
+        .damage = 100.0F, .range_modifier = 1.0F, .penetration = 1.0F, .headshot_multiplier = 4.0F};
+    head.penetration_params.weapon_penetration = 1.0F;
+    Hitbox cap;
+    cap.is_capsule = true;
+    cap.capsule =
+        cs2::aim::Capsule{.a = Vec3{20.0F, -1.0F, -1.0F}, .b = Vec3{20.0F, 1.0F, 1.0F}, .radius = 1.0F};
+    cap.multiplier = 4.0F;
+    head.hitboxes.push_back(cap);
+
+    const auto open = cs2::aim::solve(head);
+    expect(open.valid, "open shot solves");
+
+    SolveInput thin = head;
+    if (const auto w = wall(1.0F); w.has_value()) {
+      thin.occlusion.push_back(*w);
+    }
+    const auto through = cs2::aim::solve(thin);
+    expect(through.valid, "a penetrable wall still leaves a hittable head");
+    expect(through.value < open.value, "the wall attenuates the head");
+    expect(through.value > 0.0F, "a thin wall does not block the shot");
+
+    SolveInput blocked = head;
+    if (const auto w = wall(0.05F); w.has_value()) {  // the < 0.1 distance-modifier gate
+      blocked.occlusion.push_back(*w);
+    }
+    expect(!cs2::aim::solve(blocked).valid, "an impenetrable surface leaves nothing to aim at");
   }
 
   // --- hitchance objective -------------------------------------------------

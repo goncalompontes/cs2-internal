@@ -1,5 +1,7 @@
 #include "cs2/aim/solver.hpp"
 
+#include "cs2/aim/damage.hpp"
+
 namespace cs2::aim {
 
 auto solve(const SolveInput& input) -> SolveResult {
@@ -21,7 +23,20 @@ auto solve(const SolveInput& input) -> SolveResult {
     if (polygon.empty()) {
       continue;
     }
-    field.add_hitbox(polygon, hitbox.multiplier, distance, input.weapon);
+    if (!input.occlusion.empty()) {
+      // Occlusion-aware: split the silhouette by the world solids and value each
+      // fragment with the engine penetration model (the wallbang-aware field, the
+      // same as the heatmap render).
+      const std::vector<DamageFragment> fragments =
+          occlude_polygon(input.eye, input.basis, polygon, hitbox.multiplier, distance,
+                          input.occlusion, input.weapon, input.penetration,
+                          input.penetration_params);
+      for (const DamageFragment& fragment : fragments) {
+        field.add(fragment.polygon, fragment.value);
+      }
+    } else {
+      field.add_hitbox(polygon, hitbox.multiplier, distance, input.weapon);
+    }
   }
   for (const Occluder& occluder : input.occluders) {
     field.clip(occluder.normal, occluder.offset);
