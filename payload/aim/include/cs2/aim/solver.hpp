@@ -43,7 +43,11 @@ struct SolveInput {
   PenetrationParams penetration_params{};
   WeaponProfile weapon{};
   AimObjective objective = AimObjective::damage;
-  float pose_sigma = 0.0F;  // pose-uncertainty blur (0 = none)
+  float pose_sigma = 0.0F;    // pose-uncertainty blur (0 = none)
+  // The weapon's cone std-dev (inaccuracy + spread, radians): the hitchance objective
+  // maximizes the probability the cone lands on the target (`hit_probability`). 0
+  // falls back to the Chebyshev-centre margin heuristic.
+  float spread_sigma = 0.0F;
   // The deterministic pellet offsets (chart space) for `AimObjective::pellets`; the
   // engine's exact offsets come from `RandomSeed(cmd_seed)` (docs/re/aim.md).
   std::vector<Vec2> pellet_offsets;
@@ -55,6 +59,9 @@ struct SolveResult {
   Vec2 aim{};          // chart point
   Vec3 direction{};    // world direction
   float value = 0.0F;  // field value at the aim
+  // The probability the shot lands on the target for the chosen aim (the cone
+  // `spread_sigma`): 1 when the whole cone is inside a hitbox, 0 when it misses.
+  float hitchance = 0.0F;
   std::size_t cells = 0;
 };
 

@@ -5,6 +5,7 @@
 // optima are the nearest point (max damage) and the Chebyshev centre (max
 // hitchance), and pose uncertainty is a Gaussian blur of the field.
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <span>
@@ -21,7 +22,31 @@ struct WeaponProfile {
   float penetration = 1.0F;     // m_flPenetration
   float headshot_multiplier = 4.0F;
   float spread = 0.0F;  // m_flSpread (+0x750, FiringModeFloat primary)
+  // The inaccuracy terms (`m_flInaccuracy*`, `docs/re/aim.md`): the cone a shot's
+  // direction is perturbed by before the spread offset. The engine composes the ones
+  // that apply from the shooter's state (`FUN_18080b880`, not yet re-reversed on the
+  // current build); `inaccuracy()` below is the first-order stand+move estimate.
+  float inaccuracy_stand = 0.0F;       // +0x760
+  float inaccuracy_crouch = 0.0F;      // +0x758
+  float inaccuracy_move = 0.0F;        // +0x788
+  float inaccuracy_jump_initial = 0.0F;  // +0x7B8
+  float inaccuracy_jump_apex = 0.0F;     // +0x7BC
 };
+
+// The first-order inaccuracy for the shooter's state (radians-ish; the engine's cone
+// magnitude). `speed` is the horizontal speed (units/s), `on_ground`/`crouched` the
+// stance. This is a *model* — the exact composition (`FUN_18080b880`, the air scale
+// convar, the jump initial↔apex blend) still needs a live cross-check
+// (`docs/re/aim.md` §"Inaccuracy"). It is used only when the caller passes no explicit
+// cone, so an explicit `sigma`/`spread` always wins.
+[[nodiscard]] inline auto inaccuracy(const WeaponProfile& weapon, float speed, bool on_ground,
+                                     bool crouched) noexcept -> float {
+  float base = on_ground ? (crouched ? weapon.inaccuracy_crouch : weapon.inaccuracy_stand)
+                         : weapon.inaccuracy_jump_apex;
+  // The move term scales with speed (the engine's `move = (speed/250) * …`).
+  base += weapon.inaccuracy_move * std::clamp(speed / 250.0F, 0.0F, 1.0F);
+  return base;
+}
 
 // Damage retained over `distance` world units (`range_modifier^(d/500)`).
 [[nodiscard]] inline auto range_falloff(float range_modifier, float distance) noexcept -> float {
@@ -66,6 +91,17 @@ struct DamageField {
 
   // The damage at a chart point (max over containing cells), or 0.
   [[nodiscard]] auto value_at(const Vec2& point) const noexcept -> float;
+
+  // The **hitchance**: the probability a shot aimed at `aim` lands inside the target's
+  // hitbox after the cone perturbs its direction. The cone is an isotropic angular
+  // Gaussian of std-dev `sigma` (the weapon inaccuracy + spread), integrated by the
+  // same deterministic quadrature as `argmax_expected` — the fraction of kernel samples
+  // whose perturbed direction lands in a cell. 0 when the target is not hit; 1 when the
+  // whole cone is inside it. With `sigma == 0` this is the binary indicator.
+  [[nodiscard]] auto hit_probability(const Vec2& aim, float sigma) const noexcept -> float;
+
+  // The aim maximizing the hitchance (`hit_probability`) for the cone `sigma`.
+  [[nodiscard]] auto argmax_hit_probability(float sigma, int grid = 40) const -> Vec2;
 
   // The pellet-sum field `Σ_k D(aim + offset_k)` — the deterministic spread model
   // (`docs/ragebot.md` §2/§3: a shot fires K pellets whose directions are

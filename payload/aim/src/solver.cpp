@@ -48,7 +48,10 @@ auto solve(const SolveInput& input) -> SolveResult {
   Vec2 aim{};
   switch (input.objective) {
     case AimObjective::hitchance:
-      aim = field.argmax_hitchance();
+      // The real hitchance when a cone is given (maximize the hit probability);
+      // otherwise fall back to the Chebyshev-centre margin heuristic.
+      aim = input.spread_sigma > 0.0F ? field.argmax_hit_probability(input.spread_sigma)
+                                      : field.argmax_hitchance();
       break;
     case AimObjective::expected:
       aim = field.argmax_expected(input.pose_sigma);
@@ -68,6 +71,7 @@ auto solve(const SolveInput& input) -> SolveResult {
   result.value = input.objective == AimObjective::pellets
                      ? field.value_at_pellets(aim, input.pellet_offsets)
                      : field.value_at(aim);
+  result.hitchance = field.hit_probability(aim, input.spread_sigma);
   result.cells = field.cells.size();
   return result;
 }

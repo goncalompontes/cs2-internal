@@ -65,6 +65,18 @@ Convars: `weapon_accuracy_nospread` `0x181bcfeb0`, `weapon_air_spread_scale`
 `0x181ca13f0`, `weapon_accuracy_shotgun_spread_patterns` `0x181ca1588`,
 `sv_turning_inaccuracy_*` / `sv_strafing_inaccuracy_*`.
 
+**Current build (2026-10-18).** The RVAs above are for build `25815307`; on the live
+build (`659940c1`) they resolve to unrelated functions, so the composition must be
+re-found. The **VData offsets are current** (`CsWeaponBaseVData`, `calibration/schema.json`):
+`m_flSpread 0x750`, `m_flInaccuracyCrouch 0x758`, `m_flInaccuracyStand 0x760`,
+`m_flInaccuracyJump 0x768`, `m_flInaccuracyLand 0x770`, `m_flInaccuracyLadder 0x778`,
+`m_flInaccuracyFire 0x780`, `m_flInaccuracyMove 0x788`,
+`m_flInaccuracyJumpInitial 0x7B8`, `m_flInaccuracyJumpApex 0x7BC`,
+`m_flInaccuracyReload 0x7C0`. The payload reads them (`read_weapon_profile`) and
+`aim::inaccuracy(...)` is a first-order stand/move cone; the exact engine composition
+(the applicable-term sum, the `weapon_air_spread_scale` convar, the jump initial↔apex
+`|v_z|` blend, `pow(x, 0.25)`) is the next RE step (`docs/ragebot.md` §0).
+
 ## Weapon data (`CCSWeaponBaseVData`) — penetration / damage parameters
 
 Schema offsets (from `calibration/schema.json`, `CCSWeaponBaseVData`):

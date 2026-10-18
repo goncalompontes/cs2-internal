@@ -62,6 +62,14 @@ constexpr std::uintptr_t k_bone_stride = 0x20;
 // `CCSWeaponBaseVData` (reached via `C_BaseEntity::m_nSubclassID` + the entity's
 // VData chain, `docs/re/aim.md`); the VData carries the real damage model.
 constexpr std::uintptr_t k_vdata_spread = 0x750;  // m_flSpread (FiringModeFloat)
+// The inaccuracy terms (`m_flInaccuracy*`, `docs/re/aim.md` §"Inaccuracy"), used for the
+// hitchance cone. The engine composes the applicable terms from the shooter's state
+// (`FUN_18080b880`); `aim::inaccuracy` is the first-order stand/move estimate.
+constexpr std::uintptr_t k_vdata_inaccuracy_crouch = 0x758;
+constexpr std::uintptr_t k_vdata_inaccuracy_stand = 0x760;
+constexpr std::uintptr_t k_vdata_inaccuracy_move = 0x788;
+constexpr std::uintptr_t k_vdata_inaccuracy_jump_initial = 0x7B8;
+constexpr std::uintptr_t k_vdata_inaccuracy_jump_apex = 0x7BC;
 constexpr std::uintptr_t k_vdata_damage = 0x820;
 constexpr std::uintptr_t k_vdata_headshot = 0x824;
 constexpr std::uintptr_t k_vdata_penetration = 0x82C;
@@ -168,6 +176,12 @@ auto read_weapon_profile(std::uintptr_t weapon_vdata, WeaponProfile& profile) no
   if (float spread = 0.0F; game::read(weapon_vdata + k_vdata_spread, spread) && spread > 0.0F) {
     profile.spread = spread;
   }
+  // The inaccuracy terms (read as-is; the shader picks which apply).
+  (void)game::read(weapon_vdata + k_vdata_inaccuracy_crouch, profile.inaccuracy_crouch);
+  (void)game::read(weapon_vdata + k_vdata_inaccuracy_stand, profile.inaccuracy_stand);
+  (void)game::read(weapon_vdata + k_vdata_inaccuracy_move, profile.inaccuracy_move);
+  (void)game::read(weapon_vdata + k_vdata_inaccuracy_jump_initial, profile.inaccuracy_jump_initial);
+  (void)game::read(weapon_vdata + k_vdata_inaccuracy_jump_apex, profile.inaccuracy_jump_apex);
   return true;
 }
 

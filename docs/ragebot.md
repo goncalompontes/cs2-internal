@@ -160,6 +160,21 @@
   heatmap does) and takes the weapon's real `m_flPenetration`; the `rage` command
   reports `occluders`/`backtracks`/`record`. Host test `aim-solver` gained the
   thin-wall-attenuates and `< 0.1`-gate-blocks cases.
+- **A real hitchance + the weapon inaccuracy terms (2026-10-18).** `hitchance` was the
+  Chebyshev-centre margin heuristic; it is now the **hit probability** — the fraction of
+  the weapon's cone that lands on the target (`DamageField::hit_probability` /
+  `argmax_hit_probability`, the same deterministic Gaussian quadrature as `expected`,
+  `docs/ragebot.md` §2). The `CCSWeaponBaseVData` inaccuracy terms
+  (`m_flInaccuracyCrouch/Stand/Move/JumpInitial/JumpApex` at
+  `0x758/0x760/0x788/0x7B8/0x7BC`, `docs/re/aim.md` §"Inaccuracy") are read into
+  `WeaponProfile`, and `aim::inaccuracy(...)` is the first-order stand/move cone (the
+  engine's exact composition `FUN_18080b880` still needs re-reversing — the doc's RVAs
+  are from the old build). The `aim` command takes `cone` (radians; defaults to the
+  weapon's inaccuracy+spread) and reports `hitchance`/`cone`; the `hitchance` objective
+  maximizes the probability when a cone is given. Host tests `aim-field`/`aim-solver`.
+  **Next:** re-reverse the exact inaccuracy composition (+ the `weapon_air_spread_scale`
+  convar, the jump initial↔apex `|v_z|` blend) and the shotgun/negev pattern table
+  (`FUN_1807cd1b0`) on the current build, then live cross-check the pellet seed.
 - **The enumeration is camera-independent (2026-10-18).** The query box had been
   `eye → camera_forward·1400 ±96`, so the enumerated solid set (and therefore the
   render *and* the attenuation) changed as the player looked around. It is now the

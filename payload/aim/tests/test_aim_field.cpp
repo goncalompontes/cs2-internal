@@ -101,6 +101,27 @@ auto main() -> int {
            "K=1 reduces to argmax_damage");
   }
 
+  // --- the hitchance: the cone (hit) probability (docs/ragebot.md §2) -------
+  {
+    DamageField cone;
+    cone.add(square(-0.02F, -0.02F, 0.02F, 0.02F), 100.0F);  // a 0.04-wide cell at the origin
+
+    expect(near(cone.hit_probability(Vec2{}, 0.0F), 1.0F), "no cone, centre -> hit");
+    expect(near(cone.hit_probability(Vec2{0.5F, 0.5F}, 0.0F), 0.0F), "no cone, far -> miss");
+    expect(near(cone.hit_probability(Vec2{}, 0.001F), 1.0F), "a tiny cone inside -> 1");
+    expect(cone.hit_probability(Vec2{0.5F, 0.5F}, 0.01F) < 0.01F, "a far cone -> ~0");
+    // A cone straddling the cell edge gives a partial probability.
+    const float edge = cone.hit_probability(Vec2{0.04F, 0.0F}, 0.04F);
+    expect(edge > 0.0F && edge < 1.0F, "a straddling cone -> partial");
+    // The hitchance optimum maximizes the probability.
+    const Vec2 best = cone.argmax_hit_probability(0.04F);
+    expect(cone.hit_probability(best, 0.04F) >= edge, "argmax_hit_probability improves it");
+    // A wider cone over a small cell lowers the peak hitchance.
+    expect(cone.hit_probability(cone.argmax_hit_probability(0.08F), 0.08F) <
+               cone.hit_probability(best, 0.04F),
+           "a wider cone lowers the peak hitchance");
+  }
+
   if (failures == 0) {
     std::printf("aim-field: ok\n");
     return 0;

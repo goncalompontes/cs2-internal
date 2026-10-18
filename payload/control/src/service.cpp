@@ -1174,6 +1174,18 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
     }
   }
 
+  // The spread cone for the hitchance objective (`docs/re/aim.md` §"Inaccuracy"): an
+  // explicit `cone` (radians) or the weapon's first-order inaccuracy + spread (standing;
+  // the exact state composition `FUN_18080b880` still needs a live cross-check).
+  {
+    float cone = number("cone", -1.0F);
+    if (cone < 0.0F) {
+      const float inacc = aim::inaccuracy(input->weapon, 0.0F, true, false);
+      cone = std::sqrt(inacc * inacc + input->weapon.spread * input->weapon.spread);
+    }
+    input->spread_sigma = cone;
+  }
+
   const aim::SolveResult result = aim::solve(*input);
   if (!result.valid) {
     set_error(out, "aim unavailable: no hittable target");
@@ -1197,6 +1209,8 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
   payload.set("yaw", Json::number(yaw));
   payload.set("pitch", Json::number(pitch));
   payload.set("value", Json::number(result.value));
+  payload.set("hitchance", Json::number(static_cast<double>(result.hitchance)));
+  payload.set("cone", Json::number(static_cast<double>(input->spread_sigma)));
   payload.set("cells", Json::number(static_cast<double>(result.cells)));
   payload.set("aim_u", Json::number(result.aim.x));
   payload.set("aim_v", Json::number(result.aim.y));

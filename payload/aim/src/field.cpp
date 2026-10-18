@@ -60,6 +60,68 @@ auto DamageField::value_at(const Vec2& point) const noexcept -> float {
   return best;
 }
 
+auto DamageField::hit_probability(const Vec2& aim, float sigma) const noexcept -> float {
+  if (cells.empty()) {
+    return 0.0F;
+  }
+  const std::vector<Vec2> kernel = gaussian_offsets(sigma, 32);
+  if (kernel.size() <= 1) {
+    return value_at(aim) > 0.0F ? 1.0F : 0.0F;
+  }
+  int hits = 0;
+  for (const Vec2& offset : kernel) {
+    if (value_at(aim + offset) > 0.0F) {
+      ++hits;
+    }
+  }
+  return static_cast<float>(hits) / static_cast<float>(kernel.size());
+}
+
+auto DamageField::argmax_hit_probability(float sigma, int grid) const -> Vec2 {
+  const Polygon box = bounds();
+  if (box.empty()) {
+    return Vec2{};
+  }
+  float min_x = box.points.front().x;
+  float max_x = min_x;
+  float min_y = box.points.front().y;
+  float max_y = min_y;
+  for (const Vec2& p : box.points) {
+    min_x = std::min(min_x, p.x);
+    max_x = std::max(max_x, p.x);
+    min_y = std::min(min_y, p.y);
+    max_y = std::max(max_y, p.y);
+  }
+
+  Vec2 best = polygon_centroid(box);
+  float best_p = -1.0F;
+  const auto consider = [&](const Vec2& candidate) {
+    const float p = hit_probability(candidate, sigma);
+    if (p > best_p) {
+      best_p = p;
+      best = candidate;
+    }
+  };
+  // The cell optima and vertices are the natural maxima of the (piecewise-constant)
+  // probability, so seed the search with them, then refine on a grid.
+  for (const Cell& cell : cells) {
+    consider(chebyshev_center(cell.polygon));
+    for (const Vec2& point : cell.polygon.points) {
+      consider(point);
+    }
+  }
+  const int n = std::max(grid, 1);
+  const float step_x = (max_x - min_x) / static_cast<float>(n);
+  const float step_y = (max_y - min_y) / static_cast<float>(n);
+  for (int iy = 0; iy <= n; ++iy) {
+    for (int ix = 0; ix <= n; ++ix) {
+      consider(Vec2{min_x + static_cast<float>(ix) * step_x,
+                    min_y + static_cast<float>(iy) * step_y});
+    }
+  }
+  return best;
+}
+
 auto DamageField::value_at_pellets(const Vec2& aim, std::span<const Vec2> offsets) const noexcept
     -> float {
   if (offsets.empty()) {
