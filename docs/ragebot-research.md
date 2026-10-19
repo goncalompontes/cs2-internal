@@ -4,6 +4,11 @@
 > still cost tens of milliseconds per tick. This file is the *research phase* brief: what
 > the industry does, which libraries exist, and which of our components should be
 > replaced. Read this before writing more geometry code.
+>
+> **Deep research:** three companion briefs in [`research/`](research/) — read
+> [`research/README.md`](research/README.md) for the index and the ranked findings. They
+> contain measured benchmarks, primary-source citations, and **three concrete bugs found
+> in our current code** (one of which is a gameplay-visible hitchance error).
 
 ## 1. Where the cost actually is (measured, not guessed)
 
@@ -47,15 +52,27 @@ References:
   modifiers. This is the same idea without engine calls — and it is the closest analogue
   to what we could do payload-side.
   <https://github.com/Read1dno/ExternalAutoWallCS2>
-- **Osiris** (the reference open-source CS2 cheat): aimbot/triggerbot drive the engine's
-  own trace; there is no projected damage field anywhere in it.
-  <https://github.com/danielkrupinski/Osiris>
+- **Osiris** (the best-known open-source cheat): **MIT licensed**, and `master` contains
+  **no aimbot, autowall or trace code at all** — it is visuals/HUD only. Its aimbot exists
+  only on the `csgo-end-of-life` tag, and that one is a bone scan + visibility check with
+  no probability model. Do not cite it as the CS2 combat reference.
+  <https://github.com/danielkrupinski/Osiris> (verified: MIT `LICENSE`, and
+  `Source/Features/` on `master` has no `Aimbot`.)
+- **The CS2 lineage is `CreateTrace`, not a trace loop.** In CS2 the engine call returns
+  the **entire sorted surface stack** for a ray in one go (`TraceData_t::mod_array`), and
+  `HandleBulletPenetration` is pure arithmetic per stack entry. So a correct CS2 autowall
+  is *one engine call + ≤5 arithmetic steps* — the CS:GO `TraceRay`/`TraceToExit` loop is
+  the wrong shape. The public CS2 releases that do this are the UC "EngineTrace /
+  TraceShape" line (UC 747109 → 608159 → 764290).
 - UC: *Full Penetration / Autowall / Damage calculation* (CS2 structs + code).
   <https://www.unknowncheats.me/forum/counter-strike-2-a/764290-penetration-autowall-damage-calculation.html>
 
-**Conclusion:** the arrangement/field is our own invention. It is elegant (it answers
-"what is the best aimpoint" rather than "can I hit this point"), but it is the reason we
-are slow. The industry trades the global optimum for a handful of traces.
+**Conclusion:** the arrangement/field is our own invention — **no public implementation
+builds a projected damage field.** It is elegant (it answers "what is the best aimpoint"
+rather than "can I hit this point"), but it is the reason we are slow. The industry trades
+the global optimum for a bounded number of traces. See
+[`research/autowall-implementations.md`](research/autowall-implementations.md) for the
+full survey, and note the licences there before reading any code.
 
 ## 3. We are closer to the industry design than it looks
 
