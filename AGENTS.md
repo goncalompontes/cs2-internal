@@ -74,6 +74,12 @@ the bots respawn elsewhere, so the cell count changes and dominates the timings.
 host benchmark over a saved cell set for timing, and live runs (`scripts/perf-live.py`)
 for correctness.
 
+**Next phase: research, not more geometry.** [`docs/ragebot-research.md`](docs/ragebot-research.md)
+collects what the industry actually does (repeated ray traces, not a projected
+arrangement), the libraries worth adopting (Clipper2, tinybvh, potentially the engine's
+own `TraceShape`), and the recommended pivot away from `occlude_polygon`'s fragment
+arrangement. Read it before adding more geometry code.
+
 The ragebot itself (Tier-2 occlusion, angle-correct field, multi-target, assists,
 per-weapon profiles) is described in `docs/ragebot.md` and audited in
 `docs/ragebot-review.md`; the perf work is in `docs/ragebot-perf.md`. The payload,

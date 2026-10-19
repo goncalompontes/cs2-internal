@@ -6,6 +6,15 @@
 > `docs/next-session-present-hook.md`) landed and is validated; this session then
 > instrumented and began optimising the ragebot. The remaining work is the perf and
 > correctness items below.
+>
+> **Update (later 2026-10-19):** the work described here is committed (`5dd49fb`,
+> `9296a42`). Two of the items below landed (§2.0 objective search, §2.1 pyramid
+> enumeration), and the session's measurements invalidated this file's original premise
+> — the objective search, not the world projection, was the bottleneck. The remaining
+> cost is `occlude_polygon`'s fragment arrangement; **read
+> [`docs/ragebot-research.md`](ragebot-research.md) before writing more geometry code** —
+> the industry uses repeated ray traces, not a projected arrangement, and the brief lists
+> the libraries worth adopting (Clipper2, tinybvh, the engine's own `TraceShape`).
 
 ## 0. What landed this session
 
