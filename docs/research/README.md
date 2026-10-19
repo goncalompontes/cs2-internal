@@ -11,6 +11,11 @@ whichever of these matches your task.
 | [`geometry-algorithms.md`](geometry-algorithms.md) | Measured benchmarks of our primitives vs Clipper2/CGAL/Boost, BVH libraries, visibility algorithms, the manual-map constraints | You are about to write geometry or pick a library |
 | [`aim-objective-math.md`](aim-objective-math.md) | The probability model, the spread kernel, numerics of the polygon mass, multimodal optimisation, pellets | You are touching the objective search or hitchance |
 
+[`frontier-prompt.md`](frontier-prompt.md) is a **self-contained prompt** (all the measured
+numbers and constraints inline) for handing the whole problem to a frontier reasoning
+model, asking it to formalise the problem, compare designs, and propose the optimal
+architecture.
+
 ## The three findings that matter most
 
 1. **The algorithm is wrong, not the primitive.** [`geometry-algorithms.md`](geometry-algorithms.md) §2
