@@ -1,18 +1,44 @@
 # Hand-off — overlay / payload state
 
-> **NEXT SESSION: start at [`docs/next-session-ragebot-perf.md`](next-session-ragebot-perf.md).**
-> The in-process Present renderer landed (ADR-0023; the Vulkan layer is now a fallback),
-> and the ragebot was instrumented and optimised this session. The remaining work is the
-> **occlusion query volume** (cone/frustum over the `AabbBvh`, plus a depth-sorted
-> "fully impenetrable" early-exit), **moving the remaining game logic into the frame
-> stages** (out of the renderer), and the lag-comp/inaccuracy correctness items. Perf
-> numbers, instrumentation, the uncommitted-file list and the run/gotcha details are all
-> in that doc.
+> **NEXT SESSION: start at [`docs/next-session-ragebot-research.md`](next-session-ragebot-research.md).**
+> This session profiled the ragebot properly, fixed its two biggest costs, disabled
+> lag-record backtracking by default, and ran three deep-research threads. The next step is
+> **acting on the research**, not writing more geometry: a one-line hitchance σ bug, a
+> one-hour 10–14× on the hot path, then replacing the occlusion *arrangement* with a
+> bounded candidate search. All committed at `33672a5`.
 
-> **Previous session: [`docs/next-session-present-hook.md`](next-session-present-hook.md).**
-> That was the in-process renderer + ragebot-follow-ups brief; the renderer part is done
-> (ADR-0023), the ragebot follow-ups (auto-stop, recoil, cursor) are still open and are
-> carried into the new doc.
+> **Previous session: [`docs/next-session-ragebot-perf.md`](next-session-ragebot-perf.md).**
+> That brief's premise was **wrong** — it said the world projection was the bottleneck; the
+> profile showed the *objective search* was. Two of its items (objective search, pyramid
+> enumeration) are now done; the doc carries a correction note at the top.
+
+## ⏸ Wrap-up (2026-10-19, evening) — ragebot perf, backtrack off, research phase
+
+**Resume at [`docs/next-session-ragebot-research.md`](next-session-ragebot-research.md).**
+
+- **The profile contradicted the previous brief.** Live, at a dense spot, the objective
+  search was **43 ms of a 61 ms tick** and a single tick once took **11.6 s**. Fixed:
+  a uniform point grid in `DamageField`, value-eligible candidates, an allocation-free
+  Chebyshev bisection and a proven `8σ` tail cutoff (host: `argmax_damage` 102 → 0.15 ms);
+  the per-enemy **pyramid enumeration** (1792 → 14 world hulls) with occluders **tagged by
+  target**; mesh clusters projecting 8 AABB corners instead of the triangle soup
+  (772 µs → 0.69 µs); and the redundant live-pose re-solve removed. Worst tick 11.6 s →
+  ~15 ms. All in `5dd49fb`; full numbers in [`ragebot-perf.md`](ragebot-perf.md) §2.0/§3.9.
+- **Occlusion still the dominant cost** (6–70 ms, spot-dependent): `occlude_polygon`
+  enumerates a 2-D arrangement (57 hitboxes × 312 solids → 15,670 cells, ~0.6 s). A
+  stopgap cap (`PenetrationParams::max_occluders = 24`) is in place and is explicitly *not*
+  exactness-preserving — it must be removed when the real fix lands.
+- **Lag-record backtracking is OFF by default** (menu checkbox, `rage backtrack=true` to
+  re-enable). Turning it off also skips record sampling (~0.6 ms/tick) and the redundant
+  live-pose re-solve (~4 ms/tick).
+- **Research phase done** — three deep briefs under [`docs/research/`](research/README.md):
+  *no public cheat builds a projected damage field* (all trace; in CS2 one call returns the
+  whole sorted surface stack), our clipping primitive is **6× faster than Clipper2** so the
+  *algorithm* is the problem, and the hitchance σ is **√6 too wide** (a gameplay bug:
+  0.221 reported vs 0.777 true for a head-sized target). Also: Osiris is **MIT** (the
+  earlier note said GPL-3.0) and its `master` has no combat code at all.
+- **Committed and clean**: `5dd49fb`, `9296a42`, `e8ba263`, `33672a5` on
+  `feat/occlusion-penetration`. 17/17 host tests; `payload.dll` builds.
 
 ## ⏸ Wrap-up (2026-10-19) — in-process renderer + ragebot instrumentation/perf
 

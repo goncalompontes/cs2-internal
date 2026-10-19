@@ -39,47 +39,37 @@ play/injection testing — it will land in session 0 and there will be no GPU.
 
 ## Where to resume (current work)
 
-**Start at [`docs/next-session-ragebot-perf.md`](docs/next-session-ragebot-perf.md).**
+**Start at [`docs/next-session-ragebot-research.md`](docs/next-session-ragebot-research.md).**
 
-The in-process Present renderer (workstream A from the previous brief) **landed** —
-ADR-0023: the ESP + HUD + menu render from the game's own DXGI `Present` with the
-payload's ImGui D3D11 backend; the Vulkan layer is now a fallback and
-`scripts/launch-cs2.cmd` defaults to D3D11 (no `-vulkan`). This session then
-instrumented and optimised the ragebot.
+Committed at `33672a5` (tree clean, 17/17 host tests). This session profiled the ragebot,
+fixed its two biggest costs, disabled lag-record backtracking by default, and ran three
+deep-research threads. **The next step is acting on the research, not writing more
+geometry.**
 
-The remaining work, in priority order (all detailed in that doc):
+Ranked, in that doc:
 
-1. **Objective-search cost** — **done** (`docs/ragebot-perf.md` §3.9): the live profile
-   showed the *objective search*, not the world projection, was the bottleneck
-   (`argmax` ~43 of ~61 ms/tick). Fixed exactly with a point grid in `DamageField`,
-   value-eligible candidates, an allocation-free Chebyshev bisection and a proven `8σ`
-   tail cutoff. Host benchmark: `argmax_damage` 102 ms → 0.15 ms. The cone objective's
-   remaining ~20–35 ms is `mass_ascent`'s iteration count — the next step.
-2. **Occlusion query volume** — **done** (§2.1): the enumeration is now the union of the
-   **eye→enemy pyramids** (`AabbBvh::query_pyramid`), one base per enemy. Live 1792 → 14
-   world hulls, with the used occluder silhouettes identical to the old AABB volume.
-   `scripts/perf-live.py compare` re-runs that A/B live.
-3. **Depth-sorted "fully impenetrable" early-exit** — still open: stop projecting once the
-   penetration budget is exhausted for every hitbox (exact, no geometry dropped).
-4. **Move the remaining game logic out of the renderer** — state read, record sampling
-   and the occlusion-box build still run in `Overlay::update`; they belong in the frame
-   stage that owns them (CreateMove / FrameStageNotify), following the game's order.
-5. **Lag-comp correctness** (needs RE) — bone setup at the record's exact
-   `m_flSimulationTime`; lerp-aware record validity.
-6. **Inaccuracy units** — reverse `FUN_18080b880` on the current build.
-7. **Ragebot follow-ups** — auto-stop oscillation, recoil/spray, menu cursor.
+1. **Hitchance σ bug** — one line: the σ is `√6` too wide vs the engine's kernel, so
+   `min_hitchance` rejects shots that hit ~78 % of the time.
+2. **Per-fragment AABB re-prune** in `occlude_polygon` — ~1 hour, measured 10–14×, no
+   model change.
+3. **Evaluate, don't enumerate** (2–3 days) — score candidates with `ray_span` +
+   `penetration_after_walls` (~2–5 ms) and keep the arrangement only for the heatmap;
+   then remove the stopgap occluder cap and the backtrack budget guard.
+4. The carried-over items: depth-sorted early-exit (subsumed by 3), moving the state
+   read / record sampling / occlusion build into the frame stages, lag-comp bone setup at
+   the recorded `m_flSimulationTime` (needs RE), the inaccuracy-unit cross-check
+   (`FUN_18080b880`), and the ragebot follow-ups (auto-stop oscillation, recoil/spray,
+   menu cursor).
+
+The short orientation brief is [`docs/ragebot-research.md`](docs/ragebot-research.md); the
+three deep briefs (with measured benchmarks, primary-source citations, licence notes and
+the bugs they found in our code) are indexed at
+[`docs/research/README.md`](docs/research/README.md).
 
 **Live measurement caveat:** a "before/after" is *not* comparable across a game restart —
 the bots respawn elsewhere, so the cell count changes and dominates the timings. Use the
 host benchmark over a saved cell set for timing, and live runs (`scripts/perf-live.py`)
 for correctness.
-
-**Next phase: research, not more geometry.** The short orientation brief is
-[`docs/ragebot-research.md`](docs/ragebot-research.md); the three deep briefs (with
-measured benchmarks, primary-source citations, and the bugs they found in our code) are
-indexed at [`docs/research/README.md`](docs/research/README.md). Read those before adding
-more geometry code: the primitive is fine, the *algorithm* (enumerating a 2-D arrangement)
-is the problem, and the industry uses one engine trace per candidate instead.
 
 The ragebot itself (Tier-2 occlusion, angle-correct field, multi-target, assists,
 per-weapon profiles) is described in `docs/ragebot.md` and audited in
@@ -87,7 +77,7 @@ per-weapon profiles) is described in `docs/ragebot.md` and audited in
 injection, live state and overlay are validated on native Windows — see
 `docs/handoff.md` and `docs/windows-validation.md`.
 
-**Uncommitted:** everything since `77f2548` — commit before continuing.
+**Uncommitted:** nothing — the tree is clean at `33672a5`.
 
 ## Static RE tooling (REA + Ghidra)
 
