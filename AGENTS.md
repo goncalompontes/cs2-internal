@@ -39,15 +39,22 @@ play/injection testing — it will land in session 0 and there will be no GPU.
 
 ## Where to resume (current work)
 
-The active feature is the **programmatic scenario / control harness** (drive CS2
-for tests: launch, inject, join a bot match, add/place bots, aim, input
-sequences, await events). Resume from:
+**Start at [`docs/next-session-present-hook.md`](docs/next-session-present-hook.md).**
+Two workstreams:
 
-- `docs/control-harness.md` — design, decisions, command surface, next actions.
-- `docs/re/engine2.md` — RE of the engine console-command path (the `exec`
-  primitive; `-concommandpipe` finding).
+1. **Retire the external (Vulkan-layer) renderer for the ESP/menu** and render
+   in-process from the game's Present path. The DXGI method-table interposer
+   (`payload/features/src/present_hook.cpp` + `dxgi_interposer.cpp`) and the ImGui
+   D3D11 backend (`payload/render/src/imgui_backend.cpp`) already exist; the work is to
+   make that the default (instead of `GamePresentHook` + the `overlay/` shm layer) and
+   move the menu input/WndProc into the payload.
+2. **Ragebot follow-ups still broken/janky:** auto-stop oscillation (counter-strafe
+   frame/hysteresis), recoil/spray compensation (verify what the shot inherits; the
+   per-weapon pattern table), and the menu cursor still being locked.
 
-The payload, injection, live state and the Vulkan overlay are already validated
+The ragebot itself (Tier-2 occlusion, angle-correct field, multi-target, assists,
+per-weapon profiles) is described in `docs/ragebot.md` and audited in
+`docs/ragebot-review.md`. The payload, injection, live state and overlay are validated
 on native Windows — see `docs/handoff.md` and `docs/windows-validation.md`.
 
 ## Static RE tooling (REA + Ghidra)

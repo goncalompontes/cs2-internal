@@ -1,6 +1,14 @@
 # Hand-off — overlay / payload state
 
-> **▶ NEXT SESSION (occlusion): start at [`NEXT_SESSION_OCCLUSION.md`](../NEXT_SESSION_OCCLUSION.md).**
+> **NEXT SESSION: start at [`docs/next-session-present-hook.md`](next-session-present-hook.md).**
+> It carries the session status (commits, what is live-verified), the three ragebot
+> items still broken/janky (auto-stop oscillation, recoil/spray compensation, menu
+> cursor), and the new direction: **retire the external Vulkan-layer renderer for the
+> ESP/menu and render in-process from the game's Present path** (the DXGI interposer +
+> ImGui D3D11 backend already exist; the work is to make that the default and move the
+> menu input into the payload).
+
+> **Archived brief (occlusion): [`NEXT_SESSION_OCCLUSION.md`](../NEXT_SESSION_OCCLUSION.md).**
 > It is self-contained: the goal (make the Tier-2 enumeration match the engine's trace
 > **exactly**, no inference, using the `rea` plugin), what is already reversed, how to
 > reverse the big DLLs, the live workflow + saved position, and the acceptance criteria.
