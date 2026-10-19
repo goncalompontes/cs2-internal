@@ -422,9 +422,9 @@ class Input {
     rage_reload_.store(reload);
   }
   // Recoil compensation (subtract the recoil punch from the silent aim) and the
-  // auto-stop speed threshold: 0 = a full stop, > 0 = decelerate (counter-strafe) only
-  // until the horizontal speed is at/below this many units per second (the fastest
-  // movement that does not add spread).
+  // auto-stop speed threshold in units/s: 0 = a full stop, > 0 = decelerate
+  // (counter-strafe) only until the horizontal speed is at/below this many units per
+  // second. The service defaults this to 34% of the weapon's max speed.
   void set_rage_recoil(bool on) noexcept { rage_recoil_.store(on); }
   void set_rage_stop_speed(float units_per_second) noexcept {
     rage_stop_speed_.store(units_per_second);
