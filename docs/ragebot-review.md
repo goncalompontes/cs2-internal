@@ -178,10 +178,11 @@ Menu (`wire::Settings`, `k_version` 8 → **9**) + `rage` command + payload:
   already still/scoped before firing; mode 2 means "when a damageable target exists"
   rather than "when firing". They are applied through `Input` even when no solve is
   active (`clear_rage_aim_keep_aux`).
-- **Speed-limited auto-stop.** `rage_stop_speed` (units/s, menu slider): 0 = a full stop;
-  > 0 = **counter-strafe** only until the horizontal speed is at/below the limit (the
-  fastest movement that does not add spread) — the move axes are computed opposite the
-  velocity in the aim frame, then released.
+- **Speed-limited auto-stop.** `rage_stop_speed` (units/s, menu slider): 0 = the default
+  **34% of the weapon's max speed**, > 0 = an explicit speed; auto-stop **counter-strafes**
+  only until the horizontal speed is at/below the limit (the fastest movement that does
+  not add spread) — the move axes are computed opposite the velocity in the aim frame,
+  then released.
 - **Recoil compensation.** `rage_recoil` (`m_pAimPunchServices -> m_predictableBaseAngle`)
   is subtracted from the silent aim each tick, so the shot (which inherits the punch)
   lands on the target.
