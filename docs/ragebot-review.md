@@ -193,6 +193,26 @@ Menu (`wire::Settings`, `k_version` 8 → **9**) + `rage` command + payload:
   are ragebot targets; the knife, C4, taser, grenades and equipment are excluded
   (`is_rage_weapon`, with a designer-name deny-list fallback). `wire::Settings` v11.
 
+### 3d. Fourth pass — multi-target, full recoil, silent aim, cursor (2026-10-19)
+
+- **Multi-target aim.** The solve no longer picks the closest enemy. Target selection
+  collects every enemy in the FOV (nearest-first, capped at 6) and builds **one field
+  over all of them** (`Hitbox::target` tags each hitbox); the global optima pick the
+  best aimpoint, and `best_target_for` maps it back to the enemy. Backtracking then runs
+  for the chosen enemy (the occlusion set is shared). The fire gate/diagnostics follow.
+- **Recoil = the full punch.** `read_aim_punch` now sums the predictable *and*
+  unpredictable (`m_unpredictableBaseAngle`) buffers — the accumulated spray pattern —
+  not just the predictable base angle. The weapon's incremental pattern table remains a
+  follow-up; the total punch each tick already covers the pattern as it accumulates.
+- **Silent aim fixed.** The command-`viewangles` write moved the camera; it is removed.
+  The silent aim is written into the **raw** sub-tick history (`CCSGOInput + 0xbd0`)
+  *before* the engine builds the command's `input_history` (the channel the shot reads),
+  as well as the history entries — so a shot never falls back to the player's view and
+  the camera stays still.
+- **Menu cursor.** The overlay now calls `ClipCursor(nullptr)` when the menu opens and
+  every frame while it is open, releasing the mouse clip the game holds (previously the
+  cursor was trapped and the game's own menu had to be opened first).
+
 ## 4. Verification
 
 - Host tests: **16/16** (`meson test -C build`), including the new geometry/field

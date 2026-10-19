@@ -916,6 +916,34 @@ auto Service::effective_rage_tuning(const char* active_weapon) noexcept -> RageT
   return name.rfind("weapon_", 0) == 0;
 }
 
+// The entity index whose hitbox is angularly closest to `direction` — the target the
+// global aimpoint landed on.
+auto best_target_for(const aim::SolveInput& input, const game::Vec3& direction) -> int {
+  int best = -1;
+  float best_dot = -2.0F;
+  for (const aim::Hitbox& hitbox : input.hitboxes) {
+    const game::Vec3 centre =
+        hitbox.is_capsule ? (hitbox.capsule.a + hitbox.capsule.b) * 0.5F : hitbox.box.center;
+    const game::Vec3 to_centre = game::normalized(centre - input.eye);
+    const float d = game::dot(direction, to_centre);
+    if (d > best_dot) {
+      best_dot = d;
+      best = hitbox.target;
+    }
+  }
+  return best;
+}
+
+// The pawn of the player with entity `index` (0 when absent).
+auto pawn_for_index(const game::Snapshot& snapshot, int index) -> std::uintptr_t {
+  for (const game::PlayerSnapshot& player : snapshot.players) {
+    if (player.index == index) {
+      return player.pawn;
+    }
+  }
+  return 0;
+}
+
 // The hitgroup / hitbox id of the box whose centre is angularly closest to
 // `direction` — a diagnostic (which hitbox the solve effectively picked).
 auto rage_hitbox_for(const aim::SolveInput& solve_input, const game::Vec3& direction) -> int {
@@ -1146,11 +1174,13 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   // one, else the global settings (`effective_rage_tuning`).
   const RageTuning tuning = effective_rage_tuning(local.weapon.c_str());
 
-  // Target selection (`docs/ragebot.md` §3): the nearest enemy within the FOV cone
-  // (degrees; 0 = unlimited), computed **before** the trigger so the assists can be
-  // predictive.
+  // Target selection (`docs/ragebot.md` §3): the enemies within the FOV cone (degrees;
+  // 0 = unlimited), computed **before** the trigger so the assists can be predictive.
+  // **Every** enemy is a candidate — the solve scans them all at once and picks the best
+  // aimpoint, not the closest player.
   constexpr float k_deg_to_rad = 0.01745329251994329577F;
-  int selected_target = -1;
+  constexpr std::size_t k_max_candidates = 6;
+  std::vector<int> candidates;
   {
     const float fov = tuning.fov;
     const float cos_limit = fov > 0.0F ? std::cos(fov * 0.5F * k_deg_to_rad) : -1.0F;
@@ -1159,7 +1189,8 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     const float pitch = local.eye_angles.pitch * k_deg_to_rad;
     const game::Vec3 forward{std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw),
                              -std::sin(pitch)};
-    float best = 1.0e30F;
+    // Nearest first, capped, so the field stays bounded when 10 players are in view.
+    std::vector<std::pair<float, int>> in_view;
     for (const game::PlayerSnapshot& player : snapshot.players) {
       if (player.is_local || !player.alive || player.pawn == 0) {
         continue;
@@ -1179,16 +1210,20 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
       if (dot < cos_limit) {
         continue;  // outside the FOV cone
       }
-      if (player.distance < best) {
-        best = player.distance;
-        selected_target = player.index;
+      in_view.emplace_back(player.distance, player.index);
+    }
+    std::sort(in_view.begin(), in_view.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& entry : in_view) {
+      if (candidates.size() >= k_max_candidates) {
+        break;
       }
+      candidates.push_back(entry.second);
     }
   }
-  // "Can we deal damage to the player": a target in FOV and range. The partner assists
-  // (auto-stop / auto-scope) engage on this, *before* firing — the interim predictive
-  // behaviour. Mode 1 is unconditional while the ragebot is enabled.
-  const bool damageable = selected_target >= 0;
+  // "Can we deal damage to the player": any enemy in FOV. The partner assists engage on
+  // this, *before* firing.
+  const bool damageable = !candidates.empty();
 
   // The predictive assists (`docs/ragebot.md`): stop/scope as soon as a damageable
   // target exists (mode 2) or always (mode 1). They run even when the trigger is not
@@ -1238,6 +1273,10 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     input_.clear_rage_aim_keep_aux();
     return;
   }
+  if (candidates.empty()) {
+    input_.clear_rage_aim_keep_aux();
+    return;
+  }
 
   aim::WeaponProfile weapon;
   weapon.damage = rage_damage_.load();
@@ -1255,16 +1294,28 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     }
   }
 
-  if (selected_target < 0) {
+  // --- multi-target solve: every candidate in one field ----------------------------
+  std::optional<aim::SolveInput> multi;
+  for (const int index : candidates) {
+    auto in = aim::build_input(snapshot, weapon, index);
+    if (!in.has_value()) {
+      continue;
+    }
+    for (aim::Hitbox& hitbox : in->hitboxes) {
+      hitbox.target = index;
+    }
+    if (!multi.has_value()) {
+      multi = std::move(in);
+    } else {
+      multi->hitboxes.insert(multi->hitboxes.end(), in->hitboxes.begin(), in->hitboxes.end());
+    }
+  }
+  if (!multi.has_value() || multi->hitboxes.empty()) {
     input_.clear_rage_aim_keep_aux();
     return;
   }
+  std::optional<aim::SolveInput>& solve_input = multi;
 
-  auto solve_input = aim::build_input(snapshot, weapon, selected_target);
-  if (!solve_input.has_value()) {
-    input_.clear_rage_aim();
-    return;
-  }
   // The hitbox filter (`rage_hitbox`): 1 = head only, 2 = body only.
   if (const int mode = tuning.hitbox; mode != 0) {
     std::erase_if(solve_input->hitboxes, [mode](const aim::Hitbox& hitbox) {
@@ -1272,19 +1323,14 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
       return mode == 1 ? !head : head;
     });
     if (solve_input->hitboxes.empty()) {
-      input_.clear_rage_aim();
+      input_.clear_rage_aim_keep_aux();
       return;
     }
   }
   // Occlusion (`docs/ragebot.md` §3): project the world solids the game thread
-  // enumerated into the solve's chart. The solver then splits each hitbox by them and
-  // attenuates with the engine penetration model — the same field the heatmap renders
-  // — so the aim is wallbang-aware instead of aiming at a fully-occluded hitbox.
-  //
-  // Only the solids whose AABB can lie between the eye and *this* target are projected:
-  // the enumeration box spans every target's hitbox geometry (thousands of solids), and
-  // projecting them all on the publish thread every frame stalls the overlay (the freeze
-  // watchdog tripped once). The per-hull AABB is cached (`OcclusionHull::has_bounds`).
+  // enumerated into the solve's chart, once — shared by the multi-target pick and the
+  // backtracking poses. Only the solids whose AABB can lie between the eye and the
+  // candidates are projected (the per-hull AABB is cached, `OcclusionHull::has_bounds`).
   {
     game::Vec3 lo = solve_input->eye;
     game::Vec3 hi = solve_input->eye;
@@ -1299,7 +1345,7 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
       if (hull.has_bounds && !(hull.bounds_max.x >= lo.x && hull.bounds_min.x <= hi.x &&
                                hull.bounds_max.y >= lo.y && hull.bounds_min.y <= hi.y &&
                                hull.bounds_max.z >= lo.z && hull.bounds_min.z <= hi.z)) {
-        continue;  // cannot lie between the eye and this target
+        continue;  // cannot lie between the eye and the candidates
       }
       std::optional<aim::OccluderCell> cell;
       if (hull.kind == aim::SolidKind::sphere) {
@@ -1345,8 +1391,33 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
       break;
   }
 
+  // The global pick across **all** candidates: which target's hitbox the best aimpoint
+  // lands on. `best_target_for` maps the aim direction back to the hitbox (and so the
+  // enemy) it points at.
+  const aim::SolveResult multi_result = aim::solve(*solve_input);
+  if (!multi_result.valid) {
+    input_.clear_rage_aim_keep_aux();
+    return;
+  }
+  const int best_target = best_target_for(*solve_input, multi_result.direction);
+
+  // Narrow the field to the chosen enemy for the backtracking pass (records are
+  // per-enemy). The occlusion set is shared.
+  const std::uintptr_t chosen_pawn = pawn_for_index(snapshot, best_target);
+  if (chosen_pawn == 0) {
+    input_.clear_rage_aim_keep_aux();
+    return;
+  }
+  std::erase_if(solve_input->hitboxes,
+                [best_target](const aim::Hitbox& hitbox) { return hitbox.target != best_target; });
+  if (solve_input->hitboxes.empty()) {
+    input_.clear_rage_aim_keep_aux();
+    return;
+  }
+  solve_input->pawn = chosen_pawn;
+
   // Backtracking (`docs/ragebot.md` §8): score the live pose and every sampled lag
-  // record of this target and take the best. The record set is the discrete
+  // record of the chosen target and take the best. The record set is the discrete
   // replacement for the continuous pose distribution — the server rewinds the target
   // to a past pose inside the lag-comp window, so a record can beat the live pose.
   // Records are tried newest-first and the live pose first, so the live aim wins ties.
@@ -1366,13 +1437,17 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
       if (backtrack_tick_base > 0 && it->tick <= floor_tick) {
         continue;  // outside the lag-comp window
       }
-      poses.push_back(
-          aim::PoseCandidate{it->tick, static_cast<float>(newest - it->tick), it->hitboxes});
+      std::vector<aim::Hitbox> record_hitboxes = it->hitboxes;
+      for (aim::Hitbox& hitbox : record_hitboxes) {
+        hitbox.target = best_target;
+      }
+      poses.push_back(aim::PoseCandidate{it->tick, static_cast<float>(newest - it->tick),
+                                         std::move(record_hitboxes)});
     }
   }
   const aim::BacktrackResult backtrack = aim::solve_backtrack(*solve_input, poses);
   if (!backtrack.valid) {
-    input_.clear_rage_aim();
+    input_.clear_rage_aim_keep_aux();
     return;
   }
   const aim::SolveResult& result = backtrack.solve;

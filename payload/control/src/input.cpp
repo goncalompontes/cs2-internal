@@ -150,7 +150,8 @@ constexpr std::size_t k_services_button_offset = 0x58;  // CInButtonState word 0
 // `C_CSPlayerPawn::m_pAimPunchServices` -> `m_predictableBaseAngle` (QAngle, degrees):
 // the recoil punch the shot inherits, subtracted for recoil compensation.
 constexpr std::size_t k_pawn_aim_punch_offset = 0x1598;
-constexpr std::size_t k_aim_punch_angle_offset = 0x50;
+constexpr std::size_t k_aim_punch_angle_offset = 0x50;               // m_predictableBaseAngle
+constexpr std::size_t k_aim_punch_angle_offset_unpredictable = 0xa4;  // m_unpredictableBaseAngle
 constexpr std::size_t k_cmd_number_offset = 0x8;        // CUserCmd::nSequenceNumber
 constexpr std::size_t k_base_client_tick_offset = 0x54;  // CBaseUserCmdPB::client_tick
 // Sub-tick placement: the press pair sits a few grid steps past the recorded
@@ -321,29 +322,64 @@ auto Input::read_aim_punch(float out[3]) const noexcept -> bool {
   if (!cs2::game::read(pawn + k_pawn_aim_punch_offset, punch) || punch == 0) {
     return false;
   }
-  return cs2::game::read(punch + k_aim_punch_angle_offset, out);
+  // The full view punch the shot inherits is predictable + unpredictable (the
+  // accumulated spray pattern in the unpredictable buffer).
+  float predictable[3] = {0.0F, 0.0F, 0.0F};
+  float unpredictable[3] = {0.0F, 0.0F, 0.0F};
+  const bool has_predictable = cs2::game::read(punch + k_aim_punch_angle_offset, predictable);
+  const bool has_unpredictable =
+      cs2::game::read(punch + k_aim_punch_angle_offset_unpredictable, unpredictable);
+  if (!has_predictable && !has_unpredictable) {
+    return false;
+  }
+  out[0] = predictable[0] + unpredictable[0];
+  out[1] = predictable[1] + unpredictable[1];
+  out[2] = predictable[2] + unpredictable[2];
+  return true;
 }
 
-void Input::write_command_viewangles(std::uint8_t* cmd, float pitch, float yaw,
-                                     float roll) noexcept {
-  if (cmd == nullptr) {
+// The compensated silent aim: the desired view minus the recoil punch (which the shot
+// would otherwise inherit).
+void Input::rage_silent_angles(float& pitch, float& yaw) const noexcept {
+  pitch = rage_pitch_.load();
+  yaw = rage_yaw_.load();
+  if (!rage_recoil_.load()) {
     return;
   }
-  const auto base =
-      *reinterpret_cast<std::uintptr_t*>(cmd + k_cmd_pb_offset + k_pb_base_offset);
-  if (!writable(base, k_base_viewangles_offset + sizeof(void*))) {
+  float punch[3] = {0.0F, 0.0F, 0.0F};
+  if (read_aim_punch(punch)) {
+    pitch -= punch[0];
+    yaw -= punch[1];
+  }
+}
+
+// Write the silent aim into the **raw** per-sub-tick angle history (`CCSGOInput + 0xbd0`)
+// which the engine copies into the command's `input_history` *inside* slot 5 — so it
+// must land before the original. This is the channel the shot's history entry is built
+// from; the engine's own view (the camera) is a separate global and is not touched.
+void Input::write_raw_silent_angles(float pitch, float yaw, float roll) noexcept {
+  if (ccsgo_input_ == 0) {
     return;
   }
-  const auto angles = *reinterpret_cast<std::uintptr_t*>(base + k_base_viewangles_offset);
-  if (!writable(angles, k_angles_values_offset + 12)) {
+  std::int32_t count = 0;
+  std::uintptr_t rep = 0;
+  if (!cs2::game::read(ccsgo_input_ + k_input_history_count_offset, count) ||
+      !cs2::game::read(ccsgo_input_ + k_input_history_rep_offset, rep)) {
     return;
   }
-  auto* xyz = reinterpret_cast<float*>(angles + k_angles_values_offset);
-  xyz[0] = pitch;
-  xyz[1] = yaw;
-  xyz[2] = roll;
-  *reinterpret_cast<std::uint32_t*>(angles + k_angles_has_bits_offset) |= k_angles_bits;
-  *reinterpret_cast<std::uint32_t*>(base + k_base_has_bits_offset) |= k_base_viewangles_bit;
+  if (count <= 0 || count > 64 || rep == 0) {
+    return;
+  }
+  for (int i = 0; i < count; ++i) {
+    const auto entry = rep + static_cast<std::uintptr_t>(i) * k_input_history_stride;
+    if (!writable(entry + k_input_history_angles_offset, 3 * sizeof(float))) {
+      break;
+    }
+    auto* xyz = reinterpret_cast<float*>(entry + k_input_history_angles_offset);
+    xyz[0] = pitch;
+    xyz[1] = yaw;
+    xyz[2] = roll;
+  }
 }
 
 void Input::write_engine_buttons(std::uint64_t set_bits, std::uint64_t clear_bits) noexcept {
@@ -369,22 +405,12 @@ void Input::rage_tick(std::uint8_t* cmd, std::uint64_t* buttons) noexcept {
   if (!rage_active_.load()) {
     return;
   }
-  float pitch = rage_pitch_.load();
-  float yaw = rage_yaw_.load();
-  // Recoil compensation: the shot inherits the recoil punch, so aim the view *below* it
-  // by the current punch (the bullet then lands on the target). Read fresh each tick.
-  if (rage_recoil_.load()) {
-    float punch[3] = {0.0F, 0.0F, 0.0F};
-    if (read_aim_punch(punch)) {
-      pitch -= punch[0];
-      yaw -= punch[1];
-    }
-  }
+  float pitch = 0.0F;
+  float yaw = 0.0F;
+  // Recoil compensation (predictable + unpredictable punch) is folded into the silent
+  // aim. Read fresh each tick.
+  rage_silent_angles(pitch, yaw);
   write_silent_angles(cmd, pitch, yaw, 0.0F);
-  // Also write the command's own `viewangles`: if the shot does not read the sub-tick
-  // history (the entry can be absent/empty), the engine falls back to this field — the
-  // camera/silent write alone leaves the shot following the player's real view.
-  write_command_viewangles(cmd, pitch, yaw, 0.0F);
   rage_writes_.fetch_add(1);
   if (buttons == nullptr) {
     return;
@@ -1019,6 +1045,15 @@ void __fastcall Input::create_move_input_detour(void* self, int slot, char activ
   input->write_entry_move();
   input->write_raw_move();
   input->write_raw_angles();
+  // The ragebot's silent aim goes into the *raw* angle history too, before the engine
+  // builds the command's `input_history` (the shot's history entry), so the shot never
+  // falls back to the player's own view. This does not move the camera.
+  if (input->rage_active_.load()) {
+    float silent_pitch = 0.0F;
+    float silent_yaw = 0.0F;
+    input->rage_silent_angles(silent_pitch, silent_yaw);
+    input->write_raw_silent_angles(silent_pitch, silent_yaw, 0.0F);
+  }
   if (input->original5_ != nullptr) {
     reinterpret_cast<create_move_input_fn>(input->original5_)(self, slot, active);
   }

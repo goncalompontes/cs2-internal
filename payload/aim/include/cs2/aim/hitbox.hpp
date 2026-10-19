@@ -36,6 +36,9 @@ struct Hitbox {
   bool is_capsule = false;
   Capsule capsule{};
   int bone = -1;  // the bone it rides (diagnostics)
+  // The entity index of the enemy this hitbox belongs to (the multi-target solve scans
+  // every enemy at once, `-1` when unknown).
+  int target = -1;
 };
 
 // Rotate `v` by `bone`'s quaternion.

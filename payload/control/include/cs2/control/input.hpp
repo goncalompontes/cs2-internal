@@ -586,10 +586,12 @@ class Input {
   // Assert/clear bits in the engine's own held-button word (`CInButtonState` at the
   // movement services `+0x58`); some weapon actions read it instead of the command mask.
   void write_engine_buttons(std::uint64_t set_bits, std::uint64_t clear_bits) noexcept;
-  // The command's own `viewangles` (the legacy field the shot falls back to when the
-  // sub-tick history has no entry) — written alongside the silent sub-tick angles.
-  void write_command_viewangles(std::uint8_t* cmd, float pitch, float yaw, float roll) noexcept;
-  // The current recoil punch (`m_pAimPunchServices -> m_predictableBaseAngle`).
+  // Write the silent aim into the raw per-sub-tick angle history (`CCSGOInput + 0xbd0`),
+  // before the engine builds the command's `input_history` — the channel the shot reads.
+  void write_raw_silent_angles(float pitch, float yaw, float roll) noexcept;
+  // The silent aim with recoil compensation applied.
+  void rage_silent_angles(float& pitch, float& yaw) const noexcept;
+  // The current recoil punch (`m_pAimPunchServices`, predictable + unpredictable).
   [[nodiscard]] auto read_aim_punch(float out[3]) const noexcept -> bool;
   // One tick of the auto-strafe (see `set_strafe`); called from `apply()` with the
   // `CBaseUserCmdPB` (`base`) and the owning `CUserCmd` (`cmd`).

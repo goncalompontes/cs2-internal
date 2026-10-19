@@ -117,6 +117,9 @@ void set_menu_open(bool open) {
       ShowCursor(TRUE);
       g_cursor_shown = true;
     }
+    // Release the mouse clip the game holds; without this the OS cursor stays trapped in
+    // the window and the user must open the game's own menu first.
+    ClipCursor(nullptr);
     g_menu_open.store(true, std::memory_order_relaxed);
     overlay_log("cs2-overlay: menu opened (hwnd %p)", static_cast<void*>(g_window));
   } else {
@@ -470,8 +473,13 @@ void frame(wire::Settings& settings, bool in_game) noexcept {
     g_force_open = true;
   }
   poll_toggle(in_game);
-  if (g_menu_open.load(std::memory_order_relaxed) && !draw_window(settings)) {
-    set_menu_open(false);
+  if (g_menu_open.load(std::memory_order_relaxed)) {
+    // The game re-clips the cursor every frame while it has focus; keep it unclipped so
+    // the menu is usable without the game's own mouse-release.
+    ClipCursor(nullptr);
+    if (!draw_window(settings)) {
+      set_menu_open(false);
+    }
   }
   settings.menu_open = g_menu_open.load(std::memory_order_relaxed) ? 1 : 0;
 #else
