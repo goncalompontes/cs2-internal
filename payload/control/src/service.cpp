@@ -743,7 +743,8 @@ void Service::set_rage_features(bool on, int key, bool fire, int objective, int 
                                 float min_damage, float min_hitchance, int autostop,
                                 int autoscope, bool autoreload, bool only_visible, int mode,
                                 bool per_weapon, const char* weapon, int config_op,
-                                std::uint32_t config_token) noexcept {
+                                std::uint32_t config_token, bool recoil,
+                                float stop_speed) noexcept {
   rage_enabled_.store(on);
   rage_key_.store(key);
   rage_fire_.store(fire);
@@ -758,6 +759,8 @@ void Service::set_rage_features(bool on, int key, bool fire, int objective, int 
   rage_only_visible_.store(only_visible);
   rage_mode_.store(mode);
   rage_per_weapon_.store(per_weapon);
+  rage_recoil_.store(recoil);
+  rage_stop_speed_.store(stop_speed);
   {
     std::lock_guard<std::mutex> lock(rage_config_mutex_);
     if (weapon != nullptr) {
@@ -854,6 +857,8 @@ auto Service::effective_rage_tuning(const char* active_weapon) noexcept -> RageT
   tuning.autoreload = rage_autoreload_.load();
   tuning.only_visible = rage_only_visible_.load();
   tuning.fire = rage_fire_.load();
+  tuning.recoil = rage_recoil_.load();
+  tuning.stop_speed = rage_stop_speed_.load();
   tuning.key = rage_key_.load();
   tuning.fov = rage_fov_.load();
   tuning.min_damage = rage_min_damage_.load();
@@ -879,6 +884,36 @@ auto Service::effective_rage_tuning(const char* active_weapon) noexcept -> RageT
   tuning.min_damage = profile->min_damage;
   tuning.min_hitchance = profile->min_hitchance;
   return tuning;
+}
+
+// The ragebot only solves real firearms. `SWeaponType` (`m_WeaponType`): 1 pistol,
+// 2 smg, 3 rifle, 4 shotgun, 5 sniper, 6 machinegun; 0 knife, 7 c4, 8 taser, 9 grenade,
+// 10 equipment, … are excluded (knife-bot is a later feature). An unknown type (-1)
+// falls back to a designer-name deny-list.
+[[nodiscard]] auto is_rage_weapon(int weapon_type, const std::string& name) noexcept -> bool {
+  if (weapon_type >= 1 && weapon_type <= 6) {
+    return true;  // pistol / smg / rifle / shotgun / sniper / machinegun
+  }
+  if (weapon_type > 6) {
+    return false;  // a known non-firearm (c4, taser, grenade, equipment, …)
+  }
+  if (weapon_type == 0) {
+    return false;  // knife
+  }
+  // Unknown type: any `weapon_*` that is not on the deny-list.
+  static constexpr const char* k_deny[] = {"weapon_knife",        "weapon_c4",
+                                           "weapon_taser",        "weapon_flashbang",
+                                           "weapon_hegrenade",    "weapon_smokegrenade",
+                                           "weapon_molotov",      "weapon_incgrenade",
+                                           "weapon_decoy",        "weapon_tagrenade",
+                                           "weapon_breachcharge", "weapon_bumpmine",
+                                           "weapon_healthshot",   "weapon_shield"};
+  for (const char* deny : k_deny) {
+    if (name == deny) {
+      return false;
+    }
+  }
+  return name.rfind("weapon_", 0) == 0;
 }
 
 // The hitgroup / hitbox id of the box whose centre is angularly closest to
@@ -1098,65 +1133,30 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     input_.clear_rage_aim();
     return;
   }
+  const game::PlayerSnapshot& local = *snapshot.local;
 
-  // The effective tuning: the per-weapon profile when enabled and the active weapon has
-  // one, else the global settings (`effective_rage_tuning`).
-  const RageTuning tuning = effective_rage_tuning(snapshot.local->weapon.c_str());
-
-  // The trigger (`docs/ragebot.md`): hold the key, always on, or toggle on the key.
-  bool engaged = forced;
-  if (!forced) {
-#if defined(_WIN32)
-    const bool key_down = tuning.key > 0 && (GetAsyncKeyState(tuning.key) & 0x8000) != 0;
-#else
-    const bool key_down = false;
-#endif
-    switch (tuning.mode) {
-      case 1:  // always on
-        engaged = true;
-        break;
-      case 2:  // toggle on the key's press edge
-        if (key_down && !rage_key_down_) {
-          rage_toggle_ = !rage_toggle_;
-        }
-        rage_key_down_ = key_down;
-        engaged = rage_toggle_;
-        break;
-      default:  // hold (key 0 = always, for back-compat)
-        engaged = tuning.key <= 0 || key_down;
-        break;
-    }
-  }
-  if (!engaged) {
+  // Only real firearms are ragebot targets (`m_WeaponType`): the knife, C4, taser,
+  // grenades and equipment are excluded (knife-bot is a later feature).
+  if (!is_rage_weapon(local.weapon_type, local.weapon)) {
     input_.clear_rage_aim();
     return;
   }
 
-  aim::WeaponProfile weapon;
-  weapon.damage = rage_damage_.load();
-  weapon.range_modifier = rage_range_modifier_.load();
-  weapon.headshot_multiplier = rage_headshot_.load();
-  // The penetration power is not a menu setting: take it from the shooter's real
-  // weapon (`docs/re/penetration.md`) so the wallbang math uses the right budget.
-  {
-    aim::WeaponProfile from_game;
-    if (aim::read_weapon_profile(snapshot.local->weapon_vdata, from_game) &&
-        from_game.penetration > 0.0F) {
-      weapon.penetration = from_game.penetration;
-    }
-  }
+  // The effective tuning: the per-weapon profile when enabled and the active weapon has
+  // one, else the global settings (`effective_rage_tuning`).
+  const RageTuning tuning = effective_rage_tuning(local.weapon.c_str());
 
   // Target selection (`docs/ragebot.md` §3): the nearest enemy within the FOV cone
-  // (degrees; 0 = unlimited) and within the weapon's range. `build_input`'s own pick is
-  // by distance, so the FOV is applied here.
+  // (degrees; 0 = unlimited), computed **before** the trigger so the assists can be
+  // predictive.
   constexpr float k_deg_to_rad = 0.01745329251994329577F;
   int selected_target = -1;
   {
     const float fov = tuning.fov;
     const float cos_limit = fov > 0.0F ? std::cos(fov * 0.5F * k_deg_to_rad) : -1.0F;
-    const game::Vec3& eye = snapshot.local->eye_origin;
-    const float yaw = snapshot.local->eye_angles.yaw * k_deg_to_rad;
-    const float pitch = snapshot.local->eye_angles.pitch * k_deg_to_rad;
+    const game::Vec3& eye = local.eye_origin;
+    const float yaw = local.eye_angles.yaw * k_deg_to_rad;
+    const float pitch = local.eye_angles.pitch * k_deg_to_rad;
     const game::Vec3 forward{std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw),
                              -std::sin(pitch)};
     float best = 1.0e30F;
@@ -1185,8 +1185,78 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
       }
     }
   }
+  // "Can we deal damage to the player": a target in FOV and range. The partner assists
+  // (auto-stop / auto-scope) engage on this, *before* firing — the interim predictive
+  // behaviour. Mode 1 is unconditional while the ragebot is enabled.
+  const bool damageable = selected_target >= 0;
+
+  // The predictive assists (`docs/ragebot.md`): stop/scope as soon as a damageable
+  // target exists (mode 2) or always (mode 1). They run even when the trigger is not
+  // engaged, so the player is already still/scoped before the shot.
+  {
+    const int autostop = tuning.autostop;
+    const int autoscope = tuning.autoscope;
+    const bool stop_want = autostop == 1 || (autostop == 2 && damageable);
+    const bool scope_want = autoscope == 1 || (autoscope == 2 && damageable);
+    input_.set_rage_aux(stop_want, scope_want, tuning.autoreload && local.clip <= 0);
+    input_.set_rage_recoil(tuning.recoil);
+    // The auto-stop speed threshold: an explicit units/s, else 34% of the weapon's max
+    // speed — the fastest movement that does not add spread (a tunable default; the
+    // menu exposes the value).
+    const float stop_speed =
+        tuning.stop_speed > 0.0F ? tuning.stop_speed : 0.34F * local.max_speed;
+    input_.set_rage_stop_speed(stop_speed);
+    rage_scope_wanted_.store(scope_want);
+  }
+
+  // The trigger (`docs/ragebot.md`): hold the key, always on, or toggle on the key.
+  bool engaged = forced;
+  if (!forced) {
+#if defined(_WIN32)
+    const bool key_down = tuning.key > 0 && (GetAsyncKeyState(tuning.key) & 0x8000) != 0;
+#else
+    const bool key_down = false;
+#endif
+    switch (tuning.mode) {
+      case 1:  // always on
+        engaged = true;
+        break;
+      case 2:  // toggle on the key's press edge
+        if (key_down && !rage_key_down_) {
+          rage_toggle_ = !rage_toggle_;
+        }
+        rage_key_down_ = key_down;
+        engaged = rage_toggle_;
+        break;
+      default:  // hold (key 0 = always, for back-compat)
+        engaged = tuning.key <= 0 || key_down;
+        break;
+    }
+  }
+  if (!engaged) {
+    // Drop the aim but keep the predictive assists applied.
+    input_.clear_rage_aim_keep_aux();
+    return;
+  }
+
+  aim::WeaponProfile weapon;
+  weapon.damage = rage_damage_.load();
+  weapon.range_modifier = rage_range_modifier_.load();
+  weapon.headshot_multiplier = rage_headshot_.load();
+  // The penetration power is not a menu setting: take it from the shooter's real
+  // weapon (`docs/re/penetration.md`) so the wallbang math uses the right budget.
+  {
+    aim::WeaponProfile from_game;
+    if (aim::read_weapon_profile(local.weapon_vdata, from_game)) {
+      if (from_game.penetration > 0.0F) {
+        weapon.penetration = from_game.penetration;
+      }
+      weapon.weapon_type = from_game.weapon_type;
+    }
+  }
+
   if (selected_target < 0) {
-    input_.clear_rage_aim();
+    input_.clear_rage_aim_keep_aux();
     return;
   }
 
@@ -1330,19 +1400,10 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   }
   const int hitbox = rage_hitbox_for(*solve_input, result.direction);
 
-  // The assists (`docs/ragebot.md`): auto-stop, auto-scope and auto-reload while a
-  // solve is live. The mode 2 variants only engage when the shot is actually being
-  // fired, so the features are invisible while just tracking a target.
+  // The assists were already decided predictively above; here we only commit the aim
+  // and (optionally) the fire.
   const bool firing = (tuning.fire || forced) && visible_ok;
-  const int autostop = tuning.autostop;
-  const int autoscope = tuning.autoscope;
-  const bool want_scope = autoscope == 1 || (autoscope == 2 && firing);
-  rage_scope_wanted_.store(want_scope);
   input_.set_rage_aim(pitch, yaw, target_index, hitbox);
-  input_.set_rage_aux(autostop == 1 || (autostop == 2 && firing), want_scope,
-                      tuning.autoreload && snapshot.local->clip <= 0);
-  // The menu owns `fire` in normal play; the forced (test) path bypasses the key
-  // and therefore also fires, since the menu's per-frame push clears `fire`.
   input_.set_rage_fire(firing);
   rage_last_target_.store(target_index);
   rage_last_record_.store(backtrack.record);
@@ -1606,6 +1667,12 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   if (const Json* value = args.find("only_visible"); value != nullptr && value->is_bool()) {
     rage_only_visible_.store(value->as_bool());
   }
+  if (const Json* value = args.find("recoil"); value != nullptr && value->is_bool()) {
+    rage_recoil_.store(value->as_bool());
+  }
+  if (const Json* value = args.find("stop_speed"); value != nullptr && value->is_number()) {
+    rage_stop_speed_.store(static_cast<float>(value->as_number()));
+  }
   // The trigger: `mode` 0 hold / 1 always / 2 toggle, or the names `hold`/`always`/
   // `toggle`. `key` may be a number (virtual-key code) in the same call.
   if (const Json* value = args.find("mode"); value != nullptr) {
@@ -1652,7 +1719,7 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
                     rage_min_damage_.load(), rage_min_hitchance_.load(), rage_autostop_.load(),
                     rage_autoscope_.load(), rage_autoreload_.load(), rage_only_visible_.load(),
                     rage_mode_.load(), rage_per_weapon_.load(), weapon, 0,
-                    rage_config_token_.load());
+                    rage_config_token_.load(), rage_recoil_.load(), rage_stop_speed_.load());
 
   Json payload = Json::object();
   payload.set("enabled", Json::boolean(on));
@@ -1677,6 +1744,8 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   payload.set("autoscope", Json::number(static_cast<double>(rage_autoscope_.load())));
   payload.set("autoreload", Json::boolean(rage_autoreload_.load()));
   payload.set("only_visible", Json::boolean(rage_only_visible_.load()));
+  payload.set("recoil", Json::boolean(rage_recoil_.load()));
+  payload.set("stop_speed", Json::number(static_cast<double>(rage_stop_speed_.load())));
   payload.set("visible", Json::boolean(rage_visible_.load()));
   payload.set("stops", Json::number(static_cast<double>(input_.rage_stops())));
   payload.set("mode", Json::number(static_cast<double>(rage_mode_.load())));

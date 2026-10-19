@@ -57,6 +57,16 @@ struct PlayerSnapshot {
   // simulating, from which the rewind window is measured.
   float simulation_time = 0.0F;
   int tick_base = 0;
+  // The active weapon's `SWeaponType` (`CCSWeaponBaseVData::m_WeaponType`, +0x520):
+  // 0 knife, 1 pistol, 2 smg, 3 rifle, 4 shotgun, 5 sniper, 6 machinegun, 7 c4, 8 taser,
+  // 9 grenade, 10 equipment, … -1 when unknown. The ragebot only solves real firearms.
+  int weapon_type = -1;
+  // The current recoil punch (`m_pAimPunchServices` -> `m_predictableBaseAngle`), in
+  // degrees, used for recoil compensation. Pitch is up-positive.
+  float aim_punch_pitch = 0.0F;
+  float aim_punch_yaw = 0.0F;
+  // `C_BaseEntity::m_flMaxspeed` — the basis for the auto-stop speed threshold.
+  float max_speed = 0.0F;
 };
 
 // Authoritative round/game state, read from the level's `C_CSGameRules`

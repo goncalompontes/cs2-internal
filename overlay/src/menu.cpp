@@ -396,6 +396,10 @@ auto draw_window(wire::Settings& settings) -> bool {
         }
         toggle("Auto-reload (empty clip)", settings.rage_autoreload);
         toggle("Only visible (no wallbang)", settings.rage_only_visible);
+        toggle("Recoil compensation", settings.rage_recoil);
+        ImGui::SetNextItemWidth(160.0F);
+        ImGui::SliderFloat("Auto-stop speed", &settings.rage_stop_speed, 0.0F, 250.0F, "%.0f u/s");
+        ImGui::TextDisabled("0 = full stop; >0 counter-strafes down to this speed.");
         ImGui::Separator();
         // Per-weapon profiles (`rage_config.hpp`): the live sliders above are the
         // *global* tuning; save/load a weapon's copy, and `Per-weapon` applies the

@@ -59,6 +59,11 @@ class StateReader {
     std::uint32_t scoped = 0x1ea0;
     std::uint32_t defusing = 0x1ea2;
     std::uint32_t in_buy_zone = 0x15e0;
+    // `C_CSPlayerPawn::m_pAimPunchServices` (`CsPlayerAimPunchServices*`) — the recoil
+    // punch; `m_predictableBaseAngle` is a QAngle at +0x50.
+    std::uint32_t aim_punch_services = 0x1598;
+    // `C_BaseEntity::m_flMaxspeed` — the auto-stop threshold basis.
+    std::uint32_t max_speed = 0x1ac;
     // C_CSPlayerPawnBase
     std::uint32_t flash_duration = 0x1510;
     // C_BasePlayerPawn

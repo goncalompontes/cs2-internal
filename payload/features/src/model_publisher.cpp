@@ -65,6 +65,8 @@ auto to_wire_settings(const EspConfig& config) -> wire::Settings {
   settings.rage_mode = config.rage_mode;
   settings.rage_per_weapon = config.rage_per_weapon;
   std::memcpy(settings.rage_weapon, config.rage_weapon, sizeof(settings.rage_weapon));
+  settings.rage_recoil = config.rage_recoil;
+  settings.rage_stop_speed = config.rage_stop_speed;
   settings.show_hud = 1;
   return settings;
 }
@@ -100,6 +102,8 @@ auto from_wire_settings(const wire::Settings& settings) -> EspConfig {
   config.rage_per_weapon = settings.rage_per_weapon != 0 ? 1 : 0;
   std::memcpy(config.rage_weapon, settings.rage_weapon, sizeof(config.rage_weapon));
   config.rage_weapon[sizeof(config.rage_weapon) - 1] = '\0';
+  config.rage_recoil = settings.rage_recoil != 0 ? 1 : 0;
+  config.rage_stop_speed = settings.rage_stop_speed;
   return config;
 }
 

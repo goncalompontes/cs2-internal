@@ -409,6 +409,9 @@ class Input {
   // `rage` control command.
   void set_rage_aim(float pitch, float yaw, int target, int hitbox) noexcept;
   void clear_rage_aim() noexcept;
+  // Drop the aim but keep the assists (auto-stop/scope) — the predictive assists run
+  // even when the trigger is not engaged.
+  void clear_rage_aim_keep_aux() noexcept { rage_active_.store(false); }
   void set_rage_fire(bool on) noexcept { rage_fire_.store(on); }
   // The common ragebot assists, applied while a solve is active (`docs/ragebot.md`):
   // auto-stop (hold still for accuracy), auto-scope (press zoom), auto-reload. Owned by
@@ -417,6 +420,14 @@ class Input {
     rage_stop_.store(stop);
     rage_scope_.store(scope);
     rage_reload_.store(reload);
+  }
+  // Recoil compensation (subtract the recoil punch from the silent aim) and the
+  // auto-stop speed threshold: 0 = a full stop, > 0 = decelerate (counter-strafe) only
+  // until the horizontal speed is at/below this many units per second (the fastest
+  // movement that does not add spread).
+  void set_rage_recoil(bool on) noexcept { rage_recoil_.store(on); }
+  void set_rage_stop_speed(float units_per_second) noexcept {
+    rage_stop_speed_.store(units_per_second);
   }
   [[nodiscard]] bool rage_fire() const noexcept { return rage_fire_.load(); }
   [[nodiscard]] bool rage_active() const noexcept { return rage_active_.load(); }
@@ -575,6 +586,11 @@ class Input {
   // Assert/clear bits in the engine's own held-button word (`CInButtonState` at the
   // movement services `+0x58`); some weapon actions read it instead of the command mask.
   void write_engine_buttons(std::uint64_t set_bits, std::uint64_t clear_bits) noexcept;
+  // The command's own `viewangles` (the legacy field the shot falls back to when the
+  // sub-tick history has no entry) — written alongside the silent sub-tick angles.
+  void write_command_viewangles(std::uint8_t* cmd, float pitch, float yaw, float roll) noexcept;
+  // The current recoil punch (`m_pAimPunchServices -> m_predictableBaseAngle`).
+  [[nodiscard]] auto read_aim_punch(float out[3]) const noexcept -> bool;
   // One tick of the auto-strafe (see `set_strafe`); called from `apply()` with the
   // `CBaseUserCmdPB` (`base`) and the owning `CUserCmd` (`cmd`).
   void strafe_tick(void* base, void* cmd) noexcept;
@@ -655,6 +671,8 @@ class Input {
   std::atomic<bool> rage_stop_{false};
   std::atomic<bool> rage_scope_{false};
   std::atomic<bool> rage_reload_{false};
+  std::atomic<bool> rage_recoil_{false};
+  std::atomic<float> rage_stop_speed_{0.0F};
   std::atomic<std::uint64_t> rage_writes_{0};
   std::atomic<std::uint64_t> rage_shots_{0};
   std::atomic<std::uint64_t> rage_stops_{0};

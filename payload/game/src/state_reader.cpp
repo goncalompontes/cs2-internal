@@ -85,6 +85,8 @@ auto StateReader::FieldOffsets::resolve() -> StateReader::FieldOffsets {
   o.scoped = field("C_CSPlayerPawn", "m_bIsScoped", o.scoped);
   o.defusing = field("C_CSPlayerPawn", "m_bIsDefusing", o.defusing);
   o.in_buy_zone = field("C_CSPlayerPawn", "m_bInBuyZone", o.in_buy_zone);
+  o.aim_punch_services = field("C_CSPlayerPawn", "m_pAimPunchServices", o.aim_punch_services);
+  o.max_speed = field("C_BaseEntity", "m_flMaxspeed", o.max_speed);
   o.flash_duration = field("C_CSPlayerPawnBase", "m_flFlashDuration", o.flash_duration);
   o.weapon_services = field("C_BasePlayerPawn", "m_pWeaponServices", o.weapon_services);
   o.controller = field("C_BasePlayerPawn", "m_hController", o.controller);
@@ -219,6 +221,19 @@ auto StateReader::read_player(int index, std::uintptr_t controller) const -> Pla
   (void)read(pawn + o.eye_angles, player.eye_angles);
   (void)read(pawn + o.velocity, player.velocity);
   player.simulation_time = read_or<float>(pawn + o.simulation_time, 0.0F);
+  player.max_speed = read_or<float>(pawn + o.max_speed, 0.0F);
+
+  // Recoil punch: `m_pAimPunchServices -> m_predictableBaseAngle` (QAngle, degrees).
+  {
+    const std::uintptr_t punch = read_or<std::uintptr_t>(pawn + o.aim_punch_services, 0);
+    if (punch != 0) {
+      float angles[3] = {0.0F, 0.0F, 0.0F};
+      if (read(punch + 0x50, angles)) {
+        player.aim_punch_pitch = angles[0];
+        player.aim_punch_yaw = angles[1];
+      }
+    }
+  }
 
   const auto scene = read_or<std::uintptr_t>(pawn + o.scene_node, 0);
   Vec3 view_offset{};
@@ -249,6 +264,10 @@ auto StateReader::read_player(int index, std::uintptr_t controller) const -> Pla
       // `C_BaseEntity::m_nSubclassID` (+0x08) is the weapon's
       // `CCSWeaponBaseVData*` (`docs/re/aim.md`; the ragebot's damage model).
       player.weapon_vdata = read_or<std::uintptr_t>(weapon + 0x388, 0);
+      // `CCSWeaponBaseVData::m_WeaponType` (+0x520) — the ragebot excludes non-firearms.
+      if (player.weapon_vdata != 0) {
+        player.weapon_type = read_or<std::int32_t>(player.weapon_vdata + 0x520, -1);
+      }
     }
   }
   return player;

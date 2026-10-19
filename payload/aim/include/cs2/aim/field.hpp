@@ -33,6 +33,10 @@ struct WeaponProfile {
   float inaccuracy_move = 0.0F;        // +0x788
   float inaccuracy_jump_initial = 0.0F;  // +0x7B8
   float inaccuracy_jump_apex = 0.0F;     // +0x7BC
+  // `CCSWeaponBaseVData::m_WeaponType` (+0x520): 0 knife, 1 pistol, 2 smg, 3 rifle,
+  // 4 shotgun, 5 sniper, 6 machinegun, 7 c4, 8 taser, 9 grenade, 10 equipment, … -1
+  // when unknown. Only firearms (1-6) are ragebot targets.
+  int weapon_type = -1;
 };
 
 // The inaccuracy for the shooter's state: the engine's effective value when the payload

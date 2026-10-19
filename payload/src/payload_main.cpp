@@ -144,15 +144,13 @@ auto parse_rage_env() noexcept -> RageConfig {
 void on_movement_settings(void* context, const cs2::overlay::wire::Settings& settings) noexcept {
   auto* runtime = static_cast<Runtime*>(context);
   runtime->control.set_movement_features(settings.auto_strafe != 0, settings.bhop != 0);
-  runtime->control.set_rage_features(settings.rage != 0, settings.rage_key,
-                                     settings.rage_fire != 0, settings.rage_objective,
-                                     settings.rage_hitbox, settings.rage_fov,
-                                     settings.rage_min_damage, settings.rage_min_hitchance,
-                                     settings.rage_autostop, settings.rage_autoscope,
-                                     settings.rage_autoreload != 0,
-                                     settings.rage_only_visible != 0, settings.rage_mode,
-                                     settings.rage_per_weapon != 0, settings.rage_weapon,
-                                     settings.rage_config_op, settings.rage_config_token);
+  runtime->control.set_rage_features(
+      settings.rage != 0, settings.rage_key, settings.rage_fire != 0, settings.rage_objective,
+      settings.rage_hitbox, settings.rage_fov, settings.rage_min_damage,
+      settings.rage_min_hitchance, settings.rage_autostop, settings.rage_autoscope,
+      settings.rage_autoreload != 0, settings.rage_only_visible != 0, settings.rage_mode,
+      settings.rage_per_weapon != 0, settings.rage_weapon, settings.rage_config_op,
+      settings.rage_config_token, settings.rage_recoil != 0, settings.rage_stop_speed);
 }
 
 // The per-frame overlay refresh forwards the local pawn so the movement features
@@ -228,7 +226,7 @@ DWORD WINAPI install_thread(void*) {
                           " fire=" + (rage.fire ? "1" : "0"));
     cs2::payload::runtime().control.set_rage_features(
         rage.enabled, rage.key, rage.fire, 1 /*hitchance*/, 0 /*auto*/, 0.0F, 0.0F, 0.0F, 0, 0,
-        false, false, 0 /*hold*/, false, "", 0, 0);
+        false, false, 0 /*hold*/, false, "", 0, 0, true /*recoil*/, 0.0F);
     cs2::payload::runtime().publisher.set_rage_defaults(rage.enabled, rage.key, rage.fire);
     cs2::payload::runtime().publisher.set_settings_sink(&on_movement_settings,
                                                         &cs2::payload::runtime());

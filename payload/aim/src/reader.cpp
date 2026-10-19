@@ -70,6 +70,8 @@ constexpr std::uintptr_t k_vdata_inaccuracy_stand = 0x760;
 constexpr std::uintptr_t k_vdata_inaccuracy_move = 0x788;
 constexpr std::uintptr_t k_vdata_inaccuracy_jump_initial = 0x7B8;
 constexpr std::uintptr_t k_vdata_inaccuracy_jump_apex = 0x7BC;
+// `m_WeaponType` (`SWeaponType`, +0x520): the ragebot's firearm gate.
+constexpr std::uintptr_t k_vdata_weapon_type = 0x520;
 // The **effective** inaccuracy the engine computed for the local pawn
 // (`CsPlayerPawn::m_flInterpolatedInaccuracy`, client `+0x1F50`, `docs/re/aim.md`
 // §"Inaccuracy"): the crosshair value — the engine's own composition of the stance/move/
@@ -187,6 +189,7 @@ auto read_weapon_profile(std::uintptr_t weapon_vdata, WeaponProfile& profile) no
   (void)game::read(weapon_vdata + k_vdata_inaccuracy_move, profile.inaccuracy_move);
   (void)game::read(weapon_vdata + k_vdata_inaccuracy_jump_initial, profile.inaccuracy_jump_initial);
   (void)game::read(weapon_vdata + k_vdata_inaccuracy_jump_apex, profile.inaccuracy_jump_apex);
+  (void)game::read(weapon_vdata + k_vdata_weapon_type, profile.weapon_type);
   return true;
 }
 

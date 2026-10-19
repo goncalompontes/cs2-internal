@@ -49,6 +49,9 @@ struct EspConfig {
   std::uint8_t rage_mode = 0;
   std::uint8_t rage_per_weapon = 0;
   char rage_weapon[24] = {};
+  // Recoil compensation, and the auto-stop speed threshold in units/s (0 = full stop).
+  std::uint8_t rage_recoil = 0;
+  float rage_stop_speed = 0.0F;
 };
 
 // Per-build counters, for diagnostics/logging (never used for rendering).

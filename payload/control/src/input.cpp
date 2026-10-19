@@ -147,6 +147,10 @@ constexpr std::size_t k_reset_prediction_command_slot = 44;
 //     start a lone press leaves `B == 0` and produces no edge, so the primitive
 //     is a **release+press pair sharing one `when`**.
 constexpr std::size_t k_services_button_offset = 0x58;  // CInButtonState word 0 (held now)
+// `C_CSPlayerPawn::m_pAimPunchServices` -> `m_predictableBaseAngle` (QAngle, degrees):
+// the recoil punch the shot inherits, subtracted for recoil compensation.
+constexpr std::size_t k_pawn_aim_punch_offset = 0x1598;
+constexpr std::size_t k_aim_punch_angle_offset = 0x50;
 constexpr std::size_t k_cmd_number_offset = 0x8;        // CUserCmd::nSequenceNumber
 constexpr std::size_t k_base_client_tick_offset = 0x54;  // CBaseUserCmdPB::client_tick
 // Sub-tick placement: the press pair sits a few grid steps past the recorded
@@ -308,6 +312,40 @@ void Input::write_silent_angles(void* cmd, float pitch, float yaw, float roll) n
   }
 }
 
+auto Input::read_aim_punch(float out[3]) const noexcept -> bool {
+  const std::uintptr_t pawn = local_pawn_.load();
+  if (pawn == 0) {
+    return false;
+  }
+  std::uintptr_t punch = 0;
+  if (!cs2::game::read(pawn + k_pawn_aim_punch_offset, punch) || punch == 0) {
+    return false;
+  }
+  return cs2::game::read(punch + k_aim_punch_angle_offset, out);
+}
+
+void Input::write_command_viewangles(std::uint8_t* cmd, float pitch, float yaw,
+                                     float roll) noexcept {
+  if (cmd == nullptr) {
+    return;
+  }
+  const auto base =
+      *reinterpret_cast<std::uintptr_t*>(cmd + k_cmd_pb_offset + k_pb_base_offset);
+  if (!writable(base, k_base_viewangles_offset + sizeof(void*))) {
+    return;
+  }
+  const auto angles = *reinterpret_cast<std::uintptr_t*>(base + k_base_viewangles_offset);
+  if (!writable(angles, k_angles_values_offset + 12)) {
+    return;
+  }
+  auto* xyz = reinterpret_cast<float*>(angles + k_angles_values_offset);
+  xyz[0] = pitch;
+  xyz[1] = yaw;
+  xyz[2] = roll;
+  *reinterpret_cast<std::uint32_t*>(angles + k_angles_has_bits_offset) |= k_angles_bits;
+  *reinterpret_cast<std::uint32_t*>(base + k_base_has_bits_offset) |= k_base_viewangles_bit;
+}
+
 void Input::write_engine_buttons(std::uint64_t set_bits, std::uint64_t clear_bits) noexcept {
   if (set_bits == 0 && clear_bits == 0) {
     return;
@@ -331,7 +369,22 @@ void Input::rage_tick(std::uint8_t* cmd, std::uint64_t* buttons) noexcept {
   if (!rage_active_.load()) {
     return;
   }
-  write_silent_angles(cmd, rage_pitch_.load(), rage_yaw_.load(), 0.0F);
+  float pitch = rage_pitch_.load();
+  float yaw = rage_yaw_.load();
+  // Recoil compensation: the shot inherits the recoil punch, so aim the view *below* it
+  // by the current punch (the bullet then lands on the target). Read fresh each tick.
+  if (rage_recoil_.load()) {
+    float punch[3] = {0.0F, 0.0F, 0.0F};
+    if (read_aim_punch(punch)) {
+      pitch -= punch[0];
+      yaw -= punch[1];
+    }
+  }
+  write_silent_angles(cmd, pitch, yaw, 0.0F);
+  // Also write the command's own `viewangles`: if the shot does not read the sub-tick
+  // history (the entry can be absent/empty), the engine falls back to this field — the
+  // camera/silent write alone leaves the shot following the player's real view.
+  write_command_viewangles(cmd, pitch, yaw, 0.0F);
   rage_writes_.fetch_add(1);
   if (buttons == nullptr) {
     return;
@@ -1668,38 +1721,70 @@ void Input::apply(void* cmd) noexcept {
       *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset + k_pb_base_offset);
   const bool rage_stopping = rage_active_.load() && rage_stop_.load();
   if (rage_stopping) {
-    // Ragebot auto-stop: hold still while the solve is live (maximum accuracy — the
-    // spread cone the hitchance is computed against is the standing one). Every channel
-    // the engine moves from is zeroed: the command's base move + both button states, the
-    // raw axes source (`CCSGOInput + 0x270`, also zeroed pre-original in
-    // `write_raw_move`) and the engine's own held-button word. The auto-strafe is
-    // suppressed so it cannot re-add movement.
-    if (writable(strafe_base, k_base_move_offset + 12)) {
-      auto* move = reinterpret_cast<float*>(strafe_base + k_base_move_offset);
-      move[0] = 0.0F;
-      move[1] = 0.0F;
-      *reinterpret_cast<std::uint32_t*>(strafe_base + k_base_has_bits_offset) |= k_base_move_bits;
-    }
+    // Ragebot auto-stop. With `rage_stop_speed_ == 0` it holds still (maximum accuracy);
+    // with a speed limit it **counter-strafes** only until the horizontal speed is at or
+    // below the limit — the fastest movement that does not add spread — instead of
+    // stopping outright. Every channel the engine moves from is written: the command's
+    // base move + both button states, the raw axes source (`CCSGOInput + 0x270`, also
+    // pre-original in `write_raw_move`) and the engine's own held-button word.
     constexpr std::uint64_t move_bits = button::k_forward | button::k_back |
                                         button::k_moveleft | button::k_moveright;
-    *buttons &= ~move_bits;
+    constexpr float k_pi = 3.14159265358979323846F;
+    constexpr float k_deg_to_rad = 0.01745329251994329577F;
+
+    const float limit = rage_stop_speed_.load();
+    float vx = 0.0F;
+    float vy = 0.0F;
+    float speed = 0.0F;
+    if (limit > 0.0F && velocity(vx, vy)) {
+      speed = std::sqrt(vx * vx + vy * vy);
+    }
+    const bool brake = limit > 0.0F && speed > limit;
+    // The move axes: the counter-wish when braking, else zero (hold still).
+    float forward = 0.0F;
+    float side = 0.0F;
+    if (brake) {
+      const float aim_yaw = rage_yaw_.load() * k_deg_to_rad;
+      const float rel = std::atan2(vy, vx) + k_pi - aim_yaw;
+      forward = std::cos(rel) >= 0.0F ? 1.0F : -1.0F;
+      side = -std::sin(rel) >= 0.0F ? 1.0F : -1.0F;
+    }
+
+    if (writable(strafe_base, k_base_move_offset + 12)) {
+      auto* move = reinterpret_cast<float*>(strafe_base + k_base_move_offset);
+      move[0] = forward;
+      move[1] = side;
+      *reinterpret_cast<std::uint32_t*>(strafe_base + k_base_has_bits_offset) |= k_base_move_bits;
+    }
+    std::uint64_t held = *buttons & ~move_bits;
+    if (forward > 0.0F) {
+      held |= button::k_forward;
+    } else if (forward < 0.0F) {
+      held |= button::k_back;
+    }
+    if (side > 0.0F) {
+      held |= button::k_moveleft;
+    } else if (side < 0.0F) {
+      held |= button::k_moveright;
+    }
+    *buttons = held;
     const auto buttons_pb =
         *reinterpret_cast<std::uintptr_t*>(strafe_base + k_base_buttons_pb_offset);
     if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
       auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
-      state[0] &= ~move_bits;
-      state[1] &= ~move_bits;
+      state[0] = (state[0] & ~move_bits) | (held & move_bits);
+      state[1] = (state[1] & ~move_bits) | (held & move_bits);
       *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3u;
     }
     if (ccsgo_input_ != 0) {
       auto* raw = reinterpret_cast<float*>(ccsgo_input_ + k_input_move_offset);
       if (writable(reinterpret_cast<std::uintptr_t>(raw), 3 * sizeof(float))) {
-        raw[0] = 0.0F;
-        raw[1] = 0.0F;
+        raw[0] = brake ? forward : 0.0F;
+        raw[1] = brake ? side : 0.0F;
         raw[2] = 0.0F;
       }
     }
-    write_engine_buttons(0, move_bits);
+    write_engine_buttons(held & move_bits, move_bits & ~held);
     rage_stops_.fetch_add(1);
   }
   if (!rage_stopping) {

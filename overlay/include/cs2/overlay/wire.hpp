@@ -20,7 +20,7 @@
 namespace cs2::overlay::wire {
 
 inline constexpr uint32_t k_magic = 0x324F5343U;  // 'CSO2'
-inline constexpr uint32_t k_version = 10;
+inline constexpr uint32_t k_version = 11;
 
 inline constexpr int k_max_sections = 16;
 inline constexpr int k_max_lines = 64;
@@ -127,6 +127,11 @@ struct Settings {
   uint8_t rage_config_op;
   uint32_t rage_config_token;
   char rage_weapon[24];
+  // Recoil compensation (subtract the recoil punch from the silent aim) and the
+  // auto-stop speed threshold in units/s (0 = a full stop; > 0 = counter-strafe down to
+  // this speed, the fastest movement that does not add spread).
+  uint8_t rage_recoil;
+  float rage_stop_speed;
 };
 
 struct Model {

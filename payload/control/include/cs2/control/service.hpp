@@ -54,7 +54,8 @@ class Service {
   void set_rage_features(bool on, int key, bool fire, int objective, int hitbox, float fov,
                          float min_damage, float min_hitchance, int autostop, int autoscope,
                          bool autoreload, bool only_visible, int mode, bool per_weapon,
-                         const char* weapon, int config_op, std::uint32_t config_token) noexcept;
+                         const char* weapon, int config_op, std::uint32_t config_token,
+                         bool recoil, float stop_speed) noexcept;
 
   // Run the ragebot for one state refresh. The overlay's per-frame sink calls this
   // with the current snapshot; the solve runs on the render thread and stashes the
@@ -174,6 +175,9 @@ class Service {
   std::atomic<int> rage_autoscope_{0};
   std::atomic<bool> rage_autoreload_{false};
   std::atomic<bool> rage_only_visible_{false};
+  // Recoil compensation, and the auto-stop speed threshold in units/s (0 = full stop).
+  std::atomic<bool> rage_recoil_{true};
+  std::atomic<float> rage_stop_speed_{0.0F};
   // True when the last solve's aim reached the target with no wall in front.
   std::atomic<bool> rage_visible_{false};
   // The trigger mode (0 = hold key, 1 = always on, 2 = toggle key) and its toggle state.
@@ -200,10 +204,12 @@ class Service {
     bool autoreload = false;
     bool only_visible = false;
     bool fire = false;
+    bool recoil = true;
     int key = 0;
     float fov = 0.0F;
     float min_damage = 0.0F;
     float min_hitchance = 0.0F;
+    float stop_speed = 0.0F;
   };
   [[nodiscard]] auto effective_rage_tuning(const char* active_weapon) noexcept -> RageTuning;
   // Auto-scope is driven through the engine's own `+zoom`/`-zoom` (Cbuf), the only

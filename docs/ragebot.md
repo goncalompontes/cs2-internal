@@ -273,6 +273,17 @@
   the engine's own held-button word); auto-scope/auto-reload mirror zoom/attack2/reload
   into the button-state *changed* word (a press edge) and into the engine held-button
   word. `wire::Settings` v10.
+- **Predictive assists, speed-limited stop, recoil, weapon gate (2026-10-19, third
+  session).** Auto-stop/auto-scope are decided **before** the trigger from target
+  selection ("can deal damage"), so the player is already still/scoped before firing;
+  auto-scope drives the engine's own `+zoom`/`-zoom` via `Cbuf` (the command button mask
+  does not reach the weapon zoom — measured live). Auto-stop is a **counter-strafe down
+  to `rage_stop_speed`** (default 34% of the weapon's max speed; 0 = full stop). **Recoil
+  compensation** subtracts `m_pAimPunchServices -> m_pPredictableBaseAngle` from the
+  silent aim. The silent aim also writes the command's own `viewangles` (the fallback the
+  shot uses when the sub-tick history has no entry) — the intermittent "fires with my
+  current view". And the ragebot is gated to **firearms** (`m_WeaponType` 1–6): the knife,
+  C4, taser, grenades and equipment are excluded. `wire::Settings` v11.
 
 
 

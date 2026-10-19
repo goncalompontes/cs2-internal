@@ -171,6 +171,27 @@ Menu (`wire::Settings`, `k_version` 8 → **9**) + `rage` command + payload:
   / auto-reload now also mirror zoom/attack2/reload into the button-state **changed**
   word (so the engine sees a fresh press edge) and into the engine held-button word.
 
+### 3c. Third pass — predictive assists, speed-limited stop, recoil, weapon gate (2026-10-19)
+
+- **Predictive assists.** Auto-stop / auto-scope are decided **before** the trigger from
+  the target selection (a target in FOV/range = "can deal damage"), so the player is
+  already still/scoped before firing; mode 2 means "when a damageable target exists"
+  rather than "when firing". They are applied through `Input` even when no solve is
+  active (`clear_rage_aim_keep_aux`).
+- **Speed-limited auto-stop.** `rage_stop_speed` (units/s, menu slider): 0 = a full stop;
+  > 0 = **counter-strafe** only until the horizontal speed is at/below the limit (the
+  fastest movement that does not add spread) — the move axes are computed opposite the
+  velocity in the aim frame, then released.
+- **Recoil compensation.** `rage_recoil` (`m_pAimPunchServices -> m_predictableBaseAngle`)
+  is subtracted from the silent aim each tick, so the shot (which inherits the punch)
+  lands on the target.
+- **Sub-tick fallback.** The silent aim now also writes the command's own `viewangles`
+  (`base+0x40`), the legacy field the shot falls back to when the `input_history` has no
+  entry — the cause of the intermittent "fires with my current view".
+- **Firearm gate.** Only `SWeaponType` 1–6 (pistol/smg/rifle/shotgun/sniper/machinegun)
+  are ragebot targets; the knife, C4, taser, grenades and equipment are excluded
+  (`is_rage_weapon`, with a designer-name deny-list fallback). `wire::Settings` v11.
+
 ## 4. Verification
 
 - Host tests: **16/16** (`meson test -C build`), including the new geometry/field
