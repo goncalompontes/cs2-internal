@@ -1,7 +1,9 @@
 #include "cs2/control/occlusion_query.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -46,7 +48,27 @@ constexpr std::uintptr_t k_entities_in_box_fallback = 0x9DBD20;  // EntitiesInBo
 // `FUN_180352920`), and its trace is `TraceLineIntervals` with that mask. Using the
 // same mask keeps the enumerated solid set consistent with the bullets the engine
 // actually fires.
-constexpr int k_contents_solid = 0x1C300B;
+//
+// NOTE (RE, 2026-10-19, `docs/re/bullet-trace.md` §"The bullet filter"): the value the
+// engine's *world query* actually reads is `*(qword*)(filter + 8)`, not the `contents`
+// argument — `EntitiesInBox` (`0x1809dbd20`) loads `r13b = filter[0x37]`, and when
+// `flags & 7` passes it hands `filter + 8` to the world query at vtable `+0x5d0`
+// (`TraceLineIntervals` does the same at `+0x520`, `TraceShape` at `+0x558/0x560`).
+// The engine's static default filter (`client+0x2227070`) carries `+8 = 0xffffffff…`
+// (all contents), so a payload passing it enumerates a **superset** — including
+// `CONTENTS_PLAYERCLIP` brushes the bullet passes through. The custom filter below
+// copies the engine object (keeping its vtable, which the query reads far beyond
+// `+8`) and writes the bullet's real mask into `+8`.
+constexpr int k_bullet_mask = 0x1C300B;
+constexpr int k_contents_solid = 0x1C300B;  // the `contents` argument (also the bullet mask)
+
+// The engine filter object (`CTraceFilter`, 0x48 B): vtable @+0, mask @+8, flags
+// @+0x37, group @+0x38 — the fields `FUN_180352920` writes (docs/re/bullet-trace.md).
+constexpr std::uintptr_t k_filter_size = 0x48;
+constexpr std::uintptr_t k_filter_mask = 0x08;
+constexpr std::uintptr_t k_filter_flags = 0x37;
+constexpr std::uintptr_t k_filter_group = 0x38;
+constexpr std::uintptr_t k_filter_byte39 = 0x39;
 
 // Shape layer (`docs/re/vphysics2.md`): shape+0x18 type, +0xC0 hull / +0xC8 mesh.
 constexpr std::uintptr_t k_shape_type = 0x18;
@@ -76,10 +98,19 @@ constexpr std::uintptr_t k_mesh_vertices = 0x38;
 constexpr std::uintptr_t k_mesh_tri_count = 0x18;
 constexpr std::uintptr_t k_mesh_indices = 0x50;
 // The exact ray test intersects a mesh's triangles (a mesh is not convex), so the
-// triangle count is bounded for the one-time level parse. A larger mesh is skipped
-// rather than approximated. (The map's wall meshes are well within this.)
-constexpr std::int32_t k_max_mesh_vertices = 65536;
-constexpr std::int32_t k_max_mesh_triangles = 65536;
+// triangle count is bounded for the one-time level parse. A larger mesh is split into
+// spatial **clusters** (below) rather than skipped: the world's largest collision mesh
+// on de_dust2 has ~101k vertices, and the previous 65536 cap silently dropped it —
+// which is exactly why a wall/ground surface it carries was absent from the occluders
+// (live-confirmed 2026-10-19, `docs/re/bullet-trace.md`).
+constexpr std::int32_t k_max_mesh_vertices = 1 << 20;
+constexpr std::int32_t k_max_mesh_triangles = 1 << 20;
+// A collision mesh is emitted as several spatially bounded clusters of at most this
+// many triangles, so a map-wide mesh becomes many small occluders (bounded chart
+// silhouettes, cheap `ray_span`) instead of one chart-wide hull that fragments and
+// stalls the solve. `k_max_mesh_clusters` bounds the work per mesh.
+constexpr std::int32_t k_mesh_cluster_triangles = 2048;
+constexpr int k_max_mesh_clusters = 128;
 constexpr std::uintptr_t k_hull_vertex_count = 0x70;
 constexpr std::uintptr_t k_hull_vertices = 0x78;
 constexpr std::uintptr_t k_vertex_stride = 0xC;
@@ -191,10 +222,19 @@ constexpr int k_max_records = 8192;
 // table) and comparing the entity to the players' pawns.
 std::uintptr_t g_exclude_pawns[64] = {};
 int g_exclude_pawn_count = 0;
+
+// The engine's static default filter object, byte-copied and re-masked to the bullet
+// mask (see `k_bullet_mask`): the copy keeps the engine's vtable (which the query reads
+// far past `+8`), so it is safe where a payload-built vtable is not. POD only.
+alignas(16) unsigned char g_bullet_filter[k_filter_size] = {};
+bool g_bullet_filter_ready = false;
 // Hulls whose `RnHull_t` plane array could not be read; their half-spaces are rebuilt
 // from the vertices so they still attenuate (a silhouette without planes is drawn but
 // never occludes).
 int g_hulls_no_planes = 0;
+// Collision-mesh clusters emitted across the process (a big mesh is split into several
+// so no map-wide mesh is dropped and no chart-wide silhouette is built).
+int g_mesh_clusters = 0;
 
 // The game's resolved `SurfacePropertiesList` array (docs/re/penetration.md), set
 // once per query from `*(client + DAT_18254e100) + 0x28`. POD only.
@@ -481,8 +521,107 @@ auto parse_hull(std::uintptr_t hull, const BodyTransform& transform,
   return true;
 }
 
-// Read an `RnMesh_t` (a triangle soup; docs/re/vphysics2.md) into the chart. `scale`
-// is the shape's uniform scale (a Vec3), `transform` the owning body's world transform.
+// Split a triangle soup into spatially bounded clusters, appending one
+// `SolidKind::mesh` occluder per cluster (docs/re/bullet-trace.md). A collision mesh
+// can be map-wide (the largest on de_dust2 is ~101k vertices); one chart-wide convex
+// silhouette for it fragments every hitbox and makes `ray_span` scan the whole soup,
+// so it is split by the widest axis at the median until each cluster is small. Each
+// cluster carries its own world AABB (cached for the per-query broad phase when the
+// body transform is identity — the static world).
+void emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_identity,
+                        std::vector<OcclusionHull>& out, const ShapeSurface& surface) {
+  if (tris.empty()) {
+    return;
+  }
+  struct Range {
+    int begin = 0;
+    int end = 0;
+  };
+  std::vector<Range> stack;
+  stack.push_back(Range{0, static_cast<int>(tris.size())});
+  int emitted = 0;
+  while (!stack.empty() && emitted < k_max_mesh_clusters) {
+    const Range range = stack.back();
+    stack.pop_back();
+    const int count = range.end - range.begin;
+    if (count <= 0) {
+      continue;
+    }
+    if (count <= k_mesh_cluster_triangles ||
+        static_cast<int>(stack.size()) + emitted + 2 > k_max_mesh_clusters) {
+      OcclusionHull solid;
+      solid.kind = cs2::aim::SolidKind::mesh;
+      solid.triangles.reserve(static_cast<std::size_t>(count) * 3);
+      Vec3 mn = tris[static_cast<std::size_t>(range.begin)][0];
+      Vec3 mx = mn;
+      for (int i = range.begin; i < range.end; ++i) {
+        for (const Vec3& p : tris[static_cast<std::size_t>(i)]) {
+          solid.triangles.push_back(p);
+          mn.x = std::min(mn.x, p.x);
+          mn.y = std::min(mn.y, p.y);
+          mn.z = std::min(mn.z, p.z);
+          mx.x = std::max(mx.x, p.x);
+          mx.y = std::max(mx.y, p.y);
+          mx.z = std::max(mx.z, p.z);
+        }
+      }
+      solid.vertices = solid.triangles;  // `project_mesh_occluder` hulls this point set
+      if (transform_identity) {
+        solid.bounds_min = mn;
+        solid.bounds_max = mx;
+        solid.has_bounds = true;
+      }
+      apply_surface(solid, surface);
+      out.push_back(std::move(solid));
+      ++emitted;
+      ++g_mesh_clusters;
+      continue;
+    }
+    // The widest axis of the range's vertex bounds.
+    Vec3 mn = tris[static_cast<std::size_t>(range.begin)][0];
+    Vec3 mx = mn;
+    for (int i = range.begin; i < range.end; ++i) {
+      for (const Vec3& p : tris[static_cast<std::size_t>(i)]) {
+        mn.x = std::min(mn.x, p.x);
+        mn.y = std::min(mn.y, p.y);
+        mn.z = std::min(mn.z, p.z);
+        mx.x = std::max(mx.x, p.x);
+        mx.y = std::max(mx.y, p.y);
+        mx.z = std::max(mx.z, p.z);
+      }
+    }
+    const float ex = mx.x - mn.x;
+    const float ey = mx.y - mn.y;
+    const float ez = mx.z - mn.z;
+    int axis = 0;
+    if (ey > ex && ey >= ez) {
+      axis = 1;
+    } else if (ez > ex && ez > ey) {
+      axis = 2;
+    }
+    const auto centroid = [axis](const std::array<Vec3, 3>& t) -> float {
+      const float c = axis == 0 ? t[0].x + t[1].x + t[2].x
+                                : (axis == 1 ? t[0].y + t[1].y + t[2].y : t[0].z + t[1].z + t[2].z);
+      return c * (1.0F / 3.0F);
+    };
+    const auto pivot_pos = static_cast<std::ptrdiff_t>((range.begin + range.end) / 2);
+    std::nth_element(tris.begin() + range.begin, tris.begin() + pivot_pos,
+                     tris.begin() + range.end,
+                     [&centroid](const std::array<Vec3, 3>& a, const std::array<Vec3, 3>& b) {
+                       return centroid(a) < centroid(b);
+                     });
+    const int pivot_index = static_cast<int>(pivot_pos);
+    if (pivot_index <= range.begin || pivot_index >= range.end) {
+      continue;  // degenerate split; drop the range rather than loop forever
+    }
+    stack.push_back(Range{range.begin, pivot_index});
+    stack.push_back(Range{pivot_index, range.end});
+  }
+}
+
+// Read an `RnMesh_t` (a triangle soup; docs/re/vphysics2.md), split it into clusters
+// and transform each to world space. `scale` is the shape's uniform scale (a Vec3),
+// `transform` the owning body's world transform.
 auto parse_mesh(std::uintptr_t mesh, const Vec3& scale, const BodyTransform& transform,
                 std::vector<OcclusionHull>& out, const ShapeSurface& surface) -> bool {
   std::int32_t count = 0;
@@ -514,8 +653,8 @@ auto parse_mesh(std::uintptr_t mesh, const Vec3& scale, const BodyTransform& tra
                              static_cast<std::size_t>(tri_count) * 3 * sizeof(std::int32_t))) {
     return false;
   }
-  std::vector<Vec3> triangles;
-  triangles.reserve(tri_indices.size());
+  std::vector<std::array<Vec3, 3>> tris;
+  tris.reserve(static_cast<std::size_t>(tri_count));
   for (std::size_t t = 0; t + 2 < tri_indices.size(); t += 3) {
     const std::int32_t ia = tri_indices[t];
     const std::int32_t ib = tri_indices[t + 1];
@@ -523,20 +662,16 @@ auto parse_mesh(std::uintptr_t mesh, const Vec3& scale, const BodyTransform& tra
     if (ia < 0 || ia >= count || ib < 0 || ib >= count || ic < 0 || ic >= count) {
       continue;
     }
-    triangles.push_back(points[static_cast<std::size_t>(ia)]);
-    triangles.push_back(points[static_cast<std::size_t>(ib)]);
-    triangles.push_back(points[static_cast<std::size_t>(ic)]);
+    tris.push_back(std::array<Vec3, 3>{points[static_cast<std::size_t>(ia)],
+                                       points[static_cast<std::size_t>(ib)],
+                                       points[static_cast<std::size_t>(ic)]});
   }
-  if (triangles.size() < 3) {
+  if (tris.empty()) {
     return false;
   }
-  OcclusionHull solid;
-  solid.kind = cs2::aim::SolidKind::mesh;
-  solid.vertices = std::move(points);
-  solid.triangles = std::move(triangles);
-  apply_surface(solid, surface);
-  out.push_back(std::move(solid));
-  return true;
+  const int before = static_cast<int>(out.size());
+  emit_mesh_clusters(tris, transform.is_identity(), out, surface);
+  return static_cast<int>(out.size()) > before;
 }
 
 auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
@@ -663,13 +798,30 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
   }
 }
 
+// Copy the engine's static filter object at `engine` (an in-process VA) and write the
+// bullet mask/group/flags into it, returning the payload-side object. Falls back to the
+// engine object when the copy fails. The engine's own vtable is preserved by the copy.
+auto build_bullet_filter(std::uintptr_t engine) -> void* {
+  g_bullet_filter_ready = false;
+  if (engine < 0x10000 || !cs2::game::read_bytes(engine, g_bullet_filter, k_filter_size)) {
+    return reinterpret_cast<void*>(engine);
+  }
+  *reinterpret_cast<std::int64_t*>(g_bullet_filter + k_filter_mask) =
+      static_cast<std::int64_t>(k_bullet_mask);
+  g_bullet_filter[k_filter_group] = 3;     // the shot's collision group (FUN_180352920)
+  g_bullet_filter[k_filter_flags] = 0x0F;  // the engine default's query-selection flags
+  g_bullet_filter[k_filter_byte39] =
+      static_cast<unsigned char>((g_bullet_filter[k_filter_byte39] & 0xC9U) | 0x49U);
+  g_bullet_filter_ready = true;
+  return g_bullet_filter;
+}
+
 // One `EntitiesInBox` call. Returns the record count (0 on fault/empty).
-auto run_box_query(void* iface, std::uintptr_t base, const Vec3& lo, const Vec3& hi,
+auto run_box_query(void* iface, void* filter, const Vec3& lo, const Vec3& hi,
                    ResultVector& vector, bool* ok) -> std::int32_t {
   BoxCall call;
   call.iface = iface;
-  call.filter = reinterpret_cast<void*>(
-      base + sdk_client_offset("physics_query_filter", k_static_filter_fallback));
+  call.filter = filter;
   call.contents = k_contents_solid;
   call.vector = &vector;
   call.lo = lo;
@@ -999,6 +1151,19 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
 
   g_entities_in_box = reinterpret_cast<EntitiesInBoxFn>(base + entities_in_box);
 
+  // The custom bullet filter (see `k_bullet_mask`): a copy of the engine's filter with
+  // the shot's collision mask, so the enumerated set matches what a bullet crosses.
+  void* filter = build_bullet_filter(base + static_filter);
+  if (stats != nullptr) {
+    stats->filter = reinterpret_cast<std::uintptr_t>(filter);
+    stats->filter_custom = g_bullet_filter_ready;
+    if (g_bullet_filter_ready) {
+      stats->filter_mask = *reinterpret_cast<std::int64_t*>(g_bullet_filter + k_filter_mask);
+      stats->filter_group = g_bullet_filter[k_filter_group];
+      stats->filter_flags = g_bullet_filter[k_filter_flags];
+    }
+  }
+
   int shapes = 0;
   int* type_counts = stats != nullptr ? stats->type_counts : nullptr;
 
@@ -1009,7 +1174,7 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
     vector.flags = 0x80000000U;  // external buffer: the engine will not reallocate
     bool ok = false;
     const std::int32_t count =
-        run_box_query(reinterpret_cast<void*>(iface), base, lo, hi, vector, &ok);
+        run_box_query(reinterpret_cast<void*>(iface), filter, lo, hi, vector, &ok);
     if (stats != nullptr) {
       stats->ok = ok;
       stats->faulted = !ok;
@@ -1036,6 +1201,7 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
     stats->shapes = shapes;
     stats->hulls = static_cast<int>(out.size());
     stats->hulls_no_planes = g_hulls_no_planes;
+    stats->mesh_clusters = g_mesh_clusters;
     // The surface probe persists across queries: the world body is parsed only on the
     // first query, so a cached query has no `surface_hits` of its own.
     if (stats->surface_hits == 0 && g_surface_probe_set != 0) {

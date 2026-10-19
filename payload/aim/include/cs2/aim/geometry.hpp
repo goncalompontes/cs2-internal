@@ -65,9 +65,28 @@ struct Polygon {
   [[nodiscard]] auto empty() const noexcept -> bool { return points.size() < 3; }
 };
 
+// The chart's local differential scale at a pitch `v`: a true angular offset of `r`
+// radians spans `r` in the chart's `v` (pitch) but `r / cos(v)` in its `u` (yaw),
+// because `u` is a yaw about the world Z axis. Every angular quantity that lives on
+// the sphere and is evaluated on this chart (a cone radius, a sphere silhouette's
+// yaw half-width, a hitchance kernel) must be scaled by this, or the model is wrong
+// at a steep aim — the angle-dependent failure where the ragebot works when level
+// with a target and stops working when looking up or down at one. Clamped so a
+// near-vertical direction cannot blow up.
+[[nodiscard]] auto yaw_scale(float pitch) noexcept -> float;
+
 // The convex hull of a point set (Andrew's monotone chain). Fewer than 3 points,
 // or a degenerate (collinear) set, yields an empty polygon.
 [[nodiscard]] auto convex_hull(std::span<const Vec2> points) -> Polygon;
+
+// The convex hull of projected chart points, with every yaw first unwrapped into the
+// `±π` window about `reference_yaw`. A silhouette that straddles the chart's `±π`
+// seam (a target to the west of the eye, world yaw ≈ ±π) would otherwise collapse to
+// a chart-wide hull — the seam bug that makes the solve fail at a whole range of
+// target bearings. `reference_yaw` is the yaw of the silhouette's own centre
+// direction, so the result stays one contiguous polygon that `unproject` maps back
+// to the right world directions.
+[[nodiscard]] auto convex_hull_unwrapped(std::span<const Vec2> points, float reference_yaw) -> Polygon;
 
 [[nodiscard]] auto polygon_area(const Polygon& polygon) noexcept -> float;
 [[nodiscard]] auto polygon_centroid(const Polygon& polygon) noexcept -> Vec2;
@@ -78,13 +97,24 @@ struct Polygon {
 [[nodiscard]] auto clip_half_plane(const Polygon& polygon, const Vec2& normal, float offset)
     -> Polygon;
 
-// The polygon point nearest the chart origin — the *damage* optimum (least
-// range falloff / wall thickness). The origin itself when it is inside.
+// The polygon point nearest `reference` (the chart origin by default) — the *damage*
+// optimum when the value within a cell varies (least range falloff / wall thickness).
+// The reference itself when it is inside.
+[[nodiscard]] auto nearest_point_to(const Polygon& polygon, const Vec2& reference) -> Vec2;
 [[nodiscard]] auto nearest_point(const Polygon& polygon) -> Vec2;
 
 // The centre of the polygon's largest inscribed circle — the *hitchance* optimum
 // (maximum margin to the boundary). Empty polygon yields the origin.
 [[nodiscard]] auto chebyshev_center(const Polygon& polygon) -> Vec2;
+
+// The radius of that inscribed circle (0 for a degenerate polygon): the margin, used
+// to compare how robustly a cell can be hit.
+[[nodiscard]] auto chebyshev_radius(const Polygon& polygon) -> float;
+
+// The distance from `point` to the polygon's boundary (negative outside). For a point
+// inside it is how far the aim can drift before it leaves the cell — the local margin
+// used by the global point search.
+[[nodiscard]] auto polygon_margin(const Polygon& polygon, const Vec2& point) -> float;
 
 // Project an oriented box from `eye` into the chart. Empty when the box is not
 // (mostly) in front of the eye.

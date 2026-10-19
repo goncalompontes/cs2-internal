@@ -240,6 +240,39 @@
 - **Remaining:** wiring the recorded window into the *solve* (the heatmap reads it;
   `DamageField`/`solve` does not yet), the pose blur, and pellet-pattern
   registration.
+- **Angle-correctness + filter audit (2026-10-19).** A full review against the Tier-2
+  plan is in `docs/ragebot-review.md`. Fixed: (a) the chart's **yaw/pitch metric** —
+  `project_sphere` is now the exact 3-D silhouette cone, the hitchance/pose kernels are
+  anisotropic (`yaw_scale(pitch)`), and `argmax_damage` is the best cell's Chebyshev
+  centre instead of the point nearest the chart origin (world `+X`), which had made the
+  aim — and the fire gate — depend on the target's absolute bearing; (b) the **±π yaw
+  seam** (`convex_hull_unwrapped`, a target due west no longer becomes a chart-wide
+  hull); (c) the **bullets' collision mask** (`EntitiesInBox` reads the mask from
+  `filter+8`, not its `contents` argument — the payload now passes a copy of the engine
+  filter re-masked to `0x1c300b`, `docs/re/bullet-trace.md`); (d) the **mesh cap** that
+  silently dropped the map's largest collision mesh (101097 verts) — the floor/terrain
+  — now split into spatial clusters. New features: **auto-stop, auto-scope,
+  auto-reload, only-visible** (`wire::Settings` v9, the `rage` command). Still open:
+  the inaccuracy unit/scale (§2.4 of the review).
+- **Global point selection, trigger modes, per-weapon configs (2026-10-19, second
+  session).** (a) The point optima are now **global over the whole field**: `argmax_damage`
+  maximizes damage then the local margin across **every** cell/fragment (not one
+  best cell's own optimum), `argmax_hitchance` maximizes the margin among
+  comparable-value cells, and `argmax_hit_probability` seeds from every cell. A new
+  `polygon_margin`/`field_margin` supplies the robustness score. (b) The ragebot
+  trigger is a mode (`wire::Settings.rage_mode`): **hold key / always on / toggle
+  key**. (c) **Per-weapon configs** (`payload/control/rage_config.hpp`): a profile
+  (objective/hitbox/mode/key/fov/min-damage/min-hitchance/assists/fire) per weapon
+  designer name, applied when `per_weapon` is on, and **persisted** to
+  `%LOCALAPPDATA%\cs2-internal\cs2-rage.cfg`, loaded at startup. Editable from the menu
+  (weapon field + Save/Load/Delete) and the `rage` command
+  (`weapon=`, `per_weapon=true`, `profile_save`/`profile_load`/`profile_delete`,
+  `save`/`load`, `mode=hold|always|toggle`). (d) **Auto-stop / auto-scope fixed**:
+  auto-stop now zeroes every channel the engine moves from (the command base and both
+  button states, the raw `CCSGOInput + 0x270` axes *before* the engine copies them, and
+  the engine's own held-button word); auto-scope/auto-reload mirror zoom/attack2/reload
+  into the button-state *changed* word (a press edge) and into the engine held-button
+  word. `wire::Settings` v10.
 
 
 

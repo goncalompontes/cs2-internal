@@ -274,6 +274,9 @@ void Input::set_rage_aim(float pitch, float yaw, int target, int hitbox) noexcep
 
 void Input::clear_rage_aim() noexcept {
   rage_active_.store(false);
+  rage_stop_.store(false);
+  rage_scope_.store(false);
+  rage_reload_.store(false);
 }
 
 void Input::write_silent_angles(void* cmd, float pitch, float yaw, float roll) noexcept {
@@ -305,6 +308,25 @@ void Input::write_silent_angles(void* cmd, float pitch, float yaw, float roll) n
   }
 }
 
+void Input::write_engine_buttons(std::uint64_t set_bits, std::uint64_t clear_bits) noexcept {
+  if (set_bits == 0 && clear_bits == 0) {
+    return;
+  }
+  const std::uintptr_t pawn = local_pawn_.load();
+  if (pawn == 0) {
+    return;
+  }
+  std::uintptr_t services = 0;
+  if (!cs2::game::read(pawn + k_movement_services_offset, services) || services == 0) {
+    return;
+  }
+  auto* state = reinterpret_cast<std::uint64_t*>(services + k_services_button_offset);
+  if (!writable(reinterpret_cast<std::uintptr_t>(state), sizeof(std::uint64_t))) {
+    return;
+  }
+  *state = (*state | set_bits) & ~clear_bits;
+}
+
 void Input::rage_tick(std::uint8_t* cmd, std::uint64_t* buttons) noexcept {
   if (!rage_active_.load()) {
     return;
@@ -314,18 +336,30 @@ void Input::rage_tick(std::uint8_t* cmd, std::uint64_t* buttons) noexcept {
   if (buttons == nullptr) {
     return;
   }
-  // Mirror the (persistently asserted) attack into the command's
-  // `CInButtonStatePB` so the sub-tick records agree with the legacy mask.
+  // Mirror the (persistently asserted) attack, zoom and reload into the command's
+  // `CInButtonStatePB` so the sub-tick records agree with the legacy mask. A changed
+  // word is needed for the engine to see a fresh press edge (zoom/reload act on the
+  // edge), exactly as the attack does.
   const auto base =
       *reinterpret_cast<std::uintptr_t*>(cmd + k_cmd_pb_offset + k_pb_base_offset);
   const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
-  if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
+  std::uint64_t extra = *buttons & button::k_attack;
+  if (rage_scope_.load()) {
+    extra |= button::k_attack2 | button::k_zoom;
+  }
+  if (rage_reload_.load()) {
+    extra |= button::k_reload;
+  }
+  if (extra != 0 && writable(buttons_pb, k_buttonstate_values_offset + 16)) {
     auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
-    const std::uint64_t attack = *buttons & button::k_attack;
-    state[0] = (state[0] & ~button::k_attack) | attack;  // held
-    state[1] = (state[1] & ~button::k_attack) | attack;  // changed (a press edge)
+    state[0] = (state[0] & ~extra) | extra;  // held
+    state[1] = (state[1] & ~extra) | extra;  // changed (a press edge)
     *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3u;
   }
+  // Also assert the extra buttons in the engine's own held-button word
+  // (`CInButtonState` at the movement services), which some weapon actions read
+  // instead of the command mask.
+  write_engine_buttons(extra, 0);
   if ((*buttons & button::k_attack) != 0) {
     rage_shots_.fetch_add(1);
   }
@@ -1422,16 +1456,30 @@ auto Input::add_analog_step(void* base, float forward, float side, float when) n
 }
 
 void Input::write_raw_move() noexcept {
-  if (!move_enabled_.load() || ccsgo_input_ == 0) {
+  if (ccsgo_input_ == 0) {
+    return;
+  }
+  auto* move = reinterpret_cast<float*>(ccsgo_input_ + k_input_move_offset);
+  if (!writable(reinterpret_cast<std::uintptr_t>(move), 3 * sizeof(float))) {
+    return;
+  }
+  // Ragebot auto-stop: zero the raw axes *before* the engine's `create_move_input`
+  // copies them into the command (this is the source the engine derives the move from),
+  // so the player's own WASD cannot move the shot. Runs even when the move feature is
+  // off, hence before the `move_enabled_` check.
+  if (rage_active_.load() && rage_stop_.load()) {
+    move[0] = 0.0F;
+    move[1] = 0.0F;
+    move[2] = 0.0F;
+    raw_writes_.fetch_add(1);
+    return;
+  }
+  if (!move_enabled_.load()) {
     return;
   }
   float axes[3];
   resolve_axes(move_forward_.load(), move_side_.load(), move_up_.load(), move_quantize_.load(),
                axes);
-  auto* move = reinterpret_cast<float*>(ccsgo_input_ + k_input_move_offset);
-  if (!writable(reinterpret_cast<std::uintptr_t>(move), 3 * sizeof(float))) {
-    return;
-  }
   move[0] = axes[0];
   move[1] = axes[1];
   move[2] = axes[2];
@@ -1531,9 +1579,19 @@ void Input::apply(void* cmd) noexcept {
   // wrote that tick let a shot be released on a command the silent write had not
   // reached, so it followed the camera (the auto-fire timing bug). A persistent
   // press is exactly why manual `press("attack")` always hit.
-  const bool rage_firing = rage_active_.load() && rage_fire_.load();
+  const bool rage_solved = rage_active_.load();
+  const bool rage_firing = rage_solved && rage_fire_.load();
   if (rage_firing) {
     value |= button::k_attack;
+  }
+  // Auto-scope / auto-reload (common ragebot assists, `docs/ragebot.md`): hold zoom
+  // and/or reload while a solve is active. The engine ignores zoom on a weapon that
+  // cannot scope; reload is a no-op when the clip is full.
+  if (rage_solved && rage_scope_.load()) {
+    value |= button::k_attack2 | button::k_zoom;
+  }
+  if (rage_solved && rage_reload_.load()) {
+    value |= button::k_reload;
   }
   if (value != current) {
     *buttons = value;
@@ -1608,7 +1666,45 @@ void Input::apply(void* cmd) noexcept {
   //    move write so it owns the airborne case.
   const auto strafe_base =
       *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset + k_pb_base_offset);
-  strafe_tick(reinterpret_cast<void*>(strafe_base), bytes);
+  const bool rage_stopping = rage_active_.load() && rage_stop_.load();
+  if (rage_stopping) {
+    // Ragebot auto-stop: hold still while the solve is live (maximum accuracy — the
+    // spread cone the hitchance is computed against is the standing one). Every channel
+    // the engine moves from is zeroed: the command's base move + both button states, the
+    // raw axes source (`CCSGOInput + 0x270`, also zeroed pre-original in
+    // `write_raw_move`) and the engine's own held-button word. The auto-strafe is
+    // suppressed so it cannot re-add movement.
+    if (writable(strafe_base, k_base_move_offset + 12)) {
+      auto* move = reinterpret_cast<float*>(strafe_base + k_base_move_offset);
+      move[0] = 0.0F;
+      move[1] = 0.0F;
+      *reinterpret_cast<std::uint32_t*>(strafe_base + k_base_has_bits_offset) |= k_base_move_bits;
+    }
+    constexpr std::uint64_t move_bits = button::k_forward | button::k_back |
+                                        button::k_moveleft | button::k_moveright;
+    *buttons &= ~move_bits;
+    const auto buttons_pb =
+        *reinterpret_cast<std::uintptr_t*>(strafe_base + k_base_buttons_pb_offset);
+    if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
+      auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
+      state[0] &= ~move_bits;
+      state[1] &= ~move_bits;
+      *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3u;
+    }
+    if (ccsgo_input_ != 0) {
+      auto* raw = reinterpret_cast<float*>(ccsgo_input_ + k_input_move_offset);
+      if (writable(reinterpret_cast<std::uintptr_t>(raw), 3 * sizeof(float))) {
+        raw[0] = 0.0F;
+        raw[1] = 0.0F;
+        raw[2] = 0.0F;
+      }
+    }
+    write_engine_buttons(0, move_bits);
+    rage_stops_.fetch_add(1);
+  }
+  if (!rage_stopping) {
+    strafe_tick(reinterpret_cast<void*>(strafe_base), bytes);
+  }
 
   // 4. The command's **own** `viewangles` (`base + 0x40`) — what movement's
   //     wishdir is computed from. Measured live 2026-10-15: writing the

@@ -344,11 +344,20 @@ auto draw_window(wire::Settings& settings) -> bool {
         ImGui::EndTabItem();
       }
       if (ImGui::BeginTabItem("Ragebot")) {
-        toggle("Ragebot (hold key)", settings.rage);
-        int key_index = rage_key_index(settings.rage_key);
-        if (ImGui::Combo("Trigger key", &key_index, k_rage_key_names,
-                         IM_ARRAYSIZE(k_rage_key_names))) {
-          settings.rage_key = static_cast<std::uint8_t>(k_rage_key_vks[key_index]);
+        toggle("Ragebot", settings.rage);
+        // The trigger (`docs/ragebot.md`): hold the key, always on, or toggle the key.
+        static const char* const k_trigger_modes[] = {"Hold key", "Always on", "Toggle key"};
+        int trigger = settings.rage_mode <= 2 ? settings.rage_mode : 0;
+        ImGui::SetNextItemWidth(160.0F);
+        if (ImGui::Combo("Trigger", &trigger, k_trigger_modes, IM_ARRAYSIZE(k_trigger_modes))) {
+          settings.rage_mode = static_cast<std::uint8_t>(trigger);
+        }
+        if (settings.rage_mode == 0) {
+          int key_index = rage_key_index(settings.rage_key);
+          if (ImGui::Combo("Trigger key", &key_index, k_rage_key_names,
+                           IM_ARRAYSIZE(k_rage_key_names))) {
+            settings.rage_key = static_cast<std::uint8_t>(k_rage_key_vks[key_index]);
+          }
         }
         toggle("Auto fire", settings.rage_fire);
         ImGui::Separator();
@@ -372,6 +381,51 @@ auto draw_window(wire::Settings& settings) -> bool {
         ImGui::SliderFloat("Min damage", &settings.rage_min_damage, 0.0F, 200.0F, "%.0f");
         ImGui::SetNextItemWidth(160.0F);
         ImGui::SliderFloat("Min hitchance", &settings.rage_min_hitchance, 0.0F, 1.0F, "%.2f");
+        ImGui::Separator();
+        // The common assists (`docs/ragebot.md`).
+        static const char* const k_assist_modes[] = {"Off", "Always", "When firing"};
+        int autostop = settings.rage_autostop <= 2 ? settings.rage_autostop : 0;
+        ImGui::SetNextItemWidth(160.0F);
+        if (ImGui::Combo("Auto-stop", &autostop, k_assist_modes, IM_ARRAYSIZE(k_assist_modes))) {
+          settings.rage_autostop = static_cast<std::uint8_t>(autostop);
+        }
+        int autoscope = settings.rage_autoscope <= 2 ? settings.rage_autoscope : 0;
+        ImGui::SetNextItemWidth(160.0F);
+        if (ImGui::Combo("Auto-scope", &autoscope, k_assist_modes, IM_ARRAYSIZE(k_assist_modes))) {
+          settings.rage_autoscope = static_cast<std::uint8_t>(autoscope);
+        }
+        toggle("Auto-reload (empty clip)", settings.rage_autoreload);
+        toggle("Only visible (no wallbang)", settings.rage_only_visible);
+        ImGui::Separator();
+        // Per-weapon profiles (`rage_config.hpp`): the live sliders above are the
+        // *global* tuning; save/load a weapon's copy, and `Per-weapon` applies the
+        // profile matching the active weapon at solve time.
+        toggle("Per-weapon config", settings.rage_per_weapon);
+        ImGui::SetNextItemWidth(180.0F);
+        ImGui::InputText("Weapon key", settings.rage_weapon, sizeof(settings.rage_weapon));
+        if (ImGui::Button("Save to weapon")) {
+          settings.rage_config_op = 1;
+          ++settings.rage_config_token;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Load from weapon")) {
+          settings.rage_config_op = 2;
+          ++settings.rage_config_token;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete")) {
+          settings.rage_config_op = 5;
+          ++settings.rage_config_token;
+        }
+        if (ImGui::Button("Save file")) {
+          settings.rage_config_op = 3;
+          ++settings.rage_config_token;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Load file")) {
+          settings.rage_config_op = 4;
+          ++settings.rage_config_token;
+        }
         ImGui::Separator();
         ImGui::TextDisabled("Hold the key to aim at the best enemy in FOV (silent),");
         ImGui::TextDisabled("through walls with the real penetration model.");

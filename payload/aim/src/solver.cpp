@@ -32,7 +32,7 @@ auto solve(const SolveInput& input) -> SolveResult {
                           input.occlusion, input.weapon, input.penetration,
                           input.penetration_params);
       for (const DamageFragment& fragment : fragments) {
-        field.add(fragment.polygon, fragment.value);
+        field.add(fragment.polygon, fragment.value, fragment.base_value);
       }
     } else {
       field.add_hitbox(polygon, hitbox.multiplier, distance, input.weapon);
@@ -72,6 +72,9 @@ auto solve(const SolveInput& input) -> SolveResult {
                      ? field.value_at_pellets(aim, input.pellet_offsets)
                      : field.value_at(aim);
   result.hitchance = field.hit_probability(aim, input.spread_sigma);
+  // Whether the chosen aim is attenuated by a wall in front (the unoccluded value is
+  // strictly larger) — the "only shoot through nothing" gate (`SolveResult::penetrated`).
+  result.penetrated = result.value + 1.0e-3F < field.base_value_at(aim);
   result.cells = field.cells.size();
   return result;
 }

@@ -62,6 +62,9 @@ struct SolveResult {
   // The probability the shot lands on the target for the chosen aim (the cone
   // `spread_sigma`): 1 when the whole cone is inside a hitbox, 0 when it misses.
   float hitchance = 0.0F;
+  // True when the chosen aim's damage is reduced by a wall in front (its unoccluded
+  // value is larger) — the "only visible / no wallbang" fire gate.
+  bool penetrated = false;
   std::size_t cells = 0;
 };
 

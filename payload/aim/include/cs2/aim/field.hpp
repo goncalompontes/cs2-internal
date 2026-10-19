@@ -70,6 +70,10 @@ struct WeaponProfile {
 struct Cell {
   Polygon polygon;
   float value = 0.0F;
+  // The damage before the walls in front (the unoccluded value), so the solve can
+  // tell whether the chosen aim is actually attenuated (an "only shoot what you can
+  // see" gate).
+  float base_value = 0.0F;
 };
 
 // A damage field over the chart. Cells never overlap by construction: they are
@@ -81,8 +85,9 @@ struct DamageField {
     return cells.empty();
   }
 
-  // Add a convex cell; empty polygons and non-positive values are dropped.
-  void add(const Polygon& polygon, float value);
+  // Add a convex cell; empty polygons and non-positive values are dropped. `base` is
+  // the unoccluded value (`value` when not given).
+  void add(const Polygon& polygon, float value, float base = -1.0F);
 
   // Add a hitbox cell with the weapon value model applied.
   void add_hitbox(const Polygon& polygon, float hitgroup_multiplier, float distance,
@@ -95,12 +100,15 @@ struct DamageField {
   // The damage at a chart point (max over containing cells), or 0.
   [[nodiscard]] auto value_at(const Vec2& point) const noexcept -> float;
 
+  // The unoccluded damage at a chart point (max over containing cells' `base_value`).
+  [[nodiscard]] auto base_value_at(const Vec2& point) const noexcept -> float;
+
   // The **hitchance**: the probability a shot aimed at `aim` lands inside the target's
   // hitbox after the cone perturbs its direction. The cone is an isotropic angular
-  // Gaussian of std-dev `sigma` (the weapon inaccuracy + spread), integrated by the
-  // same deterministic quadrature as `argmax_expected` — the fraction of kernel samples
-  // whose perturbed direction lands in a cell. 0 when the target is not hit; 1 when the
-  // whole cone is inside it. With `sigma == 0` this is the binary indicator.
+  // Gaussian of std-dev `sigma` (the weapon inaccuracy + spread); on the chart its yaw
+  // half-width is `sigma / cos(pitch)` (the yaw/pitch metric), so the integral is over
+  // a chart ellipse, not a circle. 0 when the target is not hit; 1 when the whole cone
+  // is inside it. With `sigma == 0` this is the binary indicator.
   [[nodiscard]] auto hit_probability(const Vec2& aim, float sigma) const noexcept -> float;
 
   // The aim maximizing the hitchance (`hit_probability`) for the cone `sigma`.
@@ -122,10 +130,12 @@ struct DamageField {
   // The highest-value cell (nullptr when empty).
   [[nodiscard]] auto best_cell() const noexcept -> const Cell*;
 
-  // The aim maximizing damage: the best cell's point nearest the chart origin.
+  // The aim maximizing damage. The value is constant across a cell, so this is the
+  // best cell's Chebyshev centre — the most robust point of the highest-damage cell.
   [[nodiscard]] auto argmax_damage() const -> Vec2;
 
-  // The aim maximizing margin: the best cell's Chebyshev centre.
+  // The aim maximizing margin: the Chebyshev centre of the best cell (or of a
+  // comparable-value cell with a meaningfully larger margin).
   [[nodiscard]] auto argmax_hitchance() const -> Vec2;
 
   // The aim maximizing the pose-blurred field, `E[value]` under a Gaussian pose

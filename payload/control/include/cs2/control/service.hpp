@@ -21,6 +21,7 @@
 #include "cs2/control/input.hpp"
 #include "cs2/control/json.hpp"
 #include "cs2/control/occlusion_query.hpp"
+#include "cs2/control/rage_config.hpp"
 #include "cs2/game/state_reader.hpp"
 
 namespace cs2::control {
@@ -47,9 +48,13 @@ class Service {
 
   // Drive the ragebot (`docs/ragebot.md`): the overlay menu's Ragebot tab and the
   // `rage` control command set the same state. `key` is a Win32 virtual-key code
-  // (0 = none), held to trigger the solve.
+  // (0 = none), held to trigger the solve. `autostop`/`autoscope` are modes
+  // (0 = off, 1 = always while solving, 2 = only while firing); `autoreload` and
+  // `only_visible` are flags.
   void set_rage_features(bool on, int key, bool fire, int objective, int hitbox, float fov,
-                         float min_damage, float min_hitchance) noexcept;
+                         float min_damage, float min_hitchance, int autostop, int autoscope,
+                         bool autoreload, bool only_visible, int mode, bool per_weapon,
+                         const char* weapon, int config_op, std::uint32_t config_token) noexcept;
 
   // Run the ragebot for one state refresh. The overlay's per-frame sink calls this
   // with the current snapshot; the solve runs on the render thread and stashes the
@@ -163,6 +168,49 @@ class Service {
   std::atomic<float> rage_fov_{0.0F};
   std::atomic<float> rage_min_damage_{0.0F};
   std::atomic<float> rage_min_hitchance_{0.0F};
+  // The common ragebot assists: auto-stop mode, auto-scope mode (0 off / 1 always /
+  // 2 when firing), auto-reload, and "only fire on an unattenuated (visible) shot".
+  std::atomic<int> rage_autostop_{0};
+  std::atomic<int> rage_autoscope_{0};
+  std::atomic<bool> rage_autoreload_{false};
+  std::atomic<bool> rage_only_visible_{false};
+  // True when the last solve's aim reached the target with no wall in front.
+  std::atomic<bool> rage_visible_{false};
+  // The trigger mode (0 = hold key, 1 = always on, 2 = toggle key) and its toggle state.
+  std::atomic<int> rage_mode_{0};
+  bool rage_key_down_ = false;
+  bool rage_toggle_ = false;
+  // Per-weapon profiles (`rage_config.hpp`), persisted to the payload data file. The
+  // menu's "weapon key" and the pending config op arrive with the settings; the last
+  // applied token is remembered so one click runs one op.
+  std::atomic<bool> rage_per_weapon_{false};
+  std::atomic<std::uint32_t> rage_config_token_{0};
+  std::mutex rage_config_mutex_;
+  char rage_weapon_[24] = {};
+  RageConfigStore rage_profiles_{};
+  void apply_rage_config_op(int op, const char* weapon) noexcept;
+  // The tuning actually used by the solve: the per-weapon profile when `per_weapon` is
+  // on and the active weapon has one, else the global settings.
+  struct RageTuning {
+    int objective = 1;
+    int hitbox = 0;
+    int mode = 0;
+    int autostop = 0;
+    int autoscope = 0;
+    bool autoreload = false;
+    bool only_visible = false;
+    bool fire = false;
+    int key = 0;
+    float fov = 0.0F;
+    float min_damage = 0.0F;
+    float min_hitchance = 0.0F;
+  };
+  [[nodiscard]] auto effective_rage_tuning(const char* active_weapon) noexcept -> RageTuning;
+  // Auto-scope is driven through the engine's own `+zoom`/`-zoom` (Cbuf), the only
+  // channel the game's zoom actually reads (measured live). The render thread sets the
+  // wanted state; the game-thread sink applies the transition via `+zoom`/`-zoom`.
+  std::atomic<bool> rage_scope_wanted_{false};
+  bool rage_scope_applied_ = false;
   std::atomic<std::uint64_t> rage_solves_{0};
   std::atomic<int> rage_last_target_{-1};
   // Backtracking (`docs/ragebot.md` §8): how many solves chose a lag record over the

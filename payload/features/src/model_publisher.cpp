@@ -58,6 +58,13 @@ auto to_wire_settings(const EspConfig& config) -> wire::Settings {
   settings.rage_fov = config.rage_fov;
   settings.rage_min_damage = config.rage_min_damage;
   settings.rage_min_hitchance = config.rage_min_hitchance;
+  settings.rage_autostop = config.rage_autostop;
+  settings.rage_autoscope = config.rage_autoscope;
+  settings.rage_autoreload = config.rage_autoreload;
+  settings.rage_only_visible = config.rage_only_visible;
+  settings.rage_mode = config.rage_mode;
+  settings.rage_per_weapon = config.rage_per_weapon;
+  std::memcpy(settings.rage_weapon, config.rage_weapon, sizeof(settings.rage_weapon));
   settings.show_hud = 1;
   return settings;
 }
@@ -85,6 +92,14 @@ auto from_wire_settings(const wire::Settings& settings) -> EspConfig {
   config.rage_fov = settings.rage_fov;
   config.rage_min_damage = settings.rage_min_damage;
   config.rage_min_hitchance = settings.rage_min_hitchance;
+  config.rage_autostop = settings.rage_autostop <= 2 ? settings.rage_autostop : 0;
+  config.rage_autoscope = settings.rage_autoscope <= 2 ? settings.rage_autoscope : 0;
+  config.rage_autoreload = settings.rage_autoreload != 0 ? 1 : 0;
+  config.rage_only_visible = settings.rage_only_visible != 0 ? 1 : 0;
+  config.rage_mode = settings.rage_mode <= 2 ? settings.rage_mode : 0;
+  config.rage_per_weapon = settings.rage_per_weapon != 0 ? 1 : 0;
+  std::memcpy(config.rage_weapon, settings.rage_weapon, sizeof(config.rage_weapon));
+  config.rage_weapon[sizeof(config.rage_weapon) - 1] = '\0';
   return config;
 }
 

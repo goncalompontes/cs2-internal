@@ -39,6 +39,16 @@ struct EspConfig {
   float rage_fov = 0.0F;                // target cone (degrees; 0 = unlimited)
   float rage_min_damage = 0.0F;         // don't aim/fire below this damage
   float rage_min_hitchance = 0.0F;      // don't aim/fire below this hitchance
+  // The common ragebot assists (docs/ragebot.md): auto-stop / auto-scope modes
+  // (0 off, 1 always while solving, 2 only while firing), auto-reload, only-visible.
+  std::uint8_t rage_autostop = 0;
+  std::uint8_t rage_autoscope = 0;
+  std::uint8_t rage_autoreload = 0;
+  std::uint8_t rage_only_visible = 0;
+  // The trigger mode (0 hold / 1 always / 2 toggle) and the per-weapon profile state.
+  std::uint8_t rage_mode = 0;
+  std::uint8_t rage_per_weapon = 0;
+  char rage_weapon[24] = {};
 };
 
 // Per-build counters, for diagnostics/logging (never used for rendering).

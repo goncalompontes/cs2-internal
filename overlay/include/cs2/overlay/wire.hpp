@@ -20,7 +20,7 @@
 namespace cs2::overlay::wire {
 
 inline constexpr uint32_t k_magic = 0x324F5343U;  // 'CSO2'
-inline constexpr uint32_t k_version = 8;
+inline constexpr uint32_t k_version = 10;
 
 inline constexpr int k_max_sections = 16;
 inline constexpr int k_max_lines = 64;
@@ -109,6 +109,24 @@ struct Settings {
   float rage_fov;            // degrees; 0 = no limit
   float rage_min_damage;     // don't aim/fire below this damage (0 = any)
   float rage_min_hitchance;  // don't fire below this hitchance (0-1; 0 = any)
+  // The common ragebot assists (`docs/ragebot.md`). `rage_autostop`/`rage_autoscope`
+  // are modes (0 = off, 1 = always while solving, 2 = only while firing); the rest are
+  // flags. `rage_only_visible` fires only when no wall attenuates the shot.
+  uint8_t rage_autostop;
+  uint8_t rage_autoscope;
+  uint8_t rage_autoreload;
+  uint8_t rage_only_visible;
+  // The trigger (`docs/ragebot.md`): 0 = hold the key, 1 = always on, 2 = toggle on the
+  // key. Per-weapon profiles and their persistence (`rage_config.hpp`):
+  // `rage_per_weapon` applies the profile matching the active weapon; the weapon key +
+  // `rage_config_op` (1 save-to-weapon, 2 load-from-weapon, 3 save file, 4 load file,
+  // 5 delete profile) are sent with `rage_config_token` incremented so one click is one
+  // action.
+  uint8_t rage_mode;
+  uint8_t rage_per_weapon;
+  uint8_t rage_config_op;
+  uint32_t rage_config_token;
+  char rage_weapon[24];
 };
 
 struct Model {

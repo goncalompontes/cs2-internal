@@ -222,6 +222,8 @@ Service::Service() {
   // The occlusion query must run on a game thread; `Input::apply` (the CreateMove
   // hook) is one.
   input_.set_game_thread_sink(&game_thread_entry, this);
+  // Restore the per-weapon ragebot profiles from the last session (`rage_config.hpp`).
+  (void)rage_config_load(rage_profiles_);
 }
 
 auto Service::uptime_ms() const noexcept -> std::uint64_t {
@@ -738,7 +740,10 @@ void Service::set_movement_features(bool auto_strafe, bool bhop) noexcept {
 }
 
 void Service::set_rage_features(bool on, int key, bool fire, int objective, int hitbox, float fov,
-                                float min_damage, float min_hitchance) noexcept {
+                                float min_damage, float min_hitchance, int autostop,
+                                int autoscope, bool autoreload, bool only_visible, int mode,
+                                bool per_weapon, const char* weapon, int config_op,
+                                std::uint32_t config_token) noexcept {
   rage_enabled_.store(on);
   rage_key_.store(key);
   rage_fire_.store(fire);
@@ -747,6 +752,133 @@ void Service::set_rage_features(bool on, int key, bool fire, int objective, int 
   rage_fov_.store(fov);
   rage_min_damage_.store(min_damage);
   rage_min_hitchance_.store(min_hitchance);
+  rage_autostop_.store(autostop);
+  rage_autoscope_.store(autoscope);
+  rage_autoreload_.store(autoreload);
+  rage_only_visible_.store(only_visible);
+  rage_mode_.store(mode);
+  rage_per_weapon_.store(per_weapon);
+  {
+    std::lock_guard<std::mutex> lock(rage_config_mutex_);
+    if (weapon != nullptr) {
+      rage_weapon_key(weapon, rage_weapon_, sizeof(rage_weapon_));
+    }
+  }
+  // One click = one op: the menu increments the token.
+  if (config_op != 0 && config_token != rage_config_token_.load()) {
+    rage_config_token_.store(config_token);
+    apply_rage_config_op(config_op, weapon);
+  }
+}
+
+void Service::apply_rage_config_op(int op, const char* weapon) noexcept {
+  char key[24] = {};
+  bool persist = false;
+  {
+    std::lock_guard<std::mutex> lock(rage_config_mutex_);
+    rage_weapon_key(weapon != nullptr ? weapon : rage_weapon_, key, sizeof(key));
+    switch (op) {
+      case 1: {  // save the live globals into the weapon's profile
+        RageProfile* profile = rage_profile_find(rage_profiles_, key, true);
+        if (profile == nullptr) {
+          return;
+        }
+        profile->objective = static_cast<std::uint8_t>(rage_objective_.load());
+        profile->hitbox = static_cast<std::uint8_t>(rage_hitbox_.load());
+        profile->mode = static_cast<std::uint8_t>(rage_mode_.load());
+        profile->key = rage_key_.load();
+        profile->fov = rage_fov_.load();
+        profile->min_damage = rage_min_damage_.load();
+        profile->min_hitchance = rage_min_hitchance_.load();
+        profile->autostop = static_cast<std::uint8_t>(rage_autostop_.load());
+        profile->autoscope = static_cast<std::uint8_t>(rage_autoscope_.load());
+        profile->autoreload = rage_autoreload_.load() ? 1 : 0;
+        profile->only_visible = rage_only_visible_.load() ? 1 : 0;
+        profile->fire = rage_fire_.load() ? 1 : 0;
+        persist = true;
+        break;
+      }
+      case 2: {  // load the weapon's profile into the live globals
+        const RageProfile* profile = rage_profile_find(rage_profiles_, key, false);
+        if (profile == nullptr) {
+          return;
+        }
+        rage_objective_.store(profile->objective);
+        rage_hitbox_.store(profile->hitbox);
+        rage_mode_.store(profile->mode);
+        rage_key_.store(profile->key);
+        rage_fov_.store(profile->fov);
+        rage_min_damage_.store(profile->min_damage);
+        rage_min_hitchance_.store(profile->min_hitchance);
+        rage_autostop_.store(profile->autostop);
+        rage_autoscope_.store(profile->autoscope);
+        rage_autoreload_.store(profile->autoreload != 0);
+        rage_only_visible_.store(profile->only_visible != 0);
+        rage_fire_.store(profile->fire != 0);
+        break;
+      }
+      case 4:  // load file
+        (void)rage_config_load(rage_profiles_);
+        return;
+      case 5: {  // delete the weapon's profile
+        for (int i = 0; i < rage_profiles_.count; ++i) {
+          char existing[24];
+          rage_weapon_key(rage_profiles_.profiles[i].weapon, existing, sizeof(existing));
+          if (std::strcmp(existing, key) == 0) {
+            rage_profiles_.profiles[i] = rage_profiles_.profiles[--rage_profiles_.count];
+            break;
+          }
+        }
+        persist = true;
+        break;
+      }
+      default:
+        return;
+    }
+  }
+  // Persist after an edit (and for an explicit save). Re-take the lock so a concurrent
+  // profile edit on the control thread cannot race the read; the write is tiny and rare.
+  if (op == 3 || persist) {
+    std::lock_guard<std::mutex> lock(rage_config_mutex_);
+    (void)rage_config_save(rage_profiles_);
+  }
+}
+
+auto Service::effective_rage_tuning(const char* active_weapon) noexcept -> RageTuning {
+  RageTuning tuning;
+  tuning.objective = rage_objective_.load();
+  tuning.hitbox = rage_hitbox_.load();
+  tuning.mode = rage_mode_.load();
+  tuning.autostop = rage_autostop_.load();
+  tuning.autoscope = rage_autoscope_.load();
+  tuning.autoreload = rage_autoreload_.load();
+  tuning.only_visible = rage_only_visible_.load();
+  tuning.fire = rage_fire_.load();
+  tuning.key = rage_key_.load();
+  tuning.fov = rage_fov_.load();
+  tuning.min_damage = rage_min_damage_.load();
+  tuning.min_hitchance = rage_min_hitchance_.load();
+  if (!rage_per_weapon_.load() || active_weapon == nullptr || active_weapon[0] == '\0') {
+    return tuning;
+  }
+  std::lock_guard<std::mutex> lock(rage_config_mutex_);
+  const RageProfile* profile = rage_profile_find(rage_profiles_, active_weapon, false);
+  if (profile == nullptr) {
+    return tuning;
+  }
+  tuning.objective = profile->objective;
+  tuning.hitbox = profile->hitbox;
+  tuning.mode = profile->mode;
+  tuning.autostop = profile->autostop;
+  tuning.autoscope = profile->autoscope;
+  tuning.autoreload = profile->autoreload != 0;
+  tuning.only_visible = profile->only_visible != 0;
+  tuning.fire = profile->fire != 0;
+  tuning.key = profile->key;
+  tuning.fov = profile->fov;
+  tuning.min_damage = profile->min_damage;
+  tuning.min_hitchance = profile->min_hitchance;
+  return tuning;
 }
 
 // The hitgroup / hitbox id of the box whose centre is angularly closest to
@@ -891,6 +1023,18 @@ void Service::game_thread_entry(void* context) noexcept {
 }
 
 void Service::on_game_thread() noexcept {
+  // Auto-scope through the engine's own `+zoom`/`-zoom`: the command button mask does
+  // not reach the weapon's zoom, but the console held-buttons do (measured live). The
+  // transition is applied here so it runs on a game thread (Cbuf).
+  {
+    const bool want_scope = rage_scope_wanted_.load();
+    if (want_scope != rage_scope_applied_) {
+      console_.refresh();
+      if (console_.ready() && console_.exec(want_scope ? "+zoom" : "-zoom")) {
+        rage_scope_applied_ = want_scope;
+      }
+    }
+  }
   if (!occlusion_request_.exchange(false)) {
     return;
   }
@@ -923,6 +1067,9 @@ void Service::on_game_thread() noexcept {
 }
 
 void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
+  // Auto-scope is re-decided every frame; the game-thread sink applies the transition
+  // (`+zoom`/`-zoom`). Clear it here and re-arm it below when a solve wants it.
+  rage_scope_wanted_.store(false);
   // Sample the per-enemy lag records every frame (the heatmap's history), before
   // the ragebot's early-out so records accrue even when the ragebot is idle. The
   // occlusion enumeration also consumes them (the eye→hitboxes box needs the live pose
@@ -947,12 +1094,40 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   // The hook is what runs `apply()` per tick; install it on first use so the
   // ragebot works during menu-only play (no scenario attached).
   input_.refresh();
-  const int key = rage_key_.load();
-  if (!forced && (key <= 0 || (GetAsyncKeyState(key) & 0x8000) == 0)) {
+  if (!snapshot.valid || !snapshot.local.has_value() || !snapshot.local->alive) {
     input_.clear_rage_aim();
     return;
   }
-  if (!snapshot.valid || !snapshot.local.has_value() || !snapshot.local->alive) {
+
+  // The effective tuning: the per-weapon profile when enabled and the active weapon has
+  // one, else the global settings (`effective_rage_tuning`).
+  const RageTuning tuning = effective_rage_tuning(snapshot.local->weapon.c_str());
+
+  // The trigger (`docs/ragebot.md`): hold the key, always on, or toggle on the key.
+  bool engaged = forced;
+  if (!forced) {
+#if defined(_WIN32)
+    const bool key_down = tuning.key > 0 && (GetAsyncKeyState(tuning.key) & 0x8000) != 0;
+#else
+    const bool key_down = false;
+#endif
+    switch (tuning.mode) {
+      case 1:  // always on
+        engaged = true;
+        break;
+      case 2:  // toggle on the key's press edge
+        if (key_down && !rage_key_down_) {
+          rage_toggle_ = !rage_toggle_;
+        }
+        rage_key_down_ = key_down;
+        engaged = rage_toggle_;
+        break;
+      default:  // hold (key 0 = always, for back-compat)
+        engaged = tuning.key <= 0 || key_down;
+        break;
+    }
+  }
+  if (!engaged) {
     input_.clear_rage_aim();
     return;
   }
@@ -977,7 +1152,7 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   constexpr float k_deg_to_rad = 0.01745329251994329577F;
   int selected_target = -1;
   {
-    const float fov = rage_fov_.load();
+    const float fov = tuning.fov;
     const float cos_limit = fov > 0.0F ? std::cos(fov * 0.5F * k_deg_to_rad) : -1.0F;
     const game::Vec3& eye = snapshot.local->eye_origin;
     const float yaw = snapshot.local->eye_angles.yaw * k_deg_to_rad;
@@ -1021,7 +1196,7 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     return;
   }
   // The hitbox filter (`rage_hitbox`): 1 = head only, 2 = body only.
-  if (const int mode = rage_hitbox_.load(); mode != 0) {
+  if (const int mode = tuning.hitbox; mode != 0) {
     std::erase_if(solve_input->hitboxes, [mode](const aim::Hitbox& hitbox) {
       const bool head = hitbox.group == 1;
       return mode == 1 ? !head : head;
@@ -1088,7 +1263,7 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     solve_input->spread_sigma =
         std::sqrt(inacc * inacc + solve_input->weapon.spread * solve_input->weapon.spread);
   }
-  switch (rage_objective_.load()) {
+  switch (tuning.objective) {
     case 0:
       solve_input->objective = aim::AimObjective::damage;
       break;
@@ -1133,11 +1308,14 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   const aim::SolveResult& result = backtrack.solve;
 
   // The aim/fire gate (`docs/ragebot.md` §3): only aim and fire when the solve meets
-  // the user's minimum damage and hitchance.
-  if (result.value < rage_min_damage_.load() || result.hitchance < rage_min_hitchance_.load()) {
+  // the user's minimum damage and hitchance, and (optionally) when the shot is not
+  // attenuated by a wall ("only visible").
+  if (result.value < tuning.min_damage || result.hitchance < tuning.min_hitchance) {
     input_.clear_rage_aim();
     return;
   }
+  const bool visible_ok = !tuning.only_visible || !result.penetrated;
+  rage_visible_.store(!result.penetrated);
 
   constexpr float k_rad_to_deg = 57.295779513082320876F;
   const float yaw = std::atan2(result.direction.y, result.direction.x) * k_rad_to_deg;
@@ -1152,10 +1330,20 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   }
   const int hitbox = rage_hitbox_for(*solve_input, result.direction);
 
+  // The assists (`docs/ragebot.md`): auto-stop, auto-scope and auto-reload while a
+  // solve is live. The mode 2 variants only engage when the shot is actually being
+  // fired, so the features are invisible while just tracking a target.
+  const bool firing = (tuning.fire || forced) && visible_ok;
+  const int autostop = tuning.autostop;
+  const int autoscope = tuning.autoscope;
+  const bool want_scope = autoscope == 1 || (autoscope == 2 && firing);
+  rage_scope_wanted_.store(want_scope);
   input_.set_rage_aim(pitch, yaw, target_index, hitbox);
+  input_.set_rage_aux(autostop == 1 || (autostop == 2 && firing), want_scope,
+                      tuning.autoreload && snapshot.local->clip <= 0);
   // The menu owns `fire` in normal play; the forced (test) path bypasses the key
   // and therefore also fires, since the menu's per-frame push clears `fire`.
-  input_.set_rage_fire(rage_fire_.load() || forced);
+  input_.set_rage_fire(firing);
   rage_last_target_.store(target_index);
   rage_last_record_.store(backtrack.record);
   if (backtrack.record != -1) {
@@ -1188,12 +1376,13 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
     return false;
   }
   const int target = input_.rage_target();
-  std::snprintf(out, size, "rage: %s target %d box %d w%llu s%llu bt%llu rec%d occ%d fire %d",
+  std::snprintf(out, size, "rage: %s target %d box %d w%llu s%llu bt%llu rec%d occ%d fire %d%s",
                 input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(),
                 static_cast<unsigned long long>(input_.rage_writes()),
                 static_cast<unsigned long long>(input_.rage_shots()),
                 static_cast<unsigned long long>(rage_backtracks_.load()), rage_last_record_.load(),
-                rage_occluders_.load(), input_.rage_fire() ? 1 : 0);
+                rage_occluders_.load(), input_.rage_fire() ? 1 : 0,
+                input_.rage_stop() ? " stop" : "");
   return true;
 }
 
@@ -1405,9 +1594,65 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   if (const Json* value = args.find("hitbox"); value != nullptr && value->is_number()) {
     rage_hitbox_.store(static_cast<int>(value->as_number()));
   }
+  if (const Json* value = args.find("autostop"); value != nullptr && value->is_number()) {
+    rage_autostop_.store(static_cast<int>(value->as_number()));
+  }
+  if (const Json* value = args.find("autoscope"); value != nullptr && value->is_number()) {
+    rage_autoscope_.store(static_cast<int>(value->as_number()));
+  }
+  if (const Json* value = args.find("autoreload"); value != nullptr && value->is_bool()) {
+    rage_autoreload_.store(value->as_bool());
+  }
+  if (const Json* value = args.find("only_visible"); value != nullptr && value->is_bool()) {
+    rage_only_visible_.store(value->as_bool());
+  }
+  // The trigger: `mode` 0 hold / 1 always / 2 toggle, or the names `hold`/`always`/
+  // `toggle`. `key` may be a number (virtual-key code) in the same call.
+  if (const Json* value = args.find("mode"); value != nullptr) {
+    if (value->is_number()) {
+      rage_mode_.store(static_cast<int>(value->as_number()));
+    } else if (value->is_string()) {
+      const std::string_view name = value->as_string();
+      rage_mode_.store(name == "always" ? 1 : (name == "toggle" ? 2 : 0));
+    }
+  }
+  if (const Json* value = args.find("per_weapon"); value != nullptr && value->is_bool()) {
+    rage_per_weapon_.store(value->as_bool());
+  }
+  char weapon[24] = {};
+  {
+    std::lock_guard<std::mutex> lock(rage_config_mutex_);
+    if (const Json* value = args.find("weapon"); value != nullptr && value->is_string()) {
+      rage_weapon_key(std::string(value->as_string()).c_str(), rage_weapon_,
+                      sizeof(rage_weapon_));
+    }
+    std::snprintf(weapon, sizeof(weapon), "%s", rage_weapon_);
+  }
+  const auto config_flag = [&](const char* name) -> bool {
+    const Json* value = args.find(name);
+    return value != nullptr && value->is_bool() && value->as_bool();
+  };
+  if (config_flag("profile_save")) {
+    apply_rage_config_op(1, weapon);
+  }
+  if (config_flag("profile_load")) {
+    apply_rage_config_op(2, weapon);
+  }
+  if (config_flag("save")) {
+    apply_rage_config_op(3, weapon);
+  }
+  if (config_flag("load")) {
+    apply_rage_config_op(4, weapon);
+  }
+  if (config_flag("profile_delete")) {
+    apply_rage_config_op(5, weapon);
+  }
   input_.refresh();
   set_rage_features(on, key, fire, rage_objective_.load(), rage_hitbox_.load(), rage_fov_.load(),
-                    rage_min_damage_.load(), rage_min_hitchance_.load());
+                    rage_min_damage_.load(), rage_min_hitchance_.load(), rage_autostop_.load(),
+                    rage_autoscope_.load(), rage_autoreload_.load(), rage_only_visible_.load(),
+                    rage_mode_.load(), rage_per_weapon_.load(), weapon, 0,
+                    rage_config_token_.load());
 
   Json payload = Json::object();
   payload.set("enabled", Json::boolean(on));
@@ -1428,6 +1673,19 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   payload.set("fov", Json::number(static_cast<double>(rage_fov_.load())));
   payload.set("min_damage", Json::number(static_cast<double>(rage_min_damage_.load())));
   payload.set("min_hitchance", Json::number(static_cast<double>(rage_min_hitchance_.load())));
+  payload.set("autostop", Json::number(static_cast<double>(rage_autostop_.load())));
+  payload.set("autoscope", Json::number(static_cast<double>(rage_autoscope_.load())));
+  payload.set("autoreload", Json::boolean(rage_autoreload_.load()));
+  payload.set("only_visible", Json::boolean(rage_only_visible_.load()));
+  payload.set("visible", Json::boolean(rage_visible_.load()));
+  payload.set("stops", Json::number(static_cast<double>(input_.rage_stops())));
+  payload.set("mode", Json::number(static_cast<double>(rage_mode_.load())));
+  payload.set("per_weapon", Json::boolean(rage_per_weapon_.load()));
+  {
+    std::lock_guard<std::mutex> lock(rage_config_mutex_);
+    payload.set("weapon", Json::string(std::string(rage_weapon_)));
+    payload.set("profiles", Json::number(static_cast<double>(rage_profiles_.count)));
+  }
   set_ok(out, std::move(payload));
 }
 
@@ -1736,6 +1994,13 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   walls_json.set("world", Json::string(hex(walls_stats.world)));
   walls_json.set("filter", Json::string(hex(walls_stats.filter)));
   walls_json.set("filter_vtable", Json::string(hex(walls_stats.filter_vtable)));
+  // The custom bullet filter (docs/re/bullet-trace.md): the mask actually handed to the
+  // world query is `filter+8`, so report it (the engine static default carries ~0).
+  walls_json.set("filter_custom", Json::boolean(walls_stats.filter_custom));
+  walls_json.set("filter_mask", Json::integer(walls_stats.filter_mask));
+  walls_json.set("filter_group", Json::integer(walls_stats.filter_group));
+  walls_json.set("filter_flags", Json::integer(walls_stats.filter_flags));
+  walls_json.set("mesh_clusters", Json::integer(walls_stats.mesh_clusters));
   walls_json.set("occluders", Json::integer(static_cast<std::int64_t>(options.occlusion.size())));
   // The penetration model this chart was valued with (docs/re/penetration.md).
   walls_json.set("penetration_model", Json::string(engine_pen ? "engine" : "simple"));

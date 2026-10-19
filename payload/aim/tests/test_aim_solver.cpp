@@ -182,6 +182,7 @@ auto main() -> int {
 
     const auto open = cs2::aim::solve(head);
     expect(open.valid, "open shot solves");
+    expect(!open.penetrated, "an open shot is not attenuated");
 
     SolveInput thin = head;
     if (const auto w = wall(1.0F); w.has_value()) {
@@ -191,6 +192,7 @@ auto main() -> int {
     expect(through.valid, "a penetrable wall still leaves a hittable head");
     expect(through.value < open.value, "the wall attenuates the head");
     expect(through.value > 0.0F, "a thin wall does not block the shot");
+    expect(through.penetrated, "a shot through a wall is flagged as attenuated");
 
     SolveInput blocked = head;
     if (const auto w = wall(0.05F); w.has_value()) {  // the < 0.1 distance-modifier gate

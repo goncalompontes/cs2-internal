@@ -410,13 +410,23 @@ class Input {
   void set_rage_aim(float pitch, float yaw, int target, int hitbox) noexcept;
   void clear_rage_aim() noexcept;
   void set_rage_fire(bool on) noexcept { rage_fire_.store(on); }
+  // The common ragebot assists, applied while a solve is active (`docs/ragebot.md`):
+  // auto-stop (hold still for accuracy), auto-scope (press zoom), auto-reload. Owned by
+  // the menu / `rage` command like the rest; all default off.
+  void set_rage_aux(bool stop, bool scope, bool reload) noexcept {
+    rage_stop_.store(stop);
+    rage_scope_.store(scope);
+    rage_reload_.store(reload);
+  }
   [[nodiscard]] bool rage_fire() const noexcept { return rage_fire_.load(); }
   [[nodiscard]] bool rage_active() const noexcept { return rage_active_.load(); }
+  [[nodiscard]] bool rage_stop() const noexcept { return rage_stop_.load(); }
   [[nodiscard]] int rage_target() const noexcept { return rage_target_.load(); }
   [[nodiscard]] int rage_hitbox() const noexcept { return rage_hitbox_.load(); }
   // Ticks a rage aim was written, and attack presses issued.
   [[nodiscard]] std::uint64_t rage_writes() const noexcept { return rage_writes_.load(); }
   [[nodiscard]] std::uint64_t rage_shots() const noexcept { return rage_shots_.load(); }
+  [[nodiscard]] std::uint64_t rage_stops() const noexcept { return rage_stops_.load(); }
 
   // --- record-based bunnyhop (UC 771389) ---------------------------------
   // Read-only post-hook state (`docs/re/research-bhop.md`). `bhop_landed_tick` /
@@ -562,6 +572,9 @@ class Input {
   // One tick of the ragebot: write the render-thread solve as the silent sub-tick
   // view angles and (optionally) press attack.
   void rage_tick(std::uint8_t* cmd, std::uint64_t* buttons) noexcept;
+  // Assert/clear bits in the engine's own held-button word (`CInButtonState` at the
+  // movement services `+0x58`); some weapon actions read it instead of the command mask.
+  void write_engine_buttons(std::uint64_t set_bits, std::uint64_t clear_bits) noexcept;
   // One tick of the auto-strafe (see `set_strafe`); called from `apply()` with the
   // `CBaseUserCmdPB` (`base`) and the owning `CUserCmd` (`cmd`).
   void strafe_tick(void* base, void* cmd) noexcept;
@@ -639,8 +652,12 @@ class Input {
   std::atomic<int> rage_target_{-1};
   std::atomic<int> rage_hitbox_{-1};
   std::atomic<bool> rage_fire_{false};
+  std::atomic<bool> rage_stop_{false};
+  std::atomic<bool> rage_scope_{false};
+  std::atomic<bool> rage_reload_{false};
   std::atomic<std::uint64_t> rage_writes_{0};
   std::atomic<std::uint64_t> rage_shots_{0};
+  std::atomic<std::uint64_t> rage_stops_{0};
   // Record-based bunnyhop: diagnostics + the per-command decision cache (the hook
   // can run more than once per frame, and the `fresh` phase must only be sampled
   // once — see `bhop_tick`).

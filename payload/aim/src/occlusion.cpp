@@ -317,14 +317,36 @@ auto OccluderCell::lower_bound_distance(const Vec3& eye) const noexcept -> float
 auto project_occluder(const Vec3& eye, const Basis& basis, std::vector<Vec3> world_vertices,
                       std::vector<OccluderPlane> planes, float surface_modifier)
     -> std::optional<OccluderCell> {
+  if (world_vertices.empty()) {
+    return std::nullopt;
+  }
+  // The reference direction is the solid's own centre; vertices behind it (a solid that
+  // straddles the eye, e.g. a large brush the eye stands next to) are dropped so the
+  // silhouette cannot wrap around the chart and over-cover every hitbox.
+  Vec3 centroid{};
+  for (const Vec3& v : world_vertices) {
+    centroid = centroid + v;
+  }
+  centroid = centroid * (1.0F / static_cast<float>(world_vertices.size()));
+  const Vec3 reference = centroid - eye;
+  const float reference_len = game::length(reference);
+  float reference_yaw = 0.0F;
+  if (const auto centre = basis.project(reference); centre.has_value()) {
+    reference_yaw = centre->x;
+  }
+
   std::vector<Vec2> projected;
   projected.reserve(world_vertices.size());
   for (const Vec3& v : world_vertices) {
-    if (const auto p = basis.project(v - eye)) {
+    const Vec3 to_vertex = v - eye;
+    if (reference_len > k_epsilon && game::dot(to_vertex, reference) < 0.0F) {
+      continue;  // behind the solid's own facing
+    }
+    if (const auto p = basis.project(to_vertex)) {
       projected.push_back(*p);
     }
   }
-  Polygon polygon = convex_hull(projected);
+  Polygon polygon = convex_hull_unwrapped(projected, reference_yaw);
   if (polygon.empty()) {
     return std::nullopt;
   }
@@ -332,12 +354,7 @@ auto project_occluder(const Vec3& eye, const Basis& basis, std::vector<Vec3> wor
   // assumes. The engine's `RnHull_t` planes are `dot(n, x) = d` but may be stored
   // with the normal pointing either way, and the vertex centroid is inside the hull
   // by construction, so the centroid decides the sign — robust across builds.
-  if (!planes.empty() && !world_vertices.empty()) {
-    Vec3 centroid{};
-    for (const Vec3& v : world_vertices) {
-      centroid = centroid + v;
-    }
-    centroid = centroid * (1.0F / static_cast<float>(world_vertices.size()));
+  if (!planes.empty()) {
     int violations = 0;
     for (const OccluderPlane& plane : planes) {
       if (game::dot(plane.normal, centroid) > plane.dist) {
@@ -403,14 +420,33 @@ auto project_mesh_occluder(const Vec3& eye, const Basis& basis, std::vector<Vec3
   if (vertices.empty() || triangles.size() < 3) {
     return std::nullopt;
   }
+  // The reference direction is the mesh cluster's centre; vertices behind it are dropped
+  // from the broad-phase silhouette so a cluster the eye stands beside cannot wrap
+  // around the chart. (The exact depth/thickness still comes from `ray_span` over the
+  // full triangle list.)
+  Vec3 centre{};
+  for (const Vec3& v : vertices) {
+    centre = centre + v;
+  }
+  centre = centre * (1.0F / static_cast<float>(vertices.size()));
+  const Vec3 reference = centre - eye;
+  const float reference_len = game::length(reference);
+  float reference_yaw = 0.0F;
+  if (const auto c = basis.project(reference); c.has_value()) {
+    reference_yaw = c->x;
+  }
   std::vector<Vec2> projected;
   projected.reserve(vertices.size());
   for (const Vec3& v : vertices) {
-    if (const auto p = basis.project(v - eye)) {
+    const Vec3 to_vertex = v - eye;
+    if (reference_len > k_epsilon && game::dot(to_vertex, reference) < 0.0F) {
+      continue;
+    }
+    if (const auto p = basis.project(to_vertex)) {
       projected.push_back(*p);
     }
   }
-  Polygon polygon = convex_hull(projected);
+  Polygon polygon = convex_hull_unwrapped(projected, reference_yaw);
   if (polygon.empty()) {
     return std::nullopt;
   }

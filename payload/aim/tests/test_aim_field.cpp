@@ -43,9 +43,11 @@ auto main() -> int {
   expect(near(field.value_at(Vec2{-0.05F, 0.0F}), 10.0F), "body value");
   expect(near(field.value_at(Vec2{0.5F, 0.5F}), 0.0F), "outside value");
 
-  // Damage optimum: the head cell's point nearest the origin.
+  // Damage optimum: the head cell's Chebyshev centre (the value is constant across the
+  // cell, so the most robust point is the right choice; it must not depend on the
+  // target's absolute bearing, which the old "nearest the chart origin" did).
   const Vec2 damage = field.argmax_damage();
-  expect(near(damage.x, 0.04F) && near(damage.y, 0.0F), "damage optimum on the head's near edge");
+  expect(near(damage.x, 0.05F) && near(damage.y, 0.0F), "damage optimum at the head centre");
   expect(near(field.value_at(damage), 100.0F), "damage optimum has head value");
 
   // Hitchance optimum: the head cell's Chebyshev centre.
@@ -64,8 +66,8 @@ auto main() -> int {
     clipped.clip(Vec2{1.0F, 0.0F}, 0.03F);
     expect(near(clipped.value_at(Vec2{0.042F, 0.0F}), 0.0F), "clip removes the head");
     expect(near(clipped.value_at(Vec2{-0.05F, 0.0F}), 10.0F), "clip keeps the body");
-    // The body now contains the chart origin, so the nearest point is the origin.
-    expect(near(clipped.argmax_damage().x, 0.0F) && near(clipped.argmax_damage().y, 0.0F),
+    // The body is now the only cell; its Chebyshev centre is the optimum.
+    expect(near(clipped.argmax_damage().x, -0.04F) && near(clipped.argmax_damage().y, 0.0F),
            "body is now the damage optimum");
   }
 
@@ -131,6 +133,43 @@ auto main() -> int {
     expect(cone.hit_probability(cone.argmax_hit_probability(0.08F), 0.08F) <
                cone.hit_probability(best, 0.04F),
            "a wider cone lowers the peak hitchance");
+  }
+
+  // --- the global (whole-field) damage optimum -----------------------------
+  {
+    // Two equal-value cells of very different robustness: the old per-cell pick could
+    // land in the thin sliver; the global search must prefer the wide block, i.e. the
+    // best point with respect to the whole field, not one fragment.
+    DamageField f;
+    f.add(square(0.00F, 0.00F, 0.10F, 1.00F), 100.0F);   // tall, thin (margin 0.05)
+    f.add(square(0.20F, -0.10F, 0.40F, 0.10F), 100.0F);  // wide block (margin 0.10)
+    const Vec2 best = f.argmax_damage();
+    expect(best.x > 0.20F && best.x < 0.40F && best.y > -0.10F && best.y < 0.10F,
+           "global damage optimum is the robust cell, not the sliver");
+    expect(near(f.value_at(best), 100.0F), "global damage optimum keeps the value");
+  }
+
+  // --- the hitchance is invariant to the aim's absolute pitch --------------
+  {
+    // A cone and a silhouette that share the chart's `1/cos(pitch)` metric: the
+    // probability at the silhouette centre must not depend on the pitch. Ignoring the
+    // metric (a circular chart cone) made the fire gate fail at a steep aim — the
+    // "works level, stops working up/down" symptom.
+    using cs2::aim::Basis;
+    using cs2::aim::Vec3;
+    const auto probability = [](float pitch) {
+      constexpr float k_dist = 20.0F;
+      constexpr float k_radius = 1.0F;
+      const Vec3 centre{k_dist * std::cos(pitch), 0.0F, k_dist * std::sin(pitch)};
+      DamageField f;
+      f.add(cs2::aim::project_sphere(Vec3{}, centre, k_radius, Basis::world(), 64), 100.0F);
+      const Vec2 c = cs2::aim::chebyshev_center(f.cells.front().polygon);
+      return f.hit_probability(c, 0.5F * std::asin(k_radius / k_dist));
+    };
+    const float level = probability(0.0F);
+    const float steep = probability(1.2F);
+    expect(std::fabs(level - steep) < 0.12F, "hitchance is pitch-invariant");
+    expect(level > 0.4F && steep > 0.4F, "hitchance positive at both pitches");
   }
 
   if (failures == 0) {

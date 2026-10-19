@@ -59,6 +59,14 @@ struct OcclusionQueryStats {
   std::uintptr_t world = 0;          // *(void**)iface
   std::uintptr_t filter = 0;         // the filter object we would pass
   std::uintptr_t filter_vtable = 0;  // *(void**)filter
+  // The custom bullet filter (`build_bullet_filter`): whether the engine object was
+  // copied, and the mask/group/flags actually handed to the world query (the mask lives
+  // at `filter+8`, per the `EntitiesInBox` RE — docs/re/bullet-trace.md).
+  bool filter_custom = false;
+  std::int64_t filter_mask = 0;
+  int filter_group = 0;
+  int filter_flags = 0;
+  int mesh_clusters = 0;  // collision-mesh clusters emitted (a big mesh is split)
   // RE probe (docs/re/occlusion.md): the first overlap record's `+0x50` material
   // token — the value the record build stores from `*(hit->vtbl[0x30]() + 0x28)`.
   // Its type is unresolved (an 8-byte load; could be a float pair or a pointer), so a

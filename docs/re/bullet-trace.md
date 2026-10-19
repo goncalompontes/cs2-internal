@@ -183,6 +183,96 @@ bullet collision mask was also corrected to the engine's **`0x1c300b`**.
 (stride `0xC`); triangle count `+0x18`; **triangle vertex indices `+0x50`** (3 ×
 `int32` per triangle).
 
+## The bullet filter & the mask the world query actually reads (RE, 2026-10-19)
+
+Re-derived from the live build (`client.dll` sha `659940c1…`) with a local capstone
+PE pass (`artifacts/re_filter.py`, output `artifacts/re_filter_out.txt`).
+
+**`CTraceFilter::init` = `FUN_180352920`** (the bullet's filter constructor) writes,
+for a filter at `rcx` and the shot's `(entity, mask, group, flags)`:
+
+| field | value | note |
+|---|---|---|
+| `+0x00` | vtable `client+0x1ad4838` (`lea rax,[rip+0x1781ee7]`) | the *same* vtable as the static default |
+| `+0x08` (qword) | `param_3` = **`0x1c300b`** | the collision mask |
+| `+0x10` | 0 | |
+| `+0x18` | 0 | |
+| `+0x20` (dword) | `FUN_1809dd600(entity)` | the shooter's entity handle |
+| `+0x20`/`+0x28` | `-1` before that | skip handles |
+| `+0x30` (word) | `FUN_1809ea740(entity)` | a collision-group word |
+| `+0x34` (dword) | `0xf00ffff` | bits `+0x34..0x36` + the `+0x37` flags seed |
+| `+0x37` (byte) | `param_5` (flags) | the query-selection flags |
+| `+0x38` (byte) | `param_4` = `3` | collision group |
+| `+0x39` (byte) | `(old & 0xc9) \| 0x49` | |
+| `+0x40` (byte) | 0 | |
+
+**The mask the query reads is `*(qword*)(filter + 8)`, not the `contents`
+argument.** `EntitiesInBox` = `FUN_1809dbd20`:
+
+```
+r14  = filter (arg4);  r12 = box_min;  r15 = box_max
+if (filter[0x37] == 1) skip FUN_180b9e660(filter+8); else FUN_180b9e660(filter+8)
+r13b = filter[0x37]
+if ((r13b & 7) != 0) {                       // the primary box-overlap query
+    r9 = filter + 8                          //  <-- the mask pointer
+    edx = contents (stack arg)               //  the 'contents' argument, passed separately
+    rcx = *(this)                            //  the physics world
+    (*(world->vtbl + 0x5d0))(world, results, descriptor, ..., r9, edx, ...)
+    ConvertOverlapMultiple(results, tmp)     // FUN_1809d2dc0 (0x70-byte records)
+    FilterOverlapResults(this, results, filter)
+}
+if ((*(byte*)(filter+8) >> 1) & 1)  { ... FUN_1801e2160 ... ConvertHitboxOverlapMultiple }
+if ((r13b & 8) != 0)                { ... }
+```
+
+So the same `filter+8` mask contract holds for `TraceLineIntervals` (`+0x520`),
+`TraceShape` (`+0x558` single / `+0x560` sorted) and the box query (`+0x5d0`).
+
+**The engine's static default filter object** (`client+0x2227070`, the object the
+payload used to pass) is:
+
+```
+vtable = client+0x1ad4838   +0x08 = 0xffffffffffffffff (ALL contents!)
++0x20 = -1  +0x28 = -1      +0x34 = 0x00f00ffff
++0x37 = 0x0f (flags)        +0x38 = 3 (group)      +0x39 = 0
+```
+
+Its vtable slot `+8` (`ShouldHitEntity`) is `mov al,1; ret` (`client+0x22d900`), and
+`FilterOverlapResults` (`FUN_1809df4e0`) short-circuits to "keep everything" when
+`filter[0x40] == 0` — which the default is. **Consequence:** passing the static
+default enumerates a *superset* of the bullet's set (mask `~0`, including
+`CONTENTS_PLAYERCLIP` brushes a bullet flies through). The payload now passes a
+**copy of that object with `+8 = 0x1c300b`, `+0x38 = 3`, `+0x37 = 0x0f`** — the
+engine vtable is preserved by the copy, so the query is safe (a payload-built
+vtable is not: the engine reads slots past `+8`). `Walls.filter_mask` /
+`filter_custom` report it live.
+
+**Why a wall/floor was still missing — the mesh cap (live, 2026-10-19).** The
+worldspawn body's meshes on de_dust2 are (live `artifacts/floor_probe.py`):
+
+| mesh | vertices | triangles | AABB (min → max) |
+|---|---|---|---|
+| 1 | 689 | 1221 | `[-2410,-1184,-130] → [1835,3429,808]` |
+| 2 | 5944 | 8271 | `[-2312,-1200,-232] → [1868,3204,820]` |
+| 3 | 7915 | 8831 | `[-2184,-157,-82] → [1720,3019,411]` |
+| 4 | **101097** | **104429** | `[-4736,-2496,-320] → [3584,4608,964]` |
+| 5 | 76 | 25 | |
+| 6 | 218 | 175 | |
+
+Mesh 4 spans the whole map footprint — and the reader's old **65536** vertex/triangle
+cap silently dropped it, so every surface it carries (terrain/floor and large merged
+walls) was absent from the occluders. Fixed: the cap is raised and a large mesh is
+instead **split into spatial clusters** (`occlusion_query.cpp` `emit_mesh_clusters`,
+≤2048 triangles each, each a bounded occluder with its own world AABB) so the floor
+occludes where it is crossed and a map-wide mesh no longer becomes one chart-wide
+silhouette. `walls.mesh_clusters` reports the count.
+
+> Note the enumeration is still an `EntitiesInBox` over the eye→target AABB: it
+> cannot *miss* a solid a shot crosses (the segment is inside the box), but it does
+> not list world geometry merely *visible* around the target (e.g. the ground under
+> the player). Making the list exactly the engine's trace set is the Tier-1
+> `TraceLineIntervals` step (`docs/ragebot.md` §10).
+
 ## Still open
 
 1. **Compound (4) shapes** — still skipped (`docs/re/occlusion.md` "Still to pin" 3).
@@ -190,7 +280,11 @@ bullet collision mask was also corrected to the engine's **`0x1c300b`**.
    enter/exit byte `+0x32` are pinned; the surface/material field is not, so a
    trace-based *oracle* (fire the engine's own `TraceLineIntervals` and diff the
    solids) still needs that record mapped end-to-end.
-3. **Surface / penetration modifiers** — `OccluderCell::surface_modifier` is still
-   `1.0` (`docs/re/occlusion.md` "Still to pin" 5).
-4. The map's ~10k-triangle mesh is intersected per fragment; a mesh BVH (`RnNode_t`)
-   is the performance follow-up.
+3. The map's ~10k-triangle mesh is split into clusters now, but a per-cluster mesh
+   **BVH** (`RnNode_t`) is still the performance follow-up (a cluster's `ray_span`
+   scans its triangles).
+4. **The mesh vertex scale** (`shape+0xB8`) is assumed uniform; a non-uniform mesh
+   scale is not modelled.
+5. The enumeration is still a body-box overlap; swapping it for the engine's own
+   `TraceLineIntervals` segment trace (exact same solids, no over-inclusion) is the
+   Tier-1 step.
