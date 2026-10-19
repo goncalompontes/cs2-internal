@@ -52,6 +52,10 @@ struct EspConfig {
   // Recoil compensation, and the auto-stop speed threshold in units/s (0 = full stop).
   std::uint8_t rage_recoil = 0;
   float rage_stop_speed = 0.0F;
+  // Lag-record backtracking (`docs/ragebot.md` §8). Off by default: each pose is a full
+  // solve and record sampling is ~0.6 ms/tick, so it is disabled until the perf work
+  // lands. The feature is retained and can be re-enabled here / via `rage backtrack=1`.
+  std::uint8_t rage_backtrack = 0;
 };
 
 // Per-build counters, for diagnostics/logging (never used for rendering).

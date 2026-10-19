@@ -427,6 +427,7 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
   last_height_ = screen_height;
 
   model_ = render::OverlayModel{};
+  model_.show_hud = show_hud_;
   model_.hud.title = "cs2-internal";
   if (!reader_ || !reader_->ready()) {
     model_.hud.title += "  [waiting for client.dll]";

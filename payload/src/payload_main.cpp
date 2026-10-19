@@ -13,6 +13,7 @@
 #include "cs2/diag/crash_handler.hpp"
 #include "cs2/diag/watchdog.hpp"
 #include "cs2/features/game_present_hook.hpp"
+#include "cs2/features/menu.hpp"
 #include "cs2/features/model_publisher.hpp"
 #include "cs2/features/overlay.hpp"
 #include "cs2/features/present_hook.hpp"
@@ -46,9 +47,10 @@ namespace {
 struct Runtime {
   render::ImGuiBackend backend;
   features::Overlay overlay;
+  features::Menu menu{overlay};
   features::ModelPublisher publisher{overlay};
   features::GamePresentHook game_present{publisher};
-  features::PresentHook present{backend, overlay};
+  features::PresentHook present{backend, overlay, &menu};
   control::Service control;
 };
 
@@ -57,6 +59,39 @@ Runtime g_runtime;
 auto runtime() -> Runtime& {
   return g_runtime;
 }
+
+#if defined(_WIN32)
+// Which renderer the payload drives.
+enum class RenderMode {
+  present,       // in-process D3D11/DXGI Present + the payload's own menu (default)
+  layer,         // external Vulkan layer: publish the model on the game's present
+  layer_thread,  // external Vulkan layer via a dedicated publish thread (Wine-safe)
+};
+
+// `CS2_PAYLOAD_RENDER` picks explicitly. Otherwise the graphics stack decides: a
+// Vulkan/DXVK stack (a loaded `vulkan-1.dll`) uses the external layer, and
+// everything else (native D3D11) renders in-process. The game inherits its
+// environment from Steam, so the env is only a hint — the module check is the
+// reliable signal. `CS2_PAYLOAD_PUB_THREAD` selects the Wine-safe layer variant.
+auto render_mode() noexcept -> RenderMode {
+  if (const char* mode = std::getenv("CS2_PAYLOAD_RENDER"); mode != nullptr) {
+    if (std::string(mode) == "present") {
+      return RenderMode::present;
+    }
+    if (std::string(mode) == "layer") {
+      return RenderMode::layer;
+    }
+    if (std::string(mode) == "layer-thread") {
+      return RenderMode::layer_thread;
+    }
+  }
+  if (GetModuleHandleW(L"vulkan-1.dll") != nullptr) {
+    return std::getenv("CS2_PAYLOAD_PUB_THREAD") != nullptr ? RenderMode::layer_thread
+                                                            : RenderMode::layer;
+  }
+  return RenderMode::present;
+}
+#endif
 
 // `CS2_PAYLOAD_MOVEMENT` — the payload's own switch for the movement features
 // (`docs/re/subtick.md` §"The movement yaw channel"). Comma-separated names:
@@ -150,7 +185,8 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
       settings.rage_min_hitchance, settings.rage_autostop, settings.rage_autoscope,
       settings.rage_autoreload != 0, settings.rage_only_visible != 0, settings.rage_mode,
       settings.rage_per_weapon != 0, settings.rage_weapon, settings.rage_config_op,
-      settings.rage_config_token, settings.rage_recoil != 0, settings.rage_stop_speed);
+      settings.rage_config_token, settings.rage_recoil != 0, settings.rage_stop_speed,
+      settings.rage_backtrack != 0);
 }
 
 // The per-frame overlay refresh forwards the local pawn so the movement features
@@ -220,16 +256,21 @@ DWORD WINAPI install_thread(void*) {
                           " OVERLAY_LOG=" + env_value("CS2_OVERLAY_LOG"));
     cs2::payload::runtime().control.set_movement_features(movement.strafe, movement.bhop);
     cs2::payload::runtime().publisher.set_movement_defaults(movement.strafe, movement.bhop);
+    cs2::payload::runtime().menu.set_movement_defaults(movement.strafe, movement.bhop);
     const RageConfig rage = parse_rage_env();
     cs2::game::append_log(std::string("[cs2-payload] rage: enabled=") +
                           (rage.enabled ? "1" : "0") + " key=" + std::to_string(rage.key) +
                           " fire=" + (rage.fire ? "1" : "0"));
     cs2::payload::runtime().control.set_rage_features(
         rage.enabled, rage.key, rage.fire, 1 /*hitchance*/, 0 /*auto*/, 0.0F, 0.0F, 0.0F, 0, 0,
-        false, false, 0 /*hold*/, false, "", 0, 0, true /*recoil*/, 0.0F);
+        false, false, 0 /*hold*/, false, "", 0, 0, true /*recoil*/, 0.0F,
+        false /*backtrack: off by default*/);
     cs2::payload::runtime().publisher.set_rage_defaults(rage.enabled, rage.key, rage.fire);
+    cs2::payload::runtime().menu.set_rage_defaults(rage.enabled, rage.key, rage.fire);
     cs2::payload::runtime().publisher.set_settings_sink(&on_movement_settings,
                                                         &cs2::payload::runtime());
+    cs2::payload::runtime().menu.set_settings_sink(&on_movement_settings,
+                                                   &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_local_pawn_sink(&on_local_pawn,
                                                         &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_snapshot_sink(&on_snapshot, &cs2::payload::runtime());
@@ -242,14 +283,33 @@ DWORD WINAPI install_thread(void*) {
     cs2::payload::runtime().overlay.set_predicted_origin_provider(
         &on_predicted_origin, &cs2::payload::runtime());
   }
-  // Publish the overlay model for the Vulkan present layer (ADR-0016), driven
-  // from the game's own present hook on the render thread — no payload thread.
+  // Render path (workstream A): the ESP + menu render in-process from the game's
+  // D3D11/DXGI Present by default; the external Vulkan layer (the shm publisher +
+  // `game_present`) is the fallback for a Vulkan/DXVK stack.
   if (std::getenv("CS2_PAYLOAD_NO_PUBLISH") == nullptr) {
-    (void)cs2::payload::runtime().publisher.map();
-    if (std::getenv("CS2_PAYLOAD_PUB_THREAD") != nullptr) {
-      (void)cs2::payload::runtime().publisher.start();  // legacy dedicated thread
-    } else {
-      (void)cs2::payload::runtime().game_present.install();
+    RenderMode mode = render_mode();
+    if (mode == RenderMode::present && !cs2::payload::runtime().present.install()) {
+      mode = RenderMode::layer;  // dxgi/d3d11 unavailable: fall back
+    }
+    switch (mode) {
+      case RenderMode::present:
+        // In-process renderer: the ESP + menu render from the game's D3D11/DXGI
+        // Present; no shared memory, no Vulkan layer.
+        cs2::game::append_log("[cs2-payload] render: in-process Present (DXGI) + menu");
+        break;
+      case RenderMode::layer_thread:
+        (void)cs2::payload::runtime().publisher.map();
+        (void)cs2::payload::runtime().publisher.start();  // dedicated publish thread
+        cs2::game::append_log("[cs2-payload] render: external Vulkan layer (publish thread)");
+        break;
+      case RenderMode::layer:
+      default:
+        // Publish the model to shared memory and let the external Vulkan layer
+        // draw it, driven from the game's own present hook.
+        (void)cs2::payload::runtime().publisher.map();
+        (void)cs2::payload::runtime().game_present.install();
+        cs2::game::append_log("[cs2-payload] render: external Vulkan layer (present hook)");
+        break;
     }
   }
   return 0;
@@ -320,7 +380,18 @@ void boot() {
   // module (the game's TLS callbacks + DllMain(DLL_THREAD_ATTACH)), which wedges
   // CS2/DXVK; create it skipping thread attach instead (the routine bootstraps
   // its own TLS).
-  cs2::tls::create_thread_no_attach(reinterpret_cast<void* (*)(void*)>(&install_thread), nullptr);
+  //
+  // The in-process renderer is the exception: its DXGI/D3D11 probe (method-table
+  // discovery) faults inside dxgi when called from a thread that never ran module
+  // thread-attach, so that path uses a normal thread (safe on native Windows
+  // D3D11). The layer paths keep the TLS-skip thread (the Wine/DXVK wedge in
+  // ADR-0017).
+  if (render_mode() == RenderMode::present) {
+    (void)CreateThread(nullptr, 0, &install_thread, nullptr, 0, nullptr);
+  } else {
+    (void)cs2::tls::create_thread_no_attach(reinterpret_cast<void* (*)(void*)>(&install_thread),
+                                            nullptr);
+  }
 #else
   runtime().publisher.start();
 #endif

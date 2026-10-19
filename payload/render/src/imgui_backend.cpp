@@ -57,7 +57,11 @@ auto ImGuiBackend::initialize(const RenderContext& context) -> bool {
 
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
+  imgui_context_ = ImGui::GetCurrentContext();
   ImGui::StyleColorsDark();
+  // The menu is drawn with this font too; no .ini round-trip (the mapped module
+  // has no stable working directory).
+  ImGui::GetIO().IniFilename = nullptr;
   load_fonts();
 
   // The Win32 platform backend is deliberately NOT used: its window/mouse calls
@@ -219,6 +223,12 @@ void ImGuiBackend::render(const RenderContext& context, const OverlayModel& mode
   }
   auto* render_target = static_cast<ID3D11RenderTargetView*>(render_target_);
 
+  // The window thread's WndProc may have swapped the current context; make ours
+  // current again before the frame.
+  if (imgui_context_ != nullptr && ImGui::GetCurrentContext() != imgui_context_) {
+    ImGui::SetCurrentContext(static_cast<ImGuiContext*>(imgui_context_));
+  }
+
   // Display-only: set the frame size directly (the Win32 platform backend is not
   // used). A positive size is required by ImGui_ImplDX11_NewFrame.
   ImGuiIO& io = ImGui::GetIO();
@@ -230,7 +240,13 @@ void ImGuiBackend::render(const RenderContext& context, const OverlayModel& mode
   ImGui::NewFrame();
 
   draw_commands(model.draw);
-  draw_hud(model.hud);
+  if (model.show_hud) {
+    draw_hud(model.hud);
+  }
+  // The in-process menu (workstream A) draws here, inside the frame.
+  if (ui_callback_ != nullptr) {
+    ui_callback_(ui_context_);
+  }
 
   ImGui::Render();
 
@@ -257,6 +273,7 @@ void ImGuiBackend::shutdown() {
   if (initialized_) {
     ImGui_ImplDX11_Shutdown();
     ImGui::DestroyContext();
+    imgui_context_ = nullptr;
     release_render_target();
     initialized_ = false;
   }

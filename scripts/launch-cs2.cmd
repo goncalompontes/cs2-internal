@@ -18,10 +18,16 @@ rem environment variable wins (set it if Steam lives elsewhere, e.g. another
 rem drive). See docs/setup-windows.md.
 if not defined STEAM set "STEAM=C:\Program Files (x86)\Steam\steam.exe"
 set "APPID=730"
-set "FLAGS=-insecure -novid -vulkan"
+
+rem Render path (workstream A). `present` (the default) renders the ESP + menu
+rem **in-process** from the game's D3D11/DXGI Present: no Vulkan layer, no -vulkan.
+rem `layer` keeps the external Vulkan present layer (`overlay/`), which needs the
+rem Vulkan backend and the implicit-layer registration.
+if not defined CS2_PAYLOAD_RENDER set "CS2_PAYLOAD_RENDER=present"
+set "FLAGS=-insecure -novid"
 
 rem Payload + Vulkan overlay layer configuration (see docs/handoff.md).
-rem - PUB_THREAD: the payload's safe dedicated publish thread (native Windows).
+rem - CS2_PAYLOAD_RENDER: `present` (in-process DXGI) or `layer` (Vulkan layer).
 rem - CS2_OVERLAY: enables the implicit Vulkan layer (registered under
 rem   HKLM\SOFTWARE\Khronos\Vulkan\ImplicitLayers; see overlay/README.md).
 rem - MOVEMENT: the payload's movement features (docs/re/subtick.md §"The movement
@@ -35,9 +41,10 @@ rem   variable (`setx CS2_PAYLOAD_MOVEMENT strafe,bhop` + restart Steam), or the
 rem   control commands. Leave it unset for movement *tests*.
 rem - Outputs go under %LOCALAPPDATA%\cs2-internal (a Medium-integrity game
 rem   process cannot write C:\ root).
-set "CS2_PAYLOAD_PUB_THREAD=1"
-set "CS2_OVERLAY=1"
-rem set "CS2_PAYLOAD_MOVEMENT=strafe,bhop"
+if /I "%CS2_PAYLOAD_RENDER%"=="layer" (
+  set "FLAGS=-insecure -novid -vulkan"
+  set "CS2_OVERLAY=1"
+)
 set "CS2_OVERLAY_LOG=%LOCALAPPDATA%\cs2-internal\cs2-overlay-layer.log"
 if not exist "%LOCALAPPDATA%\cs2-internal" mkdir "%LOCALAPPDATA%\cs2-internal"
 

@@ -34,6 +34,11 @@ class Overlay {
   [[nodiscard]] const EspConfig& esp_config() const noexcept { return esp_.config(); }
   void set_esp_config(const EspConfig& config) noexcept { esp_.config() = config; }
 
+  // Whether the debug HUD window is drawn. Set by the in-process menu's
+  // "Debug HUD window" toggle; the layer gates it from its own settings.
+  void set_show_hud(bool show) noexcept { show_hud_ = show; }
+  [[nodiscard]] bool show_hud() const noexcept { return show_hud_; }
+
   // Forward the local pawn from each state refresh. The control thread's movement
   // features (strafe/bhop prediction) need it fresh even when no scenario is
   // polling `state` (`Input::note_local_pawn`).
@@ -94,6 +99,7 @@ class Overlay {
   float last_width_ = 0.0F;
   float last_height_ = 0.0F;
   bool initialized_ = false;
+  bool show_hud_ = true;
   LocalPawnSink local_pawn_sink_ = nullptr;
   void* local_pawn_context_ = nullptr;
   SnapshotSink snapshot_sink_ = nullptr;

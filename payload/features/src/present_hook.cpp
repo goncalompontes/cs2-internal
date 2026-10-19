@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include "cs2/diag/watchdog.hpp"
+#include "cs2/features/menu.hpp"
 #include "cs2/game/log.hpp"
 
 #if defined(_WIN32)
@@ -60,8 +61,8 @@ void log_line(const char* text) noexcept {
 
 }  // namespace
 
-PresentHook::PresentHook(render::UiBackend& backend, Overlay& overlay) noexcept
-    : backend_(&backend), overlay_(&overlay) {}
+PresentHook::PresentHook(render::UiBackend& backend, Overlay& overlay, Menu* menu) noexcept
+    : backend_(&backend), overlay_(&overlay), menu_(menu) {}
 
 PresentHook::~PresentHook() { uninstall(); }
 
@@ -83,14 +84,17 @@ auto PresentHook::install() noexcept -> bool {
   // the payload safe to map into non-graphical targets.
   if (GetModuleHandleW(L"dxgi.dll") == nullptr || GetModuleHandleW(L"d3d11.dll") == nullptr) {
     std::puts("[cs2-features] dxgi/d3d11 not loaded; skipping Present hook");
+    log_line("present hook: dxgi/d3d11 not loaded; skipped");
     return false;
   }
 
   // Replaces the swapchain Present/ResizeBuffers slots in the discovered method
   // table instead of MinHook-patching the Present function body (DXVK only
   // conditionally reserves a hot-patchable Present entry; ADR-0015).
+  log_line("present hook: interposing (discovering method tables)");
   if (!interposer_.install(&present_callback, &resize_callback, this)) {
     std::puts("[cs2-features] DXGI interposition failed");
+    log_line("present hook: DXGI interposition FAILED");
     return false;
   }
   installed_ = true;
@@ -128,6 +132,9 @@ void PresentHook::on_present(void* swapchain) noexcept {
 #if defined(_WIN32)
   if (swapchain == nullptr) {
     return;
+  }
+  if (frames_ == 1) {
+    log_line("present hook: first Present call");
   }
   auto* chain = static_cast<IDXGISwapChain*>(swapchain);
   ID3D11Device* device = nullptr;
@@ -178,6 +185,13 @@ void PresentHook::on_present(void* swapchain) noexcept {
     const auto screen_width = static_cast<float>(desc.BufferDesc.Width);
     const auto screen_height = static_cast<float>(desc.BufferDesc.Height);
     const render::OverlayModel& model = overlay_->update(screen_width, screen_height);
+    // The in-process menu (workstream A): tick it (poll the toggle, subclass the
+    // game window's WndProc, release the cursor, apply the settings) and draw it
+    // inside the ImGui frame via the backend's UI callback.
+    if (menu_ != nullptr) {
+      menu_->tick(model.in_game, context_.hwnd);
+      backend_->set_ui_callback(&Menu::ui_entry, menu_);
+    }
     backend_->render(context_, model);
     if (frames_ % 300 == 0) {
       log_line("presenting frames");

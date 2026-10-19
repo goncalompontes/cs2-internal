@@ -34,6 +34,15 @@ class UiBackend {
 
   // Called before unload.
   virtual void shutdown() = 0;
+
+  // An optional overlay-UI hook, invoked once per frame between `NewFrame` and
+  // `Render` (so it may add ImGui windows). The in-process menu registers here
+  // (workstream A); the display-only paths leave it unset.
+  using UiCallback = void (*)(void* context);
+  virtual void set_ui_callback(UiCallback callback, void* context) {
+    (void)callback;
+    (void)context;
+  }
 };
 
 }  // namespace cs2::render

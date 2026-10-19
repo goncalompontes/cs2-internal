@@ -239,7 +239,7 @@ reference.
   `IDXGIDeviceSubObject`).
 
 ## ADR-0016 — Overlay rendering: portable Vulkan present layer + shared-memory model
-**Status:** accepted (supersedes ADR-0015)
+**Status:** accepted; **superseded by ADR-0023** for the default renderer (in-process DXGI Present + the payload's own menu). Retained as the dialect/Vulkan fallback (`CS2_PAYLOAD_RENDER=layer`, `-vulkan`).
 
 Live test of ADR-0015 (2026-10, Proton-CachyOS, `-insecure`): the method-table
 interposer installed (`present hook installed (dxgi method-table interposer)`,
@@ -573,4 +573,55 @@ target's lag-compensated pose.
 
 Validation uses the control harness (silent sub-tick aim + fire + observed
 health drop).
+
+## ADR-0023 — Default renderer: in-process DXGI Present + the payload's own menu
+**Status:** accepted (2026-10-19); supersedes ADR-0016 for the default. Validated
+on native Windows.
+
+**Context.** ADR-0016 moved rendering into a Vulkan layer to dodge the DXVK
+`Present` deadlock (ADR-0017), which was specific to Wine/Proton + DXVK. On
+**native Windows** the game runs D3D11/DXGI, and the historic freeze did not
+reproduce; the DXGI method-table interposer (`PresentHook` + `DxgiInterposer`,
+ADR-0015) and the ImGui D3D11 backend already existed but were not the default.
+
+**Decision.** Render the ESP + HUD in-process from the game's own
+`IDXGISwapChain::Present`, and move the menu into the payload:
+
+- `PresentHook` (DXGI method-table interposer) is the default when the game is on
+  D3D11/DXGI. `CS2_PAYLOAD_RENDER` (`present` | `layer` | `layer-thread`) overrides;
+  otherwise a loaded `vulkan-1.dll` selects the layer. The game inherits its
+  environment from **Steam**, so the decision is made from the loaded graphics
+  modules, not the env.
+- The menu lives in the payload (`features::Menu`): it owns the settings block
+  (ADR-0021), subclasses the game window's WndProc, releases the cursor while
+  open, and draws with the payload's ImGui context via a new `UiBackend` UI
+  callback (`set_ui_callback`) invoked inside the ImGui frame.
+- The `overlay/` Vulkan layer + shared-memory publisher remain the fallback for a
+  Vulkan/DXVK stack (keep ADR-0016 for that case; the layer is unchanged).
+
+**Gotcha (decisive).** The payload's threads are created with
+`THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH` (ADR-0017) so they never run
+`LdrpInitializeThread`. DXGI/D3D11 fault when their entry points are called from
+such a thread (the probe device creation crashed inside `dxgi` reading `+0xa8`).
+The in-process install therefore runs on a **normal** thread (safe on native
+Windows D3D11); the layer paths keep the TLS-skip thread.
+
+**Validated (2026-10-19, native Windows, de_dust2 bot match).** Present
+interposed, ImGui D3D11 backend initialized, ESP (boxes/health/name/weapon/flags)
+and the debug HUD drawn in-process, the menu rendered as its own ImGui window
+(tabs + widgets), the game stable (`artifacts/game.png`).
+
+**Menu input.** The menu subclasses the game window's WndProc, feeds Dear ImGui,
+and swallows mouse/keyboard messages. That alone does **not** stop the game's
+mouse-look: CS2's input goes through **SDL3**, which reads raw input with
+`user32!GetRawInputBuffer` in its own loop (it does not import `GetRawInputData`),
+so `WM_INPUT` never reaches the subclassed WndProc. While the menu is open the
+payload therefore **patches SDL3's IAT entry for `GetRawInputBuffer`** (the export
+is a `jmp`-thunk-like prologue too long for the inline hook) to return "no raw
+input" — blocking mouse motion, buttons and keyboard to the game until the menu
+closes. `GetCursorPos`-based look (`m_rawinput 0`) is not covered.
+
+**Open.** Windowed/fullscreen + resize stress; the cursor release needs operator
+confirmation; the raw-input block needs live confirmation; the ragebot follow-ups
+in `docs/next-session-present-hook.md` remain.
 

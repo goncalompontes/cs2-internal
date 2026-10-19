@@ -2,6 +2,9 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <string>
+
+#include "cs2/game/log.hpp"
 
 #if defined(_WIN32)
 #include <d3d11.h>
@@ -14,6 +17,10 @@ namespace cs2::features {
 namespace {
 
 #if defined(_WIN32)
+
+void dxgi_log(const char* text) noexcept {
+  cs2::game::append_log(std::string("[cs2-dxgi] ") + text);
+}
 
 // DXGI method-table indices (IUnknown occupies 0..2 of every COM table).
 constexpr std::size_t k_factory_create_swapchain = 10;            // IDXGIFactory
@@ -111,6 +118,7 @@ auto discover_method_tables(MethodTables& out) noexcept -> bool {
   HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
   HMODULE d3d11 = GetModuleHandleW(L"d3d11.dll");
   if (dxgi == nullptr || d3d11 == nullptr) {
+    dxgi_log("discover: dxgi/d3d11 module missing");
     return false;
   }
 
@@ -121,14 +129,17 @@ auto discover_method_tables(MethodTables& out) noexcept -> bool {
       void*, int, void*, unsigned, const void*, unsigned, unsigned, void**, void**, void**)>(
       GetProcAddress(d3d11, "D3D11CreateDevice"));
   if (create_factory == nullptr || create_device == nullptr) {
+    dxgi_log("discover: CreateDXGIFactory1/D3D11CreateDevice not found");
     return false;
   }
 
   const HINSTANCE instance = GetModuleHandleW(nullptr);
   const HWND window = create_probe_window(instance);
   if (window == nullptr) {
+    dxgi_log("discover: probe window creation failed");
     return false;
   }
+  dxgi_log("discover: probe window created");
 
   IDXGIFactory* factory = nullptr;
   IDXGIFactory2* factory2 = nullptr;
@@ -139,6 +150,7 @@ auto discover_method_tables(MethodTables& out) noexcept -> bool {
 
   if (create_factory(__uuidof(IDXGIFactory), reinterpret_cast<void**>(&factory)) < 0 ||
       factory == nullptr) {
+    dxgi_log("discover: CreateDXGIFactory1 failed");
     goto cleanup;
   }
   out.factory = *reinterpret_cast<void***>(factory);
@@ -146,12 +158,15 @@ auto discover_method_tables(MethodTables& out) noexcept -> bool {
       factory2 != nullptr) {
     out.has_factory2 = true;
   }
+  dxgi_log("discover: factory acquired");
   if (create_device(nullptr, /*D3D_DRIVER_TYPE_HARDWARE=*/1, nullptr, 0, nullptr, 0,
                     /*D3D11_SDK_VERSION=*/7, reinterpret_cast<void**>(&device), nullptr,
                     reinterpret_cast<void**>(&context)) < 0 ||
       device == nullptr) {
+    dxgi_log("discover: D3D11CreateDevice failed");
     goto cleanup;
   }
+  dxgi_log("discover: D3D11 device created");
 
   {
     DXGI_SWAP_CHAIN_DESC desc{};
@@ -165,10 +180,12 @@ auto discover_method_tables(MethodTables& out) noexcept -> bool {
     desc.Windowed = TRUE;
     desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     if (factory->CreateSwapChain(device, &desc, &swapchain) < 0 || swapchain == nullptr) {
+      dxgi_log("discover: CreateSwapChain failed");
       goto cleanup;
     }
     out.swapchain = *reinterpret_cast<void***>(swapchain);
   }
+  dxgi_log("discover: probe swapchain created");
   ok = out.factory != nullptr && out.swapchain != nullptr;
 
 cleanup:
@@ -210,8 +227,10 @@ auto DxgiInterposer::install(PresentCallback on_present, ResizeCallback on_resiz
   MethodTables tables{};
   if (!discover_method_tables(tables)) {
     std::puts("[cs2-dxgi] method-table discovery failed (dxgi/d3d11 unavailable)");
+    dxgi_log("install: discovery failed");
     return false;
   }
+  dxgi_log("install: method tables discovered; patching slots");
 
   g_on_present = on_present;
   g_on_resize = on_resize;
@@ -243,12 +262,14 @@ auto DxgiInterposer::install(PresentCallback on_present, ResizeCallback on_resiz
 
   if (!present_->installed()) {
     std::puts("[cs2-dxgi] failed to patch the swapchain Present slot");
+    dxgi_log("install: failed to patch the Present slot");
     uninstall();
     return false;
   }
 
   installed_ = true;
   std::puts("[cs2-dxgi] swapchain method table interposed (Present + ResizeBuffers)");
+  dxgi_log("install: swapchain method table interposed");
   return true;
 #else
   (void)on_present;

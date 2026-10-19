@@ -23,6 +23,10 @@ class ImGuiBackend final : public UiBackend {
   void render(const RenderContext& context, const OverlayModel& model) override;
   void on_before_resize() override;
   void shutdown() override;
+  void set_ui_callback(UiCallback callback, void* context) override {
+    ui_callback_ = callback;
+    ui_context_ = context;
+  }
 
   [[nodiscard]] std::uint64_t frames() const noexcept { return frames_; }
 
@@ -38,8 +42,11 @@ class ImGuiBackend final : public UiBackend {
   void* device_ = nullptr;          // ID3D11Device*
   void* device_context_ = nullptr;  // ID3D11DeviceContext*
   void* render_target_ = nullptr;   // ID3D11RenderTargetView* (back buffer)
+  void* imgui_context_ = nullptr;   // ImGuiContext* we created
   unsigned render_target_width_ = 0;
   unsigned render_target_height_ = 0;
+  UiCallback ui_callback_ = nullptr;
+  void* ui_context_ = nullptr;
 };
 
 }  // namespace cs2::render

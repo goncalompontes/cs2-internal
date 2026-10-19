@@ -132,6 +132,10 @@ struct Settings {
   // this speed, the fastest movement that does not add spread).
   uint8_t rage_recoil;
   float rage_stop_speed;
+  // Lag-record backtracking (`docs/ragebot.md` §8). **Off by default**: the sampled lag
+  // poses cost a full solve each and the record sampling itself is ~0.6 ms/tick, so the
+  // feature is kept but disabled until the perf work lands.
+  uint8_t rage_backtrack;
 };
 
 struct Model {
