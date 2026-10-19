@@ -31,6 +31,40 @@ Service::~Service() {
   stop();
 }
 
+namespace {
+
+// Microsecond wall clock for the ragebot instrumentation (`docs/ragebot-perf.md`).
+auto now_us() noexcept -> std::uint64_t {
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+}
+
+// Adds the scope's elapsed microseconds to `total` and keeps the running maximum in
+// `max_value` (a lock-free CAS). Used to time one rage-path frame across all its
+// early returns.
+struct FrameScope {
+  std::atomic<std::uint64_t>* total = nullptr;
+  std::atomic<std::uint64_t>* last = nullptr;
+  std::atomic<std::uint64_t>* max_value = nullptr;
+  std::uint64_t start = 0;
+
+  FrameScope(std::atomic<std::uint64_t>& total_ref, std::atomic<std::uint64_t>& last_ref,
+             std::atomic<std::uint64_t>& max_ref) noexcept
+      : total(&total_ref), last(&last_ref), max_value(&max_ref), start(now_us()) {}
+  ~FrameScope() {
+    const std::uint64_t elapsed = now_us() - start;
+    total->fetch_add(elapsed, std::memory_order_relaxed);
+    last->store(elapsed, std::memory_order_relaxed);
+    std::uint64_t previous = max_value->load(std::memory_order_relaxed);
+    while (elapsed > previous &&
+           !max_value->compare_exchange_weak(previous, elapsed, std::memory_order_relaxed)) {
+    }
+  }
+};
+
+}  // namespace
+
 #if defined(_WIN32)
 namespace {
 
@@ -60,6 +94,26 @@ void extend_box(game::Vec3& lo, game::Vec3& hi, const aim::Hitbox& hitbox) noexc
     extend_point(lo, hi, game::Vec3{b.x + r, b.y + r, b.z + r});
     return;
   }
+  for (const game::Vec3& corner : hitbox.box.corners()) {
+    extend_point(lo, hi, corner);
+  }
+}
+
+// The world AABB of one hitbox (the same geometry `extend_box` unions into the box).
+void hitbox_bounds(const aim::Hitbox& hitbox, game::Vec3& lo, game::Vec3& hi) noexcept {
+  if (hitbox.is_capsule) {
+    const float r = hitbox.capsule.radius;
+    const game::Vec3 a = hitbox.capsule.a;
+    const game::Vec3 b = hitbox.capsule.b;
+    // (`std::min`/`std::max` are macros under <windows.h> in this translation unit.)
+    lo = game::Vec3{a.x < b.x ? a.x : b.x, a.y < b.y ? a.y : b.y, a.z < b.z ? a.z : b.z};
+    hi = game::Vec3{a.x > b.x ? a.x : b.x, a.y > b.y ? a.y : b.y, a.z > b.z ? a.z : b.z};
+    lo = game::Vec3{lo.x - r, lo.y - r, lo.z - r};
+    hi = game::Vec3{hi.x + r, hi.y + r, hi.z + r};
+    return;
+  }
+  lo = hitbox.box.corners().front();
+  hi = lo;
   for (const game::Vec3& corner : hitbox.box.corners()) {
     extend_point(lo, hi, corner);
   }
@@ -740,11 +794,10 @@ void Service::set_movement_features(bool auto_strafe, bool bhop) noexcept {
 }
 
 void Service::set_rage_features(bool on, int key, bool fire, int objective, int hitbox, float fov,
-                                float min_damage, float min_hitchance, int autostop,
-                                int autoscope, bool autoreload, bool only_visible, int mode,
-                                bool per_weapon, const char* weapon, int config_op,
-                                std::uint32_t config_token, bool recoil,
-                                float stop_speed) noexcept {
+                                float min_damage, float min_hitchance, int autostop, int autoscope,
+                                bool autoreload, bool only_visible, int mode, bool per_weapon,
+                                const char* weapon, int config_op, std::uint32_t config_token,
+                                bool recoil, float stop_speed, bool backtrack) noexcept {
   rage_enabled_.store(on);
   rage_key_.store(key);
   rage_fire_.store(fire);
@@ -761,6 +814,7 @@ void Service::set_rage_features(bool on, int key, bool fire, int objective, int 
   rage_per_weapon_.store(per_weapon);
   rage_recoil_.store(recoil);
   rage_stop_speed_.store(stop_speed);
+  rage_backtrack_.store(backtrack);
   {
     std::lock_guard<std::mutex> lock(rage_config_mutex_);
     if (weapon != nullptr) {
@@ -901,13 +955,11 @@ auto Service::effective_rage_tuning(const char* active_weapon) noexcept -> RageT
     return false;  // knife
   }
   // Unknown type: any `weapon_*` that is not on the deny-list.
-  static constexpr const char* k_deny[] = {"weapon_knife",        "weapon_c4",
-                                           "weapon_taser",        "weapon_flashbang",
-                                           "weapon_hegrenade",    "weapon_smokegrenade",
-                                           "weapon_molotov",      "weapon_incgrenade",
-                                           "weapon_decoy",        "weapon_tagrenade",
-                                           "weapon_breachcharge", "weapon_bumpmine",
-                                           "weapon_healthshot",   "weapon_shield"};
+  static constexpr const char* k_deny[] = {
+      "weapon_knife",      "weapon_c4",           "weapon_taser",        "weapon_flashbang",
+      "weapon_hegrenade",  "weapon_smokegrenade", "weapon_molotov",      "weapon_incgrenade",
+      "weapon_decoy",      "weapon_tagrenade",    "weapon_breachcharge", "weapon_bumpmine",
+      "weapon_healthshot", "weapon_shield"};
   for (const char* deny : k_deny) {
     if (name == deny) {
       return false;
@@ -1031,12 +1083,81 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
   game::Vec3 lo = local.eye_origin;
   game::Vec3 hi = local.eye_origin;
   bool have_geometry = false;
-  {
+  // One pyramid base **per enemy**, covering both its current snapshot bounds and every
+  // sampled lag pose. The enumeration is the union of the eye→enemy pyramids, so a far
+  // enemy cannot widen the query to the whole map (`docs/ragebot-perf.md` §2.1) while
+  // every enemy still contributes its own volume.
+  //
+  // The snapshot bounds matter: a pawn that just (re)spawned or teleported can have a
+  // record ring that is still empty or still holds its old position, and a pyramid built
+  // from stale poses would prune the walls in the real line of sight. The snapshot bounds
+  // are always current, and the record ring adds the backtrack poses on top.
+  aim::Aabb targets[k_max_occlusion_targets] = {};
+  std::uintptr_t target_pawns[k_max_occlusion_targets] = {};
+  int target_count = 0;
+  const auto target_for = [&](std::uintptr_t pawn) -> aim::Aabb* {
+    for (int i = 0; i < target_count; ++i) {
+      if (target_pawns[i] == pawn) {
+        return &targets[i];
+      }
+    }
+    if (target_count >= k_max_occlusion_targets) {
+      return nullptr;
+    }
+    target_pawns[target_count] = pawn;
+    aim::Aabb* target = &targets[target_count++];
+    // Seed the base at the eye: the pyramid is `conv(eye, base)`, and the eye is its
+    // apex, so adding the eye to the base changes nothing. It keeps "extend" uniform.
+    target->min = local.eye_origin;
+    target->max = local.eye_origin;
+    return target;
+  };
+  // The current pose of every enemy (authoritative, never stale).
+  for (const game::PlayerSnapshot& player : snapshot.players) {
+    if (player.is_local || !player.alive || player.pawn == 0) {
+      continue;
+    }
+    if (player.team != 2 && player.team != 3) {
+      continue;
+    }
+    aim::Aabb* target = target_for(player.pawn);
+    if (target == nullptr) {
+      continue;
+    }
+    const game::Vec3 tlo = player.origin + player.mins;
+    const game::Vec3 thi = player.origin + player.maxs;
+    target->min.x = target->min.x < tlo.x ? target->min.x : tlo.x;
+    target->min.y = target->min.y < tlo.y ? target->min.y : tlo.y;
+    target->min.z = target->min.z < tlo.z ? target->min.z : tlo.z;
+    target->max.x = target->max.x > thi.x ? target->max.x : thi.x;
+    target->max.y = target->max.y > thi.y ? target->max.y : thi.y;
+    target->max.z = target->max.z > thi.z ? target->max.z : thi.z;
+    extend_point(lo, hi, tlo);
+    extend_point(lo, hi, thi);
+    have_geometry = true;
+  }
+  // Every sampled lag pose, so a backtrack aim has its own walls enumerated too. Only
+  // when backtracking (or the live heatmap) actually consumes them.
+  if (rage_backtrack_.load() || occlusion_live_.load()) {
     std::lock_guard<std::mutex> lock(records_mutex_);
     for (const std::uintptr_t pawn : records_.pawns()) {
+      aim::Aabb* target = target_for(pawn);
+      if (target == nullptr) {
+        continue;
+      }
       for (const aim::Record& record : records_.records(pawn)) {
         for (const aim::Hitbox& hitbox : record.hitboxes) {
-          extend_box(lo, hi, hitbox);
+          game::Vec3 tlo{};
+          game::Vec3 thi{};
+          hitbox_bounds(hitbox, tlo, thi);
+          target->min.x = target->min.x < tlo.x ? target->min.x : tlo.x;
+          target->min.y = target->min.y < tlo.y ? target->min.y : tlo.y;
+          target->min.z = target->min.z < tlo.z ? target->min.z : tlo.z;
+          target->max.x = target->max.x > thi.x ? target->max.x : thi.x;
+          target->max.y = target->max.y > thi.y ? target->max.y : thi.y;
+          target->max.z = target->max.z > thi.z ? target->max.z : thi.z;
+          extend_point(lo, hi, tlo);
+          extend_point(lo, hi, thi);
           have_geometry = true;
         }
       }
@@ -1054,18 +1175,26 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
       }
       extend_point(lo, hi, player.eye_origin);
       have_geometry = true;
+      if (target_count < k_max_occlusion_targets) {
+        const game::Vec3 pad{24.0F, 24.0F, 72.0F};  // a player-sized proxy box
+        targets[target_count++] = aim::Aabb{player.eye_origin - pad, player.eye_origin + pad};
+      }
     }
   }
   if (!have_geometry) {
     return;
   }
   std::lock_guard<std::mutex> lock(occlusion_mutex_);
-  // Enumerate every frame: the eye→hitboxes box is the exact query box, and caching it
-  // would make the solid set stale (docs/ragebot.md — correctness over cost). Only the
-  // *parse* of the static world body is cached, per query AABB.
+  // Enumerate every frame: the eye→hitboxes volume is the exact query volume, and caching
+  // it would make the solid set stale (docs/ragebot.md — correctness over cost). Only the
+  // *parse* of the static world body is cached.
   occlusion_eye_ = local.eye_origin;
   occlusion_lo_ = lo;
   occlusion_hi_ = hi;
+  occlusion_target_count_ = target_count;
+  for (int i = 0; i < target_count; ++i) {
+    occlusion_targets_[i] = targets[i];
+  }
   // Exclude the players' own collision bodies (targets, not occluders). `index` is the
   // entity identity index, exactly the record handle's `& 0x7fff`.
   int n = 0;
@@ -1098,64 +1227,112 @@ void Service::on_game_thread() noexcept {
       }
     }
   }
-  if (!occlusion_request_.exchange(false)) {
+  if (occlusion_request_.exchange(false)) {
+    game::Vec3 eye{};
+    game::Vec3 box_min{};
+    game::Vec3 box_max{};
+    std::uint16_t exclude[k_max_occlusion_exclude] = {};
+    std::uintptr_t pawns[k_max_occlusion_exclude] = {};
+    aim::Aabb targets[k_max_occlusion_targets] = {};
+    int exclude_count = 0;
+    int target_count = 0;
+    {
+      std::lock_guard<std::mutex> lock(occlusion_mutex_);
+      eye = occlusion_eye_;
+      box_min = occlusion_lo_;
+      box_max = occlusion_hi_;
+      exclude_count = occlusion_exclude_count_;
+      target_count = occlusion_target_count_;
+      for (int i = 0; i < exclude_count; ++i) {
+        exclude[i] = occlusion_exclude_[i];
+        pawns[i] = occlusion_pawns_[i];
+      }
+      for (int i = 0; i < target_count; ++i) {
+        targets[i] = occlusion_targets_[i];
+      }
+    }
+    // The payload trace filter rejects the players (a target, not a solid) — the engine
+    // calls it for every non-worldspawn overlap (`docs/re/occlusion.md`).
+    set_occlusion_exclude_pawns(pawns, exclude_count);
+    OcclusionQueryStats stats;
+    // The enumeration volume: the per-target pyramid union by default, or the older
+    // single AABB when the diagnostic asks for it (`occlusion_enum_mode_`).
+    // `enum=box` forces the single-AABB volume; `enum=both` uses the pyramid for the
+    // result but also runs the AABB on the same tick to compare them.
+    const int enum_mode = occlusion_enum_mode_.load();
+    const bool use_pyramid = enum_mode != 1;
+    const bool verify_enum = enum_mode == 2;
+    std::vector<OcclusionHull> hulls = query_world_occluders(
+        eye, box_min, box_max, occlusion_invoke_.load(), &stats, exclude, exclude_count,
+        use_pyramid ? targets : nullptr, use_pyramid ? target_count : 0, verify_enum);
+    std::lock_guard<std::mutex> lock(occlusion_mutex_);
+    occlusion_hulls_ = std::move(hulls);
+    occlusion_stats_ = stats;
+  }
+
+  // The ragebot solve, on the **game thread** (this hook runs per simulated command), so
+  // the aim belongs to the command being built — not to the render thread's frame. The
+  // hitboxes are re-read inside the solve, so only the player list / eye / weapon come
+  // from the (at most one frame old) snapshot (`docs/ragebot-perf.md` §3.3).
+  if (!rage_enabled_.load() && !rage_force_.load()) {
+    input_.clear_rage_aim();
     return;
   }
-  game::Vec3 eye{};
-  game::Vec3 box_min{};
-  game::Vec3 box_max{};
-  std::uint16_t exclude[k_max_occlusion_exclude] = {};
-  std::uintptr_t pawns[k_max_occlusion_exclude] = {};
-  int exclude_count = 0;
+  game::Snapshot snapshot;
   {
-    std::lock_guard<std::mutex> lock(occlusion_mutex_);
-    eye = occlusion_eye_;
-    box_min = occlusion_lo_;
-    box_max = occlusion_hi_;
-    exclude_count = occlusion_exclude_count_;
-    for (int i = 0; i < exclude_count; ++i) {
-      exclude[i] = occlusion_exclude_[i];
-      pawns[i] = occlusion_pawns_[i];
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    if (!have_snapshot_.load(std::memory_order_relaxed)) {
+      return;
     }
+    snapshot = last_snapshot_;
   }
-  // The payload trace filter rejects the players (a target, not a solid) — the engine
-  // calls it for every non-worldspawn overlap (`docs/re/occlusion.md`).
-  set_occlusion_exclude_pawns(pawns, exclude_count);
-  OcclusionQueryStats stats;
-  std::vector<OcclusionHull> hulls = query_world_occluders(
-      eye, box_min, box_max, occlusion_invoke_.load(), &stats, exclude, exclude_count);
-  std::lock_guard<std::mutex> lock(occlusion_mutex_);
-  occlusion_hulls_ = std::move(hulls);
-  occlusion_stats_ = stats;
+  rage_tick(snapshot);
 }
 
 void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
-  // Auto-scope is re-decided every frame; the game-thread sink applies the transition
-  // (`+zoom`/`-zoom`). Clear it here and re-arm it below when a solve wants it.
-  rage_scope_wanted_.store(false);
-  // Sample the per-enemy lag records every frame (the heatmap's history), before
-  // the ragebot's early-out so records accrue even when the ragebot is idle. The
-  // occlusion enumeration also consumes them (the eye→hitboxes box needs the live pose
-  // and every lag record), so sample whenever either feature is live.
-  // The ragebot also consumes the occluders (the wallbang-aware solve), so the record
-  // sampling and the enumeration must run when it is active too — not only for the
-  // heatmap.
+  // Hand the snapshot to the game-thread solve and sample the per-enemy lag records (the
+  // heatmap's history) + build the occlusion-query box. The **solve itself runs on the
+  // game thread** (`rage_tick` from the CreateMove hook), not here.
+  {
+    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    last_snapshot_ = snapshot;
+    have_snapshot_.store(true, std::memory_order_relaxed);
+  }
+  perf_.snapshot_frames.fetch_add(1, std::memory_order_relaxed);
   const bool rage_requested = rage_enabled_.load() || rage_force_.load();
-  if (heatmap_sampling_.load() || occlusion_live_.load() || rage_requested) {
+  // Lag-record sampling is the heatmap's history and the backtrack poses. With backtrack
+  // disabled (the default) and no heatmap asking for it, skip the walk entirely: it was
+  // ~0.6 ms/tick on the render thread for records nothing consumed.
+  const bool want_records = heatmap_sampling_.load() || occlusion_live_.load() ||
+                            (rage_requested && rage_backtrack_.load());
+  if (want_records) {
+    const std::uint64_t t = now_us();
     sample_records(snapshot);
+    perf_.sample_us.fetch_add(now_us() - t, std::memory_order_relaxed);
   }
-  // The occlusion enumeration also must run on a game thread (tier0 TLS).
+  // The occlusion enumeration must run on a game thread (tier0 TLS) — this only builds
+  // the query box and requests it; `on_game_thread` runs the engine query.
   if (occlusion_live_.load() || rage_requested) {
-    occlusion_invoke_.store(true);  // the engine query must actually run
+    occlusion_invoke_.store(true);
+    const std::uint64_t t = now_us();
     cache_occlusion_targets(snapshot);
+    perf_.query_us.fetch_add(now_us() - t, std::memory_order_relaxed);
   }
+}
+
+void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
+  // Ragebot instrumentation (`docs/ragebot-perf.md`): time the whole solve and each stage.
+  perf_.frames.fetch_add(1, std::memory_order_relaxed);
+  FrameScope frame_scope(perf_.total_us, perf_.last_total_us, perf_.max_total_us);
+  // Auto-scope is re-decided every tick; the same sink applies the transition (`+zoom`).
+  rage_scope_wanted_.store(false);
   const bool forced = rage_force_.load();
   if (!rage_enabled_.load() && !forced) {
     input_.clear_rage_aim();
     return;
   }
-  // The hook is what runs `apply()` per tick; install it on first use so the
-  // ragebot works during menu-only play (no scenario attached).
+  // The hook is what runs `apply()` per tick; install it on first use so the ragebot
+  // works during menu-only play (no scenario attached).
   input_.refresh();
   if (!snapshot.valid || !snapshot.local.has_value() || !snapshot.local->alive) {
     input_.clear_rage_aim();
@@ -1238,8 +1415,7 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     // The auto-stop speed threshold: an explicit units/s, else 34% of the weapon's max
     // speed — the fastest movement that does not add spread (a tunable default; the
     // menu exposes the value).
-    const float stop_speed =
-        tuning.stop_speed > 0.0F ? tuning.stop_speed : 0.34F * local.max_speed;
+    const float stop_speed = tuning.stop_speed > 0.0F ? tuning.stop_speed : 0.34F * local.max_speed;
     input_.set_rage_stop_speed(stop_speed);
     rage_scope_wanted_.store(scope_want);
   }
@@ -1296,19 +1472,25 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
 
   // --- multi-target solve: every candidate in one field ----------------------------
   std::optional<aim::SolveInput> multi;
-  for (const int index : candidates) {
-    auto in = aim::build_input(snapshot, weapon, index);
-    if (!in.has_value()) {
-      continue;
+  {
+    const std::uint64_t t = now_us();
+    for (const int index : candidates) {
+      auto in = aim::build_input(snapshot, weapon, index);
+      if (!in.has_value()) {
+        continue;
+      }
+      for (aim::Hitbox& hitbox : in->hitboxes) {
+        hitbox.target = index;
+      }
+      if (!multi.has_value()) {
+        multi = std::move(in);
+      } else {
+        multi->hitboxes.insert(multi->hitboxes.end(), in->hitboxes.begin(), in->hitboxes.end());
+      }
     }
-    for (aim::Hitbox& hitbox : in->hitboxes) {
-      hitbox.target = index;
-    }
-    if (!multi.has_value()) {
-      multi = std::move(in);
-    } else {
-      multi->hitboxes.insert(multi->hitboxes.end(), in->hitboxes.begin(), in->hitboxes.end());
-    }
+    perf_.build_us.fetch_add(now_us() - t, std::memory_order_relaxed);
+    perf_.candidates.store(static_cast<std::uint32_t>(candidates.size()),
+                           std::memory_order_relaxed);
   }
   if (!multi.has_value() || multi->hitboxes.empty()) {
     input_.clear_rage_aim_keep_aux();
@@ -1340,11 +1522,12 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     constexpr float k_margin = 8.0F;
     lo = game::Vec3{lo.x - k_margin, lo.y - k_margin, lo.z - k_margin};
     hi = game::Vec3{hi.x + k_margin, hi.y + k_margin, hi.z + k_margin};
+    const std::uint64_t t_project = now_us();
     std::lock_guard<std::mutex> lock(occlusion_mutex_);
     for (const OcclusionHull& hull : occlusion_hulls_) {
-      if (hull.has_bounds && !(hull.bounds_max.x >= lo.x && hull.bounds_min.x <= hi.x &&
-                               hull.bounds_max.y >= lo.y && hull.bounds_min.y <= hi.y &&
-                               hull.bounds_max.z >= lo.z && hull.bounds_min.z <= hi.z)) {
+      if (hull.has_bounds &&
+          !(hull.bounds_max.x >= lo.x && hull.bounds_min.x <= hi.x && hull.bounds_max.y >= lo.y &&
+            hull.bounds_min.y <= hi.y && hull.bounds_max.z >= lo.z && hull.bounds_min.z <= hi.z)) {
         continue;  // cannot lie between the eye and the candidates
       }
       std::optional<aim::OccluderCell> cell;
@@ -1356,7 +1539,7 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
                                              hull.radius, hull.surface_modifier);
       } else if (hull.kind == aim::SolidKind::mesh) {
         cell = aim::project_mesh_occluder(solve_input->eye, solve_input->basis, hull.vertices,
-                                          hull.triangles, hull.surface_modifier);
+                                          hull.triangles, hull.surface_modifier, hull.mesh_bvh);
       } else {
         cell = aim::project_occluder(solve_input->eye, solve_input->basis, hull.vertices,
                                      hull.planes, hull.surface_modifier);
@@ -1365,12 +1548,21 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
         cell->damage_modifier = hull.damage_modifier;
         cell->material = hull.material;
         cell->grate = hull.grate;
+        cell->target = hull.target;
         solve_input->occlusion.push_back(std::move(*cell));
       }
     }
+    perf_.project_us.fetch_add(now_us() - t_project, std::memory_order_relaxed);
   }
+  // Occlusion work bound for the rage solve (`PenetrationParams::max_occluders`): the
+  // nearest solids per hitbox. Tune here if a spot still stalls the game.
+  static constexpr int k_max_solve_occluders = 24;
   solve_input->penetration = aim::PenetrationModel::engine;
   solve_input->penetration_params.weapon_penetration = solve_input->weapon.penetration;
+  // Bound the arrangement cost: examine the nearest solids per hitbox only. Without it a
+  // dense position (a long eye→enemy cone) exploded into ~15k fragments and ~0.6 s per
+  // tick. See `PenetrationParams::max_occluders` for the tradeoff.
+  solve_input->penetration_params.max_occluders = k_max_solve_occluders;
   rage_occluders_.store(static_cast<int>(solve_input->occlusion.size()));
   solve_input->pose_sigma = rage_sigma_.load();
   // The hitchance cone: the weapon's inaccuracy + spread (`docs/re/aim.md`).
@@ -1394,7 +1586,18 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   // The global pick across **all** candidates: which target's hitbox the best aimpoint
   // lands on. `best_target_for` maps the aim direction back to the hitbox (and so the
   // enemy) it points at.
-  const aim::SolveResult multi_result = aim::solve(*solve_input);
+  aim::SolveStats solve_stats;
+  const std::uint64_t t_solve = now_us();
+  const aim::SolveResult multi_result = aim::solve(*solve_input, &solve_stats);
+  perf_.solve_us.fetch_add(now_us() - t_solve, std::memory_order_relaxed);
+  // Aggregate the solve breakdown here (not after the backtrack) so a gated/early-return
+  // frame still attributes its cost.
+  perf_.solve_calls.fetch_add(solve_stats.solves, std::memory_order_relaxed);
+  perf_.solve_project_us.fetch_add(solve_stats.project_us, std::memory_order_relaxed);
+  perf_.solve_occlude_us.fetch_add(solve_stats.occlude_us, std::memory_order_relaxed);
+  perf_.solve_argmax_us.fetch_add(solve_stats.argmax_us, std::memory_order_relaxed);
+  perf_.hitboxes.store(solve_stats.hitboxes, std::memory_order_relaxed);
+  perf_.cells.store(solve_stats.cells, std::memory_order_relaxed);
   if (!multi_result.valid) {
     input_.clear_rage_aim_keep_aux();
     return;
@@ -1424,7 +1627,15 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   std::vector<aim::PoseCandidate> poses;
   poses.push_back(aim::PoseCandidate{-1, 0.0F, solve_input->hitboxes});
   const std::int32_t backtrack_tick_base = snapshot.local->tick_base;
-  {
+  // Frame-budget guard: every pose is a full solve (projection + occlusion split + the
+  // objective search), so a slow position was multiplied by the pose count. When the last
+  // tick already blew the budget, this tick scores the live pose only — the aim is still
+  // correct, just without the lag-comp candidate that tick (`docs/ragebot-perf.md` §3.9).
+  constexpr std::uint64_t k_backtrack_budget_us = 12000;
+  const bool allow_backtrack =
+      rage_backtrack_.load() &&
+      perf_.last_total_us.load(std::memory_order_relaxed) <= k_backtrack_budget_us;
+  if (allow_backtrack) {
     std::lock_guard<std::mutex> lock(records_mutex_);
     const std::int32_t newest =
         backtrack_tick_base > 0 ? backtrack_tick_base : records_.newest_tick();
@@ -1433,9 +1644,22 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
             ? aim::rewind_tick(backtrack_tick_base, lag_max_unlag_.load(), lag_interp_.load())
             : 0;
     const std::vector<aim::Record>& ring = records_.records(solve_input->pawn);
+    // The pose the server validates against is the one at the **rewind tick**
+    // (`floor_tick`, `aim::rewind_tick`), so keep the live pose and the records
+    // *nearest* that tick. Not every in-window record (wasteful — each is a full
+    // solve), and not "the newest few" (wrong: the rewind tick is the **oldest**
+    // in-window tick, so the newest records are the wrong pose). A small radius
+    // absorbs the latency/interp estimate. `docs/ragebot-perf.md` §3.1.
+    constexpr std::int32_t k_pose_radius = 3;
+    constexpr std::size_t k_fallback_poses = 8;  // when the tick base is unknown
+    std::size_t record_poses = 0;
     for (auto it = ring.rbegin(); it != ring.rend(); ++it) {
-      if (backtrack_tick_base > 0 && it->tick <= floor_tick) {
-        continue;  // outside the lag-comp window
+      if (backtrack_tick_base > 0) {
+        if (it->tick < floor_tick - 1 || it->tick > floor_tick + k_pose_radius) {
+          continue;  // not near the pose the server will rewind to
+        }
+      } else if (record_poses >= k_fallback_poses) {
+        break;
       }
       std::vector<aim::Hitbox> record_hitboxes = it->hitboxes;
       for (aim::Hitbox& hitbox : record_hitboxes) {
@@ -1443,14 +1667,39 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
       }
       poses.push_back(aim::PoseCandidate{it->tick, static_cast<float>(newest - it->tick),
                                          std::move(record_hitboxes)});
+      ++record_poses;
     }
   }
-  const aim::BacktrackResult backtrack = aim::solve_backtrack(*solve_input, poses);
-  if (!backtrack.valid) {
-    input_.clear_rage_aim_keep_aux();
-    return;
+  aim::SolveResult result;
+  int winning_record = -1;
+  float winning_age = 0.0F;
+  if (allow_backtrack) {
+    aim::SolveStats backtrack_stats;
+    const std::uint64_t t_backtrack = now_us();
+    const aim::BacktrackResult backtrack =
+        aim::solve_backtrack(*solve_input, poses, &backtrack_stats);
+    perf_.backtrack_us.fetch_add(now_us() - t_backtrack, std::memory_order_relaxed);
+    perf_.solve_calls.fetch_add(backtrack_stats.solves, std::memory_order_relaxed);
+    perf_.solve_project_us.fetch_add(backtrack_stats.project_us, std::memory_order_relaxed);
+    perf_.solve_occlude_us.fetch_add(backtrack_stats.occlude_us, std::memory_order_relaxed);
+    perf_.solve_argmax_us.fetch_add(backtrack_stats.argmax_us, std::memory_order_relaxed);
+    if (!backtrack.valid) {
+      input_.clear_rage_aim_keep_aux();
+      return;
+    }
+    result = backtrack.solve;
+    winning_record = backtrack.record;
+    winning_age = backtrack.age;
+  } else {
+    // Backtracking off: the multi-target solve **is** the live-pose answer. Re-solving the
+    // narrowed field (what `solve_backtrack` does with a single pose) duplicated the whole
+    // projection + occlusion + objective pass for nothing — ~4 ms/tick
+    // (`docs/ragebot-perf.md` §3.9).
+    result = multi_result;
   }
-  const aim::SolveResult& result = backtrack.solve;
+  perf_.occluders.store(static_cast<std::uint32_t>(solve_input->occlusion.size()),
+                        std::memory_order_relaxed);
+  perf_.poses.store(static_cast<std::uint32_t>(poses.size()), std::memory_order_relaxed);
 
   // The aim/fire gate (`docs/ragebot.md` §3): only aim and fire when the solve meets
   // the user's minimum damage and hitchance, and (optionally) when the shot is not
@@ -1481,11 +1730,44 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   input_.set_rage_aim(pitch, yaw, target_index, hitbox);
   input_.set_rage_fire(firing);
   rage_last_target_.store(target_index);
-  rage_last_record_.store(backtrack.record);
-  if (backtrack.record != -1) {
+  rage_last_record_.store(winning_record);
+  if (winning_record != -1) {
     rage_backtracks_.fetch_add(1);
   }
   rage_solves_.fetch_add(1);
+
+  // Periodic instrumentation line (`docs/ragebot-perf.md`): the average and worst
+  // whole-frame cost and the stage split, so a live session leaves a performance
+  // trace in the payload log (the `rage` command reports the same numbers).
+  const std::uint64_t perf_frames = perf_.frames.load(std::memory_order_relaxed);
+  if (perf_frames != 0 && perf_frames % 256 == 0) {
+    const auto avg = [perf_frames](const std::atomic<std::uint64_t>& acc) {
+      return static_cast<unsigned long long>(acc.load(std::memory_order_relaxed) / perf_frames);
+    };
+    const std::uint64_t perf_snapshots = perf_.snapshot_frames.load(std::memory_order_relaxed);
+    const auto avg_snap = [perf_snapshots](const std::atomic<std::uint64_t>& acc) {
+      return static_cast<unsigned long long>(
+          perf_snapshots != 0 ? acc.load(std::memory_order_relaxed) / perf_snapshots : 0);
+    };
+    char line[400];
+    std::snprintf(
+        line, sizeof(line),
+        "[rage-perf] frames=%llu total avg=%llu max=%lluus | solve=%llu (proj=%llu occ=%llu "
+        "argmax=%llu) back=%llu build=%llu proj=%llu query=%llu sample=%llu us | calls=%llu "
+        "cand=%u "
+        "hb=%u occ=%u poses=%u cells=%u",
+        static_cast<unsigned long long>(perf_frames), avg(perf_.total_us),
+        static_cast<unsigned long long>(perf_.max_total_us.load(std::memory_order_relaxed)),
+        avg(perf_.solve_us), avg(perf_.solve_project_us), avg(perf_.solve_occlude_us),
+        avg(perf_.solve_argmax_us), avg(perf_.backtrack_us), avg(perf_.build_us),
+        avg(perf_.project_us), avg_snap(perf_.query_us), avg_snap(perf_.sample_us),
+        static_cast<unsigned long long>(perf_.solve_calls.load(std::memory_order_relaxed)),
+        perf_.candidates.load(std::memory_order_relaxed),
+        perf_.hitboxes.load(std::memory_order_relaxed),
+        perf_.occluders.load(std::memory_order_relaxed),
+        perf_.poses.load(std::memory_order_relaxed), perf_.cells.load(std::memory_order_relaxed));
+    cs2::game::append_log(line);
+  }
 }
 
 auto Service::read_hitboxes(std::uintptr_t pawn, game::HitboxCapsule* out, int max) const noexcept
@@ -1745,6 +2027,9 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   if (const Json* value = args.find("recoil"); value != nullptr && value->is_bool()) {
     rage_recoil_.store(value->as_bool());
   }
+  if (const Json* value = args.find("backtrack"); value != nullptr && value->is_bool()) {
+    rage_backtrack_.store(value->as_bool());
+  }
   if (const Json* value = args.find("stop_speed"); value != nullptr && value->is_number()) {
     rage_stop_speed_.store(static_cast<float>(value->as_number()));
   }
@@ -1765,8 +2050,7 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   {
     std::lock_guard<std::mutex> lock(rage_config_mutex_);
     if (const Json* value = args.find("weapon"); value != nullptr && value->is_string()) {
-      rage_weapon_key(std::string(value->as_string()).c_str(), rage_weapon_,
-                      sizeof(rage_weapon_));
+      rage_weapon_key(std::string(value->as_string()).c_str(), rage_weapon_, sizeof(rage_weapon_));
     }
     std::snprintf(weapon, sizeof(weapon), "%s", rage_weapon_);
   }
@@ -1794,7 +2078,8 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
                     rage_min_damage_.load(), rage_min_hitchance_.load(), rage_autostop_.load(),
                     rage_autoscope_.load(), rage_autoreload_.load(), rage_only_visible_.load(),
                     rage_mode_.load(), rage_per_weapon_.load(), weapon, 0,
-                    rage_config_token_.load(), rage_recoil_.load(), rage_stop_speed_.load());
+                    rage_config_token_.load(), rage_recoil_.load(), rage_stop_speed_.load(),
+                    rage_backtrack_.load());
 
   Json payload = Json::object();
   payload.set("enabled", Json::boolean(on));
@@ -1820,6 +2105,7 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   payload.set("autoreload", Json::boolean(rage_autoreload_.load()));
   payload.set("only_visible", Json::boolean(rage_only_visible_.load()));
   payload.set("recoil", Json::boolean(rage_recoil_.load()));
+  payload.set("backtrack", Json::boolean(rage_backtrack_.load()));
   payload.set("stop_speed", Json::number(static_cast<double>(rage_stop_speed_.load())));
   payload.set("visible", Json::boolean(rage_visible_.load()));
   payload.set("stops", Json::number(static_cast<double>(input_.rage_stops())));
@@ -1829,6 +2115,46 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
     std::lock_guard<std::mutex> lock(rage_config_mutex_);
     payload.set("weapon", Json::string(std::string(rage_weapon_)));
     payload.set("profiles", Json::number(static_cast<double>(rage_profiles_.count)));
+  }
+  // The instrumentation (`docs/ragebot-perf.md`): averages since process start
+  // (`*_us`), the last frame's cost, the worst frame, and the last frame's counts. A
+  // high `backtrack_us` with `poses` ≫ 1 points at the per-pose solve; a high
+  // `argmax`/`solve_us` with large `cells` points at the field's objective search.
+  {
+    const std::uint64_t frames = perf_.frames.load(std::memory_order_relaxed);
+    const std::uint64_t snapshots = perf_.snapshot_frames.load(std::memory_order_relaxed);
+    const auto avg_us = [frames](const std::atomic<std::uint64_t>& acc) -> double {
+      return frames != 0 ? static_cast<double>(acc.load(std::memory_order_relaxed)) /
+                               static_cast<double>(frames)
+                         : 0.0;
+    };
+    const auto avg_snapshot = [snapshots](const std::atomic<std::uint64_t>& acc) -> double {
+      return snapshots != 0 ? static_cast<double>(acc.load(std::memory_order_relaxed)) /
+                                  static_cast<double>(snapshots)
+                            : 0.0;
+    };
+    Json perf = Json::object();
+    perf.set("frames", Json::number(static_cast<double>(frames)));
+    perf.set("snapshot_frames", Json::number(static_cast<double>(snapshots)));
+    perf.set("total_us", Json::number(avg_us(perf_.total_us)));
+    perf.set("last_us", Json::number(static_cast<double>(perf_.last_total_us.load())));
+    perf.set("max_us", Json::number(static_cast<double>(perf_.max_total_us.load())));
+    perf.set("sample_us", Json::number(avg_snapshot(perf_.sample_us)));
+    perf.set("query_us", Json::number(avg_snapshot(perf_.query_us)));
+    perf.set("build_us", Json::number(avg_us(perf_.build_us)));
+    perf.set("project_us", Json::number(avg_us(perf_.project_us)));
+    perf.set("solve_us", Json::number(avg_us(perf_.solve_us)));
+    perf.set("backtrack_us", Json::number(avg_us(perf_.backtrack_us)));
+    perf.set("solve_project_us", Json::number(avg_us(perf_.solve_project_us)));
+    perf.set("solve_occlude_us", Json::number(avg_us(perf_.solve_occlude_us)));
+    perf.set("solve_argmax_us", Json::number(avg_us(perf_.solve_argmax_us)));
+    perf.set("solve_calls", Json::number(static_cast<double>(perf_.solve_calls.load())));
+    perf.set("candidates", Json::number(static_cast<double>(perf_.candidates.load())));
+    perf.set("hitboxes", Json::number(static_cast<double>(perf_.hitboxes.load())));
+    perf.set("occluders", Json::number(static_cast<double>(perf_.occluders.load())));
+    perf.set("poses", Json::number(static_cast<double>(perf_.poses.load())));
+    perf.set("cells", Json::number(static_cast<double>(perf_.cells.load())));
+    payload.set("perf", std::move(perf));
   }
   set_ok(out, std::move(payload));
 }
@@ -1899,8 +2225,7 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   const float fov = number("fov", 90.0F);
   const float half_span = fov > 0.0F ? fov * 0.5F * k_deg_to_rad : k_pi;
   const float extent = half_span < k_pi ? half_span : k_pi;
-  const aim::Vec2 view{local.eye_angles.yaw * k_deg_to_rad,
-                       -local.eye_angles.pitch * k_deg_to_rad};
+  const aim::Vec2 view{local.eye_angles.yaw * k_deg_to_rad, -local.eye_angles.pitch * k_deg_to_rad};
   const int history = std::clamp(integer("history", 6), 0, 64);
   const bool include_all = flag("all").value_or(false);
   // The lag-comp window (`docs/re/lagcomp.md`): the rewind floor is measured from
@@ -1977,8 +2302,7 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
     const Json* value = args.find("pen");
     return value != nullptr && value->is_string() && value->as_string() == "engine";
   }();
-  options.penetration = engine_pen ? aim::PenetrationModel::engine
-                                   : aim::PenetrationModel::simple;
+  options.penetration = engine_pen ? aim::PenetrationModel::engine : aim::PenetrationModel::simple;
   options.penetration_params.weapon_penetration = weapon.penetration;
   options.penetration_params.max_penetrations = std::clamp(integer("max_pen", 4), 0, 16);
   // The per-surface modifiers (docs/re/penetration.md). The payload now reads each
@@ -1999,9 +2323,16 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   OcclusionQueryStats walls_stats;
   const bool walls = flag("walls").value_or(false);
   const bool walls_call = flag("walls_call").value_or(false);
+  // Diagnostic (`docs/ragebot-perf.md` §2.1): `enum=box` forces the older single-AABB
+  // enumeration, so the pyramid's occluder set can be diffed against it at one instant.
+  if (const Json* mode = args.find("enum"); mode != nullptr && mode->is_string()) {
+    const std::string_view name = mode->as_string();
+    occlusion_enum_mode_.store(name == "box" ? 1 : (name == "both" ? 2 : 0));
+  }
   occlusion_live_.store(walls);
   occlusion_invoke_.store(walls_call);
-  std::vector<aim::Polygon> occluder_polygons;  // projected silhouettes, parallel to options.occlusion
+  std::vector<aim::Polygon>
+      occluder_polygons;  // projected silhouettes, parallel to options.occlusion
   if (walls) {
     input_.refresh();  // install the CreateMove hook (the game-thread query site)
     // The solids were enumerated on the game thread; project the cached hulls.
@@ -2019,7 +2350,7 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
         // soup; project its vertices as the silhouette and keep the triangles for
         // the exact ray test (`docs/re/bullet-trace.md`).
         cell = aim::project_mesh_occluder(eye, basis, hull.vertices, hull.triangles,
-                                          hull.surface_modifier);
+                                          hull.surface_modifier, hull.mesh_bvh);
       } else {
         cell = aim::project_occluder(eye, basis, hull.vertices, hull.planes, hull.surface_modifier);
       }
@@ -2145,6 +2476,16 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   walls_json.set("filter_group", Json::integer(walls_stats.filter_group));
   walls_json.set("filter_flags", Json::integer(walls_stats.filter_flags));
   walls_json.set("mesh_clusters", Json::integer(walls_stats.mesh_clusters));
+  // The enum self-check (`enum=both`): the AABB hull count, the pyramid hull count and
+  // how many pyramid hulls the AABB missed. `enum_outside_box` must be 0 (the pyramid is
+  // a subset of the box volume).
+  walls_json.set("enum_box_kept", Json::integer(walls_stats.enum_box_kept));
+  walls_json.set("enum_pyramid_kept", Json::integer(walls_stats.enum_pyramid_kept));
+  walls_json.set("enum_outside_box", Json::integer(walls_stats.enum_outside_box));
+  walls_json.set("enum_box_only_between", Json::integer(walls_stats.enum_box_only_between));
+  walls_json.set("enum_targets", Json::integer(walls_stats.enum_targets));
+  walls_json.set("enum_target_max_distance",
+                 Json::number(static_cast<double>(walls_stats.enum_target_max_distance)));
   walls_json.set("occluders", Json::integer(static_cast<std::int64_t>(options.occlusion.size())));
   // The penetration model this chart was valued with (docs/re/penetration.md).
   walls_json.set("penetration_model", Json::string(engine_pen ? "engine" : "simple"));
@@ -2156,7 +2497,8 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   // confirm the read.
   walls_json.set("surface_array", Json::string(hex(walls_stats.surface_array)));
   walls_json.set("surface_index", Json::integer(walls_stats.surface_index));
-  walls_json.set("surface_distance", Json::number(static_cast<double>(walls_stats.surface_distance)));
+  walls_json.set("surface_distance",
+                 Json::number(static_cast<double>(walls_stats.surface_distance)));
   walls_json.set("surface_material", Json::integer(walls_stats.surface_material));
   walls_json.set("surface_hits", Json::integer(walls_stats.surface_hits));
   // RE probe (docs/re/occlusion.md): the record's `+0x50` material token, raw and
@@ -2283,4 +2625,3 @@ void Service::stop() noexcept {}
 #endif
 
 }  // namespace cs2::control
-

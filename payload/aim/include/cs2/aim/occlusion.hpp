@@ -14,6 +14,7 @@
 // solids (world-space convex vertices + a surface modifier) from the physics query.
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -36,6 +37,33 @@ struct RaySpan {
   float exit = 0.0F;
 };
 
+// A median-split bounding-volume hierarchy over a triangle soup (flat triples, 3
+// world-space points per triangle). `OccluderCell::ray_span` uses it for collision
+// **meshes** so a ray tests O(log n) triangles instead of the whole soup — the
+// `docs/ragebot-review.md` §5.4 "mesh BVH". Built once per mesh, at parse time, and
+// immutable afterwards. An empty tree is valid (the caller then scans the flat soup).
+struct MeshBvh {
+  struct Node {
+    Vec3 min{};
+    Vec3 max{};               // node AABB
+    std::uint32_t start = 0;   // leaf: first index into `order`
+    std::uint32_t count = 0;   // 0 = internal node, else the leaf's triangle count
+    std::uint32_t right = 0;   // internal: right child index (left = own index + 1)
+  };
+  std::vector<Node> nodes;
+  std::vector<std::uint32_t> order;  // triangle indices, leaves contiguous
+  std::vector<Vec3> triangles;       // the soup (3 points per triangle)
+  [[nodiscard]] bool empty() const noexcept { return nodes.empty(); }
+};
+
+// Build the BVH over `triangles` (flat triples). Returns an empty tree for no triangles.
+[[nodiscard]] auto build_mesh_bvh(std::vector<Vec3> triangles) -> MeshBvh;
+
+// The ray/mesh interval (the two nearest triangle crossings) using the BVH — identical
+// result to scanning every triangle. nullopt when the ray misses.
+[[nodiscard]] auto ray_mesh_bvh(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction)
+    -> std::optional<RaySpan>;
+
 // The kind of solid an occluder is. A brush/hull is a general convex polytope; a
 // sphere or capsule (the shape of many props) is carried analytically, so its
 // silhouette and its ray interval are exact with no vertex approximation — the
@@ -54,9 +82,18 @@ struct OccluderCell {
   // described by half-spaces; the exact ray test intersects its triangles and the
   // first entry/exit pair is the wall thickness (docs/re/vphysics2.md).
   std::vector<Vec3> triangles;
+  // mesh: the BVH over `triangles` (built once at parse time). When set, `ray_span`
+  // uses it; otherwise it scans the flat soup. Shared, so projecting the same mesh for
+  // many hitboxes does not rebuild it (`docs/ragebot-perf.md` §3.7).
+  std::shared_ptr<const MeshBvh> mesh_bvh;
   Vec3 a{};                           // sphere: centre; capsule: endpoint a; mesh: AABB min
   Vec3 b{};                           // capsule: endpoint b; mesh: AABB max
   float radius = 0.0F;                // sphere / capsule radius
+  // The target (enemy) whose eye→enemy pyramid enumerated this solid. A solid only
+  // attenuates that enemy's hitboxes, so `aim::solve` feeds each hitbox just its own
+  // target's occluders (`-1` = shared/unknown, applies to every hitbox). Passing every
+  // enemy's solids to every hitbox was what exploded `occlude_polygon`.
+  int target = -1;
   // The surface's penetration properties (docs/re/penetration.md). Until the
   // payload resolves the per-solid material these default to a neutral surface.
   float surface_modifier = 1.0F;      // surfacedata_t.game.penetrationmodifier
@@ -88,9 +125,9 @@ struct OccluderCell {
 // chart. Returns nullopt when it does not project meaningfully (behind the eye /
 // degenerate).
 [[nodiscard]] auto project_occluder(const Vec3& eye, const Basis& basis,
-                                    std::vector<Vec3> world_vertices,
-                                    std::vector<OccluderPlane> planes, float surface_modifier)
-    -> std::optional<OccluderCell>;
+                                    const std::vector<Vec3>& world_vertices,
+                                    const std::vector<OccluderPlane>& planes,
+                                    float surface_modifier) -> std::optional<OccluderCell>;
 
 // Project an analytic sphere / capsule into the chart (exact silhouette + ray test).
 [[nodiscard]] auto project_sphere_occluder(const Vec3& eye, const Basis& basis, const Vec3& center,
@@ -104,10 +141,13 @@ struct OccluderCell {
 // chart. The chart silhouette is the convex hull of the projected vertices (a
 // superset of the true, non-convex silhouette — only used for the broad phase), and
 // the exact depth/thickness along a direction comes from `ray_span` intersecting the
-// triangles. `triangles` is a flat list of world-space points, 3 per triangle.
+// triangles (via `bvh` when supplied). `triangles` is a flat list of world-space
+// points, 3 per triangle.
 [[nodiscard]] auto project_mesh_occluder(const Vec3& eye, const Basis& basis,
-                                         std::vector<Vec3> vertices, std::vector<Vec3> triangles,
-                                         float surface_modifier) -> std::optional<OccluderCell>;
+                                         const std::vector<Vec3>& vertices,
+                                         const std::vector<Vec3>& triangles, float surface_modifier,
+                                         std::shared_ptr<const MeshBvh> bvh = nullptr)
+    -> std::optional<OccluderCell>;
 
 // The inward face planes of the convex hull of a point set — for a collision **mesh**
 // (docs/re/vphysics2.md: "mesh (convex hull)"), whose world vertices the payload

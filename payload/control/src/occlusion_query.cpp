@@ -10,6 +10,7 @@
 #include <string_view>
 #include <utility>
 
+#include "cs2/aim/bvh.hpp"
 #include "cs2/diag/crash_handler.hpp"
 #include "cs2/game/memory.hpp"
 #include "cs2/game/module.hpp"
@@ -28,6 +29,12 @@ using cs2::aim::Vec3;
 constexpr std::uintptr_t k_query_global_fallback = 0x2227058;    // the query interface
 constexpr std::uintptr_t k_static_filter_fallback = 0x2227070;   // the engine's filter
 constexpr std::uintptr_t k_entities_in_box_fallback = 0x9DBD20;  // EntitiesInBox
+
+// A payload global flag: when set, the world-body enumeration also runs the single-AABB
+// query and reports how many hulls the pyramid dropped. POD only. (Scratch containers must
+// stay local: a namespace-scope `std::vector` needs CRT dynamic initialization, which the
+// manual-map injector cannot resolve — see `docs/handoff.md` gotchas.)
+bool g_verify_enum = false;
 
 // A client.dll offset from the generated SDK, or `fallback` when the entry is absent.
 // Evaluated per query (a ~20-entry scan, negligible beside the engine query) so the
@@ -403,8 +410,8 @@ struct BodyTransform {
   // A body transform that is the identity (`v_world == v_local`), so geometry stored
   // in the shape's own frame is already world-space (the static world body).
   [[nodiscard]] auto is_identity() const -> bool {
-    return position.x == 0.0F && position.y == 0.0F && position.z == 0.0F &&
-           quat[0] == 0.0F && quat[1] == 0.0F && quat[2] == 0.0F && quat[3] == 1.0F;
+    return position.x == 0.0F && position.y == 0.0F && position.z == 0.0F && quat[0] == 0.0F &&
+           quat[1] == 0.0F && quat[2] == 0.0F && quat[3] == 1.0F;
   }
 };
 
@@ -565,7 +572,21 @@ void emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_i
           mx.z = std::max(mx.z, p.z);
         }
       }
-      solid.vertices = solid.triangles;  // `project_mesh_occluder` hulls this point set
+      // The projection only needs the silhouette's point set, and the chart silhouette is
+      // the **2-D convex hull** of the projected points. Projecting all `count*3` triangle
+      // vertices to rebuild that hull every tick was the ragebot's dominant cost once the
+      // meshes were cached (`docs/ragebot-perf.md` §3.9): the AABB corners span the same
+      // convex hull (a superset — the mesh is inside its own bounds), so the broad phase is
+      // unchanged while the projection drops from thousands of points to eight. The exact
+      // thickness still comes from `ray_span` over `triangles`/`mesh_bvh`.
+      solid.vertices = {Vec3{mn.x, mn.y, mn.z}, Vec3{mx.x, mn.y, mn.z},
+                        Vec3{mx.x, mx.y, mn.z}, Vec3{mn.x, mx.y, mn.z},
+                        Vec3{mn.x, mn.y, mx.z}, Vec3{mx.x, mn.y, mx.z},
+                        Vec3{mx.x, mx.y, mx.z}, Vec3{mn.x, mx.y, mx.z}};
+      // Build the triangle BVH once, here (the clusters are cached per level), so
+      // `ray_span` is O(log n) rather than O(triangles) (`docs/ragebot-perf.md` §3.7).
+      solid.mesh_bvh =
+          std::make_shared<const cs2::aim::MeshBvh>(cs2::aim::build_mesh_bvh(solid.triangles));
       if (transform_identity) {
         solid.bounds_min = mn;
         solid.bounds_max = mx;
@@ -605,8 +626,7 @@ void emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_i
       return c * (1.0F / 3.0F);
     };
     const auto pivot_pos = static_cast<std::ptrdiff_t>((range.begin + range.end) / 2);
-    std::nth_element(tris.begin() + range.begin, tris.begin() + pivot_pos,
-                     tris.begin() + range.end,
+    std::nth_element(tris.begin() + range.begin, tris.begin() + pivot_pos, tris.begin() + range.end,
                      [&centroid](const std::array<Vec3, 3>& a, const std::array<Vec3, 3>& b) {
                        return centroid(a) < centroid(b);
                      });
@@ -768,8 +788,7 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
       std::uintptr_t hull_block = 0;
       if (cs2::game::read(compound + k_compound_hull_count, hull_count) && hull_count > 0 &&
           hull_count <= k_max_compound_parts &&
-          cs2::game::read(compound + k_compound_hull_block, hull_block) &&
-          hull_block >= 0x10000) {
+          cs2::game::read(compound + k_compound_hull_block, hull_block) && hull_block >= 0x10000) {
         for (std::int32_t i = 0; i < hull_count; ++i) {
           if (parse_hull(hull_block + static_cast<std::uintptr_t>(i) * k_compound_hull_stride,
                          transform, out, surface)) {
@@ -781,8 +800,7 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
       std::uintptr_t mesh_block = 0;
       if (cs2::game::read(compound + k_compound_mesh_count, mesh_count) && mesh_count > 0 &&
           mesh_count <= k_max_compound_parts &&
-          cs2::game::read(compound + k_compound_mesh_block, mesh_block) &&
-          mesh_block >= 0x10000) {
+          cs2::game::read(compound + k_compound_mesh_block, mesh_block) && mesh_block >= 0x10000) {
         const Vec3 scale{1.0F, 1.0F, 1.0F};
         for (std::int32_t i = 0; i < mesh_count; ++i) {
           if (parse_mesh(mesh_block + static_cast<std::uintptr_t>(i) * k_compound_mesh_stride,
@@ -817,8 +835,8 @@ auto build_bullet_filter(std::uintptr_t engine) -> void* {
 }
 
 // One `EntitiesInBox` call. Returns the record count (0 on fault/empty).
-auto run_box_query(void* iface, void* filter, const Vec3& lo, const Vec3& hi,
-                   ResultVector& vector, bool* ok) -> std::int32_t {
+auto run_box_query(void* iface, void* filter, const Vec3& lo, const Vec3& hi, ResultVector& vector,
+                   bool* ok) -> std::int32_t {
   BoxCall call;
   call.iface = iface;
   call.filter = filter;
@@ -885,17 +903,20 @@ void hull_bounds(const OcclusionHull& hull, Vec3& mn, Vec3& mx) {
   }
 }
 
-auto aabb_overlaps(const Vec3& mn, const Vec3& mx, const Vec3& lo, const Vec3& hi) -> bool {
-  return mx.x >= lo.x && mn.x <= hi.x && mx.y >= lo.y && mn.y <= hi.y && mx.z >= lo.z &&
-         mn.z <= hi.z;
-}
+// The world-hull AABB BVH (`docs/ragebot-perf.md` §3.7, the "missing BVH"): built once
+// when the world cache is (re)built (once per level for the static world), so the
+// per-query box overlap is O(log n + k) instead of walking every hull. `aim::AabbBvh`
+// is pure + host-tested (`aim-bvh`).
+cs2::aim::AabbBvh g_world_bvh;
 
 // Walk one `CPhysicsBody`'s shapes and append each hull's world-space vertices.
 // Small bodies (entities/props) are walked every call; large bodies (the static
 // world, ~10k brush shapes) are parsed once into `g_large_cache` and then copied
 // (only the hulls intersecting the query box, capped).
-void walk_body(std::uintptr_t body, const Vec3& lo, const Vec3& hi, std::vector<OcclusionHull>& out,
-               int& shapes, int* type_counts, OcclusionQueryStats* stats, bool collect) {
+void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3& hi,
+               std::vector<OcclusionHull>& out, int& shapes, int* type_counts,
+               OcclusionQueryStats* stats, bool collect, const cs2::aim::Aabb* targets,
+               int target_count) {
   std::uintptr_t data = 0;
   if (!cs2::game::read(body + k_body_data, data) || data < 0x10000) {
     return;
@@ -946,30 +967,98 @@ void walk_body(std::uintptr_t body, const Vec3& lo, const Vec3& hi, std::vector<
       for (std::size_t i = 0; i < parsed.size(); ++i) {
         g_world_cache.hulls[i] = std::move(parsed[i]);
       }
+      std::vector<cs2::aim::Aabb> boxes(static_cast<std::size_t>(g_world_cache.count));
+      for (int i = 0; i < g_world_cache.count; ++i) {
+        hull_bounds(g_world_cache.hulls[i], boxes[static_cast<std::size_t>(i)].min,
+                    boxes[static_cast<std::size_t>(i)].max);
+      }
+      g_world_bvh.build(std::move(boxes));
     }
     if (stats != nullptr && collect) {
       stats->world_cache_body = g_world_cache.body;
       stats->world_cache_hulls = g_world_cache.count;
     }
     int pushed = 0;
-    for (int i = 0; i < g_world_cache.count; ++i) {
-      const OcclusionHull& hull = g_world_cache.hulls[i];
-      Vec3 mn{};
-      Vec3 mx{};
-      hull_bounds(hull, mn, mx);
-      if (!aabb_overlaps(mn, mx, lo, hi)) {
-        if (stats != nullptr && collect) {
-          ++stats->world_box_rejected;
+    // BVH query: only the hulls that can lie between the eye and a target, in
+    // O(log n + k) — the enumeration no longer walks all ~10k world hulls
+    // (`docs/ragebot-perf.md` §3.7). With per-target boxes it is the union of the
+    // eye→target pyramids, which is exact (a conservative superset of the solids that can
+    // occlude) and far tighter than the single eye→all-targets box: one distant enemy
+    // otherwise makes the box span the whole map (`docs/ragebot-perf.md` §2.1).
+    std::vector<int> hits;
+    hits.reserve(1024);
+    std::vector<int> owner;  // per-cached-hull target: -1 none, >=0 one target, -2 shared
+    if (targets != nullptr && target_count > 0) {
+      // Owner per cached hull: `t` when only one target's pyramid contains it, `-2` when
+      // several do (then it is shared and applies to all of them).
+      owner.assign(static_cast<std::size_t>(g_world_cache.count), -1);
+      std::vector<int> target_hits;
+      for (int t = 0; t < target_count; ++t) {
+        target_hits.clear();
+        // The pyramid's apex is the **eye**, not the query box corner: a solid occludes a
+        // hitbox only if it meets a segment from the eye into that hitbox.
+        g_world_bvh.query_pyramid(eye, targets[t], target_hits);
+        for (const int index : target_hits) {
+          hits.push_back(index);
+          const int previous = owner[static_cast<std::size_t>(index)];
+          owner[static_cast<std::size_t>(index)] =
+              previous == -1 ? t : (previous == t ? t : -2);
         }
-        continue;
       }
-      out.push_back(hull);
+      // The per-target queries overlap, so deduplicate before projecting.
+      std::sort(hits.begin(), hits.end());
+      hits.erase(std::unique(hits.begin(), hits.end()), hits.end());
+      if (g_verify_enum && stats != nullptr) {
+        // Diagnostic: run the single-AABB query on the same tick. The AABB volume
+        // contains the pyramid union, so every pyramid hull must also be in the AABB set.
+        std::vector<int> box_hits;
+        g_world_bvh.query(cs2::aim::Aabb{lo, hi}, box_hits);
+        std::sort(box_hits.begin(), box_hits.end());
+        stats->enum_box_kept += static_cast<int>(box_hits.size());
+        stats->enum_pyramid_kept += static_cast<int>(hits.size());
+        for (const int index : hits) {
+          if (!std::binary_search(box_hits.begin(), box_hits.end(), index)) {
+            ++stats->enum_outside_box;
+          }
+        }
+        // The decisive check: a hull the box keeps, the pyramid dropped, and that *is*
+        // inside an eye→target pyramid would be a real occlusion lost. It must be 0.
+        for (const int index : box_hits) {
+          if (std::binary_search(hits.begin(), hits.end(), index)) {
+            continue;
+          }
+          Vec3 hlo{};
+          Vec3 hhi{};
+          hull_bounds(g_world_cache.hulls[index], hlo, hhi);
+          for (int t = 0; t < target_count; ++t) {
+            if (cs2::aim::AabbBvh::aabb_intersects_pyramid(eye, targets[t],
+                                                           cs2::aim::Aabb{hlo, hhi})) {
+              ++stats->enum_box_only_between;
+              break;
+            }
+          }
+        }
+      }
+    } else {
+      g_world_bvh.query(cs2::aim::Aabb{lo, hi}, hits);
+    }
+    for (const int index : hits) {
+      const int owner_target = owner.empty() ? -1 : owner[static_cast<std::size_t>(index)];
+      out.push_back(g_world_cache.hulls[index]);
+      if (owner_target == -2) {
+        out.back().target = -1;  // shared by several targets: applies to all
+      } else if (owner_target >= 0) {
+        out.back().target = owner_target;
+      }
       if (stats != nullptr && collect) {
         ++stats->world_box_kept;
       }
       if (++pushed >= k_max_occluders) {
         break;
       }
+    }
+    if (stats != nullptr && collect) {
+      stats->world_box_rejected += g_world_cache.count - static_cast<int>(hits.size());
     }
     return;
   }
@@ -991,10 +1080,11 @@ void walk_body(std::uintptr_t body, const Vec3& lo, const Vec3& hi, std::vector<
 // each unique body once (the worldspawn records all share one body). A record whose
 // `+0x18` handle index (`handle & 0x7fff`) is in `exclude` is skipped — those are the
 // players, which are targets, not occluders (the worldspawn `0x8000` is always kept).
-void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& lo, const Vec3& hi,
-                  std::vector<OcclusionHull>& out, OcclusionQueryStats* stats, int& shapes,
-                  int* type_counts, bool collect, std::uintptr_t entity_blocks,
-                  const std::uint16_t* exclude, int exclude_count) {
+void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, const Vec3& lo,
+                  const Vec3& hi, std::vector<OcclusionHull>& out, OcclusionQueryStats* stats,
+                  int& shapes, int* type_counts, bool collect, std::uintptr_t entity_blocks,
+                  const std::uint16_t* exclude, int exclude_count, const cs2::aim::Aabb* targets,
+                  int target_count) {
   std::uintptr_t bodies[k_max_bodies] = {};
   int body_count = 0;
 
@@ -1071,7 +1161,8 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& lo, const
   std::vector<OcclusionHull>& target = collect ? out : sink;
   int* const counts = collect ? type_counts : nullptr;
   for (int b = 0; b < body_count; ++b) {
-    walk_body(bodies[b], lo, hi, target, shapes, counts, stats, collect);
+    walk_body(bodies[b], eye, lo, hi, target, shapes, counts, stats, collect, targets,
+              target_count);
   }
 }
 
@@ -1091,11 +1182,21 @@ void set_occlusion_exclude_pawns(const std::uintptr_t* pawns, int count) noexcep
 
 auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& box_max, bool invoke,
                            OcclusionQueryStats* stats, const std::uint16_t* exclude,
-                           int exclude_count) -> std::vector<OcclusionHull> {
+                           int exclude_count, const cs2::aim::Aabb* targets, int target_count,
+                           bool verify_enum) -> std::vector<OcclusionHull> {
   std::vector<OcclusionHull> out;
-  (void)from;  // the eye; the query box is `box_min`/`box_max`
+  g_verify_enum = verify_enum;
   if (stats != nullptr) {
     *stats = OcclusionQueryStats{};
+    stats->enum_targets = target_count;
+    for (int i = 0; i < target_count; ++i) {
+      const Vec3 centre{(targets[i].min.x + targets[i].max.x) * 0.5F,
+                        (targets[i].min.y + targets[i].max.y) * 0.5F,
+                        (targets[i].min.z + targets[i].max.z) * 0.5F};
+      const Vec3 delta{centre.x - from.x, centre.y - from.y, centre.z - from.z};
+      const float distance = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+      stats->enum_target_max_distance = std::max(stats->enum_target_max_distance, distance);
+    }
   }
 
   const cs2::game::ModuleInfo client = cs2::game::find_module("client.dll");
@@ -1118,8 +1219,7 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
   // shape's material object can be turned into its real penetration modifiers.
   g_surface_array = 0;
   std::uintptr_t surface_list = 0;
-  if (cs2::game::read(base + sdk_client_offset("surface_properties_list",
-                                               k_surface_list_fallback),
+  if (cs2::game::read(base + sdk_client_offset("surface_properties_list", k_surface_list_fallback),
                       surface_list) &&
       surface_list >= 0x10000) {
     (void)cs2::game::read(surface_list + k_surface_list_array, g_surface_array);
@@ -1184,8 +1284,8 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
       return;
     }
     const std::uintptr_t data = reinterpret_cast<std::uintptr_t>(vector.data);
-    walk_records(data, count, lo, hi, out, stats, shapes, type_counts, collect, entity_blocks,
-                 exclude, exclude_count);
+    walk_records(data, count, from, lo, hi, out, stats, shapes, type_counts, collect, entity_blocks,
+                 exclude, exclude_count, targets, target_count);
   };
 
   // The box spans the eye and every target hitbox (the caller's AABB), plus the

@@ -28,9 +28,9 @@ struct WeaponProfile {
   // composition of the stance/move/jump terms, so it needs no formula. 0 when unknown.
   float inaccuracy = 0.0F;
   // The raw `m_flInaccuracy*` terms (fallback when the effective value is unavailable).
-  float inaccuracy_stand = 0.0F;       // +0x760
-  float inaccuracy_crouch = 0.0F;      // +0x758
-  float inaccuracy_move = 0.0F;        // +0x788
+  float inaccuracy_stand = 0.0F;         // +0x760
+  float inaccuracy_crouch = 0.0F;        // +0x758
+  float inaccuracy_move = 0.0F;          // +0x788
   float inaccuracy_jump_initial = 0.0F;  // +0x7B8
   float inaccuracy_jump_apex = 0.0F;     // +0x7BC
   // `CCSWeaponBaseVData::m_WeaponType` (+0x520): 0 knife, 1 pistol, 2 smg, 3 rifle,
@@ -80,14 +80,46 @@ struct Cell {
   float base_value = 0.0F;
 };
 
-// A damage field over the chart. Cells never overlap by construction: they are
-// the hitbox silhouettes clipped by the occluder half-planes.
+// A damage field over the chart. Cells are the hitbox silhouettes clipped by the
+// occluder half-planes; a cell never overlaps another from the *same* hitbox, but two
+// enemies' silhouettes can overlap, so every point query takes the maximum over the
+// containing cells.
 struct DamageField {
   std::vector<Cell> cells;
 
   [[nodiscard]] auto empty() const noexcept -> bool {
     return cells.empty();
   }
+
+  // A uniform-grid point index over the cells' AABBs. The objective search probes
+  // thousands of candidate points; scanning every cell per probe is O(cells²) and was
+  // the ragebot's dominant cost (`docs/ragebot-perf.md` §3.9). The index is built
+  // lazily and rebuilt after `add`/`clip`; it is a pure acceleration, so a probe returns
+  // exactly the same set as a linear scan.
+  //
+  // `cells` is public for the tests, so the index also revalidates against the cell
+  // count: append/erase/`add`/`clip` are all detected. Editing a cell's coordinates in
+  // place is not — call `invalidate_index()` if you do that.
+  struct PointGrid {
+    Vec2 min{};
+    Vec2 max{};
+    int nx = 0;
+    int ny = 0;
+    std::vector<int> start;      // nx*ny + 1 prefix offsets into `items`
+    std::vector<int> items;      // cell indices, bucketed
+    std::vector<int> large;      // cells whose AABB covers too many buckets to list
+    std::size_t cell_count = 0;  // `cells.size()` when built (freshness)
+    [[nodiscard]] auto empty() const noexcept -> bool {
+      return nx <= 0 || ny <= 0;
+    }
+  };
+
+  void invalidate_index() const noexcept {
+    grid_.cell_count = 0;
+  }
+
+  // Build the grid now (also done lazily by the first query).
+  void build_index() const;
 
   // Add a convex cell; empty polygons and non-positive values are dropped. `base` is
   // the unoccluded value (`value` when not given).
@@ -109,13 +141,27 @@ struct DamageField {
 
   // The **hitchance**: the probability a shot aimed at `aim` lands inside the target's
   // hitbox after the cone perturbs its direction. The cone is an isotropic angular
-  // Gaussian of std-dev `sigma` (the weapon inaccuracy + spread); on the chart its yaw
-  // half-width is `sigma / cos(pitch)` (the yaw/pitch metric), so the integral is over
-  // a chart ellipse, not a circle. 0 when the target is not hit; 1 when the whole cone
-  // is inside it. With `sigma == 0` this is the binary indicator.
+  // Gaussian of std-dev `sigma`; on the chart its yaw half-width is
+  // `sigma / cos(pitch)`. Computed **exactly** (no sampling) as the Gaussian mass over
+  // the union of the cells — each cell is convex, so its mass is a 1-D boundary
+  // integral (`hit_probability_exact`). 0 when the target is not hit; 1 when the whole
+  // cone is inside it. With `sigma == 0` this is the binary indicator.
   [[nodiscard]] auto hit_probability(const Vec2& aim, float sigma) const noexcept -> float;
 
-  // The aim maximizing the hitchance (`hit_probability`) for the cone `sigma`.
+  // The exact hit probability for an explicit (already yaw-scaled) cone `sigma_u`/`sigma_v`
+  // in chart units: the standard bivariate-normal mass over the union of the cells.
+  // Exact (no kernel sampling); O(cells · edges) per evaluation.
+  [[nodiscard]] auto hit_probability_exact(const Vec2& aim, float sigma_u,
+                                           float sigma_v) const noexcept -> float;
+
+  // The exact pose-blurred expected value `Σ_i value_i · mass(cell_i − aim)` for the same
+  // kernel (the `expected` objective). Exact; O(cells · edges).
+  [[nodiscard]] auto expected_exact(const Vec2& aim, float sigma_u, float sigma_v) const noexcept
+      -> float;
+
+  // The aim maximizing the hitchance (`hit_probability`) for the cone `sigma`. Seeded from
+  // the highest-value cells and refined with a compass search (no 2-D grid — the previous
+  // `grid`-sampled form was the ragebot's dominant cost; `docs/ragebot-perf.md` §3.2).
   [[nodiscard]] auto argmax_hit_probability(float sigma, int grid = 40) const -> Vec2;
 
   // The pellet-sum field `Σ_k D(aim + offset_k)` — the deterministic spread model
@@ -148,6 +194,20 @@ struct DamageField {
 
   // The union bounding box of the cells.
   [[nodiscard]] auto bounds() const noexcept -> Polygon;
+
+  // The cell indices whose AABB contains `point` (a superset of the cells that actually
+  // contain it), appended to `out`. Rebuilds the grid when the cells changed.
+  void cells_near(const Vec2& point, std::vector<int>& out) const;
+
+  // `value_at` / `base_value_at` with a caller-owned scratch buffer, so the objective
+  // search's thousands of probes reuse one allocation instead of one per probe.
+  [[nodiscard]] auto value_at(const Vec2& point, std::vector<int>& scratch) const noexcept -> float;
+  [[nodiscard]] auto base_value_at(const Vec2& point, std::vector<int>& scratch) const noexcept
+      -> float;
+
+ private:
+  // The lazy point index. `mutable` so the const queries can build it.
+  mutable PointGrid grid_;
 };
 
 }  // namespace cs2::aim

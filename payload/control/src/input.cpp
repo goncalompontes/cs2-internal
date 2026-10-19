@@ -1042,6 +1042,10 @@ void __fastcall Input::create_move_input_detour(void* self, int slot, char activ
   // command the engine builds already carries our movement. `write_entry_move`
   // writes the input entry `FUN_180b5f7b0` derives `+0x270` from inside the
   // original, so it must also go in first (the documented next probe).
+  // The ragebot solve (and the occlusion query) first: both the raw angle writes below
+  // and the command's silent history (in `apply`, after the original builds it) then use
+  // this tick's freshly solved aim. Runs once per tick, on the slot-5 simulated command.
+  input->run_game_thread_sink_now();
   input->write_entry_move();
   input->write_raw_move();
   input->write_raw_angles();
@@ -1631,15 +1635,15 @@ void Input::write_move_steps(void* base, float forward, float side) noexcept {
   }
 }
 
+void Input::run_game_thread_sink_now() noexcept {
+  if (game_thread_sink_ != nullptr) {
+    game_thread_sink_(game_thread_context_);
+  }
+}
+
 void Input::apply(void* cmd) noexcept {
   if (cmd == nullptr) {
     return;
-  }
-  // Run the game-thread sink first: engine calls that need the game's TLS (the
-  // physics query allocates through tier0) must run on this thread, not the
-  // payload's publish thread.
-  if (game_thread_sink_ != nullptr) {
-    game_thread_sink_(game_thread_context_);
   }
   // The **control commands** (`press`/`move`/`look`) are a backend choice: in the
   // `console` backend the runner drives the engine's own `+button`/`setang`

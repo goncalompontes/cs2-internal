@@ -9,7 +9,8 @@ namespace {
 constexpr float k_epsilon = 1e-6F;
 
 // Closest point to `p` on the segment `a`-`b`.
-[[nodiscard]] auto closest_on_segment(const Vec2& a, const Vec2& b, const Vec2& p) noexcept -> Vec2 {
+[[nodiscard]] auto closest_on_segment(const Vec2& a, const Vec2& b, const Vec2& p) noexcept
+    -> Vec2 {
   const Vec2 ab = b - a;
   const float denom = game::dot(ab, ab);
   if (denom <= k_epsilon) {
@@ -18,6 +19,33 @@ constexpr float k_epsilon = 1e-6F;
   float t = game::dot(p - a, ab) / denom;
   t = std::clamp(t, 0.0F, 1.0F);
   return a + ab * t;
+}
+
+// Sutherland-Hodgman clip into `out`, reusing its storage (the allocating
+// `clip_half_plane` copies the polygon each call, which dominated the Chebyshev search).
+void clip_half_plane_into(const Polygon& polygon, const Vec2& normal, float offset, Polygon& out) {
+  out.points.clear();
+  const std::size_t n = polygon.points.size();
+  if (n < 3) {
+    return;
+  }
+  out.points.reserve(n + 1);
+  for (std::size_t i = 0; i < n; ++i) {
+    const Vec2& cur = polygon.points[i];
+    const Vec2& prev = polygon.points[(i + n - 1) % n];
+    const float dc = game::dot(normal, cur) - offset;
+    const float dp = game::dot(normal, prev) - offset;
+    if (dc <= 0.0F) {
+      if (dp > 0.0F) {
+        const float t = dp / (dp - dc);
+        out.points.push_back(prev + (cur - prev) * t);
+      }
+      out.points.push_back(cur);
+    } else if (dp <= 0.0F) {
+      const float t = dp / (dp - dc);
+      out.points.push_back(prev + (cur - prev) * t);
+    }
+  }
 }
 
 // The signed distance from `p` to the supporting line of edge `a`->`b` of a CCW
@@ -47,6 +75,10 @@ constexpr float k_two_pi = 6.28318530717958647692F;
 
 // The largest inscribed circle of a convex polygon: returns its radius and, when
 // `centre_out` is non-null, its centre.
+//
+// The 48-step bisection re-clips the polygon every step, so both buffers are reused
+// across iterations (a `Polygon` per step allocated on every cell was a measurable share
+// of the objective search, `docs/ragebot-perf.md` §3.9). The result is unchanged.
 [[nodiscard]] auto chebyshev(const Polygon& polygon, Vec2* centre_out) -> float {
   const std::size_t n = polygon.points.size();
   if (n < 3) {
@@ -71,11 +103,19 @@ constexpr float k_two_pi = 6.28318530717958647692F;
 
   Vec2 best = centre;
   float lo = 0.0F;
-  for (int iter = 0; iter < 48; ++iter) {
+  Polygon feasible;
+  Polygon scratch;
+  // Bisection precision: the radius is only ever used as a relative "which cell is more
+  // robust" measure, so `1e-5` chart radians is far below anything the aim can act on
+  // (the chart itself is ~1e-2 wide per hitbox). Stopping there instead of always
+  // running 48 halvings keeps the search cheap without changing the chosen cell.
+  constexpr float k_tolerance = 1.0e-5F;
+  for (int iter = 0; iter < 48 && hi - lo > k_tolerance; ++iter) {
     const float mid = 0.5F * (lo + hi);
-    Polygon feasible = polygon;
+    feasible = polygon;
     for (std::size_t i = 0; i < n && !feasible.empty(); ++i) {
-      feasible = clip_half_plane(feasible, normals[i], offsets[i] - mid);
+      clip_half_plane_into(feasible, normals[i], offsets[i] - mid, scratch);
+      std::swap(feasible, scratch);
     }
     if (!feasible.empty()) {
       lo = mid;
@@ -252,7 +292,9 @@ auto clip_half_plane(const Polygon& polygon, const Vec2& normal, float offset) -
   return out;
 }
 
-auto nearest_point(const Polygon& polygon) -> Vec2 { return nearest_point_to(polygon, Vec2{}); }
+auto nearest_point(const Polygon& polygon) -> Vec2 {
+  return nearest_point_to(polygon, Vec2{});
+}
 
 auto chebyshev_center(const Polygon& polygon) -> Vec2 {
   Vec2 centre{};
@@ -260,7 +302,9 @@ auto chebyshev_center(const Polygon& polygon) -> Vec2 {
   return centre;
 }
 
-auto chebyshev_radius(const Polygon& polygon) -> float { return chebyshev(polygon, nullptr); }
+auto chebyshev_radius(const Polygon& polygon) -> float {
+  return chebyshev(polygon, nullptr);
+}
 
 auto polygon_margin(const Polygon& polygon, const Vec2& point) -> float {
   const std::size_t n = polygon.points.size();
@@ -354,8 +398,7 @@ auto project_sphere(const Vec3& eye, const Vec3& center, float radius, const Bas
   // axis. Each boundary direction is built in 3-D and projected, so the silhouette is
   // exact at any pitch — a chart-space circle of angular radius `rho` would be wrong by
   // `1/cos(pitch)` in yaw (the aim-dependent error this replaces).
-  const Vec3 reference =
-      std::fabs(axis.z) < 0.9F ? Vec3{0.0F, 0.0F, 1.0F} : Vec3{1.0F, 0.0F, 0.0F};
+  const Vec3 reference = std::fabs(axis.z) < 0.9F ? Vec3{0.0F, 0.0F, 1.0F} : Vec3{1.0F, 0.0F, 0.0F};
   const Vec3 right = game::normalized(game::cross(reference, axis));
   const Vec3 up = game::cross(axis, right);
   const float rho = std::asin(std::clamp(radius / dist, 0.0F, 1.0F));

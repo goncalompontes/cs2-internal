@@ -51,6 +51,19 @@ aim_geometry_test = executable('aim_geometry_test',
 )
 test('aim-geometry', aim_geometry_test)
 
+aim_bvh_test = executable('aim_bvh_test',
+  files(
+    'payload/aim/tests/test_aim_bvh.cpp',
+    'payload/aim/src/bvh.cpp',
+    'payload/aim/src/geometry.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-bvh', aim_bvh_test)
+
 aim_field_test = executable('aim_field_test',
   files(
     'payload/aim/tests/test_aim_field.cpp',

@@ -68,7 +68,22 @@ struct SolveResult {
   std::size_t cells = 0;
 };
 
-[[nodiscard]] auto solve(const SolveInput& input) -> SolveResult;
+// Optional per-solve breakdown for the ragebot instrumentation (`docs/ragebot-perf.md`).
+// All times are microseconds; `solve`/`solve_backtrack` accumulate into it when a
+// non-null pointer is passed (the default keeps the hot path unmeasured). This is
+// how the pipeline's cost is attributed without a profiler.
+struct SolveStats {
+  std::uint64_t project_us = 0;    // hitbox silhouette projection
+  std::uint64_t occlude_us = 0;    // occlude_polygon (fragment split + penetration)
+  std::uint64_t argmax_us = 0;     // the objective's optimum search
+  std::uint64_t total_us = 0;
+  std::uint32_t solves = 0;        // number of `solve` calls
+  std::uint32_t hitboxes = 0;      // hitbox silhouettes projected
+  std::uint32_t fragments = 0;     // damage fragments emitted
+  std::uint32_t cells = 0;         // field cells after occlusion
+};
+
+[[nodiscard]] auto solve(const SolveInput& input, SolveStats* stats = nullptr) -> SolveResult;
 
 // One candidate pose for the backtrack aim (docs/ragebot.md §8): the live pose
 // (`record == -1`) or a sampled lag record the server could rewind to.
@@ -91,7 +106,7 @@ struct BacktrackResult {
 // target to a past pose within the lag-comp window, so a record can beat the live
 // pose). Poses are tried in order, so ties keep the earlier (newest / live) pose:
 // the live aim wins unless a record is strictly better.
-[[nodiscard]] auto solve_backtrack(const SolveInput& base, const std::vector<PoseCandidate>& poses)
-    -> BacktrackResult;
+[[nodiscard]] auto solve_backtrack(const SolveInput& base, const std::vector<PoseCandidate>& poses,
+                                   SolveStats* stats = nullptr) -> BacktrackResult;
 
 }  // namespace cs2::aim

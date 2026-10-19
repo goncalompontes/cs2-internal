@@ -41,6 +41,59 @@ struct Fragment {
   std::vector<const OccluderCell*> covering;
 };
 
+// The wall layers the shot crosses **before the hitbox** along a fragment's (centroid)
+// direction: the exact, span-filtered stack, sorted nearest-first (`docs/re/penetration.md`).
+// Shared by the incremental block test and the final valuation so both use one definition.
+[[nodiscard]] auto fragment_layers(const Fragment& fragment, const Vec3& eye, const Basis& basis,
+                                   float distance) -> std::vector<PenetrationLayer> {
+  std::vector<PenetrationLayer> layers;
+  if (fragment.covering.empty()) {
+    return layers;
+  }
+  layers.reserve(fragment.covering.size());
+  const Vec3 direction = basis.unproject(polygon_centroid(fragment.polygon));
+  for (const OccluderCell* occluder : fragment.covering) {
+    const std::optional<RaySpan> span = occluder->ray_span(eye, direction);
+    if (!span.has_value() || span->entry >= distance) {
+      continue;
+    }
+    const float thickness = std::min(span->exit, distance) - span->entry;
+    if (thickness <= 0.0F) {
+      continue;
+    }
+    PenetrationLayer layer;
+    layer.thickness = thickness;
+    layer.entry = span->entry;
+    layer.enter.penetration_modifier = occluder->surface_modifier;
+    layer.enter.damage_modifier = occluder->damage_modifier;
+    layer.enter.material = occluder->material;
+    layer.enter.grate = occluder->grate;
+    layer.exit = layer.enter;  // one surface per brush in our enumeration
+    layers.push_back(layer);
+  }
+  std::sort(layers.begin(), layers.end(),
+            [](const PenetrationLayer& a, const PenetrationLayer& b) { return a.entry < b.entry; });
+  return layers;
+}
+
+// The damage a fragment carries for its current wall stack.
+[[nodiscard]] auto fragment_value(std::span<const PenetrationLayer> layers, float base,
+                                  const WeaponProfile& weapon, PenetrationModel model,
+                                  const PenetrationParams& params) -> float {
+  if (model == PenetrationModel::engine) {
+    return penetration_after_walls(base, params, layers);
+  }
+  float transmission = 1.0F;
+  for (const PenetrationLayer& layer : layers) {
+    transmission *= penetration_survival(layer.thickness, layer.enter.penetration_modifier,
+                                         weapon.penetration);
+    if (transmission <= 0.0F) {
+      break;
+    }
+  }
+  return transmission <= 0.0F ? 0.0F : base * transmission;
+}
+
 }  // namespace
 
 auto occlude_polygon(const Vec3& eye, const Basis& basis, const Polygon& silhouette,
@@ -61,12 +114,16 @@ auto occlude_polygon(const Vec3& eye, const Basis& basis, const Polygon& silhoue
   // overlap this hitbox's and that can be nearer than it. Overlap, not "the ray to the
   // centre enters it" (a solid covering only part of the silhouette still counts); the
   // depth bound is conservative (`lower_bound_distance`), so a solid entirely beyond
-  // the hitbox is pruned without ever dropping one in front.
-  std::vector<const OccluderCell*> candidates;
-  candidates.reserve(occlusion.size());
+  // the hitbox is pruned without ever dropping one in front. The survivors are ranked
+  // nearest-first and the farthest are capped (see `k_max_candidate_occluders`).
+  std::vector<std::pair<float, const OccluderCell*>> ranked;
+  ranked.reserve(occlusion.size());
   for (const OccluderCell& occluder : occlusion) {
-    if (!polygon_bounds_overlap(silhouette, occluder.polygon) ||
-        occluder.lower_bound_distance(eye) >= distance) {
+    if (!polygon_bounds_overlap(silhouette, occluder.polygon)) {
+      continue;
+    }
+    const float lower = occluder.lower_bound_distance(eye);
+    if (lower >= distance) {
       continue;
     }
     // A solid whose silhouette *fully contains* the hitbox is kept only if the centre
@@ -87,19 +144,52 @@ auto occlude_polygon(const Vec3& eye, const Basis& basis, const Polygon& silhoue
         continue;
       }
     }
-    const std::size_t index = static_cast<std::size_t>(&occluder - occlusion.data());
-    if (index < used.size()) {
-      used[index] = 1;
-    }
-    candidates.push_back(&occluder);
+    ranked.emplace_back(lower, &occluder);
+  }
+  std::sort(ranked.begin(), ranked.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+
+  // Safety valve (`PenetrationParams::max_occluders`): keep the nearest solids only.
+  // Nearest-first is the right order — the walls that decide a shot are the ones the
+  // bullet reaches first — but it is a cost/accuracy knob, not an exactness-preserving
+  // cut, and it is documented as such.
+  if (params.max_occluders > 0 &&
+      ranked.size() > static_cast<std::size_t>(params.max_occluders)) {
+    ranked.resize(static_cast<std::size_t>(params.max_occluders));
   }
 
-  // Split the silhouette by each candidate solid's silhouette.
+  std::vector<const OccluderCell*> candidates;
+  candidates.reserve(ranked.size());
+  for (const auto& entry : ranked) {
+    candidates.push_back(entry.second);
+    if (!used.empty()) {
+      const std::size_t index = static_cast<std::size_t>(entry.second - occlusion.data());
+      if (index < used.size()) {
+        used[index] = 1;
+      }
+    }
+  }
+
+  // Split the silhouette by each candidate solid's silhouette, **nearest-first**. A
+  // fragment is dropped as soon as its exact value is already 0 (it can only decrease as
+  // more walls are added) — that is the engine's 4-wall budget / `< 0.1` modifier / `< 1`
+  // damage stop, computed through the same model as the final valuation, so the result is
+  // identical to valuing every arrangement cell (`docs/ragebot-perf.md` §3.7). No cap.
+  const auto max_penetrations =
+      params.max_penetrations > 0 ? static_cast<std::size_t>(params.max_penetrations) : 0;
   std::vector<Fragment> fragments;
   fragments.push_back(Fragment{silhouette, {}});
   for (const OccluderCell* occluder : candidates) {
     std::vector<Fragment> next;
-    for (const Fragment& fragment : fragments) {
+    next.reserve(fragments.size() * 2);
+    for (Fragment& fragment : fragments) {
+      // Only fragments that could already be over budget need the (relatively costly)
+      // exact block test; a fragment with fewer coverings is kept and split.
+      if (fragment.covering.size() > max_penetrations &&
+          fragment_value(fragment_layers(fragment, eye, basis, distance), base, weapon, model,
+                         params) <= 0.0F) {
+        continue;  // provably blocked — identical to the value the full split would give
+      }
       Polygon inside;
       std::vector<Polygon> outside;
       subtract_convex(fragment.polygon, occluder->polygon, inside, outside);
@@ -115,58 +205,17 @@ auto occlude_polygon(const Vec3& eye, const Basis& basis, const Polygon& silhoue
       }
     }
     fragments = std::move(next);
+    if (fragments.empty()) {
+      break;
+    }
   }
 
   for (Fragment& fragment : fragments) {
     if (fragment.polygon.empty()) {
       continue;
     }
-    // The solids this fragment's shot reaches *before* the hitbox, as the engine's
-    // penetration stack: the exact in-front thickness per solid, sorted nearest-first
-    // (docs/re/penetration.md).
-    std::vector<PenetrationLayer> layers;
-    layers.reserve(fragment.covering.size());
-    if (!fragment.covering.empty()) {
-      const Vec3 direction = basis.unproject(polygon_centroid(fragment.polygon));
-      for (const OccluderCell* occluder : fragment.covering) {
-        const std::optional<RaySpan> span = occluder->ray_span(eye, direction);
-        if (!span.has_value() || span->entry >= distance) {
-          continue;
-        }
-        const float thickness = std::min(span->exit, distance) - span->entry;
-        if (thickness <= 0.0F) {
-          continue;
-        }
-        PenetrationLayer layer;
-        layer.thickness = thickness;
-        layer.entry = span->entry;
-        layer.enter.penetration_modifier = occluder->surface_modifier;
-        layer.enter.damage_modifier = occluder->damage_modifier;
-        layer.enter.material = occluder->material;
-        layer.enter.grate = occluder->grate;
-        layer.exit = layer.enter;  // one surface per brush in our enumeration
-        layers.push_back(layer);
-      }
-      std::sort(layers.begin(), layers.end(),
-                [](const PenetrationLayer& a, const PenetrationLayer& b) {
-                  return a.entry < b.entry;
-                });
-    }
-
-    float value = 0.0F;
-    if (model == PenetrationModel::engine) {
-      value = penetration_after_walls(base, params, layers);
-    } else {
-      float transmission = 1.0F;
-      for (const PenetrationLayer& layer : layers) {
-        transmission *= penetration_survival(layer.thickness, layer.enter.penetration_modifier,
-                                             weapon.penetration);
-        if (transmission <= 0.0F) {
-          break;
-        }
-      }
-      value = transmission <= 0.0F ? 0.0F : base * transmission;
-    }
+    const std::vector<PenetrationLayer> layers = fragment_layers(fragment, eye, basis, distance);
+    const float value = fragment_value(layers, base, weapon, model, params);
     if (value <= 0.0F) {
       continue;  // blocked
     }

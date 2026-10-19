@@ -39,23 +39,48 @@ play/injection testing — it will land in session 0 and there will be no GPU.
 
 ## Where to resume (current work)
 
-**Start at [`docs/next-session-present-hook.md`](docs/next-session-present-hook.md).**
-Two workstreams:
+**Start at [`docs/next-session-ragebot-perf.md`](docs/next-session-ragebot-perf.md).**
 
-1. **Retire the external (Vulkan-layer) renderer for the ESP/menu** and render
-   in-process from the game's Present path. The DXGI method-table interposer
-   (`payload/features/src/present_hook.cpp` + `dxgi_interposer.cpp`) and the ImGui
-   D3D11 backend (`payload/render/src/imgui_backend.cpp`) already exist; the work is to
-   make that the default (instead of `GamePresentHook` + the `overlay/` shm layer) and
-   move the menu input/WndProc into the payload.
-2. **Ragebot follow-ups still broken/janky:** auto-stop oscillation (counter-strafe
-   frame/hysteresis), recoil/spray compensation (verify what the shot inherits; the
-   per-weapon pattern table), and the menu cursor still being locked.
+The in-process Present renderer (workstream A from the previous brief) **landed** —
+ADR-0023: the ESP + HUD + menu render from the game's own DXGI `Present` with the
+payload's ImGui D3D11 backend; the Vulkan layer is now a fallback and
+`scripts/launch-cs2.cmd` defaults to D3D11 (no `-vulkan`). This session then
+instrumented and optimised the ragebot.
+
+The remaining work, in priority order (all detailed in that doc):
+
+1. **Objective-search cost** — **done** (`docs/ragebot-perf.md` §3.9): the live profile
+   showed the *objective search*, not the world projection, was the bottleneck
+   (`argmax` ~43 of ~61 ms/tick). Fixed exactly with a point grid in `DamageField`,
+   value-eligible candidates, an allocation-free Chebyshev bisection and a proven `8σ`
+   tail cutoff. Host benchmark: `argmax_damage` 102 ms → 0.15 ms. The cone objective's
+   remaining ~20–35 ms is `mass_ascent`'s iteration count — the next step.
+2. **Occlusion query volume** — **done** (§2.1): the enumeration is now the union of the
+   **eye→enemy pyramids** (`AabbBvh::query_pyramid`), one base per enemy. Live 1792 → 14
+   world hulls, with the used occluder silhouettes identical to the old AABB volume.
+   `scripts/perf-live.py compare` re-runs that A/B live.
+3. **Depth-sorted "fully impenetrable" early-exit** — still open: stop projecting once the
+   penetration budget is exhausted for every hitbox (exact, no geometry dropped).
+4. **Move the remaining game logic out of the renderer** — state read, record sampling
+   and the occlusion-box build still run in `Overlay::update`; they belong in the frame
+   stage that owns them (CreateMove / FrameStageNotify), following the game's order.
+5. **Lag-comp correctness** (needs RE) — bone setup at the record's exact
+   `m_flSimulationTime`; lerp-aware record validity.
+6. **Inaccuracy units** — reverse `FUN_18080b880` on the current build.
+7. **Ragebot follow-ups** — auto-stop oscillation, recoil/spray, menu cursor.
+
+**Live measurement caveat:** a "before/after" is *not* comparable across a game restart —
+the bots respawn elsewhere, so the cell count changes and dominates the timings. Use the
+host benchmark over a saved cell set for timing, and live runs (`scripts/perf-live.py`)
+for correctness.
 
 The ragebot itself (Tier-2 occlusion, angle-correct field, multi-target, assists,
 per-weapon profiles) is described in `docs/ragebot.md` and audited in
-`docs/ragebot-review.md`. The payload, injection, live state and overlay are validated
-on native Windows — see `docs/handoff.md` and `docs/windows-validation.md`.
+`docs/ragebot-review.md`; the perf work is in `docs/ragebot-perf.md`. The payload,
+injection, live state and overlay are validated on native Windows — see
+`docs/handoff.md` and `docs/windows-validation.md`.
+
+**Uncommitted:** everything since `77f2548` — commit before continuing.
 
 ## Static RE tooling (REA + Ghidra)
 

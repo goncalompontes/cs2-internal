@@ -66,6 +66,14 @@ struct PenetrationParams {
   int max_penetrations = 4;          // the engine's `penetrate_count` budget
   float max_total_thickness = 90.0F; // FUN_18089ca80's accumulated-thickness cap
   float max_trace_length = 3000.0F;  // HandleBulletPenetration's trace-length cap
+  // Safety valve for the arrangement cost: examine at most this many candidate solids per
+  // hitbox, **nearest-first** (0 = unlimited). The engine's budget is 4 penetrated walls
+  // and ~90 units of crossed thickness, so the walls that decide a shot are the nearest
+  // ones; but a far solid can still be the *first* wall on a ray that misses the nearer
+  // ones, so this is a deliberate cost/accuracy knob, not an exactness-preserving cut.
+  // Without it, a position whose cone crosses a dense map exploded into ~15k fragments and
+  // ~0.6 s per tick (`docs/ragebot-perf.md` §3.9).
+  int max_occluders = 0;
 };
 
 // The engine's per-wall damage loss. `damage` is the strength arriving at the wall

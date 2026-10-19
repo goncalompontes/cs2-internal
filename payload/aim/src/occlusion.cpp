@@ -213,6 +213,100 @@ struct HalfPlane {
   return std::sqrt(d2);
 }
 
+// --- mesh BVH (`docs/ragebot-perf.md` §3.7) --------------------------------
+
+constexpr std::uint32_t k_mesh_leaf = 8;  // triangles per BVH leaf
+
+// Ray vs AABB (slab test); fills the near/far distances. False when the ray misses.
+[[nodiscard]] auto ray_aabb(const Vec3& eye, const Vec3& direction, const Vec3& mn, const Vec3& mx,
+                            float& tnear, float& tfar) noexcept -> bool {
+  tnear = -1.0e30F;
+  tfar = 1.0e30F;
+  const float o[3] = {eye.x, eye.y, eye.z};
+  const float d[3] = {direction.x, direction.y, direction.z};
+  const float lo[3] = {mn.x, mn.y, mn.z};
+  const float hi[3] = {mx.x, mx.y, mx.z};
+  for (int i = 0; i < 3; ++i) {
+    if (std::fabs(d[i]) < 1e-12F) {
+      if (o[i] < lo[i] || o[i] > hi[i]) {
+        return false;
+      }
+      continue;
+    }
+    const float inv = 1.0F / d[i];
+    float t1 = (lo[i] - o[i]) * inv;
+    float t2 = (hi[i] - o[i]) * inv;
+    if (t1 > t2) {
+      std::swap(t1, t2);
+    }
+    tnear = std::max(tnear, t1);
+    tfar = std::min(tfar, t2);
+    if (tnear > tfar) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] auto mesh_centroid(const Vec3& mn, const Vec3& mx) noexcept -> Vec3 {
+  return Vec3{(mn.x + mx.x) * 0.5F, (mn.y + mx.y) * 0.5F, (mn.z + mx.z) * 0.5F};
+}
+
+// Recursive median-split build. Returns the node's index; its left child is `index + 1`.
+[[nodiscard]] auto build_mesh_node(MeshBvh& bvh, const std::vector<Vec3>& tmin,
+                                   const std::vector<Vec3>& tmax, std::uint32_t lo,
+                                   std::uint32_t hi) -> std::uint32_t {
+  const auto index = static_cast<std::uint32_t>(bvh.nodes.size());
+  bvh.nodes.emplace_back();
+  Vec3 mn = tmin[bvh.order[lo]];
+  Vec3 mx = tmax[bvh.order[lo]];
+  for (std::uint32_t i = lo + 1; i < hi; ++i) {
+    const Vec3& a = tmin[bvh.order[i]];
+    const Vec3& b = tmax[bvh.order[i]];
+    mn.x = std::min(mn.x, a.x);
+    mn.y = std::min(mn.y, a.y);
+    mn.z = std::min(mn.z, a.z);
+    mx.x = std::max(mx.x, b.x);
+    mx.y = std::max(mx.y, b.y);
+    mx.z = std::max(mx.z, b.z);
+  }
+  bvh.nodes[index].min = mn;
+  bvh.nodes[index].max = mx;
+  if (hi - lo <= k_mesh_leaf) {
+    bvh.nodes[index].start = lo;
+    bvh.nodes[index].count = hi - lo;
+    return index;
+  }
+  // Split on the widest axis of the centroids.
+  Vec3 cmin = mesh_centroid(tmin[bvh.order[lo]], tmax[bvh.order[lo]]);
+  Vec3 cmax = cmin;
+  for (std::uint32_t i = lo + 1; i < hi; ++i) {
+    const Vec3 c = mesh_centroid(tmin[bvh.order[i]], tmax[bvh.order[i]]);
+    cmin.x = std::min(cmin.x, c.x);
+    cmin.y = std::min(cmin.y, c.y);
+    cmin.z = std::min(cmin.z, c.z);
+    cmax.x = std::max(cmax.x, c.x);
+    cmax.y = std::max(cmax.y, c.y);
+    cmax.z = std::max(cmax.z, c.z);
+  }
+  const float extent[3] = {cmax.x - cmin.x, cmax.y - cmin.y, cmax.z - cmin.z};
+  const int axis = extent[0] >= extent[1] && extent[0] >= extent[2]
+                       ? 0
+                       : (extent[1] >= extent[2] ? 1 : 2);
+  const std::uint32_t mid = lo + (hi - lo) / 2;
+  const auto key = [&](std::uint32_t tri) {
+    const Vec3 c = mesh_centroid(tmin[tri], tmax[tri]);
+    return axis == 0 ? c.x : (axis == 1 ? c.y : c.z);
+  };
+  std::nth_element(bvh.order.begin() + lo, bvh.order.begin() + mid, bvh.order.begin() + hi,
+                   [&](std::uint32_t a, std::uint32_t b) { return key(a) < key(b); });
+  build_mesh_node(bvh, tmin, tmax, lo, mid);  // the left child is `index + 1`
+  const std::uint32_t right = build_mesh_node(bvh, tmin, tmax, mid, hi);
+  bvh.nodes[index].count = 0;
+  bvh.nodes[index].right = right;
+  return index;
+}
+
 }  // namespace
 
 auto OccluderCell::thickness_along(const Vec3& direction) const noexcept -> float {
@@ -247,6 +341,9 @@ auto OccluderCell::ray_span(const Vec3& eye, const Vec3& direction) const noexce
     return ray_capsule_span(eye, direction, a, b, radius);
   }
   if (kind == SolidKind::mesh) {
+    if (mesh_bvh != nullptr && !mesh_bvh->empty()) {
+      return ray_mesh_bvh(*mesh_bvh, eye, direction);
+    }
     return ray_mesh_span(eye, direction, triangles);
   }
   if (planes.empty()) {
@@ -314,8 +411,108 @@ auto OccluderCell::lower_bound_distance(const Vec3& eye) const noexcept -> float
   return inside ? 0.0F : bound;
 }
 
-auto project_occluder(const Vec3& eye, const Basis& basis, std::vector<Vec3> world_vertices,
-                      std::vector<OccluderPlane> planes, float surface_modifier)
+auto build_mesh_bvh(std::vector<Vec3> triangles) -> MeshBvh {
+  MeshBvh bvh;
+  bvh.triangles = std::move(triangles);
+  const std::size_t triangle_count = bvh.triangles.size() / 3;
+  if (triangle_count == 0) {
+    return bvh;
+  }
+  bvh.order.resize(triangle_count);
+  std::vector<Vec3> tmin(triangle_count);
+  std::vector<Vec3> tmax(triangle_count);
+  for (std::size_t i = 0; i < triangle_count; ++i) {
+    bvh.order[i] = static_cast<std::uint32_t>(i);
+    const Vec3* t = &bvh.triangles[i * 3];
+    Vec3 mn = t[0];
+    Vec3 mx = t[0];
+    for (int k = 1; k < 3; ++k) {
+      mn.x = std::min(mn.x, t[k].x);
+      mn.y = std::min(mn.y, t[k].y);
+      mn.z = std::min(mn.z, t[k].z);
+      mx.x = std::max(mx.x, t[k].x);
+      mx.y = std::max(mx.y, t[k].y);
+      mx.z = std::max(mx.z, t[k].z);
+    }
+    tmin[i] = mn;
+    tmax[i] = mx;
+  }
+  bvh.nodes.reserve(triangle_count * 2);
+  build_mesh_node(bvh, tmin, tmax, 0, static_cast<std::uint32_t>(triangle_count));
+  return bvh;
+}
+
+auto ray_mesh_bvh(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction)
+    -> std::optional<RaySpan> {
+  if (bvh.nodes.empty()) {
+    return std::nullopt;
+  }
+  float t0 = 1.0e30F;
+  float t1 = 1.0e30F;
+  struct Entry {
+    std::uint32_t node = 0;
+    float tnear = 0.0F;
+  };
+  Entry stack[128];
+  int depth = 0;
+  float tnear = 0.0F;
+  float tfar = 0.0F;
+  if (!ray_aabb(eye, direction, bvh.nodes[0].min, bvh.nodes[0].max, tnear, tfar)) {
+    return std::nullopt;
+  }
+  stack[depth++] = Entry{0, tnear};
+  while (depth > 0) {
+    const Entry current = stack[--depth];
+    if (current.tnear > t1) {
+      continue;  // farther than the second-nearest crossing already found
+    }
+    const MeshBvh::Node& node = bvh.nodes[current.node];
+    if (node.count > 0) {
+      for (std::uint32_t i = 0; i < node.count; ++i) {
+        const std::uint32_t tri = bvh.order[node.start + i] * 3;
+        if (const auto t = ray_triangle(eye, direction, bvh.triangles[tri], bvh.triangles[tri + 1],
+                                        bvh.triangles[tri + 2])) {
+          if (*t < t0) {
+            t1 = t0;
+            t0 = *t;
+          } else if (*t < t1) {
+            t1 = *t;
+          }
+        }
+      }
+      continue;
+    }
+    const std::uint32_t left = current.node + 1;
+    const std::uint32_t right = node.right;
+    float lt = 0.0F;
+    float lf = 0.0F;
+    float rt = 0.0F;
+    float rf = 0.0F;
+    const bool lhit = ray_aabb(eye, direction, bvh.nodes[left].min, bvh.nodes[left].max, lt, lf);
+    const bool rhit = ray_aabb(eye, direction, bvh.nodes[right].min, bvh.nodes[right].max, rt, rf);
+    if (lhit && rhit) {
+      if (lt <= rt) {
+        stack[depth++] = Entry{right, rt};
+        stack[depth++] = Entry{left, lt};
+      } else {
+        stack[depth++] = Entry{left, lt};
+        stack[depth++] = Entry{right, rt};
+      }
+    } else if (lhit) {
+      stack[depth++] = Entry{left, lt};
+    } else if (rhit) {
+      stack[depth++] = Entry{right, rt};
+    }
+  }
+  if (t0 >= 1.0e30F) {
+    return std::nullopt;
+  }
+  return RaySpan{t0, t1 >= 1.0e30F ? t0 : t1};
+}
+
+auto project_occluder(const Vec3& eye, const Basis& basis,
+                      const std::vector<Vec3>& world_vertices,
+                      const std::vector<OccluderPlane>& planes, float surface_modifier)
     -> std::optional<OccluderCell> {
   if (world_vertices.empty()) {
     return std::nullopt;
@@ -354,6 +551,7 @@ auto project_occluder(const Vec3& eye, const Basis& basis, std::vector<Vec3> wor
   // assumes. The engine's `RnHull_t` planes are `dot(n, x) = d` but may be stored
   // with the normal pointing either way, and the vertex centroid is inside the hull
   // by construction, so the centroid decides the sign — robust across builds.
+  bool flip_planes = false;
   if (!planes.empty()) {
     int violations = 0;
     for (const OccluderPlane& plane : planes) {
@@ -361,18 +559,20 @@ auto project_occluder(const Vec3& eye, const Basis& basis, std::vector<Vec3> wor
         ++violations;
       }
     }
-    if (violations * 2 > static_cast<int>(planes.size())) {
-      for (OccluderPlane& plane : planes) {
-        plane.normal = plane.normal * -1.0F;
-        plane.dist = -plane.dist;
-      }
-    }
+    flip_planes = violations * 2 > static_cast<int>(planes.size());
   }
   OccluderCell cell;
   cell.polygon = std::move(polygon);
   cell.kind = SolidKind::polytope;
-  cell.vertices = std::move(world_vertices);
-  cell.planes = std::move(planes);
+  // The cell owns its geometry (the exact ray test runs later, after the projection lock
+  // is released), so copy it in once here rather than taking the caller's vectors by value
+  // on every call.
+  cell.vertices = world_vertices;
+  cell.planes.reserve(planes.size());
+  for (const OccluderPlane& plane : planes) {
+    cell.planes.push_back(flip_planes ? OccluderPlane{plane.normal * -1.0F, -plane.dist}
+                                      : plane);
+  }
   cell.surface_modifier = surface_modifier;
   return cell;
 }
@@ -414,9 +614,9 @@ auto project_capsule_occluder(const Vec3& eye, const Basis& basis, const Vec3& a
   return cell;
 }
 
-auto project_mesh_occluder(const Vec3& eye, const Basis& basis, std::vector<Vec3> vertices,
-                           std::vector<Vec3> triangles, float surface_modifier)
-    -> std::optional<OccluderCell> {
+auto project_mesh_occluder(const Vec3& eye, const Basis& basis, const std::vector<Vec3>& vertices,
+                           const std::vector<Vec3>& triangles, float surface_modifier,
+                           std::shared_ptr<const MeshBvh> bvh) -> std::optional<OccluderCell> {
   if (vertices.empty() || triangles.size() < 3) {
     return std::nullopt;
   }
@@ -463,7 +663,13 @@ auto project_mesh_occluder(const Vec3& eye, const Basis& basis, std::vector<Vec3
   OccluderCell cell;
   cell.polygon = std::move(polygon);
   cell.kind = SolidKind::mesh;
-  cell.triangles = std::move(triangles);
+  // Only copy the soup when there is no BVH: with the BVH, `ray_span` uses it and the
+  // cell does not need to own the triangles. This avoids copying an entire mesh cluster
+  // (up to thousands of points) for every projected cluster, every frame.
+  if (bvh == nullptr) {
+    cell.triangles = triangles;
+  }
+  cell.mesh_bvh = std::move(bvh);
   cell.a = mn;
   cell.b = mx;
   cell.surface_modifier = surface_modifier;

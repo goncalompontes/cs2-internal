@@ -386,6 +386,32 @@ auto main() -> int {
              "a ray that misses the mesh has no span");
     }
 
+    // The triangle BVH (`MeshBvh`) must give the *identical* span to the flat scan for
+    // every ray — it is a pure acceleration (`docs/ragebot-perf.md` §3.7).
+    {
+      auto bvh = std::make_shared<const cs2::aim::MeshBvh>(cs2::aim::build_mesh_bvh(tris));
+      const auto mesh_bvh = cs2::aim::project_mesh_occluder(Vec3{}, basis, verts, tris, 1.0F, bvh);
+      expect(mesh_bvh.has_value(), "the BVH mesh projects");
+      if (mesh.has_value() && mesh_bvh.has_value()) {
+        int compared = 0;
+        for (int iy = -6; iy <= 6; ++iy) {
+          for (int iz = -6; iz <= 6; ++iz) {
+            const Vec3 direction{1.0F, static_cast<float>(iy) * 0.3F,
+                                 static_cast<float>(iz) * 0.3F};
+            const auto flat = mesh->ray_span(Vec3{}, direction);       // flat triangle scan
+            const auto fast = mesh_bvh->ray_span(Vec3{}, direction);   // BVH
+            expect(flat.has_value() == fast.has_value(), "the BVH and flat scan agree on a hit");
+            if (flat.has_value() && fast.has_value()) {
+              expect(near(flat->entry, fast->entry, 1e-3F) && near(flat->exit, fast->exit, 1e-3F),
+                     "the BVH span equals the flat scan");
+            }
+            ++compared;
+          }
+        }
+        expect(compared > 0, "BVH equivalence rays ran");
+      }
+    }
+
     // The heatmap attenuates a head behind the mesh wall (thickness 2).
     std::vector<TargetPose> poses;
     TargetPose pose;

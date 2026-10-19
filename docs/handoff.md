@@ -1,12 +1,43 @@
 # Hand-off — overlay / payload state
 
-> **NEXT SESSION: start at [`docs/next-session-present-hook.md`](next-session-present-hook.md).**
-> It carries the session status (commits, what is live-verified), the three ragebot
-> items still broken/janky (auto-stop oscillation, recoil/spray compensation, menu
-> cursor), and the new direction: **retire the external Vulkan-layer renderer for the
-> ESP/menu and render in-process from the game's Present path** (the DXGI interposer +
-> ImGui D3D11 backend already exist; the work is to make that the default and move the
-> menu input into the payload).
+> **NEXT SESSION: start at [`docs/next-session-ragebot-perf.md`](next-session-ragebot-perf.md).**
+> The in-process Present renderer landed (ADR-0023; the Vulkan layer is now a fallback),
+> and the ragebot was instrumented and optimised this session. The remaining work is the
+> **occlusion query volume** (cone/frustum over the `AabbBvh`, plus a depth-sorted
+> "fully impenetrable" early-exit), **moving the remaining game logic into the frame
+> stages** (out of the renderer), and the lag-comp/inaccuracy correctness items. Perf
+> numbers, instrumentation, the uncommitted-file list and the run/gotcha details are all
+> in that doc.
+
+> **Previous session: [`docs/next-session-present-hook.md`](next-session-present-hook.md).**
+> That was the in-process renderer + ragebot-follow-ups brief; the renderer part is done
+> (ADR-0023), the ragebot follow-ups (auto-stop, recoil, cursor) are still open and are
+> carried into the new doc.
+
+## ⏸ Wrap-up (2026-10-19) — in-process renderer + ragebot instrumentation/perf
+
+**Resume at [`docs/next-session-ragebot-perf.md`](next-session-ragebot-perf.md).**
+
+- **In-process Present renderer (ADR-0023).** ESP + HUD + menu now render from the
+  game's own `IDXGISwapChain::Present` via the DXGI method-table interposer and the
+  payload's ImGui D3D11 backend. New `features::Menu` (payload menu on the present
+  thread: WndProc subclass, cursor release, and an SDL3 `GetRawInputBuffer` IAT hook so
+  the game's mouse-look does not move the camera behind the menu). `payload_main`
+  defaults to it, with the Vulkan layer as a fallback (env `CS2_PAYLOAD_RENDER`).
+  `scripts/launch-cs2.cmd` now defaults to D3D11 (no `-vulkan`). The historic DXGI probe
+  crash was the payload thread skipping `DLL_THREAD_ATTACH` — the in-process install
+  runs on a normal thread. Validated live (de_dust2, ESP + menu drawn in-process).
+- **Ragebot perf/instrumentation (`docs/ragebot-perf.md`).** The solve was ~12 ms/frame
+  on the render thread; root causes were (a) a full `solve` per backtrack pose and (b) a
+  41×41×32 sampled objective. Fixed: exact Gaussian-mass objective (boundary integral)
+  with **gradient ascent** (analytic flux gradient — beats the old grid), the solve moved
+  into the **CreateMove hook** (once per tick, before the raw writes), rewind-tick pose
+  selection, exact blocked-fragment pruning (no caps), a **mesh triangle BVH** for
+  `ray_span`, and a **world-hull AABB BVH** for the enumeration. Remaining bottleneck:
+  the **world-solid projection** (hundreds of solids at some positions) — see the new
+  handoff.
+- **Uncommitted.** Everything since `77f2548` is uncommitted (31 modified, 8 new);
+  commit before continuing.
 
 > **Archived brief (occlusion): [`NEXT_SESSION_OCCLUSION.md`](../NEXT_SESSION_OCCLUSION.md).**
 > It is self-contained: the goal (make the Tier-2 enumeration match the engine's trace

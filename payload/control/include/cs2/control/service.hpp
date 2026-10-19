@@ -54,8 +54,8 @@ class Service {
   void set_rage_features(bool on, int key, bool fire, int objective, int hitbox, float fov,
                          float min_damage, float min_hitchance, int autostop, int autoscope,
                          bool autoreload, bool only_visible, int mode, bool per_weapon,
-                         const char* weapon, int config_op, std::uint32_t config_token,
-                         bool recoil, float stop_speed) noexcept;
+                         const char* weapon, int config_op, std::uint32_t config_token, bool recoil,
+                         float stop_speed, bool backtrack) noexcept;
 
   // Run the ragebot for one state refresh. The overlay's per-frame sink calls this
   // with the current snapshot; the solve runs on the render thread and stashes the
@@ -135,6 +135,11 @@ class Service {
   // Perform the enumeration on the game's main thread (the CreateMove hook), which
   // — unlike the publish thread — has the game's TLS, so tier0's allocator works.
   void on_game_thread() noexcept;
+  // The ragebot solve, run on the **game thread** from the CreateMove hook
+  // (`on_game_thread`) so the aim belongs to the command being simulated — not from the
+  // render thread. Uses the latest snapshot (the hitboxes are re-read fresh here) and the
+  // occlusion hulls the hook just enumerated (`docs/ragebot-perf.md` §3.3).
+  void rage_tick(const game::Snapshot& snapshot) noexcept;
   static void game_thread_entry(void* context) noexcept;
   // The common `input`/`press`/`bhop` status payload.
   [[nodiscard]] Json input_status() noexcept;
@@ -178,6 +183,10 @@ class Service {
   // Recoil compensation, and the auto-stop speed threshold in units/s (0 = full stop).
   std::atomic<bool> rage_recoil_{true};
   std::atomic<float> rage_stop_speed_{0.0F};
+  // Lag-record backtracking (`docs/ragebot.md` §8). Off by default: each pose is a full
+  // solve and the record sampling itself costs ~0.6 ms/tick. The feature is retained and
+  // re-enableable from the menu / `rage backtrack=1`.
+  std::atomic<bool> rage_backtrack_{false};
   // True when the last solve's aim reached the target with no wall in front.
   std::atomic<bool> rage_visible_{false};
   // The trigger mode (0 = hold key, 1 = always on, 2 = toggle key) and its toggle state.
@@ -226,6 +235,36 @@ class Service {
   // The number of world solids projected into the last rage solve's chart (the
   // wallbang-aware occlusion, `docs/ragebot.md` §3). 0 = no solids enumerated.
   std::atomic<int> rage_occluders_{0};
+  // Ragebot instrumentation (`docs/ragebot-perf.md`). `on_snapshot` accumulates
+  // per-stage wall time (µs) and the last frame's counts; the `rage` command reads
+  // and resets them so each poll reports the interval. This is how the solve's cost
+  // is attributed on the live build without a profiler.
+  struct RagePerf {
+    std::atomic<std::uint64_t> frames{0};           // rage-path invocations in the interval
+    std::atomic<std::uint64_t> snapshot_frames{0};  // on_snapshot (render-thread) calls
+    std::atomic<std::uint64_t> sample_us{0};
+    std::atomic<std::uint64_t> query_us{0};      // the world occlusion enumeration
+    std::atomic<std::uint64_t> build_us{0};      // build_input over the candidates
+    std::atomic<std::uint64_t> project_us{0};    // occluder silhouette projection
+    std::atomic<std::uint64_t> solve_us{0};      // aim::solve (multi-target field)
+    std::atomic<std::uint64_t> backtrack_us{0};  // aim::solve_backtrack (all poses)
+    // Breakdown of the solve(s) (`SolveStats`): hitbox projection, occlusion split and
+    // the objective search. Tells us whether the cost is geometry or the erf-based mass.
+    std::atomic<std::uint64_t> solve_project_us{0};
+    std::atomic<std::uint64_t> solve_occlude_us{0};
+    std::atomic<std::uint64_t> solve_argmax_us{0};
+    std::atomic<std::uint64_t> total_us{0};       // whole rage path
+    std::atomic<std::uint64_t> last_total_us{0};  // the last frame's whole-rage time
+    std::atomic<std::uint64_t> max_total_us{0};   // worst single frame
+    std::atomic<std::uint64_t> solve_calls{0};    // aim::solve calls (multi + backtrack)
+    std::atomic<std::uint32_t> candidates{0};     // enemies in the FOV
+    std::atomic<std::uint32_t> hitboxes{0};       // solver hitbox silhouettes
+    std::atomic<std::uint32_t> occluders{0};      // projected world solids
+    std::atomic<std::uint32_t> poses{0};          // backtrack poses (live + records)
+    std::atomic<std::uint32_t> cells{0};          // field cells after occlusion
+  };
+  RagePerf perf_;
+  std::uint64_t rage_perf_log_frames_ = 0;
   // The multi-target heatmap (`docs/ragebot.md`, ADR-0022). The render thread
   // samples each live enemy's hitboxes per frame into `records_`; the control
   // thread reads a copy to build the heatmap. Sampling is on by default (so the
@@ -244,6 +283,10 @@ class Service {
   // by the `heatmap` command under this lock.
   std::atomic<bool> occlusion_live_{false};
   std::atomic<bool> occlusion_invoke_{false};
+  // Diagnostic: 0 = the per-target pyramid enumeration (the default), 1 = the older
+  // single eye→all-targets AABB. Both are exact; the AABB is the conservative baseline
+  // used to prove the pyramid drops no occluder (`docs/ragebot-perf.md` §2.1).
+  std::atomic<int> occlusion_enum_mode_{0};
   std::atomic<bool> occlusion_request_{false};
   std::mutex occlusion_mutex_;
   game::Vec3 occlusion_eye_{};
@@ -252,6 +295,12 @@ class Service {
   // the targets do not depend on where the player is looking (`docs/ragebot.md` §3).
   game::Vec3 occlusion_lo_{};
   game::Vec3 occlusion_hi_{};
+  // The target hitboxes' world AABBs, so the world enumeration is the union of the
+  // eye→target pyramids rather than the single eye→all-targets box
+  // (`docs/ragebot-perf.md` §2.1). Bounded: the multi-target solve caps candidates.
+  static constexpr int k_max_occlusion_targets = 64;
+  aim::Aabb occlusion_targets_[k_max_occlusion_targets] = {};
+  int occlusion_target_count_ = 0;
   // Entity-handle indices (`handle & 0x7fff`) of the players, so the occlusion query
   // skips their collision bodies (a player is a target, not an occluder).
   static constexpr int k_max_occlusion_exclude = 64;
@@ -260,6 +309,13 @@ class Service {
   int occlusion_exclude_count_ = 0;
   std::vector<OcclusionHull> occlusion_hulls_;
   OcclusionQueryStats occlusion_stats_;
+  // The latest snapshot handed over by the render thread's per-frame refresh, for the
+  // game-thread solve. Copied under the mutex so the render thread never blocks on the
+  // solve. (The hitboxes are re-read on the hook, so only the player list / eye / weapon
+  // come from here — all slow-changing.)
+  std::mutex snapshot_mutex_;
+  game::Snapshot last_snapshot_;
+  std::atomic<bool> have_snapshot_{false};
   Channel channel_;
   Console console_;
   EventLog events_;

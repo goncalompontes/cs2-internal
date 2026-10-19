@@ -541,6 +541,10 @@ class Input {
   // The command the game will simulate, via the `GetUserCmd` chain.
   [[nodiscard]] void* current_cmd() noexcept;
   void capture(void* cmd) noexcept;
+  // The ragebot solve + occlusion query (the game-thread sink), run **once per tick** on
+  // the slot-5 command before the engine builds it, so this tick's raw-angle writes and
+  // the command's silent history both use the freshly solved aim.
+  void run_game_thread_sink_now() noexcept;
   void apply(void* cmd) noexcept;
   // Append a `CSubtickMoveStep` (analog forward/left) to `base->subtick_moves`.
   void* add_analog_step(void* base, float forward, float side, float when) noexcept;

@@ -1,5 +1,6 @@
 // Unit tests for the aim damage field (docs/ragebot.md, ADR-0022).
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -135,6 +136,40 @@ auto main() -> int {
            "a wider cone lowers the peak hitchance");
   }
 
+  // --- the exact (analytic) hit probability vs the closed form ---------------------
+  {
+    // For a disjoint union of axis-aligned cells the mass factors per axis:
+    // `(Φ(u1)-Φ(u0))·(Φ(v1)-Φ(v0))`. The boundary-integral implementation must match it
+    // (it is the exact 2-D integral, no sampling; `docs/ragebot-perf.md` §3.2).
+    DamageField f;
+    f.add(square(-0.04F, -0.03F, 0.02F, 0.03F), 100.0F);
+    f.add(square(0.03F, -0.02F, 0.05F, 0.02F), 60.0F);
+    const float sigma = 0.02F;
+    const auto phi = [](double x) { return 0.5 * std::erfc(-x * 0.7071067811865476); };
+    const auto closed = [&](double x0, double y0, double x1, double y1, cs2::aim::Vec2 a) {
+      return (phi((x1 - a.x) / sigma) - phi((x0 - a.x) / sigma)) *
+             (phi((y1 - a.y) / sigma) - phi((y0 - a.y) / sigma));
+    };
+    for (const cs2::aim::Vec2 a : {cs2::aim::Vec2{0.0F, 0.0F}, cs2::aim::Vec2{0.04F, 0.0F},
+                                   cs2::aim::Vec2{0.05F, 0.03F}, cs2::aim::Vec2{-0.03F, 0.01F}}) {
+      const double expected =
+          closed(-0.04, -0.03, 0.02, 0.03, a) + closed(0.03, -0.02, 0.05, 0.02, a);
+      expect(near(f.hit_probability(a, sigma), static_cast<float>(expected), 1.0e-3F),
+             "the analytic hit probability matches the closed form");
+    }
+    // Optimality: the analytic argmax is not beaten by a fine grid search.
+    const float analytic = f.hit_probability(f.argmax_hit_probability(sigma), sigma);
+    float grid_best = 0.0F;
+    for (int iy = -40; iy <= 40; ++iy) {
+      for (int ix = -40; ix <= 40; ++ix) {
+        const cs2::aim::Vec2 a{-0.08F + static_cast<float>(ix) * 0.002F,
+                               -0.08F + static_cast<float>(iy) * 0.002F};
+        grid_best = std::max(grid_best, f.hit_probability(a, sigma));
+      }
+    }
+    expect(analytic + 1e-3F >= grid_best, "the analytic argmax is the true optimum");
+  }
+
   // --- the global (whole-field) damage optimum -----------------------------
   {
     // Two equal-value cells of very different robustness: the old per-cell pick could
@@ -170,6 +205,55 @@ auto main() -> int {
     const float steep = probability(1.2F);
     expect(std::fabs(level - steep) < 0.12F, "hitchance is pitch-invariant");
     expect(level > 0.4F && steep > 0.4F, "hitchance positive at both pitches");
+  }
+
+  // --- the point index is exact (a pure acceleration) ----------------------
+  {
+    // The grid exists to make the objective search's thousands of probes cheap
+    // (`docs/ragebot-perf.md` §3.9). It must return exactly the linear-scan answer: a
+    // missed cell would silently change the damage value at the chosen aim.
+    DamageField f;
+    f.add(square(0.00F, 0.00F, 0.10F, 0.10F), 40.0F);
+    f.add(square(0.05F, 0.05F, 0.20F, 0.20F), 90.0F);  // overlaps the first
+    f.add(square(-0.30F, -0.30F, -0.20F, -0.20F), 10.0F);
+    f.add(square(0.50F, -0.60F, 0.90F, -0.10F), 70.0F);  // large: may land in `large`
+    const auto linear = [&](const Vec2& p) {
+      float best = 0.0F;
+      for (const auto& cell : f.cells) {
+        if (cs2::aim::polygon_contains(cell.polygon, p)) {
+          best = std::max(best, cell.value);
+        }
+      }
+      return best;
+    };
+    int mismatches = 0;
+    for (int iy = -70; iy <= 100; ++iy) {
+      for (int ix = -40; ix <= 100; ++ix) {
+        const Vec2 p{static_cast<float>(ix) * 0.01F, static_cast<float>(iy) * 0.01F};
+        if (std::fabs(f.value_at(p) - linear(p)) > 1e-4F) {
+          ++mismatches;
+        }
+      }
+    }
+    expect(mismatches == 0, "the point index matches the linear scan");
+    // A query outside the field's bounds still finds the spanning cell.
+    expect(near(f.value_at(Vec2{0.70F, -0.30F}), 70.0F), "an outside probe keeps the large cell");
+  }
+
+  // --- the cone objective prunes only the negligible tail ------------------
+  {
+    // Two cells: one at the aim, one far outside the kernel. The far cell's mass is
+    // below the proven tail bound, so pruning it must not change the value beyond that
+    // bound — and must not change the argmax.
+    DamageField f;
+    f.add(square(-0.01F, -0.01F, 0.01F, 0.01F), 100.0F);
+    f.add(square(50.0F, 50.0F, 51.0F, 51.0F), 100.0F);
+    const float sigma = 0.002F;
+    expect(near(f.hit_probability(Vec2{}, sigma), 1.0F, 1e-3F),
+           "a far cell contributes no measurable mass");
+    const Vec2 aim = f.argmax_hit_probability(sigma);
+    expect(std::fabs(aim.x) < 0.05F && std::fabs(aim.y) < 0.05F,
+           "the far cell does not move the cone optimum");
   }
 
   if (failures == 0) {

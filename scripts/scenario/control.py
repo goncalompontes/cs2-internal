@@ -390,7 +390,7 @@ class Control:
              headshot: float | None = None,
              range_modifier: float | None = None, hitbox: int | None = None,
              fov: float | None = None, min_damage: float | None = None,
-             min_hitchance: float | None = None) -> dict[str, Any]:
+             min_hitchance: float | None = None, backtrack: bool | None = None) -> dict[str, Any]:
         """Configure the hold-key ragebot (``docs/ragebot.md``).
 
         ``on`` enables the feature; ``key`` is the Win32 virtual-key code held to
@@ -411,6 +411,10 @@ class Control:
             args["fire"] = fire
         if force is not None:
             args["force"] = force
+        # Lag-record backtracking is **off by default**; pass ``backtrack=True`` to
+        # re-enable the feature (`docs/ragebot.md` §8).
+        if backtrack is not None:
+            args["backtrack"] = backtrack
         if objective is not None:
             args["objective"] = objective
         if damage is not None:
@@ -439,7 +443,7 @@ class Control:
                 headshot: float | None = None, pen: str | None = None,
                 pen_mod: float | None = None, dmg_mod: float | None = None,
                 max_pen: int | None = None, material: int | None = None,
-                grate: bool | None = None) -> dict[str, Any]:
+                grate: bool | None = None, enum: str | None = None) -> dict[str, Any]:
         """The multi-target damage heatmap (``docs/ragebot.md``).
 
         Projects every enemy's hitboxes — and their sampled lag records — into one
@@ -477,6 +481,11 @@ class Control:
             args["walls"] = walls
         if walls_call is not None:
             args["walls_call"] = walls_call
+        # `enum` is a diagnostic: "box" forces the older single-AABB enumeration so the
+        # per-target pyramid's occluder set can be diffed against it (`docs/ragebot-perf.md`
+        # §2.1).
+        if enum is not None:
+            args["enum"] = enum
         if max_unlag is not None:
             args["max_unlag"] = max_unlag
         if interp is not None:
