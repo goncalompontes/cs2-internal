@@ -43,6 +43,7 @@
 | B4 | What drives the **auto-strafe**? | A **per-tick handler** `FUN_212c38c66b8` (346 B) reached through the stub `0x212c38c65e4`. It maintains a **tick counter** and a **tick time** (`tick * 0.015625` = 1/64 s), then calls the movement builder `FUN_212c37beb50(ctx, cmd, state)` | `verified` |
 | B5 | Which game-side function is hooked? | **Unknown.** The stub addresses are runtime-only, so the *game* target of each hook cannot be named from the static image | `unknown` |
 | B6 | Does the module register callbacks by the engine's event *names*? | **No.** The names (`EventClientPreOutput_t`, `EventFrameBoundary_t`, `EventPostDataUpdate_t`, …) exist as plain strings at `0x212c424e34e`…`0x212c424e44b`, but **none of them is referenced by any instruction** | `verified` |
+| B7 | Is there a registration mechanism at all? | **Yes** — a **registry keyed by a 32-bit constant**: `FUN_212c3aaa9c0(registry, 0x1bf01450)` then three callback registrations (`FUN_212c38d1150/4ff0/6360`) in `FUN_212c38c5b31`. The **key's pre-image is `unknown`** (not a hash of any engine event name under 7 hash functions × ASCII/UTF-16 × 3 name forms) | `verified` (mechanism) / `unknown` (pre-image) |
 
 ---
 
@@ -202,7 +203,45 @@ Reading:
 4. **The AABB write is the ESP payload**: the `27.0`/`36.0` heights and the
    `0.9` opacity clamp are the box-drawing parameters. `inferred`.
 
-### 2.1 What this means for our strafe
+### 2.2 There *is* a keyed callback registry
+
+`verified`. `FUN_212c38c5b31` (108 B, `gproj11`) is a lazy initialiser — and it
+shows the module's registration mechanism:
+
+```c
+void FUN_212c38c5b31(void)
+{
+  if (*(char *)(unaff_RSI + 0x18) == '\0') {
+    if (DAT_212c4a57008 == 0) FUN_212c3604060(&PTR_PTR_212c4a57000);
+    FUN_212c37feba0(DAT_212c4a57008);              // build a subsystem object
+  }
+  if (DAT_212c4a57dd0 == 0) FUN_212c3832690(&PTR_PTR_212c4a57dd8);
+  uVar18 = FUN_212c3aaa9c0(DAT_212c4a57dd0, 0x1bf01450);   // registry lookup by KEY
+  if (*(char *)(unaff_RSI + 0xe9) == '\0') {                // one-shot guard
+    *(undefined1 *)(unaff_RSI + 0xe9) = 1;
+    uVar18 = FUN_212c38d1150(uVar18, &DAT_212c4a560d0);    // register callback #1
+    uVar18 = FUN_212c38d4ff0(uVar18, &DAT_212c4a560d0);    // register callback #2
+    uVar18 = FUN_212c38d6360(uVar18, &DAT_212c4a560d0);    // register callback #3
+  }
+}
+```
+
+So the module keeps a **registry keyed by a 32-bit constant**, and a subsystem
+registers **three** callbacks against the key `0x1bf01450`. `FUN_212c38c5b31`
+itself is called from `FUN_212c38c6020` and `0x212c38c7964`.
+
+**The key's pre-image was not recovered.** `0x1bf01450` is **not** a hash of
+any of the seven engine event names under FNV-1a, FNV-1, CRC32, djb2, sdbm,
+the Source-engine hash, or Jenkins — tried in ASCII and UTF-16, with and
+without the `_t` suffix, and case-folded. `unknown`.
+
+This is the most promising lead for closing the "which game event is this?"
+question: a single 32-bit key stands between us and a *name*. The next step
+would be to find the function that *computes* the key from a string (i.e. the
+hash routine) — which is a bounded search over the module's string helpers,
+not a runtime dependency.
+
+### 2.3 What this means for our strafe
 
 > Our strafe must run **once per user command**, at the same point in the
 > tick as the engine's command build — *not* once per rendered frame.
@@ -231,6 +270,7 @@ its only child) is the shape to compare against.
 | The role of `0x212c3820bd0`, `0x212c3864260`, `0x212c38af310` | decompiled the three stub targets | decompiled; they are ordinary subsystem functions, each reached only through its own stub |
 | Registration by event name | found the seven event-type name strings; searched for references to all of them | **no instruction references them** |
 | The vtable route the spec suggested | searched the image for the eight-byte pointers that a vtable entry would contain | **zero** — so none of the eight is a virtual method of a class with a static vtable |
+| The pre-image of the registry key `0x1bf01450` | 7 hash functions × ASCII/UTF-16 × 3 name forms, over all seven engine event names | **no match** — the key stands alone; finding the hash routine that produces it is a bounded static search |
 
 ---
 

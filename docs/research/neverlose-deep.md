@@ -63,6 +63,12 @@ these four briefs go deeper on the parts it left open.
   reached through the stub `0x212c38c65e4`) that keeps a tick counter and a
   `tick * 1/64` clock, and calls the movement builder
   `FUN_212c37beb50(ctx, cmd, state)`.
+* There **is** a registration mechanism: a **registry keyed by a 32-bit
+  constant** (`0x1bf01450`), into which `FUN_212c38c5b31` registers three
+  callbacks. The key's pre-image is `unknown` — it is not a hash of any of
+  the seven engine event names under 7 hash functions × ASCII/UTF-16 × 3
+  name forms — but finding the hash routine that produces it is a **bounded
+  static search**, not a runtime dependency.
 
 ### Route C — the protection layer
 
