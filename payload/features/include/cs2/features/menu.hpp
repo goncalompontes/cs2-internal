@@ -7,9 +7,11 @@
 // captures input by subclassing the game window's WndProc, releases the cursor
 // while open, and draws the menu with ImGui on the game's Present thread.
 //
-// The layer's `overlay/src/menu.cpp` is the reference; the logic is the same, but
-// the settings live in-process (no shared memory) and the ImGui context is the
-// payload's own (created by `render::ImGuiBackend`).
+// The menu's *content* is not written here: the pages, the widgets and the
+// keybind capture live in the shared header `cs2/overlay/menu_pages.hpp`, which
+// the Vulkan layer's fallback menu (`overlay/src/menu.cpp`) draws too. This
+// class owns the plumbing only: the window subclass, the raw-input block, the
+// toggle key and the settings block.
 
 #include <cstddef>
 #include <cstdint>
@@ -89,6 +91,9 @@ class Menu {
   bool marker_opened_ = false;
   bool initialised_ = false;
   unsigned marker_tick_ = 0;
+  // The keybind capture's counter when the toggle key was last polled: a
+  // capture that took a key owns it, so the menu must not toggle as well.
+  std::uint32_t capture_epoch_ = 0;
 };
 
 }  // namespace cs2::features
