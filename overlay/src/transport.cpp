@@ -1,5 +1,6 @@
 #include "transport.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -65,9 +66,9 @@ auto ensure_mapped() -> bool {
     return false;
   }
 
-  HANDLE file = CreateFileA(g_path, GENERIC_READ | GENERIC_WRITE,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                            FILE_ATTRIBUTE_NORMAL, nullptr);
+  HANDLE file =
+      CreateFileA(g_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
     return false;
   }
@@ -83,7 +84,7 @@ auto ensure_mapped() -> bool {
     return false;
   }
   auto* shared = static_cast<wire::Shared*>(view);
-  if (shared->magic != wire::k_magic || shared->version != wire::k_version) {
+  if (!wire::segment_is_compatible(shared->magic, shared->version)) {
     UnmapViewOfFile(view);
     CloseHandle(mapping);
     return false;
@@ -159,7 +160,7 @@ bool ensure_mapped() {
     return false;
   }
   auto* shared = static_cast<wire::Shared*>(view);
-  if (shared->magic != wire::k_magic || shared->version != wire::k_version) {
+  if (!wire::segment_is_compatible(shared->magic, shared->version)) {
     ::munmap(view, sizeof(wire::Shared));
     ::close(fd);
     return false;
@@ -202,13 +203,10 @@ auto read_settings(wire::Settings& out) noexcept -> bool {
   if (g_shared == nullptr && !ensure_mapped()) {
     return false;
   }
-  const uint32_t first = g_shared->settings_sequence.load(std::memory_order_acquire);
-  if ((first & 1U) != 0U) {
-    return false;
-  }
-  std::memcpy(&out, &g_shared->settings, sizeof(wire::Settings));
-  const uint32_t second = g_shared->settings_sequence.load(std::memory_order_acquire);
-  return first == second;
+  // The block has two writers (this layer's menu and the payload, which
+  // publishes a loaded configuration back), so the copy is verified with the
+  // block's own checksum: a torn read is rejected instead of being believed.
+  return wire::read_settings(*g_shared, out);
 }
 
 void write_settings(const wire::Settings& in) noexcept {
@@ -216,10 +214,7 @@ void write_settings(const wire::Settings& in) noexcept {
   if (g_shared == nullptr && !ensure_mapped()) {
     return;
   }
-  const uint32_t sequence = g_shared->settings_sequence.load(std::memory_order_relaxed);
-  g_shared->settings_sequence.store(sequence + 1, std::memory_order_relaxed);  // odd
-  std::memcpy(&g_shared->settings, &in, sizeof(wire::Settings));
-  g_shared->settings_sequence.store(sequence + 2, std::memory_order_release);  // even
+  wire::write_settings(*g_shared, in);
 }
 
 }  // namespace cs2::overlay::transport

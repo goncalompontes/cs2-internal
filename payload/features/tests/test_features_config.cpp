@@ -340,6 +340,108 @@ auto test_store_rejects_garbage() -> void {
   std::filesystem::remove(path, error);
 }
 
+// The settings block's checksum.
+//
+// The block has two writers (the layer's menu and the payload), so a reader
+// has to be able to tell a whole block from a torn one. The checksum is
+// computed in the shared header, so the payload and the layer cannot disagree
+// about it; the golden value in the header pins the two builds together.
+auto test_settings_checksum() -> void {
+  using cs2::overlay::wire::default_settings;
+  using cs2::overlay::wire::k_default_settings_checksum;
+  using cs2::overlay::wire::settings_checksum;
+
+  assert(settings_checksum(default_settings()) == k_default_settings_checksum);
+
+  // One changed byte changes the checksum.
+  const Settings original = default_settings();
+  Settings changed = original;
+  changed.esp_color_enemy[0] = static_cast<std::uint8_t>(changed.esp_color_enemy[0] + 1);
+  assert(settings_checksum(changed) != settings_checksum(original));
+
+  // A clean round trip through the segment keeps the checksum.
+  // The segment is 3 MB, so it lives in the static storage, not on the stack.
+  static cs2::overlay::wire::Shared shared{};
+  shared.magic = cs2::overlay::wire::k_magic;
+  shared.version = cs2::overlay::wire::k_version;
+  cs2::overlay::wire::write_settings(shared, changed);
+  Settings copy{};
+  assert(cs2::overlay::wire::read_settings(shared, copy));
+  assert(settings_checksum(copy) == settings_checksum(changed));
+  assert(std::memcmp(&copy, &changed, sizeof(Settings)) == 0);
+}
+
+// A torn read is always detected.
+//
+// The settings block is written by two processes that share no lock, so a
+// reader can see a block that is half of one write and half of the other. The
+// seqlock alone cannot catch that — the sequence is even and stable when the
+// read happens — so the block carries its own checksum.
+auto test_torn_read_is_detected() -> void {
+  using cs2::overlay::wire::k_magic;
+  using cs2::overlay::wire::k_version;
+  using cs2::overlay::wire::settings_checksum;
+
+  // The segment is 3 MB, so it lives in the static storage, not on the stack.
+  static cs2::overlay::wire::Shared shared{};
+  shared.magic = k_magic;
+  shared.version = k_version;
+  Settings first = cs2::overlay::wire::default_settings();
+  first.esp_color_enemy[0] = 11;
+  first.esp_color_offscreen[0] = 33;
+  Settings second = cs2::overlay::wire::default_settings();
+  second.esp_color_enemy[0] = 22;
+  second.esp_color_offscreen[0] = 44;
+
+  auto* bytes = reinterpret_cast<unsigned char*>(&shared.settings);
+  // The split falls inside the ESP colour block, so the two writers differ on
+  // **both** sides of it: the torn block is neither of them.
+  constexpr std::size_t k_split = 120;
+  std::uint32_t sequence = shared.settings_sequence.load();
+
+  // Writer A: the first half of its block, with its checksum.
+  shared.settings_sequence.store(sequence + 1);
+  std::memcpy(bytes, &first, k_split);
+  shared.settings_checksum.store(settings_checksum(first));
+  shared.settings_sequence.store(sequence + 2);
+
+  // Writer B: the whole block, with its own checksum.
+  shared.settings_sequence.store(sequence + 3);
+  std::memcpy(bytes, &second, sizeof(Settings));
+  shared.settings_checksum.store(settings_checksum(second));
+  shared.settings_sequence.store(sequence + 4);
+
+  // Writer A: the second half of its block lands after B's write. The block is
+  // now torn, but the sequence is even and stable: only the checksum can tell.
+  shared.settings_sequence.store(sequence + 5);
+  std::memcpy(bytes + k_split, reinterpret_cast<const unsigned char*>(&first) + k_split,
+              sizeof(Settings) - k_split);
+  shared.settings_sequence.store(sequence + 6);
+
+  Settings copy{};
+  std::uint32_t read_sequence = 0;
+  assert(!cs2::overlay::wire::read_settings(shared, copy, &read_sequence));
+
+  // A block that was not torn is read back unchanged.
+  cs2::overlay::wire::write_settings(shared, first);
+  assert(cs2::overlay::wire::read_settings(shared, copy, &read_sequence));
+  assert(std::memcmp(&copy, &first, sizeof(Settings)) == 0);
+}
+
+// A stale binary refuses a segment it does not understand: the version is
+// checked before the block is read, so a layer that does not know the
+// checksum never touches the block.
+auto test_segment_version() -> void {
+  using cs2::overlay::wire::k_magic;
+  using cs2::overlay::wire::k_version;
+  using cs2::overlay::wire::segment_is_compatible;
+
+  assert(segment_is_compatible(k_magic, k_version));
+  assert(!segment_is_compatible(k_magic, k_version - 1));
+  assert(!segment_is_compatible(k_magic, k_version + 1));
+  assert(!segment_is_compatible(0x12345678U, k_version));
+}
+
 // The one-shot op protocol: the menu sets the op and bumps the token, and the
 // payload carries the op out once per token.
 auto test_op_protocol() -> void {
@@ -398,6 +500,9 @@ auto main() -> int {
   test_clamping();
   test_store_round_trip();
   test_store_rejects_garbage();
+  test_settings_checksum();
+  test_torn_read_is_detected();
+  test_segment_version();
   test_op_protocol();
   std::puts("features-config: ok");
   return 0;

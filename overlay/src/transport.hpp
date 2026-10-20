@@ -20,7 +20,8 @@ void write_extent(uint32_t width, uint32_t height) noexcept;
 [[nodiscard]] auto read_model(wire::Model& out) noexcept -> bool;
 
 // Menu settings (ADR-0021): the layer's menu writes, the payload reads.
-// Returns false if the segment is not mapped or a write was in progress.
+// Returns false if the segment is not mapped, a write was in progress, or the
+// copy was torn (the block has two writers, so it carries a checksum).
 [[nodiscard]] auto read_settings(wire::Settings& out) noexcept -> bool;
 void write_settings(const wire::Settings& in) noexcept;
 
