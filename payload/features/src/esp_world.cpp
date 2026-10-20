@@ -12,6 +12,7 @@
 
 #include "cs2/features/esp.hpp"
 #include "cs2/features/esp_geometry.hpp"
+#include "cs2/features/esp_world_class.hpp"
 #include "cs2/game/entity_system.hpp"
 #include "cs2/game/math.hpp"
 #include "cs2/game/memory.hpp"
@@ -55,74 +56,12 @@ constexpr std::uintptr_t k_abs_origin = 0xc8;
 // The world entity classes, identified by their designer name's prefix. The
 // name is a class name ("smokegrenade_projectile", "planted_c4",
 // "weapon_ak47"), so the prefix identifies the class without a class
-// pointer — the game updates the classes, the prefixes stay.
-enum class WorldClass : std::uint8_t {
-  none,
-  smoke,
-  flash,
-  molotov,
-  incendiary,
-  he,
-  decoy,
-  sensor,    // the motion grenade
-  bumpmine,  // the proximity mine
-  c4,
-  weapon,
-};
-
-auto matches(const char* text, const char* prefix, std::size_t length) noexcept -> bool {
-  return std::memcmp(text, prefix, length) == 0;
-}
-
-auto classify(const char* name) noexcept -> WorldClass {
-  if (matches(name, "smokegr", 7)) {
-    return WorldClass::smoke;
-  }
-  if (matches(name, "flashba", 7)) {
-    return WorldClass::flash;
-  }
-  if (matches(name, "molotov", 7)) {
-    return WorldClass::molotov;
-  }
-  if (matches(name, "incendi", 7)) {
-    return WorldClass::incendiary;
-  }
-  if (matches(name, "hegrena", 7)) {
-    return WorldClass::he;
-  }
-  if (matches(name, "decoy_p", 7)) {
-    return WorldClass::decoy;
-  }
-  // The two grenades the list did not name: without them they got no marker
-  // at all.
-  if (matches(name, "sensorgr", 8)) {
-    return WorldClass::sensor;
-  }
-  if (matches(name, "bumpmine", 8)) {
-    return WorldClass::bumpmine;
-  }
-  if (matches(name, "planted", 7)) {
-    return WorldClass::c4;
-  }
-  if (matches(name, "c4", 2)) {
-    return WorldClass::c4;
-  }
-  if (matches(name, "weapon_", 7)) {
-    return WorldClass::weapon;
-  }
-  return WorldClass::none;
-}
-
-// The deployed incendiary (`weapon_taggrenade`) is a grenade, not a dropped
-// weapon. The seven-character prefix cannot tell the two apart, so the name
-// is read once more when the prefix says "weapon_".
-auto is_deployed_incendiary(std::uintptr_t name_ptr) noexcept -> bool {
-  char rest[10] = {};
-  if (!game::read_bytes(name_ptr + 7, rest, sizeof(rest))) {
-    return false;
-  }
-  return matches(rest, "taggrenad", 9);
-}
+// pointer — the game updates the classes, the prefixes stay. The
+// classification itself lives in `cs2/features/esp_world_class.hpp`, where
+// the host test can reach it.
+using esp_world::classify;
+using esp_world::is_deployed_incendiary;
+using esp_world::WorldClass;
 
 auto grenade_kind(WorldClass type) noexcept -> GrenadeKind {
   switch (type) {
@@ -292,7 +231,7 @@ void walk(Frame& frame) {
     if (!game::read(identity + k_identity_designer, name_ptr) || name_ptr == 0) {
       return;
     }
-    char prefix[8] = {};
+    char prefix[esp_world::k_class_prefix_length] = {};
     if (!game::read_bytes(name_ptr, prefix, sizeof(prefix))) {
       return;
     }
@@ -300,9 +239,13 @@ void walk(Frame& frame) {
     if (type == WorldClass::none) {
       return;
     }
-    // The deployed incendiary is a grenade, not a dropped weapon.
-    if (type == WorldClass::weapon && is_deployed_incendiary(name_ptr)) {
-      type = WorldClass::incendiary;
+    // The deployed incendiary is a grenade, not a dropped weapon: the name is
+    // read once more when the prefix says "weapon_".
+    if (type == WorldClass::weapon) {
+      char rest[10] = {};
+      if (game::read_bytes(name_ptr + 7, rest, sizeof(rest)) && is_deployed_incendiary(rest)) {
+        type = WorldClass::incendiary;
+      }
     }
 
     std::uintptr_t instance = 0;

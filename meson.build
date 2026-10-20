@@ -289,6 +289,7 @@ features_esp_geometry_test = executable('features_esp_geometry_test',
   files(
     'payload/features/tests/test_esp_geometry.cpp',
     'payload/features/src/esp_skeleton.cpp',
+    'payload/features/src/esp_world_class.cpp',
   ),
   include_directories : [
     include_directories('payload/features/include'),

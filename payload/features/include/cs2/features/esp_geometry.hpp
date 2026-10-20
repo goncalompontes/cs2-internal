@@ -180,6 +180,32 @@ struct ArrowPlacement {
   return points;
 }
 
+// --- The player's box --------------------------------------------------------
+
+// What the ESP draws for a projected player box.
+enum class PlayerBoxOutcome : std::uint8_t {
+  draw,        // the box is drawn
+  arrow,       // the target is outside the viewport: the arrow is drawn
+  degenerate,  // the box is too small to draw and the target is on screen
+};
+
+// What the ESP draws for a projected player box.
+//
+// The order matters: the off-screen test comes **first**, so a target that is
+// outside the viewport *and* small gets its arrow. A degenerate box is only
+// dropped when the target is on screen — otherwise the target would be
+// silently dropped altogether.
+[[nodiscard]] constexpr auto player_box_outcome(bool on_screen, float box_w, float box_h) noexcept
+    -> PlayerBoxOutcome {
+  if (!on_screen) {
+    return PlayerBoxOutcome::arrow;
+  }
+  if (box_h < 3.0F || box_w < 1.0F) {
+    return PlayerBoxOutcome::degenerate;
+  }
+  return PlayerBoxOutcome::draw;
+}
+
 // --- The radar --------------------------------------------------------------
 
 // A point in the radar's screen space.
@@ -187,6 +213,16 @@ struct RadarPoint {
   float x = 0.0F;
   float y = 0.0F;
 };
+
+// Whether a radar point is inside the radar's **disc**.
+//
+// The squared distance decides: a point at 45 degrees and exactly the
+// radius is on the ring, not outside it (the coordinate-wise test drew the
+// square around the circle).
+[[nodiscard]] constexpr auto inside_radar(const RadarPoint& point, float radius_px) noexcept
+    -> bool {
+  return point.x * point.x + point.y * point.y <= radius_px * radius_px;
+}
 
 // Map a world offset (in metres) to the radar's screen space, with the
 // viewer's own direction pointing up.

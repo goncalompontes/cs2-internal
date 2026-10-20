@@ -332,30 +332,30 @@ void build_players(Frame& frame) {
     // The target is off screen when its box misses the viewport.
     const bool on_screen =
         max.x >= 0.0F && min.x <= frame.width && max.y >= 0.0F && min.y <= frame.height;
-    if (!on_screen) {
-      // The arrow is the fallback for a target outside the viewport, so the
-      // small-box test below must not swallow it.
-      if (config.esp.offscreen) {
-        const float cx = (min.x + max.x) * 0.5F;
-        const float cy = (min.y + max.y) * 0.5F;
-        const esp_geometry::Direction direction{.x = cx - frame.width * 0.5F,
-                                                .y = cy - frame.height * 0.5F};
-        draw_offscreen_arrow(frame, player, direction);
+    // What the ESP draws for this box. The arrow comes first: a target
+    // outside the viewport must get its arrow even when its box is tiny.
+    switch (esp_geometry::player_box_outcome(on_screen, box_w, box_h)) {
+      case esp_geometry::PlayerBoxOutcome::arrow: {
+        if (config.esp.offscreen) {
+          const float cx = (min.x + max.x) * 0.5F;
+          const float cy = (min.y + max.y) * 0.5F;
+          const esp_geometry::Direction direction{.x = cx - frame.width * 0.5F,
+                                                  .y = cy - frame.height * 0.5F};
+          draw_offscreen_arrow(frame, player, direction);
+        }
+        if (frame.stats != nullptr) {
+          ++frame.stats->skipped_box;
+        }
+        continue;
       }
-      if (frame.stats != nullptr) {
-        ++frame.stats->skipped_box;
-      }
-      continue;
-    }
-
-    // A degenerate box (a target at the far edge of the screen, or a broken
-    // projection) is not drawn. The test applies to the on-screen path only:
-    // an off-screen target gets its arrow instead.
-    if (box_h < 3.0F || box_w < 1.0F) {
-      if (frame.stats != nullptr) {
-        ++frame.stats->skipped_small;
-      }
-      continue;
+      case esp_geometry::PlayerBoxOutcome::degenerate:
+        if (frame.stats != nullptr) {
+          ++frame.stats->skipped_small;
+        }
+        continue;
+      case esp_geometry::PlayerBoxOutcome::draw:
+      default:
+        break;
     }
 
     if (frame.stats != nullptr) {

@@ -21,6 +21,7 @@
 
 #include "cs2/features/esp_geometry.hpp"
 #include "cs2/features/esp_skeleton.hpp"
+#include "cs2/features/esp_world_class.hpp"
 
 namespace {
 
@@ -215,6 +216,65 @@ void test_radar_offset() {
   expect(close(edge.y, -k_radius_px), "a target at the radius lands on the ring");
 }
 
+// The radar is a disc, not the square around it.
+void test_radar_is_a_disc() {
+  constexpr float k_radius_px = 80.0F;
+  // A point at 45 degrees and exactly the radius is on the ring: the
+  // coordinate-wise test drew the square around the circle and dropped it.
+  const float diagonal = k_radius_px * 0.70710678F;
+  expect(geometry::inside_radar(geometry::RadarPoint{.x = diagonal, .y = diagonal}, k_radius_px),
+         "a point on the ring at 45 degrees is inside the radar");
+  expect(!geometry::inside_radar(geometry::RadarPoint{.x = diagonal + 1.0F, .y = diagonal},
+                                 k_radius_px),
+         "a point past the ring at 45 degrees is outside the radar");
+  expect(geometry::inside_radar(geometry::RadarPoint{.x = 0.0F, .y = -k_radius_px}, k_radius_px),
+         "a point on the ring is inside the radar");
+  expect(!geometry::inside_radar(geometry::RadarPoint{.x = k_radius_px + 1.0F, .y = 0.0F},
+                                 k_radius_px),
+         "a point past the ring is outside the radar");
+}
+
+// The off-screen arrow wins over the degenerate box: a target outside the
+// viewport must get its arrow even when its box is tiny.
+void test_player_box_outcome() {
+  using geometry::PlayerBoxOutcome;
+  expect(geometry::player_box_outcome(true, 40.0F, 80.0F) == PlayerBoxOutcome::draw,
+         "an on-screen box is drawn");
+  expect(geometry::player_box_outcome(false, 40.0F, 80.0F) == PlayerBoxOutcome::arrow,
+         "an off-screen box gets the arrow");
+  expect(geometry::player_box_outcome(true, 0.5F, 1.0F) == PlayerBoxOutcome::degenerate,
+         "a tiny on-screen box is dropped");
+  expect(geometry::player_box_outcome(false, 0.5F, 1.0F) == PlayerBoxOutcome::arrow,
+         "a tiny off-screen box still gets the arrow");
+  expect(geometry::player_box_outcome(true, 1.0F, 3.0F) == PlayerBoxOutcome::draw,
+         "the smallest drawable box is drawn");
+}
+
+// The world walk's class prefixes: the grenades the list did not name get a
+// marker, and the deployed incendiary is a grenade, not a dropped weapon.
+void test_world_classes() {
+  namespace world = cs2::features::esp_world;
+  expect(world::classify("smokegr") == world::WorldClass::smoke, "the smoke grenade is classified");
+  expect(world::classify("flashba") == world::WorldClass::flash, "the flashbang is classified");
+  expect(world::classify("molotov") == world::WorldClass::molotov, "the molotov is classified");
+  expect(world::classify("incendi") == world::WorldClass::incendiary,
+         "the incendiary is classified");
+  expect(world::classify("hegrena") == world::WorldClass::he, "the HE grenade is classified");
+  expect(world::classify("decoy_p") == world::WorldClass::decoy, "the decoy is classified");
+  expect(world::classify("sensorgr") == world::WorldClass::sensor,
+         "the sensor grenade is classified");
+  expect(world::classify("bumpmine") == world::WorldClass::bumpmine, "the bump mine is classified");
+  expect(world::classify("planted") == world::WorldClass::c4, "the planted bomb is classified");
+  expect(world::classify("c4") == world::WorldClass::c4, "the C4 is classified");
+  expect(world::classify("weapon_") == world::WorldClass::weapon, "a dropped weapon is classified");
+  expect(world::classify("player") == world::WorldClass::none,
+         "an unknown class is not classified");
+  // The deployed incendiary: "weapon_" plus the rest of the name.
+  expect(world::is_deployed_incendiary("taggrenad"), "the deployed incendiary is recognised");
+  expect(!world::is_deployed_incendiary("ak47"), "a dropped rifle is not an incendiary");
+  expect(!world::is_deployed_incendiary("deagle"), "a dropped pistol is not an incendiary");
+}
+
 void test_circle_points() {
   const std::vector<std::pair<float, float>> points = geometry::circle_points(10.0F, 20.0F, 5.0F);
   expect(points.size() == static_cast<std::size_t>(geometry::k_circle_segments),
@@ -354,6 +414,9 @@ auto main() -> int {
   test_place_arrow_small_viewport();
   test_arrow_triangle();
   test_radar_offset();
+  test_radar_is_a_disc();
+  test_player_box_outcome();
+  test_world_classes();
   test_circle_points();
   test_skeleton_chain();
   test_skeleton_missing_capsule();
