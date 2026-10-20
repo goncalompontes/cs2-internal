@@ -6,10 +6,34 @@
 > and which one is worth reversing next.
 >
 > **Second pass (same day).** A deeper repository sweep added the GitHub-hosted
-> binaries in §3.1, the Fatality CS2 base (§2.3), the Plaguecheat tree (§2.4) and
-> the Gamesense CS:GO DLL evidence (§4). The ranking is unchanged, but “the only
-> public CS2 source is Weave” no longer holds: there are now three, at very
+> binaries in §3.1, the Fatality CS2 base (§2.3), the Plaguecheat protection tree
+> (§2.4) and the Gamesense CS:GO DLL evidence (§4). The ranking is unchanged, but
+> “the only public CS2 source is Weave” no longer holds: there are now three, at very
 > different levels of completeness.
+>
+> **Third pass (same day, after the read).** The four artifacts that were read are
+> now written up: [`cs2-chams-t7.md`](cs2-chams-t7.md) (the T7 answer),
+> [`gamesense-csgo-re.md`](gamesense-csgo-re.md) (the gamesense reversal),
+> [`fatality-cs2-base.md`](fatality-cs2-base.md) (the Fatality CS2 base and its
+> config schema), and [`plaguecheat-protection.md`](plaguecheat-protection.md) (the
+> Plaguecheat reviver). Read those first; this inventory is now the *index*.
+>
+> **Fourth pass (same day).** The Weave CS2 **ragebot** was read as well —
+> [`weave-cs2-ragebot.md`](weave-cs2-ragebot.md) — and it is the most useful
+> single artifact found so far: the only public CS2 implementation of a
+> hit-chance model, an engine-priced penetration check, a lag-record backtrack
+> and the CS2 command-acceptance plumbing. A CS2 cheat module (Primordial
+> crack, Dec 2025) was also acquired and hashed; its code section is
+> **string-obfuscated**, so static reads of it yield little (see §3.2).
+>
+> **Fifth pass (same day).** The **CS:GO** Fatality tree was read for its
+> *algorithms* — [`fatality-csgo-algorithms.md`](fatality-csgo-algorithms.md) —
+> and it is the only readable implementation of a top-tier ragebot anywhere:
+> point generation with a complete radius-scale formula, a 64-sample hit
+> chance with hitbox-pinned counting, the penetration damage model, the
+> **safe-point tiers**, and a **resolver that is a hypothesis set updated from
+> server feedback**. That last one is the shape our own exactness gap has been
+> missing; §9 of that note lists the ten techniques that transfer.
 >
 > **Scope.** Inventory and triage only. Nothing listed here was downloaded or
 > executed for this note, and no artifact is included in the repository. Every
@@ -34,9 +58,9 @@
 | Artifact | Type | Era | Public since | What it is actually good for | Confidence |
 |---|---|---|---|---|---|
 | `cacamelio/weave-v3-csgo-and-cs2` | **source tree** | CS2 (2024–25) | 2025-05-19 | Only public **CS2** feature source with chams, ragebot, antiaim, lagcomp, penetration, prediction, hooks, renderer, SDK | `verified` (content read) |
-| `cacamelio/fatality-source-fixed` | **source tree** | **CS:GO** | 2026-07-12 | Complete material-override chams + full ragebot/resolver/antiaim architecture — on the old API | `verified` (content read) |
+| `cacamelio/fatality-source-fixed` | **source tree** | **CS:GO** | 2026-07-12 | The **only readable top-tier ragebot anywhere**: point generation + radius-scale formula, 64-sample hit chance with hitbox-pinned counting, the penetration damage model, the **safe-point tiers**, and a **resolver as a hypothesis set updated from server feedback** | `verified` (content read) |
 | `notphage/fatality.win-CS2` | **source tree (base)** | CS2 (2024-01) | 2024-01-18 | Real CS2 SDK, hooks, ESP, movement, GUI and Lua plumbing; **no ragebot, chams or antiaim** | `verified` (content read) |
-| `csco1337/plaguecheat` | **source tree (recompiled)** | CS2 (2026-07) | 2026-07-10 | 294-file Plaguecheat tree with asmjit, rebuilt to defeat VEH; feature completeness not yet read | `verified` (tree); features `unverified` |
+| `csco1337/plaguecheat` | **protection source** | CS2 (2026-07) | 2026-07-10 | **Not** a feature source: a module *reviver* (segment extraction, IAT, OEP, fake stack, custom VEH, snapshot spoofing) for Plaguecheat's protected segment | `verified` (read) |
 | Gamesense **CS:GO** crack DLLs | **unprotected DLL** | CS:GO | 2022–2024 | The real gamesense module for CS:GO (2.5–3.4 MB) — **not** CS2 | `verified` (listing + size) |
 | Primordial / Aimware / Plague CS2 cracks | **unprotected DLLs** | CS2 | 2024–2026 | Shipped modules with protection stripped, if authentic | `verified` (listing); authenticity `unverified` |
 | `qcold/primordial` | **loader/crack source** | CS2 (2025) | 2025-07 | Modern CS2 manual-map loader, `connect`/`recv`/`send` hooks. **No feature source** | `verified` (content read) |
@@ -50,15 +74,21 @@
 | Gamesense / Aimware / Onetap / Legendware / Nixware **CS:GO** sources | source trees | CS:GO | 2021–2024 | Complete architectures, but CS:GO semantics only | `verified` (repo metadata) |
 | `T1GxR/Axion-CS2-RAGE-CHEAT`, `nildotdev/leerware`, `soren-source/trap-cs2` | **MIT** source | CS2 | 2024–25 | The only CS2 code we may legally **copy** | `verified` |
 
-**Bottom line.** Three public CS2 source trees exist, at different completeness:
-**Weave** (feature-complete), **Fatality** (a real CS2 base with no combat
-features) and **Plaguecheat** (a 2026 recompiled tree whose feature set is not yet
-read). There is also one complete CS:GO implementation that matches our chams plan
-(Fatality) and a queue of binary dumps whose authenticity ranges from plausible to
-disputed. The **Gamesense CS:GO DLL is real and obtainable**; for **Gamesense CS2**
-the only public items are a README-only claim and malware-adjacent bundles — no
-verified dump. No public artifact contains a damage-field ragebot; the exactness gap
-in [`aim-solver-design-review.md`](aim-solver-design-review.md) stays ours to close.
+**Bottom line.** After five passes: three public CS2 source trees exist at very
+different completeness (**Weave** — the only CS2 feature implementation;
+**Fatality** — a real CS2 base with no combat code; **Plaguecheat** — a
+*protection* loader, not features), one **readable top-tier ragebot in CS:GO**
+(Fatality: point generation, hit chance, penetration model, safe-point tiers,
+and a resolver as a hypothesis set updated from server feedback), one real
+**gamesense CS:GO module**, and a queue of binary dumps whose authenticity
+ranges from plausible to disputed. No public artifact contains a **damage-field**
+ragebot — the damage field stays ours — but the *point scoring*, the *safe-point
+definition* and the *resolver update rule* are now known, and they are the
+shape our exactness gap has been missing. See
+[`fatality-csgo-algorithms.md`](fatality-csgo-algorithms.md) §9 for the ten
+techniques that transfer. The **Gamesense CS:GO DLL is real and obtainable**;
+for **Gamesense CS2** the only public items are a README-only claim and
+malware-adjacent bundles — no verified dump.
 
 ---
 
@@ -111,6 +141,9 @@ Two traps in this space, both present in the list below:
   ships”.
 - **What to read first:** `feature/chams` and `renderer` (our T7 open question),
   then `feature/penetration_system` vs our `payload/aim/src/penetration.cpp`.
+  **Both have now been read** — see [`cs2-chams-t7.md`](cs2-chams-t7.md) and
+  [`weave-cs2-ragebot.md`](weave-cs2-ragebot.md) (the ragebot, hitchance,
+  lagcomp, prediction and the CS2 command plumbing).
 
 ### 2.2 Primordial (`qcold/primordial`)
 
@@ -154,15 +187,28 @@ Two traps in this space, both present in the list below:
   interface access, subtick `create_move` shape). Read it for plumbing, not for
   combat features. It supersedes the “partial/older” characterisation in §4.
 
-### 2.4 Plaguecheat recompiled tree (`csco1337/plaguecheat`)
+### 2.4 Plaguecheat reviver (`csco1337/plaguecheat`)
 
 - **Size / dates:** 294 files, created 2026-07-10. `verified` (tree)
-- **README:** “plaguecheat-mapper — recompiled with asmjit fuck veh”. `verified`
-- **Layout:** `plague/src`, `plague/deps/asmjit` (full asmjit), `revive-engine.sln`,
-  `.clang-format`. This is a buildable C++ project, not a dump. `verified`
-- **Caveat:** “recompiled with asmjit” suggests a rebuilt/ported binary rather than
-  the vendor's own source, and the feature set was not read for this note. Do not
-  rank it above Weave until `plague/src` is inspected. `inferred`
+- **README:** "plaguecheat-mapper — recompiled with asmjit fuck veh". `verified`
+- **What it actually is — corrected after reading it:** a **module reviver**, not a
+  cheat. `plague/src/core/segment/reviver/reviver.{cxx,hxx}` (39 KB) implements:
+  `extract_segment` (allocates `PAGE_EXECUTE_READWRITE` and copies the segment),
+  `resolve_imports` (via `GetProcAddress`/`LoadLibraryA`), `setup_veh` (custom
+  vectored exception handler), `setup_patches`, `setup_cvar_interface`,
+  `setup_stack` (fabricated stack), `invoke_oep` (original entry point), plus a
+  `k_snapshot_path` for “snapshot spoofing” — the healthy snapshot emitted by
+  `EmuTrace.DumpSnapshot`. The VEH comment lists what it bypasses: page guards,
+  `KUSER_SHARED_DATA`, `CPUID`, `HYPERVISOR_SHARED_DATA`, `PEB`. `verified`
+- **Why it matters:** Plaguecheat protects its module behind an **emulated
+  execution trace** whose snapshot must be replayed, and the reviver defeats it
+  with a custom VEH and JIT-friendly rebuild (hence "asmjit … fuck veh"). That
+  is a concrete protection technique, and it is the *only* protection detail in
+  this inventory that is readable rather than inferred.
+- **What it is not:** no features, no ragebot, no ESP. Do not read it expecting
+  a cheat. `verified`
+
+See [`plaguecheat-protection.md`](plaguecheat-protection.md) for the write-up.
 
 ---
 
@@ -211,6 +257,34 @@ be well known: `CherryBarracuda/gamesense` (2024-01) ships `gamesense.dll`
 (3.42 MB) and `RAdam1233/GamesenseDLL` (2022-10) ships `gs.dll` (2.51 MB). Both are
 CS:GO-era module sizes and are documented by the community as gamesense cracks.
 `verified` (listing + size); provenance `inferred`.
+
+### 3.2 Acquired CS2 modules (static triage)
+
+Three CS2-era module binaries were fetched, hashed and PE-checked, and kept in
+`C:\Users\gpmpo\nea\quarantine\cs2-modules\`. **None was executed.**
+
+| File | Size | SHA-256 | PE facts | Verdict |
+|---|---|---|---|---|
+| `femordial.dll` (Primordial crack, 2025-12-28) | 23,786,496 | `2c53efde9b9cc5f5eab54d30aef44c4e7a6a4eedd4abdb2cfbe95dba186792dd` | PE32/x86, `.text` 0x5C4C27 (6.0 MB), `.rsrc` 17.7 MB, no exports, 9 imports (no `d3dx9`, no `WS2_32`) | **6 MB of real code, but string-obfuscated**: a local ASCII sweep of 1.03 M strings yielded 75 snake_case identifiers, only 3 meaningful (`hit_player`, `hit_pos`) plus a `curl` artifact. Plaintext feature names are absent. |
+| `primordial_mstackj.dll` (2024-12-07) | 19,817,984 | `e380b8ac8d0894c0f0d3ad46f9156dab288e2d47a4f2dd973f20b3377827b44b` | PE32/x86, `.text` only 649 KB, **`.rsrc` 18.9 MB** | The payload is almost certainly **inside the resources**; a resource-embedded module would need extraction before analysis. |
+| `steam_module.dll` (2024-11-28) | 20,480 | `294914bd5ed9b63cada2f0f792b89f202ef19320542874cd6653d746bf74ed77` | PE32/x86, 10 KB of code | A tiny helper, not the module. |
+
+**Two things worth recording.**
+
+1. `femordial.dll` and the `primodial.dll` in the `dinaq5080-wq` bundle are
+   **byte-identical in size** (23,786,496) — almost certainly the same file, so
+   that bundle's "primordial" is this artifact, not a separate build.
+2. A CS2 cheat module from 2025 is **not automatically analysable**: the
+   protection that gamesense (CS:GO) does *not* have is present here, in the
+   form of runtime string encryption. Our Neverlose work (§
+   [`neverlose-mining.md`](neverlose-mining.md)) found the same shape — opaque
+   predicates and an encrypted section — and needed a dedicated deobfuscation
+   pass. Anything we want from this module would cost the same.
+
+**Not pursued:** downloading the remaining crack archives (Aimware, Fatality,
+Plaguecheat) — they are the same shape, and the CS:GO module already gave us
+the config-vocabulary answer. The CS2-native value came from the Weave
+*source*, not from a binary.
 
 **Authenticity triage.** For any of these, the cheap checks before spending time:
 
@@ -299,12 +373,13 @@ obtainable Gamesense artifact is the **CS:GO** module.
 
 | Our open question | Best public reference | How much it actually helps |
 |---|---|---|
-| **Chams / material override** (T7 open; our tree is config-only) | **Weave CS2 `feature/chams` + `renderer`**; Fatality CS:GO `features/chams.cpp` + `draw_model_execute.cpp` | **High.** Two complete implementations, one CS2-era, one CS:GO-era. Fatality's CS2 base has **no** draw-model hook or chams (`verified`), so Weave remains the only CS2 reference. This is the strongest reason to read Weave. |
-| **Ragebot exactness** (occlusion, penetration, damage field) | Fatality CS:GO `hitscan.cpp`, `wall_penetration.cpp`, `resolver.cpp`; Weave `penetration_system`, `lagcompensation` | **Low for exactness, medium for structure.** [`autowall-implementations.md`](autowall-implementations.md) already found that public implementations use per-point traces and none builds a damage field. These trees do not change that conclusion. |
+| **Chams / material override** (T7) | **Answered** — see [`cs2-chams-t7.md`](cs2-chams-t7.md) | **High.** CS2 path: KV3 material creation (`materialsystem2.dll` pattern + `KeyValues3`/`LoadKV3`), then a **per-scene-object** override (`scene_data->material`) inside the `scenesystem.dll` `draw_scene_object` hook, colour written at `scene_data+0x40`, two passes (visible + `F_IGNOREZ`). CS:GO contrast (gamesense): VMT + global `OverrideMaterial` + one flag (`0x8000`). Every index still needs re-verification against the live client. |
+| **Ragebot exactness** (occlusion, penetration, damage field) | Fatality CS:GO `hitscan`/`wall_penetration`/`resolver` ([`fatality-csgo-algorithms.md`](fatality-csgo-algorithms.md)); Weave CS2 `penetration_system` ([`weave-cs2-ragebot.md`](weave-cs2-ragebot.md)) | **Medium-high, and new.** The shape is now known: candidate polygons are computed **per hypothesis** and the safe point is the *intersection* across hypotheses, scored by the surviving **area**; the resolver is a hypothesis set pruned by server feedback (miss ⇒ eliminate hypotheses that would have hit). The damage field stays ours — but the *point scoring* (shots-to-kill, safety area, "HP+N" min-damage convention) and the *hypothesis dimension* are adoptable. |
+| **Safe points / resolver** | Fatality CS:GO safety tiers + hypothesis set ([`fatality-csgo-algorithms.md`](fatality-csgo-algorithms.md) §6, §7) | **High** — this is the concrete shape our exactness gap has been missing: three safety tiers, a per-hypothesis polygon intersection, and a server-feedback elimination rule. The *generator* of hypotheses is CS:GO-specific; the *rule* is not. |
 | **Anti-aim** | Weave `feature/antiaim`; Fatality `antiaim.cpp` | **Low.** CS2 server gating and subtick change what is expressible; the CS:GO shape does not transfer cleanly. |
 | **Movement / autostrafe** | Fatality `autostrafer.cpp`; Weave movement code | **Low.** Our open bug is a changed default that moved the strafe onto a server-gated path ([`../handoff-wave2.md`](../handoff-wave2.md) §5.1), not a missing technique. |
 | **Schema / ESP class resolution** | Weave `sdk`; Neverlose already answered the class-chain walk | **Low.** [`neverlose-mining.md`](neverlose-mining.md) §7.6 covers it. |
-| **Loader / protection** | Primordial loader | **Informational.** Our loader is written; adopt nothing. |
+| **Loader / protection** | Primordial loader; **Plaguecheat reviver** ([`plaguecheat-protection.md`](plaguecheat-protection.md)) | **Medium.** The reviver is a readable protection *loader*: segment extraction, IAT rebuild, OEP, fabricated stack, custom VEH, snapshot spoofing. Our loader is written; the transferable idea is environment validation (`PEB`/`CPUID`/`KUSER_SHARED_DATA` checks). |
 | **Renderer / D3D11 present hook** | Weave `renderer`; Fatality `present.cpp` | **Medium**, if we touch the overlay. |
 
 The honest summary: of the five areas where we still have work, only **chams** is
@@ -316,36 +391,58 @@ or is our own measurement problem.
 
 ## 7. Recommended order
 
-1. **Weave CS2 tree** — read `feature/chams`, `renderer`, `feature/penetration_system`.
-   Answer the T7 question (“material override under CS2: which material, which
-   flags, when in the frame”) and diff the penetration structure against ours.
-   No execution, source only.
-2. **Fatality CS:GO tree** — read `features/chams.cpp` and `draw_model_execute.cpp`
-   for the canonical material-override sequence, and `hitscan/wall_penetration` for
-   ordering. Treat as historical; do not port constants.
-3. **Fatality CS2 base** (`notphage/fatality.win-CS2`) — cheap, high-signal read:
-   `include/sdk/*` (generated offsets, schema headers), `hooks/client.cpp`
-   (sub-tick `create_move`, prediction, frame-stage), `game/visuals.cpp`. Compare
-   its entity/schema access with ours. It has no combat features, so do not expect
-   ragebot or chams answers here.
-4. **Plaguecheat tree** (`csco1337/plaguecheat`) — inspect `plague/src` before
-   trusting it. It is the most recent public tree (2026-07) and may carry the
-   freshest offsets, but it is a recompile, so verify every offset against the
-   game binary.
-5. **Fatality CS2 dump 2025** — only if a question needs the *shipped* behaviour
+1. **Implement the T7 chams path** from [`cs2-chams-t7.md`](cs2-chams-t7.md) —
+   KV3 material creation + the `draw_scene_object` override, with a pass-model
+   fallback. Re-verify every index against the live client first.
+2. **Implement the CS2 command-acceptance checklist** from
+   [`weave-cs2-ragebot.md`](weave-cs2-ragebot.md) §9 — input-history angle
+   writes (silent aim), attack-history index + `ATTACKnSTART` bits, the
+   `override_tick` fake tick, and the move CRC when the movement is modified.
+   This is server-acceptance plumbing, not aim math, and it is the part we are
+   most likely missing.
+3. **Try the hash-seeded hit test** (same note, §3) — if the engine's shot
+   hash is computable, the hit test becomes exact and cheap instead of a
+   256-sample Monte-Carlo. This is the highest-value single experiment left.
+4. **Adopt the point-scoring rules** from
+   [`fatality-csgo-algorithms.md`](fatality-csgo-algorithms.md) §9 — these are
+   small, self-contained changes to our solver, in descending value:
+   (a) score candidate points by the **area of the surviving visibility
+   polygon** rather than a boolean; (b) rank by **shots-to-kill**, not raw
+   damage; (c) **pin the spread samples to the intended hitbox/hitgroup** so
+   the hitchance percentage means what the user thinks; (d) adopt the
+   **"mindmg > 100 ⇒ target HP + N"** convention and cap the threshold by the
+   target's health; (e) add the **"+5 HP per extra penetrated surface"**
+   world-drift correction.
+5. **Design the hypothesis dimension** (same note, §6–§7) — a per-target
+   hypothesis set, the intersection of their visibility polygons as the safe
+   region, and a server-feedback rule that eliminates hypotheses. The
+   *generator* is the open design question in CS2 (timing? position? which
+   side is the target on?), and the autowall-as-oracle trick
+   (§9.10 of that note) is the cheapest way to get a first hypothesis.
+6. **Adopt the industry config vocabulary** from
+   [`fatality-cs2-base.md`](fatality-cs2-base.md) §3 — `safety` conditions,
+   `fallback_mode` (off / adaptive / prefer_safepoint), `autostop` (lethal /
+   inbetween / predictive), the 7 hitboxes, `pointscale`, `mindmg` — cross-read
+   with the gamesense registry ([`gamesense-csgo-re.md`](gamesense-csgo-re.md)
+   §1.1) and the Weave names (`weave-cs2-ragebot.md` §14).
+7. **Re-derive the server's interpolation maths** (Weave §7) — it is a
+   decompiled copy of the server's own lerp, and our backtrack window should be
+   bounded the way theirs is (`maxunlag/3`, `/2`, `/1`).
+8. **Fatality CS2 dump 2025** — only if a question needs the *shipped* behaviour
    (resolver, antiaim) rather than an architecture. Reconstruct with the Neverlose
    flow, then decompile; budget it like Neverlose.
-6. **Memesense dumps** — smaller, plausibly authentic; useful if Fatality 2025 is
+9. **Memesense dumps** — smaller, plausibly authentic; useful if Fatality 2025 is
    not.
-7. **Azura / Plaguecheat / Clarity** — raw, unfixed, self-described incomplete.
-   Only for a specific symbol someone needs.
-8. **CS:GO provider sources and the Gamesense DLL** — Gamesense/Aimware/Onetap/
-   Legendware/Nixware trees, plus `gamesense.dll`/`gs.dll`, for a known-good
-   architecture when a specific subsystem is unclear. Not a source of CS2 offsets.
-9. **License-clean CS2 code** — `T1GxR/Axion-CS2-RAGE-CHEAT` (MIT),
-   `nildotdev/leerware` (MIT), `soren-source/trap-cs2` (MIT),
-   `Valthrun/valthrun-cs2` (GPL-2.0, ideas only). This is the only tier we may
-   actually copy from; prefer it whenever it covers the need.
+10. **Azura / Plaguecheat / Clarity** — raw, unfixed, self-described incomplete.
+    Only for a specific symbol someone needs. (Note: the *Plaguecheat source* is
+    protection, not features — see §2.4.)
+11. **CS:GO provider sources and the Gamesense DLL** — for a known-good
+    architecture when a specific subsystem is unclear. The gamesense module has
+    now been reversed at the architectural level; use that note, not a new pass.
+12. **License-clean CS2 code** — `T1GxR/Axion-CS2-RAGE-CHEAT` (MIT),
+    `nildotdev/leerware` (MIT), `soren-source/trap-cs2` (MIT),
+    `Valthrun/valthrun-cs2` (GPL-2.0, ideas only). This is the only tier we may
+    actually copy from; prefer it whenever it covers the need.
 
 **Do not** spend time on the Gamesense CS2 claims (README-only or malware-adjacent),
 the 2026 Fatality zip before the hash/PE check, or any “fixed” forum binary.
@@ -384,18 +481,20 @@ dropper.
 
 ## 9. Open questions
 
-- **Weave provenance and completeness.** Is `cs2/counterstrike2/` a real leak, a
-  decompile, or a community rebuild? Does it build? `inferred` that it is at least
-  CS2-era; unverified that it is shipped code.
+- **Weave provenance and completeness.** *Partly answered* by
+  [`cs2-chams-t7.md`](cs2-chams-t7.md): the CS2 tree's chams path is internally
+  consistent and complete enough to implement from. Provenance (leak vs port) is
+  still `unverified`, so treat every index as needing re-verification.
 - **Gamesense CS2.** The only GitHub bundle (`dinaq5080-wq/...`) ships a 13.9 MB
   `skeet.dll` next to a 23.8 MB `primodial.dll`, but the account also hosts repos
   named `VIRUS`/`virus1`. Cheap settlement without execution: 4 KB HTTP range read
   of the PE header (machine, timestamp, sections, import directory), `sha256`, and
   compare its shape with the known 3.42 MB CS:GO `gamesense.dll`. Until then it is
   `unverified` and unsafe.
-- **Plaguecheat tree.** Is `csco1337/plaguecheat` vendor source, a decompile, or a
-  recompile? Read `plague/src` file names and look for asmjit JIT usage. The 2026-07
-  date makes it the most current public tree if it is genuine.
+- **The Plaguecheat trace emulator.** The reviver is readable, but the producer
+  (`EmuTrace.DumpSnapshot`) is not in the tree, and the VEH's spoofed values
+  (`PEB`/`CPUID`/`KUSER_SHARED_DATA`) are described only by a comment. `unknown`
+  — see [`plaguecheat-protection.md`](plaguecheat-protection.md).
 - **`Jollycistaken/cheat-dumps`.** 20 hash-named DLLs and one EXE with no
   attribution. Identify from PE metadata (product strings, imports, timestamps)
   before ranking.
@@ -408,3 +507,22 @@ dropper.
   set.
 - **Current-build dumps.** Almost everything public is 2025 or early 2026. A
   current-build artifact would need a fresh thread, not an old one.
+- **The ragebot's *implementation*.** Three independent sources now agree on the
+  **shape** (hitbox set → point → safety predicate → damage/hitchance gates →
+  stop), and the fourth — the Weave CS2 source — finally shows an
+  **implementation**: a 256-sample hitchance over the game's own RNG, a
+  hash-seeded exact alternative, engine-priced penetration, and a lag-record
+  backtrack. It is a CS:GO algorithm in CS2 clothing, with several broken
+  parts, so the exactness gap is still ours to close. See
+  [`weave-cs2-ragebot.md`](weave-cs2-ragebot.md) §13.
+- **The engine's shot hash.** Weave's `no_spread()` path asks the game for the
+  hash of the current shot and then tests one trace — if that hash is
+  computable outside the game, we get an *exact* hit test. The single
+  highest-value unknown found in this pass.
+- **Weave's `.TMP` merge backups** hold a *different revision* of several
+  modules (they are larger than the checked-in files) — a diff may recover a
+  working multipoint implementation, since the checked-in one is broken by a
+  double division.
+- **The CS2 module binaries** (§3.2) are string-obfuscated; extracting value
+  from them would cost a deobfuscation pass comparable to our Neverlose one.
+  Lower priority than the source.
