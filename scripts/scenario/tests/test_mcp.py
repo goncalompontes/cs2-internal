@@ -275,6 +275,11 @@ class ToolCatalogueTest(unittest.TestCase):
             self.assertIn("confirm", tool.input_schema()["required"], name)
             self.assertIn("DESTRUCTIVE", tool.description, name)
 
+    def test_the_release_tool_has_no_hold(self) -> None:
+        # Releasing a button takes no hold: the button is already down.
+        tool = next(t for t in mcp_tools.TOOLS if t.name == "cs2_release")
+        self.assertNotIn("hold", tool.input_schema()["properties"])
+
     def test_the_schemas_are_structurally_valid_json_schema(self) -> None:
         # A quick structural check: the keywords the bridge emits have to be
         # the ones JSON Schema knows, and the root has to be an object schema.

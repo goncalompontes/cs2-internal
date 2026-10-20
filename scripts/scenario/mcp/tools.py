@@ -100,10 +100,17 @@ class MoveArgs(TypedDict, total=False):
 
 
 class PressArgs(TypedDict, total=False):
-    """``cs2_press`` / ``cs2_release``: one button."""
+    """``cs2_press``: one button (held for ``hold`` seconds, then released)."""
 
     key: Required[ButtonName | str]
     hold: float
+    via: InputBackend | None
+
+
+class ReleaseArgs(TypedDict, total=False):
+    """``cs2_release``: one button that was held."""
+
+    key: Required[ButtonName | str]
     via: InputBackend | None
 
 
@@ -580,7 +587,7 @@ TOOLS: tuple[Tool, ...] = (
             "Release a button that cs2_press (or a console '+button') held. "
             "Needs the game to be running."
         ),
-        shape=PressArgs,
+        shape=ReleaseArgs,
         handler=_tool_release,
     ),
     Tool(
