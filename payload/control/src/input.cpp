@@ -451,6 +451,15 @@ void Input::set_strafe_config(float wishspeed, int subticks) noexcept {
   strafe_subticks_.store(std::clamp(subticks, 0, 16));
 }
 
+void Input::set_strafe_mode(int mode) noexcept {
+  strafe_mode_.store(std::clamp(mode, static_cast<int>(StrafeMode::off),
+                                static_cast<int>(StrafeMode::directional)));
+}
+
+void Input::set_strafe_ignore_keys(bool ignore) noexcept {
+  strafe_ignore_keys_.store(ignore);
+}
+
 auto Input::velocity(float& x, float& y) const noexcept -> bool {
   const std::uintptr_t pawn = local_pawn_.load();
   if (pawn == 0) {
@@ -467,15 +476,27 @@ auto Input::velocity(float& x, float& y) const noexcept -> bool {
 
 // The auto-strafe (`set_strafe`): one tick of a **normal, silent** air-strafe.
 // Airborne only (`AirMove` is the air path; the ground is `WalkMove` + friction).
-// The goal heading is the held keys read in the *view* frame — `W`/nothing is the
-// camera's forward, `S` is behind — and a held `A`/`D` stands the feature down so
-// the player's own air control is never hijacked. The wish is then pushed
-// perpendicular to the **current** horizontal velocity on the goal's side, at the
-// `AirAccelerate` optimum `theta*` (`docs/re/strafing.md`), recomputed every tick
-// so it re-perpendicularises instead of decaying (a *held* side with a fixed basis
-// stops accelerating after ~3 ticks). Nothing writes a view angle, so neither the
-// camera nor the pawn's eye angles move (`write_strafe_wish` documents the two
-// silent encodings).
+// The goal heading is the player's **W/A/S/D intent** read in the *view* frame —
+// `W` (or nothing) is the camera's forward, `S` is behind, `D` is 90 degrees to
+// the right, `A` is 90 degrees to the left and `W`+`D` is 45 degrees to the
+// right. A held `A`/`D` no longer switches the feature off; in the legacy modes
+// (the camera-relative goal, or `strafe_ignore_keys`) it still stands the
+// feature down, so the player's own air control wins.
+//
+// The wish is then pushed perpendicular to the **current** horizontal velocity
+// on the goal's side, at the `AirAccelerate` optimum `theta*`
+// (`docs/re/strafing.md`), recomputed every tick so it re-perpendicularises
+// instead of decaying (a *held* side with a fixed basis stops accelerating after
+// ~3 ticks). The side decision carries a **dead zone and a hysteresis**: the
+// goal's offset from the velocity heading only decides the side when it is at
+// or beyond `k_strafe_side_deadzone_deg`; inside it the side of the last
+// decisive tick is kept. Holding `W` alone puts the goal exactly on the
+// velocity heading, and the tie-break there would flip the curve every tick.
+//
+// The maths is in `strafe_geometry.hpp` (pure, host-tested); this function only
+// reads the engine and hands it over. Nothing writes a view angle, so neither
+// the camera nor the pawn's eye angles move (`write_strafe_wish` documents the
+// two silent encodings).
 void Input::strafe_tick(void* base, void* cmd) noexcept {
   strafe_airborne_.store(false);
   strafe_delta_.store(0.0F);
@@ -485,24 +506,37 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   strafe_side_.store(0);
   strafe_steps_.store(0);
   strafe_clamped_.store(false);
+  strafe_side_locked_.store(0);
+  strafe_intent_f_.store(0.0F);
+  strafe_intent_l_.store(0.0F);
   strafe_reason_.store(0);
   if (base == nullptr || !strafe_enabled_.load()) {
+    strafe_side_last_.store(0);
+    return;
+  }
+  const int mode = strafe_mode_.load();
+  if (mode == static_cast<int>(StrafeMode::off)) {
+    strafe_reason_.store(8);  // the settings turned the feature off
+    strafe_side_last_.store(0);
     return;
   }
   if (on_ground()) {
     strafe_reason_.store(1);  // grounded: leave the player's own input alone
+    strafe_side_last_.store(0);
     return;
   }
   float vx = 0.0F;
   float vy = 0.0F;
   if (!velocity(vx, vy)) {
     strafe_reason_.store(2);
+    strafe_side_last_.store(0);
     return;
   }
   const float speed = std::sqrt(vx * vx + vy * vy);
   strafe_speed_.store(speed);
   if (speed < k_strafe_min_speed) {
     strafe_reason_.store(2);
+    strafe_side_last_.store(0);
     return;
   }
   strafe_airborne_.store(true);
@@ -515,55 +549,62 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
       !cs2::game::read(angles_ptr + k_angles_values_offset + sizeof(float), view_yaw)) {
     strafe_reason_.store(3);
     strafe_airborne_.store(false);
+    strafe_side_last_.store(0);
     return;
   }
 
   // The player's travel intent, read from the command's own mask *before* it is
-  // overwritten. Holding a strafe key (A/D) stands the assist down — the player is
-  // already air-controlling — and `S` flips the goal behind the camera.
+  // overwritten. The diagnostics report the **raw** W/A/S/D reading, so the
+  // operator can see what the feature read; in the legacy modes a held strafe
+  // key (A/D) stands the assist down — the player is already air-controlling —
+  // and the goal is the camera's forward/back.
   std::uint64_t buttons = 0;
   const auto cmd_ptr = reinterpret_cast<std::uintptr_t>(cmd);
   if (cmd != nullptr && writable(cmd_ptr + k_cmd_buttons_offset, sizeof(std::uint64_t))) {
     buttons = *reinterpret_cast<std::uint64_t*>(cmd_ptr + k_cmd_buttons_offset);
   }
+  const StrafeIntent intent = intent_from_buttons(buttons);
+  strafe_intent_f_.store(intent.forward);
+  strafe_intent_l_.store(intent.right);
+  const bool legacy = mode == static_cast<int>(StrafeMode::camera_relative) ||
+                      strafe_ignore_keys_.load();
   constexpr std::uint64_t side_bits = button::k_moveleft | button::k_moveright;
-  if ((buttons & side_bits) != 0) {
+  if (legacy && (buttons & side_bits) != 0) {
     strafe_reason_.store(7);
     strafe_airborne_.store(false);
     return;
   }
-  const float goal = normalize_angle(view_yaw + ((buttons & button::k_back) != 0 ? 180.0F : 0.0F));
-  strafe_goal_.store(goal);
+  // The legacy goal ignores the lateral keys (and lets `S` win over `W`).
+  const StrafeIntent goal_intent = legacy ? legacy_intent_from_buttons(buttons) : intent;
 
   // The `AirAccelerate` optimum: with the per-call budget
   // `A = wishspeed * sv_airaccelerate * frametime` and the air cap
   // `W = sv_air_max_wishspeed` (30), the wish sits at `theta* = acos((W - A)/s)`
   // off the velocity; `A >= W` collapses it to exactly 90 degrees (the usual case
-  // for a full analog, `A = 250 * 12 / 64 = 46.875`). `theta` is clamped so the
-  // degenerate `A >= W` branch and a slow player both stay sane.
-  const int steps = std::clamp(strafe_subticks_.load(), 0, k_strafe_max_steps);
-  const float cap = k_strafe_air_wishspeed;
-  const float wishspeed = strafe_wishspeed_.load();
-  // The per-call budget `A` and the optimal angle it implies. The engine re-runs
+  // for a full analog, `A = 250 * 12 / 64 = 46.875`). The engine re-runs
   // `AirAccelerate` once per slice with `frametime = (1/64)/slices`
   // (`docs/re/strafing.md` §2.5), so a slice's `A` is the full-tick `A` divided by
   // the slice count.
-  const auto theta_for = [cap](float speed, float accel) -> float {
-    if (cap - accel <= 0.0F || speed <= 0.0F) {
-      return 90.0F;  // A >= W: exactly perpendicular
-    }
-    return static_cast<float>(std::acos(std::clamp((cap - accel) / speed, -1.0F, 1.0F)) * 180.0 /
-                              k_pi);
-  };
+  const int steps = std::clamp(strafe_subticks_.load(), 0, k_strafe_max_steps);
+  const float cap = k_strafe_air_wishspeed;
+  const float wishspeed = strafe_wishspeed_.load();
   const float accel_tick = wishspeed * k_strafe_airaccelerate * k_tick_interval;
 
-  const auto vel_yaw = static_cast<float>(std::atan2(vy, vx) * 180.0 / k_pi);
-  const float delta = normalize_angle(goal - vel_yaw);
-  const float side = delta >= 0.0F ? 1.0F : -1.0F;
-  const float theta = std::clamp(theta_for(speed, accel_tick), 1.0F, 90.0F);
-  const float wish_yaw = normalize_angle(vel_yaw + side * theta);
+  const auto vel_yaw = heading_of(vx, vy);
+  const StrafePlan decision = plan(goal_intent, view_yaw, vel_yaw, speed, accel_tick, cap,
+                                   strafe_side_last_.load(), k_strafe_side_deadzone_deg);
+  strafe_goal_.store(decision.goal_yaw);
+  strafe_side_.store(decision.side);
+  strafe_side_locked_.store(decision.decisive ? 0 : 1);
+  if (decision.decisive) {
+    // The hysteresis state: the side of the last decisive tick. It is reset
+    // when the strafe stops acting (above), so a fresh jump starts from the
+    // default tie-break.
+    strafe_side_last_.store(decision.side);
+  }
+  const auto side = static_cast<float>(decision.side);
+  const float wish_yaw = decision.wish_yaw;
   const float rot = normalize_angle(wish_yaw - view_yaw);
-  strafe_side_.store(side > 0.0F ? 1 : -1);
   strafe_wish_.store(wish_yaw);
   strafe_delta_.store(rot);
 
@@ -586,15 +627,15 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
       if (s < k_strafe_min_speed) {
         break;
       }
-      const auto slice_vel = static_cast<float>(std::atan2(sy, sx) * 180.0 / k_pi);
-      const float slice_theta = std::clamp(theta_for(s, accel_slice), 1.0F, 90.0F);
+      const auto slice_vel = heading_of(sx, sy);
+      const float slice_theta = optimal_theta(s, accel_slice, cap);
       const float wish = normalize_angle(slice_vel + side * slice_theta);
       deltas[count++] = normalize_angle(wish - basis);
       basis = wish;
       // Step the simulated velocity the way `AirAccelerate` will:
       // `addspeed = min(wishspeed, 30) - dot(v, wishdir)`, `applied = min(A, addspeed)`.
-      const float wx = std::cos(wish * k_pi / 180.0F);
-      const float wy = std::sin(wish * k_pi / 180.0F);
+      const float wx = std::cos(wish * k_deg_to_rad);
+      const float wy = std::sin(wish * k_deg_to_rad);
       const float addspeed = cap - (sx * wx + sy * wy);
       if (addspeed > 0.0F) {
         const float applied = std::min(accel_slice, addspeed);
@@ -623,7 +664,7 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   // = (sin, -cos)`), snapped to the `sv_quantize_movement_input` valid set so a
   // rounding server and the client agree. Used only in the `subticks == 0` mode —
   // the sub-tick mode rotates the basis instead and keeps `(1, 0)`.
-  const float rel = rot * k_pi / 180.0F;
+  const float rel = rot * k_deg_to_rad;
   const float forward = std::cos(rel);
   const float left = -std::sin(rel);
 
@@ -1766,10 +1807,8 @@ void Input::apply(void* cmd) noexcept {
     // stopping outright. Every channel the engine moves from is written: the command's
     // base move + both button states, the raw axes source (`CCSGOInput + 0x270`, also
     // pre-original in `write_raw_move`) and the engine's own held-button word.
-    constexpr std::uint64_t move_bits = button::k_forward | button::k_back |
-                                        button::k_moveleft | button::k_moveright;
-    constexpr float k_pi = 3.14159265358979323846F;
-    constexpr float k_deg_to_rad = 0.01745329251994329577F;
+    constexpr std::uint64_t move_bits =
+        button::k_forward | button::k_back | button::k_moveleft | button::k_moveright;
 
     const float limit = rage_stop_speed_.load();
     float vx = 0.0F;

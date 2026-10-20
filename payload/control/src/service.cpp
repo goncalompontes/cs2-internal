@@ -546,6 +546,16 @@ auto Service::input_status() noexcept -> Json {
   result.set("strafe_clamped", Json::boolean(input_.strafe_clamped()));
   result.set("strafe_wishspeed", Json::number(input_.strafe_wishspeed()));
   result.set("strafe_subticks", Json::number(static_cast<double>(input_.strafe_subticks())));
+  // The strafe's own knobs and what it read: the goal mode, the legacy
+  // "A/D stands down" rule, the decoded view-frame intent (forward / right),
+  // the dead zone's verdict and the dead zone itself.
+  result.set("strafe_mode", Json::number(static_cast<double>(input_.strafe_mode())));
+  result.set("strafe_ignore_keys", Json::boolean(input_.strafe_ignore_keys()));
+  result.set("strafe_intent_f", Json::number(input_.strafe_intent_f()));
+  result.set("strafe_intent_l", Json::number(input_.strafe_intent_l()));
+  result.set("strafe_side_locked", Json::boolean(input_.strafe_side_locked()));
+  result.set("strafe_side_last", Json::number(static_cast<double>(input_.strafe_side_last())));
+  result.set("strafe_deadzone_deg", Json::number(input_.strafe_deadzone_deg()));
   result.set("strafe_writes", Json::number(static_cast<double>(input_.strafe_writes())));
   result.set("strafe_raw_writes", Json::number(static_cast<double>(input_.strafe_raw_writes())));
   result.set("bhop_presses", Json::number(static_cast<double>(input_.bhop_presses())));
@@ -777,6 +787,17 @@ void Service::do_strafe(const Json& args, Json& out) noexcept {
     return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
                                                   : fallback;
   };
+  // `mode` (0 = off, 1 = the camera's forward/back — the legacy goal, 2 = the
+  // player's W/A/S/D intent) and `ignore` (1 = a held `A`/`D` stands the
+  // feature down — the legacy rule). They are the strafe's own knobs, so they
+  // are applied whether the feature is on or not.
+  input_.set_strafe_mode(
+      static_cast<int>(number("mode", static_cast<float>(input_.strafe_mode()))));
+  bool ignore = input_.strafe_ignore_keys();
+  if (const Json* arg = args.find("ignore"); arg != nullptr) {
+    ignore = arg->is_bool() ? arg->as_bool() : arg->as_number() != 0.0;
+  }
+  input_.set_strafe_ignore_keys(ignore);
   if (on) {
     // `wishspeed` (the engine's clamped speed for a full analog, ~250) and
     // `subtick` (0 = the camera-frame analog, N = split the basis rotation over N
@@ -792,6 +813,13 @@ void Service::do_strafe(const Json& args, Json& out) noexcept {
 void Service::set_movement_features(bool auto_strafe, bool bhop) noexcept {
   input_.set_strafe(auto_strafe);
   input_.set_bhop(bhop);
+}
+
+void Service::set_strafe_features(int mode, bool ignore_keys, float wishspeed,
+                                  int subticks) noexcept {
+  input_.set_strafe_mode(mode);
+  input_.set_strafe_ignore_keys(ignore_keys);
+  input_.set_strafe_config(wishspeed, subticks);
 }
 
 void Service::set_rage_features(bool on, int key, bool fire, int objective, int hitbox, float fov,

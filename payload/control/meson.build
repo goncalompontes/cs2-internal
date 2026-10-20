@@ -2,6 +2,11 @@
 # JSON, plus the in-process `exec` primitive (docs/re/engine2.md). Windows-only
 # logic; json/predicate/snapshot_json are also built host-side for their tests
 # (see the root meson.build).
+#
+# `include/cs2/control/strafe_geometry.hpp` is the auto-strafe's decision
+# maths: a header-only, dependency-free module (no engine headers, no
+# `<windows.h>`) that the host test `control-strafe` (root meson.build)
+# compiles on its own.
 control_inc = include_directories('include')
 
 control_lib = static_library('cs2_control',

@@ -28,6 +28,8 @@
 #include <cstdint>
 #include <string_view>
 
+#include "cs2/control/strafe_geometry.hpp"
+
 namespace cs2::control {
 
 // `CUserCmd` layout (`docs/re/client-dll.md` §"Input path"): stride `0x98`,
@@ -118,8 +120,9 @@ inline constexpr std::size_t k_input_entry_move_offset = 0x18;
 inline constexpr float k_move_scale = 1.0F;
 inline constexpr float k_move_epsilon = 0.01F;
 
-// Degrees <-> radians and angle wrapping for the auto-strafe maths.
-inline constexpr float k_pi = 3.14159265358979323846F;
+// Degrees <-> radians and angle wrapping for the auto-strafe maths live in
+// `strafe_geometry.hpp` (`k_pi`, `normalize_angle`), with the button bits and
+// the strafe's decision maths.
 //: Below this horizontal speed the air-strafe wish angle is meaningless (the
 //: community's own guard is `speed < 5`) — nothing is written.
 inline constexpr float k_strafe_min_speed = 25.0F;
@@ -144,41 +147,8 @@ inline constexpr float k_strafe_rot_limit_deg = 100.0F;
 //: admission gate caps the whole field at 32 entries; the bhop pair shares it).
 inline constexpr int k_strafe_max_steps = 16;
 
-//: Shortest signed difference `a - b` in degrees, in `(-180, 180]`.
-[[nodiscard]] inline auto normalize_angle(float value) noexcept -> float {
-  auto wrapped = std::fmod(value + 180.0F, 360.0F);
-  if (wrapped < 0.0F) {
-    wrapped += 360.0F;
-  }
-  return wrapped - 180.0F;
-}
-
 // How many `CSubtickMoveStep`s the probe reads back from the last command.
 inline constexpr std::size_t k_probe_steps = 4;
-
-// Source `IN_*` button bits (the `CUserCmd` button mask).
-namespace button {
-inline constexpr std::uint64_t k_attack = 1ull << 0;
-inline constexpr std::uint64_t k_jump = 1ull << 1;
-inline constexpr std::uint64_t k_duck = 1ull << 2;
-inline constexpr std::uint64_t k_forward = 1ull << 3;
-inline constexpr std::uint64_t k_back = 1ull << 4;
-inline constexpr std::uint64_t k_use = 1ull << 5;
-inline constexpr std::uint64_t k_cancel = 1ull << 6;
-inline constexpr std::uint64_t k_left = 1ull << 7;
-inline constexpr std::uint64_t k_right = 1ull << 8;
-inline constexpr std::uint64_t k_moveleft = 1ull << 9;
-inline constexpr std::uint64_t k_moveright = 1ull << 10;
-inline constexpr std::uint64_t k_attack2 = 1ull << 11;
-inline constexpr std::uint64_t k_run = 1ull << 12;
-inline constexpr std::uint64_t k_reload = 1ull << 13;
-inline constexpr std::uint64_t k_alt1 = 1ull << 14;
-inline constexpr std::uint64_t k_alt2 = 1ull << 15;
-inline constexpr std::uint64_t k_score = 1ull << 16;
-inline constexpr std::uint64_t k_speed = 1ull << 17;
-inline constexpr std::uint64_t k_walk = 1ull << 18;
-inline constexpr std::uint64_t k_zoom = 1ull << 19;
-}  // namespace button
 
 // Resolve a friendly or `in_*` button name to its bit; 0 when unknown.
 [[nodiscard]] std::uint64_t button_bit(std::string_view name) noexcept;
@@ -336,14 +306,23 @@ class Input {
   // --- auto-strafe -------------------------------------------------------
   // A **normal, silent** auto-strafe: while **airborne** (and above a minimum
   // speed) each tick it
-  //   1. takes the goal heading from the held keys read in the *view* frame
-  //      (W/nothing ⇒ the camera's forward, S ⇒ behind; holding A/D stands the
-  //      feature down — the player's own air control wins), and
+  //   1. takes the goal heading from the player's **W/A/S/D intent** read in the
+  //      *view* frame (`W` ⇒ the camera's forward, `S` ⇒ behind, `D` ⇒ 90° to
+  //      the right, `A` ⇒ 90° to the left, `W`+`D` ⇒ 45° to the right; no
+  //      movement key ⇒ the camera's forward), and
   //   2. pushes the air-acceleration wish **perpendicular to the velocity** on the
   //      side of that goal (the optimal `theta*` of `AirAccelerate`:
   //      `theta* = A >= W ? 90 : acos((W - A) / speed)`, `W = sv_air_max_wishspeed
   //      = 30`, `A = sv_airaccelerate * wishspeed * frametime`), re-derived from the
   //      *current* velocity every tick so the wish re-perpendicularises.
+  //
+  // The side decision has a **dead zone and a hysteresis**: the goal's offset
+  // from the velocity heading decides the side only when it is at or beyond
+  // `k_strafe_side_deadzone_deg` (20°); inside it the side of the last
+  // decisive tick is kept. Holding `W` alone puts the goal exactly on the
+  // velocity heading, and without the hysteresis the tie-break there would
+  // flip the curve every tick. The maths lives in `strafe_geometry.hpp`
+  // (pure, host-tested).
   //
   // The wish is written **silently** — no view angle is touched, so neither the
   // camera nor the pawn's eye angles move. Two encodings, chosen by `subticks`:
@@ -362,13 +341,24 @@ class Input {
   //     nearly flat.
   //
   // On the ground, below the minimum speed, when no command/basis is readable, or
-  // when the player holds A/D, it writes nothing. Pairs with `bhop` for the classic
-  // auto-bhop-strafe, sharing the sub-tick array and its admission gate.
+  // when the player holds A/D (in the legacy modes), it writes nothing. Pairs
+  // with `bhop` for the classic auto-bhop-strafe, sharing the sub-tick array and
+  // its admission gate.
   void set_strafe(bool on) noexcept;
   [[nodiscard]] bool strafe() const noexcept { return strafe_enabled_.load(); }
   void set_strafe_config(float wishspeed, int subticks) noexcept;
+  /// How the goal heading is derived (`StrafeMode`): `off` disables the
+  /// feature, `camera_relative` is the legacy camera-forward goal and
+  /// `directional` follows the player's W/A/S/D.
+  void set_strafe_mode(int mode) noexcept;
+  /// The legacy rule: a held `A`/`D` stands the feature down and the goal is
+  /// the camera's forward/back. Off (the default) the lateral keys **bias**
+  /// the heading instead.
+  void set_strafe_ignore_keys(bool ignore) noexcept;
   [[nodiscard]] float strafe_wishspeed() const noexcept { return strafe_wishspeed_.load(); }
   [[nodiscard]] int strafe_subticks() const noexcept { return strafe_subticks_.load(); }
+  [[nodiscard]] int strafe_mode() const noexcept { return strafe_mode_.load(); }
+  [[nodiscard]] bool strafe_ignore_keys() const noexcept { return strafe_ignore_keys_.load(); }
   [[nodiscard]] std::uint64_t strafe_writes() const noexcept { return strafe_writes_.load(); }
   [[nodiscard]] std::uint64_t strafe_raw_writes() const noexcept {
     return strafe_raw_writes_.load();
@@ -376,17 +366,33 @@ class Input {
   [[nodiscard]] bool strafe_airborne() const noexcept { return strafe_airborne_.load(); }
   [[nodiscard]] float strafe_speed() const noexcept { return strafe_speed_.load(); }
   [[nodiscard]] float strafe_delta() const noexcept { return strafe_delta_.load(); }
-  // The goal heading (from the held keys, world yaw), the chosen wish yaw, the
-  // basis rotation written (`wish - view`, degrees, after the gate clamp), the side
-  // (+1 CCW / −1 CW of the velocity) and how many `yaw_delta` steps were queued.
+  // The goal heading (the W/A/S/D intent's travel heading, world yaw), the
+  // chosen wish yaw, the basis rotation written (`wish - view`, degrees, after
+  // the gate clamp), the side (+1 CCW / −1 CW of the velocity) and how many
+  // `yaw_delta` steps were queued.
   [[nodiscard]] float strafe_goal() const noexcept { return strafe_goal_.load(); }
   [[nodiscard]] float strafe_wish() const noexcept { return strafe_wish_.load(); }
   [[nodiscard]] float strafe_rot() const noexcept { return strafe_rot_.load(); }
   [[nodiscard]] int strafe_side() const noexcept { return strafe_side_.load(); }
   [[nodiscard]] int strafe_steps() const noexcept { return strafe_steps_.load(); }
+  // The decoded **view-frame intent** the feature read this tick (the forward
+  // axis: +1 = `W`, -1 = `S`; the lateral axis: +1 = `D`, -1 = `A`). Both 0
+  // when no movement key is held — the goal then falls back to the camera's
+  // forward.
+  [[nodiscard]] float strafe_intent_f() const noexcept { return strafe_intent_f_.load(); }
+  [[nodiscard]] float strafe_intent_l() const noexcept { return strafe_intent_l_.load(); }
+  // True when the dead zone kept the previous side instead of re-deciding it.
+  [[nodiscard]] bool strafe_side_locked() const noexcept { return strafe_side_locked_.load() != 0; }
+  // The side of the last **decisive** tick (the hysteresis state; 0 when there
+  // is none yet, which is also the state a fresh jump starts from).
+  [[nodiscard]] int strafe_side_last() const noexcept { return strafe_side_last_.load(); }
+  // The configured dead zone, in degrees (a constant — exposed so the operator
+  // can confirm the build).
+  [[nodiscard]] float strafe_deadzone_deg() const noexcept { return k_strafe_side_deadzone_deg; }
   // Why the last tick did or did not act: 0 off/no command, 1 on the ground,
   // 2 too slow, 3 no readable basis, 4 acted, 5 no room in the sub-tick array,
-  // 6 nothing to write, 7 the player is holding A/D (their input wins).
+  // 6 nothing to write, 7 the player is holding A/D (their input wins),
+  // 8 the strafe mode is off (the settings disabled the feature).
   [[nodiscard]] int strafe_reason() const noexcept { return strafe_reason_.load(); }
   // True when the basis rotation had to be clamped so the admission gate's
   // view-delta limit could not discard the whole array (the bhop pair included).
@@ -705,6 +711,10 @@ class Input {
   std::atomic<std::uint64_t> bhop_skipped_{0};  // landings with no pair placed
   std::atomic<float> strafe_wishspeed_{250.0F};
   std::atomic<int> strafe_subticks_{8};
+  // The goal mode (the wire's `movement_strafe_mode` byte) and the legacy
+  // "a held A/D stands the feature down" rule.
+  std::atomic<int> strafe_mode_{static_cast<int>(StrafeMode::directional)};
+  std::atomic<bool> strafe_ignore_keys_{false};
   std::atomic<std::uint64_t> strafe_writes_{0};
   std::atomic<std::uint64_t> strafe_raw_writes_{0};
   // Engine prediction (sub-tick bhop): the movement-services vtable entries the
@@ -730,6 +740,12 @@ class Input {
   std::atomic<int> strafe_steps_{0};
   std::atomic<int> strafe_reason_{0};
   std::atomic<bool> strafe_clamped_{false};
+  // The view-frame intent the feature read, the dead zone's verdict and the
+  // hysteresis state (the side of the last decisive tick).
+  std::atomic<float> strafe_intent_f_{0.0F};
+  std::atomic<float> strafe_intent_l_{0.0F};
+  std::atomic<int> strafe_side_locked_{0};
+  std::atomic<int> strafe_side_last_{0};
   std::atomic<bool> move_enabled_{false};
   std::atomic<bool> move_quantize_{false};
   std::atomic<bool> move_step_{false};
