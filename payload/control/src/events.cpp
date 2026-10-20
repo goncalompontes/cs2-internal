@@ -126,7 +126,10 @@ void __fastcall EventLog::fire_detour_b(void* self, void* event, std::uintptr_t 
 }
 
 auto EventLog::is_subscribed(std::string_view name) const noexcept -> bool {
-  for (std::size_t i = 0; i < subscription_count_; ++i) {
+  // The count is published with a release store (after the name is written),
+  // so a reader that sees it also sees the name.
+  const std::size_t count = subscription_count_.load(std::memory_order_acquire);
+  for (std::size_t i = 0; i < count; ++i) {
     if (name == std::string_view(subscribed_[i])) {
       return true;
     }
@@ -135,17 +138,25 @@ auto EventLog::is_subscribed(std::string_view name) const noexcept -> bool {
 }
 
 void EventLog::remember(std::string_view name) noexcept {
-  if (subscription_count_ >= k_max_subscriptions) {
+  const std::size_t count = subscription_count_.load(std::memory_order_relaxed);
+  if (count >= k_max_subscriptions) {
     return;
   }
   const std::size_t length =
       name.size() < EventEntry::k_max_name_length ? name.size() : EventEntry::k_max_name_length;
-  std::memcpy(subscribed_[subscription_count_], name.data(), length);
-  subscribed_[subscription_count_][length] = '\0';
-  ++subscription_count_;
+  std::memcpy(subscribed_[count], name.data(), length);
+  subscribed_[count][length] = '\0';
+  // Publish the count only after the name is written: the game thread reads
+  // it without the lock (it must not block on the control or render thread).
+  subscription_count_.store(count + 1, std::memory_order_release);
 }
 
 void EventLog::refresh() noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  refresh_locked();
+}
+
+void EventLog::refresh_locked() noexcept {
   if (installed_) {
     return;
   }
@@ -193,7 +204,7 @@ void EventLog::refresh() noexcept {
   cs2::game::append_log("[cs2-payload] events: dispatch hooked (" + std::to_string(patched) +
                         "/2)");
   for (const std::string_view name : k_default_events) {
-    if (subscribe(name) == k_subscribe_rejected) {
+    if (subscribe_locked(name) == k_subscribe_rejected) {
       cs2::game::append_log(std::string("[cs2-payload] events: stale default '") +
                             std::string(name) + "'");
     }
@@ -201,12 +212,21 @@ void EventLog::refresh() noexcept {
 }
 
 auto EventLog::subscribe(std::string_view name) noexcept -> std::int32_t {
+  // One lock for the install and the subscription: the control thread (the
+  // harness's `events` command) and the render thread (the sound provider's
+  // lazy subscription) can both ask for the events, and two concurrent
+  // installs would patch the dispatch vtable twice and chain the detours.
+  std::lock_guard<std::mutex> lock(mutex_);
   if (!installed_) {
-    refresh();
+    refresh_locked();
   }
   if (!installed_ || name.empty()) {
     return k_subscribe_not_ready;
   }
+  return subscribe_locked(name);
+}
+
+auto EventLog::subscribe_locked(std::string_view name) noexcept -> std::int32_t {
   if (is_subscribed(name)) {
     return k_subscribe_already;
   }
@@ -214,7 +234,7 @@ auto EventLog::subscribe(std::string_view name) noexcept -> std::int32_t {
     return k_subscribe_rejected;  // not an event this build defines
   }
   remember(name);
-  return static_cast<std::int32_t>(subscription_count_ - 1);
+  return static_cast<std::int32_t>(subscription_count_.load(std::memory_order_relaxed) - 1);
 }
 
 void EventLog::record_event(void* event) noexcept {
@@ -241,7 +261,7 @@ void EventLog::record_event(void* event) noexcept {
 
   EventArg args[EventEntry::k_max_args];
   const std::size_t arg_count = read_args(event, vtable, name, args);
-  g_active->ring_.push(name, args, arg_count);
+  g_active->ring_.push(name, args, arg_count, now);
 }
 
 auto EventLog::read_args(void* event, void** vtable, std::string_view name, EventArg* out) noexcept
