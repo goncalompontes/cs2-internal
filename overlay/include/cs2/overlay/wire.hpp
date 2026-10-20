@@ -487,7 +487,13 @@ inline void write_settings(Shared& shared, const Settings& in) noexcept {
 // builds to the same checksum: a change to the block's layout or to the
 // checksum function breaks the build on **both** sides instead of producing a
 // block the other side cannot verify.
-inline constexpr uint32_t k_default_settings_checksum = 657938248U;
+//
+// **Changing a default in `default_settings()` changes this constant.** The
+// assertion below then fires in all three builds (the host suite, the payload
+// and the Vulkan layer); recompute it and say so in the commit. The failure is
+// deliberate: a default that moves without the constant moving would let the
+// two binaries disagree about what the block's checksum is.
+inline constexpr uint32_t k_default_settings_checksum = 3884274149U;
 
 static_assert(settings_checksum(default_settings()) == k_default_settings_checksum,
               "the settings checksum changed: the payload and the layer must agree on it");
