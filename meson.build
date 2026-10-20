@@ -4,6 +4,14 @@ project('cs2-internal', 'cpp',
   default_options : [
     'warning_level=3',
     'buildtype=debugoptimized',
+    # The host build carries the tests, and `scripts/release.sh` configures it
+    # with `--buildtype=release`. Meson's `b_ndebug` default is `if-release`,
+    # so `NDEBUG` would be defined there and every `assert()` in the test
+    # suite would be compiled out: a test that only bites in the debug build
+    # is not a test. The assertions stay live in every configuration; the
+    # tests that must survive `NDEBUG` do not rely on `assert` at all (they
+    # count their failures explicitly).
+    'b_ndebug=false',
   ])
 
 # C++23 dialect. Meson's built-in cpp_std option does not list 'c++23' for the
