@@ -160,6 +160,33 @@ void test_place_arrow() {
   expect(!none.valid, "a degenerate direction has no placement");
 }
 
+// The edge clamp must not invert on a viewport that is smaller than twice
+// the margin: the distance to the border is negative there, so an
+// unclamped division puts the arrow on the **wrong** side of the screen.
+void test_place_arrow_small_viewport() {
+  constexpr float k_width = 40.0F;
+  constexpr float k_height = 40.0F;
+
+  const geometry::ArrowPlacement left =
+      geometry::place_arrow(geometry::Direction{.x = -1.0F, .y = 0.0F}, k_width, k_height);
+  expect(left.valid, "a leftward target has a placement on a small viewport");
+  expect(left.x <= k_width * 0.5F, "the left arrow is not to the right of the centre");
+  expect(left.x >= 0.0F, "the left arrow stays on the viewport");
+  expect(close(left.y, k_height * 0.5F), "the left arrow is at the centre's height");
+
+  const geometry::ArrowPlacement right =
+      geometry::place_arrow(geometry::Direction{.x = 1.0F, .y = 0.0F}, k_width, k_height);
+  expect(right.valid, "a rightward target has a placement on a small viewport");
+  expect(right.x >= k_width * 0.5F, "the right arrow is not to the left of the centre");
+  expect(right.x <= k_width, "the right arrow stays on the viewport");
+
+  const geometry::ArrowPlacement up =
+      geometry::place_arrow(geometry::Direction{.x = 0.0F, .y = -1.0F}, k_width, k_height);
+  expect(up.valid, "an upward target has a placement on a small viewport");
+  expect(up.y <= k_height * 0.5F, "the upper arrow is not below the centre");
+  expect(up.y >= 0.0F, "the upper arrow stays on the viewport");
+}
+
 void test_arrow_triangle() {
   const geometry::ArrowPlacement placement{.x = 100.0F, .y = 50.0F, .angle = 0.0F, .valid = true};
   const std::vector<std::pair<float, float>> triangle = geometry::arrow_triangle(placement, 10.0F);
@@ -280,6 +307,37 @@ void test_skeleton_missing_capsule() {
          "the legs survive a missing stomach");
 }
 
+// The chest capsules are missing: the neck and the pelvis are both "generic",
+// so the chain must still tell them apart — otherwise the pelvis is never
+// identified and **the legs vanish**.
+void test_skeleton_missing_chest() {
+  std::vector<skeleton::BonePoint> points = player_points();
+  points.erase(std::remove_if(points.begin(), points.end(),
+                              [](const skeleton::BonePoint& point) {
+                                return point.group == skeleton::k_hitgroup_chest;
+                              }),
+               points.end());
+  const std::vector<skeleton::Segment> chain = skeleton::build_chain(points);
+  expect(chain.size() >= 15, "a model without the chest keeps its segments");
+  expect(has_segment(chain, 0.0F, 0.0F, 40.0F, 0.0F, 0.0F, 36.0F),
+         "the stomach joins the pelvis without the chest");
+  expect(has_segment(chain, 0.0F, 0.0F, 36.0F, -5.0F, 0.0F, 30.0F),
+         "the legs are still attached without the chest");
+  expect(has_segment(chain, 0.0F, 0.0F, 36.0F, 5.0F, 0.0F, 30.0F),
+         "the right leg is still attached without the chest");
+}
+
+// A third "generic" capsule (a gear box) must not steal the pelvis role.
+void test_skeleton_gear_capsule() {
+  std::vector<skeleton::BonePoint> points = player_points();
+  points.push_back({skeleton::k_hitgroup_generic, 0.0F, 0.0F, 4.0F});  // a gear box
+  const std::vector<skeleton::Segment> chain = skeleton::build_chain(points);
+  expect(has_segment(chain, 0.0F, 0.0F, 40.0F, 0.0F, 0.0F, 36.0F),
+         "the stomach still joins the pelvis");
+  expect(has_segment(chain, 0.0F, 0.0F, 36.0F, -5.0F, 0.0F, 30.0F),
+         "the legs hang off the pelvis, not off the gear box");
+}
+
 void test_skeleton_empty() {
   const std::vector<skeleton::Segment> chain = skeleton::build_chain({});
   expect(chain.empty(), "an empty model has no segments");
@@ -293,11 +351,14 @@ auto main() -> int {
   test_corner_segments();
   test_screen_direction();
   test_place_arrow();
+  test_place_arrow_small_viewport();
   test_arrow_triangle();
   test_radar_offset();
   test_circle_points();
   test_skeleton_chain();
   test_skeleton_missing_capsule();
+  test_skeleton_missing_chest();
+  test_skeleton_gear_capsule();
   test_skeleton_empty();
   if (failures != 0) {
     std::printf("features-esp-geometry: %d failed check(s)\n", failures);

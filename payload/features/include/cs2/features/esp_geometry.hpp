@@ -149,8 +149,13 @@ struct ArrowPlacement {
   const float cy = height * 0.5F;
   // The distance from the centre to the border along the direction; the
   // smaller of the two keeps the arrow inside the margin on both axes.
-  const float tx = (std::abs)(dx) > 1e-4F ? (cx - margin) / (std::abs)(dx) : 1e9F;
-  const float ty = (std::abs)(dy) > 1e-4F ? (cy - margin) / (std::abs)(dy) : 1e9F;
+  //
+  // The margin is clamped at zero: a viewport narrower than twice the
+  // margin has no room for it, and the unclamped distance would be
+  // negative — which puts the arrow on the **wrong** side of the screen (a
+  // target to the left would be drawn to the right of the centre).
+  const float tx = (std::abs)(dx) > 1e-4F ? (std::max)(cx - margin, 0.0F) / (std::abs)(dx) : 1e9F;
+  const float ty = (std::abs)(dy) > 1e-4F ? (std::max)(cy - margin, 0.0F) / (std::abs)(dy) : 1e9F;
   const float t = (std::min)(tx, ty);
   placement.x = cx + dx * t;
   placement.y = cy + dy * t;

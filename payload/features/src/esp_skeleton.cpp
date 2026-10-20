@@ -87,31 +87,127 @@ auto build_chain(const std::vector<BonePoint>& points) -> std::vector<Segment> {
   std::sort(chest.begin(), chest.end(), by_height);
   std::reverse(chest.begin(), chest.end());
 
-  // The chest's height tells the neck from the pelvis among the generic
-  // capsules (both carry the "generic" hitgroup).
-  float chest_height = 0.0F;
-  if (!chest.empty()) {
-    for (const BonePoint& point : chest) {
-      chest_height += point.z;
-    }
-    chest_height /= static_cast<float>(chest.size());
-  }
-
+  // --- The neck and the pelvis ---------------------------------------------
+  //
+  // Both carry the "generic" hitgroup, so they are told apart by their
+  // **position**:
+  //
+  //   * the neck is the generic capsule nearest the head — the head's bottom
+  //     sits directly above the neck;
+  //   * the pelvis is the generic capsule nearest the legs' **highest**
+  //     capsule — the thigh's top sits directly below the pelvis.
+  //
+  // A third generic capsule (a gear box) is away from both, so it never
+  // steals either role.
+  //
+  // The model's own heights are the fallback: the chest's height (the
+  // stomach's, when the model has no chest capsules) separates the neck
+  // (above it) from the pelvis (below it). The chest alone is not enough:
+  // without it the "above the chest" test degenerates — every generic
+  // capsule counts as "above" — the pelvis is never identified and the legs
+  // vanish.
   const BonePoint* neck = nullptr;
   const BonePoint* pelvis = nullptr;
-  for (const BonePoint& point : generic) {
-    const bool above = chest.empty() || point.z > chest_height;
-    if (above) {
-      if (neck == nullptr || point.z > neck->z) {
-        neck = &point;
+
+  // The generic capsule nearest `anchor`, skipping the one already taken.
+  const auto nearest_generic = [&generic](const BonePoint& anchor,
+                                          const BonePoint* taken) -> const BonePoint* {
+    const BonePoint* best = nullptr;
+    float best_distance = 0.0F;
+    for (const BonePoint& point : generic) {
+      if (taken != nullptr && &point == taken) {
+        continue;
       }
-    } else if (pelvis == nullptr || point.z < pelvis->z) {
-      pelvis = &point;
+      const float distance = distance_sq(point, anchor);
+      if (best == nullptr || distance < best_distance) {
+        best = &point;
+        best_distance = distance;
+      }
+    }
+    return best;
+  };
+
+  if (!generic.empty()) {
+    // The neck: the head's lowest capsule is the one right above it.
+    if (!head.empty()) {
+      const BonePoint* lowest_head = &*std::min_element(head.begin(), head.end(), by_height);
+      neck = nearest_generic(*lowest_head, nullptr);
+    }
+    // The pelvis: the legs' highest capsule (the thigh's top) is the one
+    // right below it.
+    const BonePoint* thigh = nullptr;
+    for (const BonePoint& point : left_leg) {
+      if (thigh == nullptr || point.z > thigh->z) {
+        thigh = &point;
+      }
+    }
+    for (const BonePoint& point : right_leg) {
+      if (thigh == nullptr || point.z > thigh->z) {
+        thigh = &point;
+      }
+    }
+    if (thigh != nullptr) {
+      pelvis = nearest_generic(*thigh, neck);
     }
   }
-  if (neck == nullptr && pelvis == nullptr && !generic.empty()) {
-    // No chest to compare against: the higher capsule is the neck.
-    neck = &(*std::max_element(generic.begin(), generic.end(), by_height));
+
+  // The reference height: the chest's own, the stomach's when the model has
+  // no chest capsules, the head's as the last resort.
+  float reference = 0.0F;
+  bool have_reference = false;
+  if (!chest.empty()) {
+    for (const BonePoint& point : chest) {
+      reference += point.z;
+    }
+    reference /= static_cast<float>(chest.size());
+    have_reference = true;
+  } else if (!stomach.empty()) {
+    reference = stomach.front().z;
+    have_reference = true;
+  } else if (!head.empty()) {
+    reference = std::max_element(head.begin(), head.end(), by_height)->z;
+    have_reference = true;
+  }
+
+  if (!generic.empty() && (neck == nullptr || pelvis == nullptr)) {
+    if (!have_reference) {
+      // No height to compare against: the highest generic capsule is the
+      // neck and the next one down is the pelvis.
+      std::vector<const BonePoint*> ordered;
+      ordered.reserve(generic.size());
+      for (const BonePoint& point : generic) {
+        ordered.push_back(&point);
+      }
+      std::sort(
+          ordered.begin(), ordered.end(),
+          [](const BonePoint* a, const BonePoint* b) noexcept -> bool { return a->z > b->z; });
+      if (neck == nullptr && !ordered.empty()) {
+        neck = ordered.front();
+      }
+      if (pelvis == nullptr && ordered.size() > 1) {
+        pelvis = ordered[1];
+      }
+    } else {
+      for (const BonePoint& point : generic) {
+        if (neck != nullptr && &point == neck) {
+          continue;
+        }
+        if (pelvis != nullptr && &point == pelvis) {
+          continue;
+        }
+        if (point.z > reference) {
+          // The neck: the closest generic capsule above the reference.
+          if (neck == nullptr || (point.z - reference) < (neck->z - reference)) {
+            neck = &point;
+          }
+        } else {
+          // The pelvis: the closest generic capsule below the reference.
+          if (pelvis == nullptr || (reference - point.z) < (reference - pelvis->z)) {
+            pelvis = &point;
+          }
+        }
+      }
+    }
   }
 
   // The torso, in order: head, neck, chest (top down), stomach, pelvis. A
