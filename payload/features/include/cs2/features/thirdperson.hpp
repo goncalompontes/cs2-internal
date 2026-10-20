@@ -132,6 +132,9 @@ class ThirdPerson {
   bool has_saved_ideal_distance_ = false;
   float last_distance_ = 0.0F;
   std::uint64_t last_log_ms_ = 0;
+  // When the console route last re-armed the camera (the re-arm is
+  // rate-limited; see `k_rearm_interval_ms`).
+  std::uint64_t last_rearm_ms_ = 0;
 };
 
 }  // namespace cs2::features
