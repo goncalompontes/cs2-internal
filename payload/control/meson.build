@@ -7,7 +7,13 @@
 # maths: a header-only, dependency-free module (no engine headers, no
 # `<windows.h>`) that the host test `control-strafe` (root meson.build)
 # compiles on its own.
+#
+# The overlay's `include/` is on the path because `cs2/overlay/wire.hpp` is the
+# **shared POD contract** between the payload and the Vulkan layer (the
+# settings block the `settings` command reads and writes), not a layering
+# violation.
 control_inc = include_directories('include')
+overlay_inc = include_directories('../../overlay/include')
 
 control_lib = static_library('cs2_control',
   files(
@@ -21,14 +27,15 @@ control_lib = static_library('cs2_control',
     'src/channel.cpp',
     'src/occlusion_query.cpp',
     'src/rage_config.cpp',
+    'src/settings_access.cpp',
     'src/service.cpp',
   ),
-  include_directories : control_inc,
+  include_directories : [control_inc, overlay_inc],
   dependencies : [game_dep, aim_dep, diag_dep, tls_dep, sdk_dep, hooks_dep],
 )
 
 control_dep = declare_dependency(
   link_with : control_lib,
-  include_directories : control_inc,
+  include_directories : [control_inc, overlay_inc],
   dependencies : [game_dep, aim_dep, diag_dep, tls_dep, sdk_dep, hooks_dep],
 )

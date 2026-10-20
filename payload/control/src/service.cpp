@@ -72,6 +72,13 @@ namespace {
 constexpr DWORD k_poll_ms = 100;
 constexpr std::int64_t k_default_timeout_ms = 30000;
 
+// The `log` command: how many lines the payload's own log tail returns (the
+// default and the cap).
+constexpr std::size_t k_default_log_lines = 50;
+constexpr std::size_t k_max_log_lines = 500;
+// How much of the log file's end is read (the tail is taken from it).
+constexpr std::uint64_t k_log_window_bytes = 64U * 1024U;
+
 // Extend an AABB (`lo`/`hi`) to contain `point`.
 void extend_point(game::Vec3& lo, game::Vec3& hi, const game::Vec3& p) noexcept {
   lo.x = p.x < lo.x ? p.x : lo.x;
@@ -263,6 +270,16 @@ auto Service::handle(const std::string& line, std::string& response) noexcept ->
     do_heatmap(arguments, out);
   } else if (command == "predict") {
     do_predict(arguments, out);
+  } else if (command == "settings") {
+    do_settings(arguments, out);
+  } else if (command == "batch") {
+    if (!do_batch(arguments, out)) {
+      // A step closed the channel (a `quit` step).
+      response = out.dump();
+      return false;
+    }
+  } else if (command == "log") {
+    do_log(arguments, out);
   } else {
     set_error(out, "unknown cmd");
   }
@@ -296,6 +313,10 @@ auto Service::ping_result() noexcept -> Json {
   Json result = Json::object();
   result.set("pong", Json::boolean(true));
   result.set("pid", Json::number(static_cast<double>(GetCurrentProcessId())));
+  // The command-surface version: a stale client and a new payload can then
+  // disagree loudly instead of silently (the envelope itself is unchanged, so
+  // an old client still parses it).
+  result.set("protocol", Json::integer(k_protocol_version));
   // How long ago the payload was injected (its own clock): the harness waits for
   // this before the first console line, because `exec` faults in the engine's
   // Cbuf path when issued too soon after injection.
@@ -393,13 +414,37 @@ void Service::do_events(const Json& args, Json& out) noexcept {
   if (limit < 0) {
     limit = 0;
   }
+  // The optional `since` cursor: only the events with `seq > since` are
+  // returned, so a client does not have to diff the sequence numbers by hand.
+  // `last_seq` is the highest sequence the ring holds — the client's next
+  // cursor.
+  std::uint64_t since = 0;
+  bool has_since = false;
+  if (const Json* arg = args.find("since"); arg != nullptr && arg->is_number()) {
+    const std::int64_t requested = arg->as_int();
+    since = static_cast<std::uint64_t>(requested > 0 ? requested : 0);
+    has_since = true;
+  }
   Json subscriptions = Json::object();
   subscriptions.set("accepted", std::move(accepted));
   subscriptions.set("rejected", std::move(rejected));
+  Json recent = events_.recent(static_cast<std::size_t>(limit));
+  if (has_since) {
+    Json filtered = Json::array();
+    for (const Json& item : recent.items()) {
+      const Json* seq = item.find("seq");
+      if (seq != nullptr && seq->as_int() > 0 &&
+          static_cast<std::uint64_t>(seq->as_int()) > since) {
+        filtered.push_back(item);
+      }
+    }
+    recent = std::move(filtered);
+  }
   Json result = Json::object();
   result.set("count", Json::integer(static_cast<std::int64_t>(events_.count())));
+  result.set("last_seq", Json::integer(static_cast<std::int64_t>(events_.count())));
   result.set("subscribe", std::move(subscriptions));
-  result.set("events", events_.recent(static_cast<std::size_t>(limit)));
+  result.set("events", std::move(recent));
   set_ok(out, std::move(result));
 }
 
@@ -494,6 +539,146 @@ void Service::do_wait_for(const Json& args, Json& out) noexcept {
   Json result = Json::object();
   result.set("matched", Json::boolean(matched));
   result.set("snapshot", std::move(snapshot));
+  set_ok(out, std::move(result));
+}
+
+void Service::do_settings(const Json& args, Json& out) noexcept {
+  if (!settings_access_.available()) {
+    set_error(out, "settings unavailable: the live settings block is not registered");
+    return;
+  }
+  if (!settings_access_.ready()) {
+    set_error(out, "settings unavailable: the live settings block is not published yet");
+    return;
+  }
+  const auto outcome = run_settings(args, settings_access_);
+  if (!outcome.has_value()) {
+    set_error(out, outcome.error().message);
+    return;
+  }
+  Json result = Json::object();
+  if (outcome->wrote) {
+    // Only the keys whose value actually changed (a set to the value it
+    // already had is not a change).
+    Json changed = Json::array();
+    for (const std::string& name : outcome->changed) {
+      changed.push_back(Json::string(name));
+    }
+    result.set("changed", std::move(changed));
+  }
+  result.set("values", std::move(outcome->values));
+  set_ok(out, std::move(result));
+}
+
+auto Service::do_batch(const Json& args, Json& out) noexcept -> bool {
+  const Json* steps = args.find("steps");
+  if (steps == nullptr) {
+    set_error(out, "batch requires a \"steps\" array");
+    return true;
+  }
+  batch_closed_ = false;
+  Json results = Json::array();
+  const auto outcome = BatchRunner::run(*steps, 1, &Service::dispatch_step, this, results);
+  if (!outcome.has_value()) {
+    // A malformed batch: the whole command fails, and no step ran.
+    set_error(out, outcome.error().message);
+    return true;
+  }
+  Json result = Json::object();
+  result.set("results", std::move(results));
+  set_ok(out, std::move(result));
+  return !batch_closed_;
+}
+
+auto Service::dispatch_step(void* context, const Json& step, Json& response) noexcept -> bool {
+  auto* self = static_cast<Service*>(context);
+  // The step is a request: it goes through the service's own dispatcher, so a
+  // step behaves exactly like a direct request.
+  Json request = Json::object();
+  const Json* cmd = step.find("cmd");
+  if (cmd == nullptr) {
+    response.set("ok", Json::boolean(false));
+    response.set("error", Json::string("the step has no \"cmd\""));
+    return true;
+  }
+  request.set("cmd", *cmd);
+  if (const Json* step_args = step.find("args"); step_args != nullptr) {
+    request.set("args", *step_args);
+  }
+  std::string line = request.dump();
+  std::string text;
+  const bool keep_going = self->handle(line, text);
+  if (!keep_going) {
+    self->batch_closed_ = true;
+  }
+  const std::optional<Json> parsed = Json::parse(text);
+  if (parsed.has_value() && parsed->is_object()) {
+    for (const auto& [key, value] : parsed->members()) {
+      if (key == "ok" || key == "result" || key == "error") {
+        response.set(key, value);
+      }
+    }
+  }
+  if (response.find("ok") == nullptr) {
+    response.set("ok", Json::boolean(false));
+    response.set("error", Json::string("the step produced no response"));
+  }
+  return keep_going;
+}
+
+void Service::do_log(const Json& args, Json& out) noexcept {
+  std::size_t count = k_default_log_lines;
+  if (const Json* arg = args.find("count"); arg != nullptr && arg->is_number()) {
+    const auto requested = arg->as_int();
+    count = requested > 0 ? static_cast<std::size_t>(requested) : 0;
+  }
+  count = (std::min)(count, k_max_log_lines);
+
+  // The payload's own log file (`cs2::game::append_log` writes it). The file
+  // is read — there is no second in-memory buffer.
+  char path[MAX_PATH];
+  if (!cs2::game::data_file_path("cs2-payload.log", path, sizeof(path))) {
+    set_error(out, "log unavailable: the payload's data directory is not known");
+    return;
+  }
+  HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    set_error(out, "log unavailable: the payload has not written a log file yet");
+    return;
+  }
+  LARGE_INTEGER size{};
+  if (!GetFileSizeEx(file, &size)) {
+    CloseHandle(file);
+    set_error(out, "log unavailable: the log file's size could not be read");
+    return;
+  }
+  const auto length = static_cast<std::uint64_t>(size.QuadPart);
+  const std::uint64_t window = length < k_log_window_bytes ? length : k_log_window_bytes;
+  LARGE_INTEGER offset{};
+  offset.QuadPart = static_cast<LONGLONG>(length - window);
+  SetFilePointerEx(file, offset, nullptr, FILE_BEGIN);
+  std::string text(static_cast<std::size_t>(window), '\0');
+  DWORD read = 0;
+  if (window > 0) {
+    ReadFile(file, text.data(), static_cast<DWORD>(window), &read, nullptr);
+  }
+  CloseHandle(file);
+  text.resize(read);
+
+  std::vector<std::string> lines = log_tail(text, count);
+  if (length > window && !lines.empty()) {
+    // The window starts in the middle of a line: that first line is partial.
+    lines.erase(lines.begin());
+  }
+  Json array = Json::array();
+  for (const std::string& line : lines) {
+    array.push_back(Json::string(line));
+  }
+  Json result = Json::object();
+  result.set("path", Json::string(std::string(path)));
+  result.set("count", Json::integer(static_cast<std::int64_t>(lines.size())));
+  result.set("lines", std::move(array));
   set_ok(out, std::move(result));
 }
 
@@ -813,6 +998,16 @@ void Service::do_strafe(const Json& args, Json& out) noexcept {
 void Service::set_movement_features(bool auto_strafe, bool bhop) noexcept {
   input_.set_strafe(auto_strafe);
   input_.set_bhop(bhop);
+}
+
+void Service::set_settings_access(SettingsReader reader, SettingsWriter writer,
+                                  void* context) noexcept {
+  settings_access_.set(reader, writer, context);
+}
+
+void Service::set_settings_access(SettingsReader reader, SettingsWriter writer, SettingsReady ready,
+                                  void* context) noexcept {
+  settings_access_.set(reader, writer, ready, context);
 }
 
 void Service::set_strafe_features(int mode, bool ignore_keys, float wishspeed,
@@ -2292,7 +2487,36 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   const float fov = number("fov", 90.0F);
   const float half_span = fov > 0.0F ? fov * 0.5F * k_deg_to_rad : k_pi;
   const float extent = half_span < k_pi ? half_span : k_pi;
-  const aim::Vec2 view{local.eye_angles.yaw * k_deg_to_rad, -local.eye_angles.pitch * k_deg_to_rad};
+  aim::Vec2 view{local.eye_angles.yaw * k_deg_to_rad, -local.eye_angles.pitch * k_deg_to_rad};
+  // The optional `target`: the view window is centred on the direction from
+  // the eye to that entity instead of on the camera. The **chart** itself
+  // stays the absolute world yaw/pitch field (the basis is unchanged), so the
+  // cell values do not move — only the window the chart is clipped to, and
+  // rendered through, does.
+  int view_target = -1;
+  if (const Json* value = args.find("target"); value != nullptr && value->is_number()) {
+    view_target = static_cast<int>(value->as_number());
+    const game::PlayerSnapshot* target = nullptr;
+    for (const game::PlayerSnapshot& player : snapshot.players) {
+      if (player.index == view_target) {
+        target = &player;
+        break;
+      }
+    }
+    if (target == nullptr) {
+      set_error(out, "heatmap: unknown target entity " + std::to_string(view_target));
+      return;
+    }
+    const game::Vec3 delta = target->eye_origin - eye;
+    const float length = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+    if (length <= 0.0F) {
+      set_error(out, "heatmap: target " + std::to_string(view_target) + " is at the eye");
+      return;
+    }
+    // The chart's coordinates: u = atan2(y, x), v = asin(z / |d|).
+    view.x = std::atan2(delta.y, delta.x);
+    view.y = std::asin(std::clamp(delta.z / length, -1.0F, 1.0F));
+  }
   const int history = std::clamp(integer("history", 6), 0, 64);
   const bool include_all = flag("all").value_or(false);
   // The lag-comp window (`docs/re/lagcomp.md`): the rewind floor is measured from
@@ -2494,6 +2718,8 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   // it; the chart data itself is absolute (docs/ragebot.md).
   payload.set("view_yaw", Json::number(static_cast<double>(view.x)));
   payload.set("view_pitch", Json::number(static_cast<double>(view.y)));
+  // The entity the view window is centred on (-1 = the camera).
+  payload.set("view_target", Json::integer(view_target));
   Json weapon_json = Json::object();
   weapon_json.set("damage", Json::number(static_cast<double>(weapon.damage)));
   weapon_json.set("headshot", Json::number(static_cast<double>(weapon.headshot_multiplier)));

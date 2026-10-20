@@ -22,9 +22,17 @@
 #include "cs2/control/json.hpp"
 #include "cs2/control/occlusion_query.hpp"
 #include "cs2/control/rage_config.hpp"
+#include "cs2/control/settings_access.hpp"
 #include "cs2/game/state_reader.hpp"
 
 namespace cs2::control {
+
+// The command-surface version: the `ping` result's `protocol`.
+//
+// The channel was not versioned, so a stale client and a new payload could
+// disagree silently. It starts at 2: the surface the harness documents as
+// "v1" plus the `settings`, `batch` and `log` commands.
+inline constexpr std::int64_t k_protocol_version = 2;
 
 class Service {
  public:
@@ -45,6 +53,22 @@ class Service {
   // menu's settings and the payload's env call this, and the `strafe`/`bhop`
   // control commands set the same flags (the last writer wins).
   void set_movement_features(bool auto_strafe, bool bhop) noexcept;
+
+  // Register the access to the live feature settings block (ADR-0021).
+  //
+  // The block is **owned** elsewhere: the in-process overlay menu owns it, and
+  // in the Vulkan-layer mode the shared segment does (the layer's menu writes
+  // it, the payload publishes it). The owner registers a reader and a writer,
+  // so the `settings` command reads and writes the same block the menu owns —
+  // a control-side change and a menu-side change are one block, and the
+  // owner's next frame does not overwrite the change.
+  void set_settings_access(SettingsReader reader, SettingsWriter writer, void* context) noexcept;
+
+  // The same, with a readiness probe: whether the owner has published the
+  // block yet. A control-side write must not touch a block the control channel
+  // has never seen.
+  void set_settings_access(SettingsReader reader, SettingsWriter writer, SettingsReady ready,
+                           void* context) noexcept;
 
   // The auto-strafe's own knobs (the wire's `movement_strafe_*` bytes): how the
   // goal heading is derived (`mode`: 0 = off, 1 = the camera's forward/back —
@@ -115,6 +139,14 @@ class Service {
   void do_exec(const Json& args, Json& out) noexcept;
   void do_events(const Json& args, Json& out) noexcept;
   void do_wait_for(const Json& args, Json& out) noexcept;
+  // The feature settings block (`settings`): read and write the live block by
+  // its flat wire field names.
+  void do_settings(const Json& args, Json& out) noexcept;
+  // Run a list of commands in order (`batch`). Returns false when a step
+  // closed the channel (a `quit` step).
+  [[nodiscard]] bool do_batch(const Json& args, Json& out) noexcept;
+  // The payload's own log tail (`log`).
+  void do_log(const Json& args, Json& out) noexcept;
   void do_input(const Json& args, Json& out) noexcept;
   void do_press(const Json& args, Json& out, bool release) noexcept;
   void do_move(const Json& args, Json& out) noexcept;
@@ -151,6 +183,11 @@ class Service {
   static void game_thread_entry(void* context) noexcept;
   // The common `input`/`press`/`bhop` status payload.
   [[nodiscard]] Json input_status() noexcept;
+
+  // Run one batch step through the service's own dispatcher, so a step
+  // behaves exactly like a direct request. Returns false when the channel
+  // must close.
+  static auto dispatch_step(void* context, const Json& step, Json& response) noexcept -> bool;
 
   // Note the local pawn for the `usercmd` auto-jump on-ground test.
   void note_local_pawn(const game::Snapshot& snapshot) noexcept {
@@ -334,6 +371,11 @@ class Service {
   EventLog events_;
   Input input_;
   std::optional<game::StateReader> reader_;
+  // The access to the live feature settings block (ADR-0021), registered by
+  // the block's owner (`payload_main.cpp`).
+  SettingsAccess settings_access_;
+  // Set when a batch step closed the channel (a `quit` step).
+  bool batch_closed_ = false;
 };
 
 }  // namespace cs2::control

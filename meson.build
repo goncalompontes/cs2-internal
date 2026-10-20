@@ -181,6 +181,32 @@ aim_penetration_test = executable('aim_penetration_test',
 )
 test('aim-penetration', aim_penetration_test)
 
+# The settings name table (generated): the control channel's `settings` command
+# addresses a feature setting by its flat wire field name, and the byte offset
+# of a field is a property of the packed layout -- 87 hand-maintained entries
+# would drift. `scripts/gen-settings-table.py` parses `wire.hpp` and writes the
+# table into the source tree (the same pattern as `scripts/gen-sdk.py`); it
+# fails loudly on a parse error rather than emitting an empty table.
+gen_settings_table = find_program('scripts/gen-settings-table.py')
+settings_table = custom_target('settings-table',
+  output : 'settings-table.stamp',
+  command : [gen_settings_table,
+             meson.current_source_dir() / 'overlay' / 'include' / 'cs2' / 'overlay' / 'wire.hpp',
+             meson.current_source_dir() / 'overlay' / 'include' / 'cs2' / 'overlay' / 'settings_table.hpp',
+             '@OUTPUT@'],
+  build_always_stale : true,
+  console : true,
+  build_by_default : true,
+)
+settings_table_dep = declare_dependency(
+  sources : settings_table,
+)
+
+# The table must never be stale: the check fails when the file on disk differs
+# from a fresh generation (the build above regenerates it, so this catches a
+# hand-edited table).
+test('settings-table', gen_settings_table, args : ['--check'])
+
 # Control-channel core (ADR-0020): the platform-independent parts of
 # payload/control (JSON value, `wait_for` predicate, snapshot serialization are
 # built here; the pipe/console/thread parts are Windows-only and live in the
@@ -192,11 +218,14 @@ control_core_test = executable('control_core_test',
     'payload/control/src/predicate.cpp',
     'payload/control/src/snapshot_json.cpp',
     'payload/control/src/event_ring.cpp',
+    'payload/control/src/settings_access.cpp',
   ),
   include_directories : [
     include_directories('payload/control/include'),
     include_directories('payload/game/include'),
+    include_directories('overlay/include'),
   ],
+  dependencies : settings_table_dep,
 )
 test('control-core', control_core_test)
 
