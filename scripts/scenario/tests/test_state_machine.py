@@ -21,11 +21,19 @@ import pathlib
 import sys
 import unittest
 from dataclasses import dataclass
+from typing import Any, cast
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from scenario import screens  # noqa: E402
-from scenario.protocol import ControlTransport  # noqa: E402
+from scenario.protocol import (  # noqa: E402
+    ControlTransport,
+    EventsResult,
+    ExecResult,
+    PingResult,
+    StateSnapshotDict,
+    WaitResult,
+)
 from scenario.screens import Can, Machine, Screen  # noqa: E402
 from scenario.session import Game, SessionError  # noqa: E402
 from scenario.tests.test_screens import blank, snapshot  # noqa: E402
@@ -35,7 +43,7 @@ from scenario.tests.test_screens import blank, snapshot  # noqa: E402
 class Frame:
     """One moment of the fake game: the snapshot and the event tail."""
 
-    raw: dict
+    raw: StateSnapshotDict
     events: tuple[str, ...] = ()
 
 
@@ -54,7 +62,7 @@ class FakeGame:
     def __init__(self, *frames: Frame) -> None:
         self.frames: list[Frame] = list(frames) or [Frame(snapshot())]
         self.execs: list[str] = []
-        self.waits: list[dict] = []
+        self.waits: list[dict[str, Any]] = []
         self.polls = 0
         self._index = 0
 
@@ -63,11 +71,11 @@ class FakeGame:
     def frame(self) -> Frame:
         return self.frames[min(self._index, len(self.frames) - 1)]
 
-    def state(self) -> dict:
+    def state(self) -> StateSnapshotDict:
         self.polls += 1
         return self.frame.raw
 
-    def events(self, limit: int = 64, subscribe=None) -> dict:
+    def events(self, limit: int = 64, subscribe: str | list[str] | None = None) -> EventsResult:
         return {
             "count": len(self.frame.events),
             "subscribe": {},
@@ -75,18 +83,19 @@ class FakeGame:
                        for index, name in enumerate(self.frame.events)],
         }
 
-    def exec(self, line: str) -> dict:
+    def exec(self, line: str) -> ExecResult:
         self.execs.append(line)
         self._index += 1
         return {"queued": True}
 
     def wait_for(self, *, timeout: float = 30.0, event: str | None = None,
-                 event_args=None, **predicates) -> dict:
+                 event_args: dict[str, Any] | None = None,
+                 **predicates: Any) -> WaitResult:
         self.waits.append({"timeout": timeout, "event": event, **predicates})
         self._index += 1
         return {"matched": True, "snapshot": None}
 
-    def ping(self) -> dict:
+    def ping(self) -> PingResult:
         return {"pong": True, "pid": 1, "uptime_ms": 60_000, "exec_ready": True,
                 "events_ready": True, "events_subscribed": 0,
                 "events_dispatch_calls": 0, "input_ready": True,
@@ -95,9 +104,14 @@ class FakeGame:
 
 
 def machine_for(*frames: Frame) -> tuple[Machine, FakeGame]:
-    """A machine bound to a fake channel that plays the given frames."""
+    """A machine bound to a fake channel that plays the given frames.
+
+    The machine is written against the ``Game`` façade; the fake stands in for
+    it (it answers the same calls), so the cast is the one place the two
+    meet.
+    """
     game = FakeGame(*frames)
-    return Machine(game, debug=False), game
+    return Machine(cast(Game, game), debug=False), game
 
 
 class TestTransitionGraph(unittest.TestCase):
@@ -303,8 +317,8 @@ class TestMachineDrive(unittest.TestCase):
         """
         machine, game = machine_for(Frame(blank()))
         machine._loading = True
-        machine.observe()
-        self.assertIs(machine.state.screen, Screen.LOADING)
+        state = machine.observe()
+        self.assertIs(state.screen, Screen.LOADING)
         # The action of the LOADING screen waits; it never asks for a map.
         machine._do_wait_load(timeout=0.2)
         self.assertEqual(game.execs, [])

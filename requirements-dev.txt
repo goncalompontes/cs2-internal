@@ -1,0 +1,19 @@
+# The development-only dependencies of the Python side.
+#
+# The package itself is **standard library only at runtime** (`pyproject.toml`
+# says so too): everything listed here is a tool the *gate* and the *test
+# suite* use, never something the runner needs at runtime.
+#
+#   pip install -r requirements-dev.txt
+#
+# Pinned: a gate that changes its mind between runs is not a gate.
+
+# The type checker. `scripts/typecheck.py` runs it over `scripts/scenario` and
+# exits non-zero on an error — the configuration lives in `pyproject.toml`
+# (`[tool.mypy]`).
+mypy==1.14.1
+
+# The MCP SDK. Only the *reference client* test needs it (it drives the MCP
+# server with the real client); that test is skipped when the package is
+# absent, because the server itself is standard library only.
+mcp>=2.0,<3

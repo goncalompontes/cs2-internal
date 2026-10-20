@@ -15,66 +15,119 @@ import pathlib
 import sys
 import unittest
 from dataclasses import dataclass
+from typing import Any, Iterable, Mapping, cast
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from scenario import screens  # noqa: E402
+from scenario.protocol import StateSnapshotDict, validate_snapshot  # noqa: E402
 from scenario.screens import Can, Screen  # noqa: E402
 
 
-def snapshot(**overrides: object) -> dict:
+def player(**overrides: Any) -> dict[str, Any]:
+    """One player block, as the payload writes it.
+
+    Every key the payload writes is present: the snapshot contract says the
+    block is never partial, so a fixture that omitted one would be a fixture
+    the payload could never produce.
+    """
+    raw: dict[str, Any] = {
+        "index": 0,
+        "name": "player",
+        "weapon": "weapon_ak47",
+        "team": 2,
+        "connected": 0,
+        "health": 100,
+        "max_health": 100,
+        "armor": 0,
+        "life_state": 0,
+        "on_ground": True,
+        "flags": 1,
+        "clip": 30,
+        "reserve": 90,
+        "ping": 10,
+        "money": 800,
+        "flash": 0.0,
+        "alive": True,
+        "is_local": True,
+        "helmet": False,
+        "defuser": False,
+        "scoped": False,
+        "defusing": False,
+        "in_buy_zone": True,
+        "has_bomb": False,
+        "origin": {"x": 1.0, "y": 2.0, "z": 3.0},
+        "eye_origin": {"x": 1.0, "y": 2.5, "z": 3.0},
+        "velocity": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "eye_angles": {"pitch": 0.0, "yaw": 90.0, "roll": 0.0},
+        "distance": 0.0,
+        "simulation_time": 30.0,
+        "tick_base": 1000,
+    }
+    raw.update(overrides)
+    return raw
+
+
+def snapshot(**overrides: Any) -> StateSnapshotDict:
     """A payload `state` snapshot, live and playable unless overridden.
 
     The default is a **plain live round**: the buy window is *closed* (the
     window being open is its own screen now — `Screen.BUY_TIME`), the bomb is
     not down and the match is in the first half.
+
+    The fixture is a **complete** wire snapshot — every key the payload writes
+    is present — and it is *validated* on the way out, so a fixture can never
+    drift away from the contract the payload answers with.
     """
-    raw: dict = {
+    raw: dict[str, Any] = {
         "valid": True,
-        # `in_game` = the payload's level probe (the level's rules-proxy entity).
-        "in_game": True,
         "in_map": True,
         "local_pawn": 0x1234,
-        "level": {"up": True, "proxy": "0x1", "rules_global": True},
-        "local": {
-            "team": 2,
-            "alive": True,
-            "life_state": 0,
-            "on_ground": True,
-            "origin": {"x": 1.0, "y": 2.0, "z": 3.0},
-            "weapon": "weapon_ak47",
-            "has_bomb": False,
-            "defuser": False,
-            "defusing": False,
+        "level": {
+            "up": True,
+            "proxy": "0x1",
+            "rules_global": True,
+            "identities": 726,
+            "local_connected": 0,
         },
+        "local": player(),
         "rules": {
             "loaded": True,
             "match_started": True,
             "warmup": False,
             "freeze": False,
-            "round_win_status": 0,
-            "round_win_reason": 0,
-            "game_phase": 2,
-            "round_time": 115,
-            "freeze_time": 0,
+            "game_restart": False,
+            "bomb_planted": False,
+            "bomb_dropped": False,
             # The buy window is closed in a plain live round.
             "t_cant_buy": True,
             "ct_cant_buy": True,
-            "bomb_planted": False,
-            "bomb_dropped": False,
+            "game_phase": 2,
+            "round_time": 115,
+            "freeze_time": 0,
+            "round_win_status": 0,
+            "round_win_reason": 0,
+            "total_rounds_played": 0,
+            "match_start_time": 30.0,
+            "round_start_time": 12.0,
+            "restart_round_time": 0.0,
+            "game_start_time": 0.0,
+            "warmup_period_start": 0.0,
+            "time_until_next_phase": 0.0,
             # The two fields the payload does not send yet (see
             # `screens.PENDING_PAYLOAD_FIELDS`).
             "overtime_playing": 0,
             "game_paused": False,
         },
-        "players": [{"team": 2}, {"team": 3}],
+        "players": [player(index=1, team=2, is_local=False),
+                    player(index=2, team=3, is_local=False)],
     }
     for key, value in overrides.items():
         if key in raw and isinstance(raw[key], dict) and isinstance(value, dict):
             raw[key] = {**raw[key], **value}
         else:
             raw[key] = value
-    return raw
+    return validate_snapshot(raw)
 
 
 @dataclass(frozen=True)
@@ -86,21 +139,39 @@ class Fixture:
     inputs the deduction takes besides the snapshot.
     """
 
-    raw: dict
+    raw: StateSnapshotDict
     loading: bool = False
     events: tuple[str, ...] = ()
 
 
-def blank() -> dict:
+def blank() -> StateSnapshotDict:
     """A snapshot with nothing readable in it.
 
     The engine booting after an injection, or the level teardown: no local
-    player, no rules, nothing to deduce from.
+    player, no readable rules, nothing to deduce from.
     """
-    raw = snapshot(valid=False, in_game=False, in_map=False, players=[])
-    raw["local"] = {}
-    raw["rules"] = {}
-    return raw
+    return snapshot(valid=False, in_map=False, local=None, players=[],
+                    rules={"loaded": False, "match_started": False})
+
+
+def deduce_raw(raw: Mapping[str, Any], events: Iterable[str] = (),
+               *, loading: bool = False) -> screens.GameState:
+    """Deduce a screen from a raw snapshot.
+
+    The deduction takes the *validated* wire shape; this is the one place
+    where a deliberately damaged snapshot (a missing probe) enters it.
+    """
+    return screens.deduce(cast(StateSnapshotDict, raw), events, loading=loading)
+
+
+def drop(raw: StateSnapshotDict, block: str, key: str) -> None:
+    """Remove a key from one block of a snapshot, in place.
+
+    The *pending* fields (the ones the payload does not send yet) are not part
+    of the wire contract, so they cannot be removed through the typed shape —
+    at runtime the block is a plain dict.
+    """
+    cast(dict[str, Any], raw)[block].pop(key, None)
 
 
 #: One representative fixture per screen (the deduction table, as data).
@@ -198,10 +269,10 @@ class TestDeduction(unittest.TestCase):
         """Without the level block the local player still decides."""
         raw = dict(FIXTURES[Screen.NOT_IN_GAME].raw)
         del raw["level"]
-        self.assertIs(screens.deduce(raw).screen, Screen.NOT_IN_GAME)
+        self.assertIs(deduce_raw(raw).screen, Screen.NOT_IN_GAME)
         raw = dict(FIXTURES[Screen.LIVE].raw)
         del raw["level"]
-        self.assertIs(screens.deduce(raw).screen, Screen.LIVE)
+        self.assertIs(deduce_raw(raw).screen, Screen.LIVE)
 
     def test_each_screen_is_recognised(self) -> None:
         for expected in Screen:
@@ -297,7 +368,7 @@ class TestDeduction(unittest.TestCase):
         # Without the field the screen is never returned (the rules block has no
         # such key, so the test is false) — the screen is dark, not faked.
         without = snapshot()
-        del without["rules"]["overtime_playing"]
+        drop(without, "rules", "overtime_playing")
         self.assertIs(screens.deduce(without).screen, Screen.LIVE)
         self.assertIn("overtime_playing", screens.PENDING_PAYLOAD_FIELDS)
 
@@ -306,7 +377,7 @@ class TestDeduction(unittest.TestCase):
         raw = snapshot(rules={"game_paused": True})
         self.assertIs(screens.deduce(raw).screen, Screen.PAUSED)
         without = snapshot()
-        del without["rules"]["game_paused"]
+        drop(without, "rules", "game_paused")
         self.assertIs(screens.deduce(without).screen, Screen.LIVE)
         self.assertIn("game_paused", screens.PENDING_PAYLOAD_FIELDS)
 

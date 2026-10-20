@@ -15,7 +15,7 @@ from __future__ import annotations
 import pathlib
 import sys
 import unittest
-from typing import Any, get_args
+from typing import Any, get_args, get_type_hints
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
@@ -310,7 +310,7 @@ class TestPredicateGrammar(unittest.TestCase):
 
     def test_the_expression_is_recursive(self) -> None:
         """``all``/``any``/``not`` nest, so the type has to be recursive."""
-        hints = protocol.get_type_hints(WaitExpr)
+        hints = get_type_hints(WaitExpr)
         self.assertIn("WaitExpr", str(hints["all"]))
         self.assertIs(hints["not"], WaitExpr)
 

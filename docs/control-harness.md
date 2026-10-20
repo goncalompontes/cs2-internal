@@ -651,6 +651,67 @@ payload hook on the console-print/logging path, or a game-event listener. Until
 then, `wait_for` predicates are state-based (an `exec_output`/`text` predicate is
 TBD).
 
+## The Python tooling
+
+The Python side is under the same roof as the C++ side: the scenario suite
+runs in `meson test`, and "fully type safe" is **enforced** by a gate rather
+than promised.
+
+### The tests
+
+`scripts/scenario/tests/` holds one suite per area, and the root
+`meson.build` registers each of them as its own `test()` — the same shape the
+C++ host suites use, so a failure names the area:
+
+| test | suite | what it pins |
+|---|---|---|
+| `scenario-protocol` | `test_protocol.py` | the wire contract and the runtime validator |
+| `scenario-screens` | `test_screens.py` | the screen deduction and the capability table |
+| `scenario-state-machine` | `test_state_machine.py` | the machine's pure logic (no game) |
+| `scenario-state` | `test_state.py` | the observation's accessors and the table's *content* |
+| `scenario-control` | `test_control.py` | the transport (a fake pipe) and the `wait_for` builder |
+| `scenario-awaiting` | `test_awaiting.py` | the readiness layer (a fake game) |
+| `scenario-session` | `test_session.py` | the session: the tool paths, the manifest, the façade |
+| `scenario-settings` | `test_settings.py` | the shared settings block (the seqlock) |
+| `scenario-heatmap` | `test_heatmap.py` | the PNG rasteriser, pixel by pixel |
+| `scenario-registry` | `test_registry.py` | the scenario registry and the tooling config |
+| `scenario-mcp` | `test_mcp.py` | the MCP server (stdio, in process) |
+| `scenario-typecheck` | `scripts/typecheck.py` | the type gate (mypy over the package) |
+
+None of them needs the game: they are host tests, and the live behaviour is
+the `scenarios/`'s job. They can also be run by hand:
+
+```powershell
+python -m unittest discover -s scripts\scenario\tests -t scripts
+python scripts\scenario\tests\run_suite.py test_control   # one suite
+```
+
+**A suite that cannot run is skipped, not failed.** The runner
+(`scripts/scenario/tests/run_suite.py`) exits with the automake skip code
+(77) when a package the suite needs is not installed, and Meson reports that
+as `SKIP`. The interpreter itself is optional too: without it, the configure
+says so and the suites are simply not registered — the C++ suite still runs.
+
+### The type gate
+
+`pyproject.toml` holds the mypy configuration (`[tool.mypy]`), and
+`scripts/typecheck.py` is the gate:
+
+```powershell
+pip install -r requirements-dev.txt   # mypy, pinned
+python scripts/typecheck.py            # exit 0 = clean, 1 = type errors
+```
+
+The configuration is `strict = true` over `scripts/scenario`: every function
+is annotated, every return type is checked, `Any` may not leak silently and
+the equality checks are strict. The wire types live in `scenario/protocol.py`
+(one `TypedDict` per answer), so a renamed field is a type error at the
+boundary instead of a `KeyError` three frames away.
+
+The package stays **standard library only at runtime** — mypy is a *dev*
+dependency, and the MCP SDK is optional (the server falls back to the
+standard library without it).
+
 ## The OpenCode / MCP integration
 
 The scenario API is also an **MCP server**: a local stdio server that exposes
