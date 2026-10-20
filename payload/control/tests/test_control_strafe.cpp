@@ -698,11 +698,43 @@ void test_the_button_bits_are_the_engine_bits() {
   assert(cs2::control::button_bit("walk") == 0);
 }
 
+// --- the steering verdict ------------------------------------------------------
+
+// The verdict is what tells the operator whether the silent encoding can work
+// at all on this server: the engine turns the velocity toward the wish when it
+// applies the basis rotation, and does not turn it at all when the server
+// ignores the sub-tick view angles (`sv_subtick_movement_view_angles 0`).
+void test_steering_verdict() {
+  using cs2::control::SteerVerdict;
+  // The velocity turned toward the wish (the side is +1 = counter-clockwise):
+  // the rotation was applied.
+  assert(cs2::control::classify_steer(100.0F, 104.0F, 1, 84.0F) == SteerVerdict::followed);
+  // The other way round: the velocity turned clockwise on a counter-clockwise
+  // wish — as wrong as no turn at all.
+  assert(cs2::control::classify_steer(100.0F, 96.0F, 1, 84.0F) == SteerVerdict::ignored);
+  // The clockwise wish and a clockwise turn: followed.
+  assert(cs2::control::classify_steer(100.0F, 96.0F, -1, 84.0F) == SteerVerdict::followed);
+  // The velocity did not move at all: the engine ignored the rotation.
+  assert(cs2::control::classify_steer(100.0F, 100.0F, 1, 84.0F) == SteerVerdict::ignored);
+  // The noise floor: a turn below the threshold is not a turn.
+  assert(cs2::control::classify_steer(100.0F, 100.1F, 1, 84.0F) == SteerVerdict::ignored);
+  // Nothing was asked for: the verdict is unknown, not "ignored".
+  assert(cs2::control::classify_steer(100.0F, 100.0F, 1, 0.0F) == SteerVerdict::unknown);
+  assert(cs2::control::classify_steer(100.0F, 100.0F, 1, 2.0F) == SteerVerdict::unknown);
+  // The wrap around 180 degrees counts as a turn (the headings are angles):
+  // -179 -> 179 is two degrees **clockwise**, 179 -> -179 is two degrees
+  // counter-clockwise.
+  assert(cs2::control::classify_steer(-179.0F, 179.0F, 1, 84.0F) == SteerVerdict::ignored);
+  assert(cs2::control::classify_steer(179.0F, -179.0F, 1, 84.0F) == SteerVerdict::followed);
+  // The thresholds are what the payload uses.
+  assert(cs2::control::k_strafe_min_requested_turn_deg == 5.0F);
+  assert(cs2::control::k_strafe_min_applied_turn_deg == 0.25F);
+}
+
 }  // namespace
 
 auto main() -> int {
-  test_intent_decoding();
-  test_goal_is_the_camera_forward();
+  test_intent_decoding();  test_goal_is_the_camera_forward();
   test_goal_is_the_lateral_keys();
   test_goal_is_the_backward_key();
   test_goal_wraps();
@@ -722,6 +754,7 @@ auto main() -> int {
   test_the_written_side_axis_carries_the_engine_sign();
   test_the_button_names_map_to_the_engine_bits();
   test_the_button_bits_are_the_engine_bits();
+  test_steering_verdict();
   std::puts("control-strafe: ok");
   return 0;
 }

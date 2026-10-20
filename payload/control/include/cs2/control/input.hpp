@@ -416,6 +416,27 @@ class Input {
   // True when the basis rotation had to be clamped so the admission gate's
   // view-delta limit could not discard the whole array (the bhop pair included).
   [[nodiscard]] bool strafe_clamped() const noexcept { return strafe_clamped_.load(); }
+  // --- The outcome: did the feature actually accelerate the player? ---------
+  //
+  // The **speed gained over the last completed airtime** (the horizontal speed
+  // at the landing minus the speed at the take-off, in units/s). This is the
+  // number the operator asked for: a silent auto-strafe that writes every tick
+  // but leaves the speed flat is not accelerating, whatever the counters say.
+  // The earlier session's live figure for the working encoding was **+85
+  // median / +105 max u/s per hop** (`docs/handoff.md`); a gated server gives
+  // ~0.
+  [[nodiscard]] float strafe_gain() const noexcept { return strafe_gain_.load(); }
+  // Did the engine apply the requested basis rotation? The server ignores the
+  // sub-tick view angles when `sv_subtick_movement_view_angles` is 0, and then
+  // the wish is never applied: the velocity heading does not move and the
+  // feature cannot work (`docs/re/strafing.md` §"The gate"). `strafe_steered`
+  // is the verdict of the last judged tick; the two counters say how many
+  // ticks the rotation was followed and how many were ignored.
+  [[nodiscard]] bool strafe_steered() const noexcept { return strafe_steered_.load(); }
+  [[nodiscard]] std::uint64_t strafe_steered_ticks() const noexcept {
+    return strafe_steered_ticks_.load();
+  }
+  [[nodiscard]] std::uint64_t strafe_ignored() const noexcept { return strafe_ignored_.load(); }
   // How many times the bhop assist queued a (sub-tick) jump press.
   [[nodiscard]] std::uint64_t bhop_presses() const noexcept { return bhop_presses_.load(); }
   // Bhop gate diagnostics: ticks the engine's button state showed the player
@@ -768,6 +789,22 @@ class Input {
   std::atomic<float> strafe_intent_l_{0.0F};
   std::atomic<int> strafe_side_locked_{0};
   std::atomic<int> strafe_side_last_{0};
+  // The outcome and the gate verdict of the auto-strafe: the speed gained over
+  // the last airtime, and whether the engine applied the requested basis
+  // rotation (the server ignores the sub-tick view angles when
+  // `sv_subtick_movement_view_angles` is 0).
+  std::atomic<float> strafe_gain_{0.0F};
+  std::atomic<bool> strafe_steered_{false};
+  std::atomic<std::uint64_t> strafe_steered_ticks_{0};
+  std::atomic<std::uint64_t> strafe_ignored_{0};
+  // The velocity heading of the previous strafe tick (the sample the steering
+  // verdict compares against) and whether there is one; the take-off speed of
+  // the current airtime and whether an airtime is running.
+  std::atomic<float> strafe_vel_yaw_last_{0.0F};
+  std::atomic<bool> strafe_vel_yaw_valid_{false};
+  std::atomic<int> strafe_side_sample_{0};
+  std::atomic<float> strafe_takeoff_speed_{0.0F};
+  std::atomic<bool> strafe_air_phase_{false};
   std::atomic<bool> move_enabled_{false};
   std::atomic<bool> move_quantize_{false};
   std::atomic<bool> move_step_{false};

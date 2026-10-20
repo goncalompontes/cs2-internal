@@ -511,6 +511,22 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   if (on_ground()) {
     strafe_reason_.store(1);  // grounded: leave the player's own input alone
     strafe_side_last_.store(0);
+    // The airtime just ended: the speed the player carried out of it is the
+    // feature's **outcome** — the gain the operator sees (the working encoding
+    // gains ~+85 u/s per hop; a server that ignores the sub-tick view angles
+    // gains nothing). The velocity is read before the ground slice of this
+    // tick, so it is still the air speed.
+    if (strafe_air_phase_.exchange(false)) {
+      float gx = 0.0F;
+      float gy = 0.0F;
+      if (velocity(gx, gy)) {
+        const float landing_speed = std::sqrt(gx * gx + gy * gy);
+        strafe_gain_.store(landing_speed - strafe_takeoff_speed_.load());
+      }
+    }
+    // A new jump starts from a clean sample: the first airborne tick's turn is
+    // the effect of the *take-off* tick's write, and there was none.
+    strafe_vel_yaw_valid_.store(false);
     return;
   }
   float vx = 0.0F;
@@ -528,6 +544,10 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
     return;
   }
   strafe_airborne_.store(true);
+  // The take-off speed of this airtime: the gain is measured against it.
+  if (!strafe_air_phase_.exchange(true)) {
+    strafe_takeoff_speed_.store(speed);
+  }
 
   auto* bytes_base = static_cast<std::uint8_t*>(base);
   auto* bytes_cmd = static_cast<std::uint8_t*>(cmd);
@@ -604,6 +624,33 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   const float rot = normalize_angle(wish_yaw - view_yaw);
   strafe_wish_.store(wish_yaw);
   strafe_delta_.store(rot);
+
+  // **Did the engine apply the rotation?** The turn of the velocity heading
+  // between this tick's read and the previous one is the effect of the
+  // rotation written in between: the engine turns the velocity toward the
+  // wish when it honours the sub-tick view angles, and it does not turn it at
+  // all when the server ignores them (`sv_subtick_movement_view_angles 0` —
+  // `docs/re/strafing.md` §"The gate"). The sample is the one the **previous**
+  // tick left behind, together with the side it pushed the wish on, so a side
+  // that flipped in between is judged against the side that was actually
+  // written.
+  if (strafe_vel_yaw_valid_.load()) {
+    switch (classify_steer(strafe_vel_yaw_last_.load(), vel_yaw, strafe_side_sample_.load(), rot)) {
+      case SteerVerdict::followed:
+        strafe_steered_ticks_.fetch_add(1);
+        strafe_steered_.store(true);
+        break;
+      case SteerVerdict::ignored:
+        strafe_ignored_.fetch_add(1);
+        strafe_steered_.store(false);
+        break;
+      case SteerVerdict::unknown:
+        break;
+    }
+  }
+  strafe_vel_yaw_last_.store(vel_yaw);
+  strafe_side_sample_.store(decision.side);
+  strafe_vel_yaw_valid_.store(true);
 
   // The per-slice basis rotations for the sub-tick mode. The engine **accumulates**
   // each step's `yaw_delta` onto the basis, so splitting the whole rotation evenly

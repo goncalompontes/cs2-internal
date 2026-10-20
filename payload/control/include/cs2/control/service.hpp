@@ -299,6 +299,17 @@ class Service {
   // show, e.g. the feature is off).
   auto rage_status(char* out, std::size_t size) const noexcept -> bool;
 
+  // The movement features' one-line status for the HUD (false when neither the
+  // auto-strafe nor the bhop is on).
+  //
+  // It carries the two numbers that answer "does the movement accelerate?":
+  // the **gain** of the last airtime (u/s) and whether the engine applied the
+  // strafe's basis rotation. The second is the gate: a server that ignores the
+  // sub-tick view angles (`sv_subtick_movement_view_angles 0`) makes the
+  // silent encoding inert, and the operator has to see that rather than guess
+  // (`docs/re/strafing.md` §"The gate").
+  auto movement_status(char* out, std::size_t size) const noexcept -> bool;
+
   // The ragebot's current target entity index (-1 = none), so the overlay can
   // highlight it.
   [[nodiscard]] int rage_target_index() const noexcept {

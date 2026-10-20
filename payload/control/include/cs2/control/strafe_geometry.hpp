@@ -446,6 +446,67 @@ struct StrafePlan {
   return static_cast<float>(std::atan2(y, x) * 180.0 / k_pi);
 }
 
+// --- The steering verdict ------------------------------------------------------
+//
+// **Did the engine apply the strafe's basis rotation?**
+//
+// The silent encoding writes the wish as a **sub-tick yaw delta**: the engine
+// accumulates it onto the command's view angles and `AirMove` builds the wish
+// from that rotated basis. When the server honours the sub-tick view angles
+// (`sv_subtick_movement_view_angles 1`) the velocity heading turns by a
+// fraction of a degree to a few degrees **per tick**, toward the wish. When the
+// server ignores them the wish is never applied at all: the velocity heading
+// does not move, the feature writes every tick and gains nothing.
+//
+// Measured live on 2026-10-20 (de_dust2 listen server, `docs/re/strafing.md`
+// §"The gate"): with the policy on, the auto-strafe carries the player from
+// 30 u/s to ~195 u/s in three hops; with it off, the speed is flat at the
+// control's ~105 u/s. **The turn of the velocity heading is the observable
+// that separates the two**, so it is what the payload reports — a silent
+// auto-strafe that writes every tick and never turns the velocity is a feature
+// that cannot work on this server, and the operator has to know.
+
+//: The smallest requested rotation that counts as "the feature asked for a
+// turn" (degrees). Below it the wish is nearly parallel to the velocity and the
+// turn it could cause is under the noise floor anyway.
+inline constexpr float k_strafe_min_requested_turn_deg = 5.0F;
+
+//: The smallest turn of the velocity heading that counts as "the engine applied
+// it" (degrees). The engine's own turn is ~1-11 degrees per tick with the
+// 8-slice rotation; the noise (the float read, a rounding server, a wall) is
+// far below a tenth of a degree.
+inline constexpr float k_strafe_min_applied_turn_deg = 0.25F;
+
+/// What the engine did with the requested rotation.
+enum class SteerVerdict {
+  unknown,   // nothing was asked for, or there is no earlier sample to compare with
+  followed,  // the velocity turned toward the wish: the rotation was applied
+  ignored,   // the velocity did not turn: the engine ignored the rotation
+};
+
+//: Classify the turn of the velocity heading against the requested rotation.
+//
+// `previous_velocity_yaw` is the heading the payload read on the **previous**
+// strafe tick and `velocity_yaw` the one it reads now, so the turn between them
+// is the effect of the rotation written in between. `side` is the side of the
+// velocity the wish was pushed on (+1 = counter-clockwise): the velocity must
+// turn that way, and a turn the other way is as good as no turn at all.
+[[nodiscard]] inline constexpr auto classify_steer(float previous_velocity_yaw, float velocity_yaw,
+                                                   int side, float requested_rotation_deg) noexcept
+    -> SteerVerdict {
+  if (std::fabs(requested_rotation_deg) < k_strafe_min_requested_turn_deg) {
+    return SteerVerdict::unknown;
+  }
+  const float turned = normalize_angle(velocity_yaw - previous_velocity_yaw);
+  if (std::fabs(turned) < k_strafe_min_applied_turn_deg) {
+    return SteerVerdict::ignored;
+  }
+  if (side != 0 && ((turned > 0.0F) != (side > 0))) {
+    return SteerVerdict::ignored;  // turned the wrong way
+  }
+  return SteerVerdict::followed;
+}
+
 // Decode a command's button mask into the view-frame intent: `W` is +1
 // forward, `S` is -1, `D` is +1 to the right and `A` is -1. A key held on both
 // sides cancels (`W`+`S` is no forward intent at all).
