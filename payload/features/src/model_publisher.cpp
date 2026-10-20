@@ -205,8 +205,25 @@ void ModelPublisher::publish_settings() noexcept {
   settings_sequence_ = sequence + 2;
 }
 
-void ModelPublisher::apply_settings() noexcept {
+// Write a settings block into the shared segment under the seqlock the layer
+// reads it with (ADR-0021): the layer's menu owns the block in the Vulkan render
+// mode, so the payload has to be able to publish a block back (e.g. after a
+// config load) or the layer would keep showing the pre-load state.
+void ModelPublisher::publish_settings_block(const wire::Settings& settings) noexcept {
+#if defined(_WIN32)
   auto* shared = static_cast<wire::Shared*>(shared_);
+  if (shared == nullptr) {
+    return;
+  }
+  const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_relaxed);
+  shared->settings_sequence.store(sequence + 1, std::memory_order_relaxed);  // odd: writing
+  std::memcpy(&shared->settings, &settings, sizeof(settings));
+  shared->settings_sequence.store(sequence + 2, std::memory_order_release);  // even: stable
+  settings_sequence_ = sequence + 2;
+#endif
+}
+
+void ModelPublisher::apply_settings() noexcept {  auto* shared = static_cast<wire::Shared*>(shared_);
   if (shared == nullptr) {
     return;
   }

@@ -12,11 +12,13 @@
 #include "cs2/control/service.hpp"
 #include "cs2/diag/crash_handler.hpp"
 #include "cs2/diag/watchdog.hpp"
+#include "cs2/features/config_store.hpp"
 #include "cs2/features/game_present_hook.hpp"
 #include "cs2/features/menu.hpp"
 #include "cs2/features/model_publisher.hpp"
 #include "cs2/features/overlay.hpp"
 #include "cs2/features/present_hook.hpp"
+#include "cs2/features/settings.hpp"
 #include "cs2/game/log.hpp"
 #include "cs2/overlay/wire.hpp"
 #include "cs2/render/imgui_backend.hpp"
@@ -52,6 +54,10 @@ struct Runtime {
   features::GamePresentHook game_present{publisher};
   features::PresentHook present{backend, overlay, &menu};
   control::Service control;
+  // The payload's own copy of the settings, so a config **load** has somewhere to
+  // land: the menu owns the live block, the file owns the persisted one, and the
+  // op protocol moves between them.
+  features::Config config;
 };
 
 Runtime g_runtime;
@@ -187,6 +193,21 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
       settings.rage_per_weapon != 0, settings.rage_weapon, settings.rage_config_op,
       settings.rage_config_token, settings.rage_recoil != 0, settings.rage_stop_speed,
       settings.rage_backtrack != 0);
+
+  // The menu's one-shot config op (save / load / reset the settings file). The op
+  // runs **once per token** — the token bookkeeping lives in the store, so the
+  // two callers of this sink (the menu and the publisher) cannot both fire it.
+  //
+  // A load or a reset changes the configuration, so the result has to reach the
+  // owner of the live block: the in-process menu (`runtime->menu`) and the shared
+  // segment (the Vulkan layer's menu, ADR-0016). Both get the same block.
+  if (cs2::features::apply_pending_op(runtime->config, settings)) {
+    const cs2::overlay::wire::Settings loaded = cs2::features::to_wire_settings(runtime->config);
+    runtime->menu.settings() = loaded;
+    runtime->publisher.publish_settings_block(loaded);
+  }
+  // Publish where the settings file lives so the menu can show it (read-only).
+  cs2::features::set_config_path(runtime->config);
 }
 
 // The per-frame overlay refresh forwards the local pawn so the movement features

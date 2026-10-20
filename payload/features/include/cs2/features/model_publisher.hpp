@@ -74,6 +74,14 @@ class ModelPublisher {
     settings_sink_context_ = context;
   }
 
+  // Write a settings block into the shared segment.
+  //
+  // The layer's menu owns the block in the Vulkan render mode, so the payload
+  // must be able to publish a block back (e.g. after a config load) or the layer
+  // would keep showing the pre-load state. Uses the same seqlock the default
+  // publication uses, so the layer never reads a half-written block.
+  void publish_settings_block(const cs2::overlay::wire::Settings& settings) noexcept;
+
  private:
 #if defined(_WIN32)
   static unsigned long __stdcall thread_entry(void* self) noexcept;
