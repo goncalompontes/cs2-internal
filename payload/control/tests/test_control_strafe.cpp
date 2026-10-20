@@ -313,6 +313,8 @@ void test_legacy_goal_is_the_old_goal() {
                                   view_yaw, 0.0F, 250.0F, 46.875F, 30.0F);
     assert(nearly(with_s.goal_yaw, cs2::control::normalize_angle(view_yaw + 180.0F)));
   }
+}
+
 // --- the engine's side-axis convention ---------------------------------------
 //
 // The convention is recorded in exactly one place —
