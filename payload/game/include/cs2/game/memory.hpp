@@ -16,6 +16,15 @@ namespace cs2::game {
 // the address is invalid or the read is short.
 [[nodiscard]] bool read_bytes(std::uintptr_t address, void* out, std::size_t count) noexcept;
 
+// Write `count` bytes to `address` in the current process. Returns false when
+// the address is not writable.
+//
+// The write goes through the OS primitive for the same reason the read does:
+// the payload is manually mapped without registered exception tables, so an
+// invalid pointer must never fault. A read-only page fails the write instead.
+[[nodiscard]] bool write_bytes(std::uintptr_t address, const void* data,
+                               std::size_t count) noexcept;
+
 template <typename T>
 [[nodiscard]] bool read(std::uintptr_t address, T& out) noexcept {
   return read_bytes(address, &out, sizeof(T));

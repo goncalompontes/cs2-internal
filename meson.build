@@ -45,11 +45,21 @@ game_matrix_test = executable('game_matrix_test', 'payload/game/tests/test_matri
 )
 test('game-matrix', game_matrix_test)
 
-# The third-person camera model (the origin/distance/angle composition) —
-# header-only and platform-independent, so the camera maths has a host
-# regression test next to the matrix one.
-game_camera_test = executable('game_camera_test', 'payload/game/tests/test_camera.cpp',
-  include_directories : include_directories('payload/game/include'),
+# The third-person camera model (the origin/distance/angle composition) and
+# the build guard on the camera's build-specific reads — the model is
+# header-only and platform-independent, and the reads take the engine access
+# as a parameter, so the camera maths and the guard have a host regression
+# test next to the matrix one (the test drives the reads against a fake
+# client, so the guard is proven without a game).
+game_camera_test = executable('game_camera_test',
+  files(
+    'payload/game/tests/test_camera.cpp',
+    'payload/game/src/camera.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/game/include'),
+    include_directories('payload/game/src'),
+  ],
 )
 test('game-camera', game_camera_test)
 
