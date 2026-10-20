@@ -2029,7 +2029,9 @@ auto Service::read_hitboxes(std::uintptr_t pawn, game::HitboxCapsule* out, int m
     return 0;
   }
   int count = 0;
-  for (const aim::ModelHitbox& box : aim::read_model_hitboxes(pawn)) {
+  // The bone names are not used here: the reader skips them, which is one
+  // string read per hitbox saved.
+  for (const aim::ModelHitbox& box : aim::read_model_hitboxes(pawn, /*read_names=*/false)) {
     if (count >= max) {
       break;
     }
