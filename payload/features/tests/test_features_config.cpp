@@ -287,16 +287,16 @@ auto test_store_round_trip() -> void {
   std::filesystem::remove(path, error);
 
   Config config = cs2::features::from_wire_settings(sentinel_settings());
-  assert(cs2::features::save(path, config));
+  assert(cs2::features::save(path.string().c_str(), config));
 
-  const auto loaded = cs2::features::load(path);
+  const auto loaded = cs2::features::load(path.string().c_str());
   assert(loaded.has_value());
   assert(*loaded == config);
 
   // A missing file is not an error the caller has to handle: it just means
   // "keep the defaults".
   std::filesystem::remove(path, error);
-  assert(!cs2::features::load(path).has_value());
+  assert(!cs2::features::load(path.string().c_str()).has_value());
   std::filesystem::remove(path, error);
 }
 
@@ -323,19 +323,38 @@ auto test_store_rejects_garbage() -> void {
       "# a comment\n"
       "esp.box = 0\n"
       "esp.box = not-a-number\n");
-  assert(!cs2::features::load(path).has_value());
+  assert(!cs2::features::load(path.string().c_str()).has_value());
 
   write("this line has no equals sign\n");
-  assert(!cs2::features::load(path).has_value());
+  assert(!cs2::features::load(path.string().c_str()).has_value());
 
   write(
       "esp.box = 0\n"
       "esp.unknown_setting = 5\n"
       "unknown_section.box = 5\n");
-  const auto loaded = cs2::features::load(path);
+  const auto loaded = cs2::features::load(path.string().c_str());
   assert(loaded.has_value());
   assert(!loaded->esp.box);
   assert(loaded->esp.health_bar);  // the default, the file did not name it
+
+  // A UTF-8 BOM (what Notepad adds by default) must not make the file
+  // corrupt: the first line is still a `key = value` line.
+  write(
+      "\xEF\xBB\xBF"
+      "esp.box = 0\n");
+  const auto with_bom = cs2::features::load(path.string().c_str());
+  assert(with_bom.has_value());
+  assert(!with_bom->esp.box);
+
+  // A colour with the wrong number of components is corrupt, not a colour.
+  write("esp.color_enemy = 1,2,3,4,5\n");
+  assert(!cs2::features::load(path.string().c_str()).has_value());
+  write("esp.color_enemy = 1,2,3\n");
+  assert(!cs2::features::load(path.string().c_str()).has_value());
+  write("esp.color_enemy = 1,2,3,4\n");
+  const auto with_color = cs2::features::load(path.string().c_str());
+  assert(with_color.has_value());
+  assert(with_color->esp.color_enemy.g == 2);
 
   std::filesystem::remove(path, error);
 }
@@ -488,31 +507,40 @@ auto test_op_protocol() -> void {
   std::error_code error;
   std::filesystem::remove(path, error);
   assert(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()));
-  assert(cs2::features::default_config_path().filename() == path.filename());
+  char published[cs2::features::k_max_config_path] = {};
+  assert(cs2::features::default_config_path(published, sizeof(published)) > 0);
+  assert(std::string(published) == path.string());
 
   // The payload publishes the file's path in the settings block.
-  Config published{};
-  cs2::features::set_config_path(published);
-  assert(std::string(published.menu.config_path.data()) == path.string());
+  Config published_config{};
+  cs2::features::set_config_path(published_config);
+  assert(std::string(published_config.menu.config_path.data()) == path.string());
 
   Config config = cs2::features::from_wire_settings(sentinel_settings());
   std::snprintf(config.menu.config_path.data(), config.menu.config_path.size(), "%s",
                 path.string().c_str());
 
-  Settings settings{};
+  // The live block the menu would hold: the op runs against it, so the file
+  // ends up with **its** values.
+  Settings settings = sentinel_settings();
   settings.menu_config_op = static_cast<std::uint8_t>(cs2::features::ConfigOp::save);
   settings.menu_config_token = 1;
-  assert(cs2::features::apply_pending_op(config, settings));
+  cs2::features::ConfigOpState state;
+  const auto saved = cs2::features::apply_pending_op(config, settings, state);
+  assert(saved.ran);
+  assert(!saved.changed);  // a save changes nothing
   assert(std::filesystem::exists(path, error));
 
   // The same token does not run the op twice.
-  assert(!cs2::features::apply_pending_op(config, settings));
+  assert(!cs2::features::apply_pending_op(config, settings, state).ran);
 
   // Load: the config comes back from the file.
   config = Config{};
   settings.menu_config_op = static_cast<std::uint8_t>(cs2::features::ConfigOp::load);
   settings.menu_config_token = 2;
-  assert(cs2::features::apply_pending_op(config, settings));
+  const auto loaded = cs2::features::apply_pending_op(config, settings, state);
+  assert(loaded.ran);
+  assert(loaded.changed);
   assert(config.esp.skeleton);
   assert(config.esp.max_box_scale == 1.75F);
   assert(config.rage.weapon[0] == 'w');
@@ -520,13 +548,107 @@ auto test_op_protocol() -> void {
   // Reset: the defaults are back.
   settings.menu_config_op = static_cast<std::uint8_t>(cs2::features::ConfigOp::reset);
   settings.menu_config_token = 3;
-  assert(cs2::features::apply_pending_op(config, settings));
-  assert(config == Config{});
+  const auto reset = cs2::features::apply_pending_op(config, settings, state);
+  assert(reset.ran);
+  assert(reset.changed);
+  // The defaults are back. The config path is the payload's own, so it is not
+  // part of the defaults.
+  Config defaults{};
+  cs2::features::set_config_path(defaults);
+  assert(config == defaults);
 
   // No op: nothing happens.
   settings.menu_config_op = 0;
   settings.menu_config_token = 4;
-  assert(!cs2::features::apply_pending_op(config, settings));
+  assert(!cs2::features::apply_pending_op(config, settings, state).ran);
+
+  std::filesystem::remove(path, error);
+}
+
+// A save persists the **live** settings, not the defaults.
+//
+// The regression: the payload's configuration copy was never synced with the
+// live block, so the op saved the defaults and the write-back reset the
+// user's toggles in the same frame.
+auto test_save_persists_live_settings() -> void {
+  const std::filesystem::path path = temp_path("cs2-internal-config-save.cfg");
+  std::error_code error;
+  std::filesystem::remove(path, error);
+  assert(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()));
+
+  // The live block: the user has toggled a few things.
+  Settings live = cs2::overlay::wire::default_settings();
+  live.esp_skeleton = 1;
+  live.esp_max_box_scale = 1.75F;
+  live.box = 0;
+  live.rage_per_weapon = 1;
+  live.menu_config_op = static_cast<std::uint8_t>(cs2::features::ConfigOp::save);
+  live.menu_config_token = 7;
+
+  // The payload's own copy still holds the defaults: the op has to bring it
+  // up to date with the live block before it runs.
+  Config config{};
+  cs2::features::ConfigOpState state;
+  const auto outcome = cs2::features::apply_pending_op(config, live, state);
+  assert(outcome.ran);
+  assert(!outcome.changed);  // a save changes nothing
+
+  // The file holds the **live** values, not the defaults.
+  const auto loaded = cs2::features::load(path.string().c_str());
+  assert(loaded.has_value());
+  assert(loaded->esp.skeleton);
+  assert(loaded->esp.max_box_scale == 1.75F);
+  assert(!loaded->esp.box);
+  assert(loaded->rage.per_weapon);
+
+  // The live block is untouched: the user's toggles survive the save.
+  assert(live.esp_skeleton == 1);
+  assert(live.esp_max_box_scale == 1.75F);
+  assert(live.box == 0);
+  std::filesystem::remove(path, error);
+}
+
+// The write-back preserves the live protocol state.
+//
+// The op/token fields and the menu's open state belong to the menu, not to
+// the configuration: a write-back that carried the file's values would
+// re-trigger the op (the file's token is an old one) and drop a ragebot op
+// the menu set in the same frame.
+auto test_write_back_preserves_protocol_state() -> void {
+  const std::filesystem::path path = temp_path("cs2-internal-config-protocol.cfg");
+  std::error_code error;
+  std::filesystem::remove(path, error);
+  assert(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()));
+
+  // Save a configuration. The file records the op and the token of the save.
+  Settings live = cs2::overlay::wire::default_settings();
+  live.esp_skeleton = 1;
+  live.menu_config_op = static_cast<std::uint8_t>(cs2::features::ConfigOp::save);
+  live.menu_config_token = 3;
+  Config config{};
+  cs2::features::ConfigOpState state;
+  assert(cs2::features::apply_pending_op(config, live, state).ran);
+
+  // The menu now asks for a load with a new token and sets a ragebot op in
+  // the same frame.
+  Settings request = live;
+  request.esp_skeleton = 0;    // the user turned the skeleton off
+  request.rage_config_op = 1;  // save-to-weapon
+  request.rage_config_token = 99;
+  request.menu_config_op = static_cast<std::uint8_t>(cs2::features::ConfigOp::load);
+  request.menu_config_token = 4;
+
+  const auto loaded = cs2::features::apply_pending_op(config, request, state);
+  assert(loaded.ran);
+  assert(loaded.changed);
+  // The loaded configuration reached the block...
+  assert(loaded.block.esp_skeleton == 1);
+  // ...but the live protocol state did not.
+  assert(loaded.block.menu_open == request.menu_open);
+  assert(loaded.block.menu_config_op == request.menu_config_op);
+  assert(loaded.block.menu_config_token == request.menu_config_token);
+  assert(loaded.block.rage_config_op == request.rage_config_op);
+  assert(loaded.block.rage_config_token == request.rage_config_token);
 
   std::filesystem::remove(path, error);
 }
@@ -544,6 +666,8 @@ auto main() -> int {
   test_segment_version();
   test_published_block_is_adopted();
   test_op_protocol();
+  test_save_persists_live_settings();
+  test_write_back_preserves_protocol_state();
   std::puts("features-config: ok");
   return 0;
 }
