@@ -301,12 +301,73 @@ Checked line by line against [`research-strafe.md`](research-strafe.md).
    the command the movement simulates carried the *player's* axes, not the strafe's.
    The measured symptom (the wish "acts", `strafe_writes` climbs, no speed change) is
    exactly what that predicts.
-2. **The `yaw_delta` gate (open):** the rotation is applied to the CMoveData angles
-   (silent) yet did not steer the velocity, which is what landmine 11 predicts when
-   the `(*vtable+0x150)()` policy is off. On a listen server that policy is the
-   `sv_subtick_movement_view_angles` convar — **the decisive one-command experiment is
-   to set it to `1` on our server and re-run the yaw-path A/B.** Until then the
-   analog path is the right primary.
+2. **The `yaw_delta` gate (CLOSED 2026-10-20 — see §"The gate" below):** the rotation
+   is applied to the CMoveData angles (silent) yet did not steer the velocity, which is
+   what landmine 11 predicts when the `(*vtable+0x150)()` policy is off. On a listen
+   server that policy is the `sv_subtick_movement_view_angles` convar — **the decisive
+   one-command experiment is to set it to `1` on our server and re-run the yaw-path
+   A/B.** Until then the analog path is the right primary.
+
+### The gate (measured 2026-10-20)
+
+**The gate is `sv_subtick_movement_view_angles`, and it is the whole story.**
+
+Measured live on a de_dust2 listen server (the `autostrafe` scenario, 3-second
+window, the player hopping with the bhop assist, everything else identical):
+
+| arm | `movement_strafe_subticks` | `sv_subtick_movement_view_angles` | strafe writes | max speed | gain |
+|---|---|---|---|---|---|
+| control (the strafe off) | – | 1 | 0 | 105.7 u/s | 75.7 |
+| the rotation encoding | **8** | **0** | 744 | 100.2 u/s | 70.2 |
+| the rotation encoding | **8** | **1** | 748 | **195.8 u/s** | **114.4** |
+| the camera-frame analog | 0 | 0 | 750 | 106.4 u/s | 46.4 |
+| the camera-frame analog | 0 | 1 | 750 | 109.0 u/s | 47.1 |
+
+Two facts fall out of it, and the second one is the surprise:
+
+1. **The rotation encoding works only when the server honours the sub-tick view
+   angles.** With the policy off the payload still writes (744 writes, 54 of 55
+   airborne samples acting) and the player does **not** accelerate: the wish is
+   never applied, so the velocity heading does not move at all. The payload's own
+   diagnostics show it: the requested wish offset stays at a constant 90° (the side
+   never flips, because the velocity never rotates), while with the policy on it
+   swings over ±109° (the velocity turns, the side re-decides, the curve continues).
+2. **The camera-frame analog encoding (`subticks = 0`) gains nothing in either
+   configuration** — 106.4 and 109.0 u/s, the control's own number. So the handoff's
+   proposed fix ("default `movement_strafe_subticks` back to 0, the path that works")
+   would have swapped one inert path for another: the `{-1,0,1}` snap loses the
+   exact perpendicular angle, and the wish is camera-relative anyway, so it cannot
+   track the velocity as it rotates.
+
+**The policy is on by default.** A freshly launched listen server (the convar never
+touched) gives the working numbers: the control reaches 107.4 u/s and the rotation
+encoding 184.5 u/s, with 570 writes and the wish offset swinging over ±109°. The
+"the policy is off on a listen server" claim in the earlier notes does not hold for a
+fresh server — it is what a server that **something else** set it to 0 on looks like
+(the `movement-probe` scenario sets it to 0 and only restores it in its `finally`, so
+a run that was interrupted leaves it off for the rest of the session).
+
+**What the payload does about it** (T16):
+
+* The strafe **measures** the gate: it compares the turn of the velocity heading
+  with the rotation it asked for (`classify_steer` in `strafe_geometry.hpp`, host
+  tested). The verdict is `strafe_steered`, with `strafe_steered_ticks` and
+  `strafe_ignored` as the counters, and it is in the `input` status and in the
+  overlay's **movement** HUD line.
+* The strafe also reports its **outcome**: `strafe_gain` — the horizontal speed
+  gained over the last completed airtime (u/s). That is the number the operator
+  asked for ("does it accelerate?"), and it is independent of the counters.
+* The `autostrafe` scenario says it outright: *"the server ignored the rotation …
+  sv_subtick_movement_view_angles is off on this server, so the silent encoding
+  cannot steer"*.
+
+**What it cannot do.** There is no *silent* way to steer the movement when the
+server ignores the sub-tick view angles: the wish direction is built from the
+command's move axes and the command's view angles, and the only silent channel that
+can express a wish relative to the *velocity* is the rotation the gate switches off.
+The camera-frame analog cannot substitute (measured above), and the command's own
+view angles would steer — but they move the eye angles, so the feature would stop
+being silent.
 
 ### Measurement method (a correction to this session's own attempts)
 
@@ -349,6 +410,17 @@ rotation asked for), `strafe_rot` (the rotation actually written, after the gate
 clamp), `strafe_side` (+1 CCW / −1 CW of the velocity), `strafe_steps` (yaw steps
 queued), `strafe_reason` (why the tick did or did not act), `strafe_clamped`,
 `strafe_wishspeed`, `strafe_subticks`, `strafe_writes`, `strafe_raw_writes`.
+
+**The outcome and the gate verdict** (added 2026-10-20, §"The gate" above):
+
+| Field | Meaning |
+|---|---|
+| `strafe_gain` | the horizontal speed gained over the **last completed airtime** (u/s) — the feature's outcome, and the number the operator asks for. The working encoding measures **+85 median / +105 max**; a gated server measures ~0. |
+| `strafe_steered` | the verdict of the last judged tick: did the engine turn the velocity toward the wish? False with the policy off. |
+| `strafe_steered_ticks` | how many airborne ticks the rotation was followed. |
+| `strafe_ignored` | how many airborne ticks asked for a rotation the velocity did not follow — the gate, counted. |
+
+They are also on the overlay's **movement** HUD line, next to the encoding in force.
 
 `strafe_reason`:
 

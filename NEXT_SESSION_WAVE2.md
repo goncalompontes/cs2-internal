@@ -29,11 +29,12 @@ Read `docs/handoff-wave2.md` and then work through it.
   `orchestrate`, in the Code Mode `execute` runtime) create the worktree, seed it,
   assemble the implementer's and the reviewer's prompts, and merge + verify.
 
-**Do this first, before anything else:** the operator reports that the movement
-(the auto-strafer or the bhop) **no longer accelerates**. `docs/handoff-wave2.md`
-§5.1 has a specific, testable suspect (a default this wave changed, which moved
-the strafe onto a path the server gates off) and the two-minute measurement that
-settles it. Fix it, then continue.
+**Do this first, before anything else:** the movement question is **settled**
+(2026-10-20). The auto-strafe's silent encoding is the only one that gains
+speed, it needs the server to honour the sub-tick view angles (the default), and
+the payload now reports the outcome and the gate
+(`docs/handoff-wave2.md` §5.1, `docs/re/strafing.md` §"The gate"). The default
+`movement_strafe_subticks` stays **8** — the measurement disproved the suspect.
 
 Then, in order: the chams' hook target (§5.2), the neverlose follow-ups
 (§5.3), and the item-5 feature candidates (§5.4).
