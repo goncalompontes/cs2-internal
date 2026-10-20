@@ -252,6 +252,22 @@ features_esp_geometry_test = executable('features_esp_geometry_test',
 )
 test('features-esp-geometry', features_esp_geometry_test)
 
+# The material system's parameter-name hash and the chams' "is this entity one
+# of ours" decision. Both are pure (no engine, no Windows), so they are built
+# natively here and regression-tested: the hash is keyed by the engine's own
+# constants, and the decision decides whether a model is drawn with the flat
+# material.
+game_material_test = executable('game_material_test',
+  files(
+    'payload/game/tests/test_material.cpp',
+    'payload/game/src/material.cpp',
+    'payload/game/src/memory.cpp',
+    'payload/game/src/module.cpp',
+  ),
+  include_directories : include_directories('payload/game/include'),
+)
+test('game-material', game_material_test)
+
 # --- Generated C++ SDK headers -------------------------------------------
 # Render payload/sdk/*.hpp from the calibration dumps in calibration/. The
 # generator is the Rust dumper, built on demand by scripts/gen-sdk.py. With

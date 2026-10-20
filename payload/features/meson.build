@@ -6,7 +6,7 @@ features_lib = static_library('cs2_features',
         'src/settings.cpp', 'src/config_store.cpp', 'src/thirdperson.cpp',
         'src/esp_players.cpp', 'src/esp_skeleton.cpp', 'src/esp_hitboxes.cpp',
         'src/esp_radar.cpp', 'src/esp_world.cpp', 'src/esp_sound.cpp',
-        'src/esp_providers.cpp'),
+        'src/esp_providers.cpp', 'src/chams.cpp'),
   include_directories : [features_inc, include_directories('../../overlay/include')],
   dependencies : [hooks_dep, render_dep, game_dep, diag_dep, tls_dep, aim_dep],
 )
