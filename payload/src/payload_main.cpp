@@ -2,9 +2,11 @@
 //
 // Boots the payload: interposes the DXGI swapchain (ADR-0015) and drives the
 // ImGui debug HUD, which reads local-player/player state via `payload/game`.
+#include <atomic>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -42,6 +44,37 @@
 namespace cs2::payload {
 namespace {
 
+// The live feature settings block (ADR-0021) as the control channel sees it.
+//
+// The block is **owned** elsewhere: the in-process overlay menu owns it, and
+// in the Vulkan-layer mode the shared segment does (the layer's menu writes
+// it, the payload publishes it). The owner publishes the block every frame
+// through the settings sink, so the control thread reads that copy — it never
+// touches the shared segment's seqlock (the publisher owns that) and never
+// reads the menu's block while the menu is writing it.
+struct LiveSettings {
+  mutable std::mutex mutex;
+  cs2::overlay::wire::Settings block{};
+  bool valid = false;
+
+  // The owner published the block it owns.
+  void update(const cs2::overlay::wire::Settings& in) noexcept {
+    std::lock_guard<std::mutex> lock(mutex);
+    block = in;
+    valid = true;
+  }
+
+  void read(cs2::overlay::wire::Settings& out) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex);
+    out = block;
+  }
+
+  [[nodiscard]] bool published() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex);
+    return valid;
+  }
+};
+
 // Lifetime owner for the payload's subsystems. A namespace-scope global (not a
 // function-local static) so it is constructed during CRT startup on the
 // injector's entry thread: the static-init guard would otherwise run on the
@@ -62,6 +95,12 @@ struct Runtime {
   // land: the menu owns the live block, the file owns the persisted one, and the
   // op protocol moves between them.
   features::Config config;
+  // The live settings block the control channel reads and writes.
+  LiveSettings live_settings;
+  // Whether the shared segment (the Vulkan layer) owns the settings block, or
+  // the in-process menu does. The render mode decides it, and the render mode
+  // can still fall back from the in-process renderer to the layer.
+  std::atomic<bool> layer_owns_settings{false};
 };
 
 Runtime g_runtime;
@@ -188,6 +227,9 @@ auto parse_rage_env() noexcept -> RageConfig {
 // the menu is the single owner).
 void on_movement_settings(void* context, const cs2::overlay::wire::Settings& settings) noexcept {
   auto* runtime = static_cast<Runtime*>(context);
+  // The owner published the block it owns: keep the control channel's copy in
+  // step, so the `settings` command reads the same block the menu owns.
+  runtime->live_settings.update(settings);
   runtime->control.set_movement_features(settings.auto_strafe != 0, settings.bhop != 0);
   // The auto-strafe's own knobs: how the goal heading is derived (0 = off,
   // 1 = the camera's forward/back, 2 = the player's W/A/S/D), whether a held
@@ -239,6 +281,38 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
 // (strafe/bhop prediction) see it fresh during menu-only play.
 void on_local_pawn(void* context, std::uintptr_t pawn) noexcept {
   static_cast<Runtime*>(context)->control.note_local_pawn(pawn);
+}
+
+// The control channel's read access to the live settings block (ADR-0021).
+//
+// The block belongs to its owner (the in-process menu, or the shared segment
+// in the Vulkan-layer mode). The owner publishes it every frame through the
+// settings sink, so the control thread reads that copy: a consistent snapshot,
+// and no seqlock of the control channel's own.
+void read_settings(void* context, cs2::overlay::wire::Settings& out) noexcept {
+  static_cast<Runtime*>(context)->live_settings.read(out);
+}
+
+// The write access: it goes **through the owner**, so the owner's next frame
+// does not overwrite the change (ADR-0021).
+void write_settings(void* context, const cs2::overlay::wire::Settings& in) noexcept {
+  auto* runtime = static_cast<Runtime*>(context);
+  if (runtime->layer_owns_settings.load()) {
+    // The Vulkan layer's menu owns the block in the shared segment; the
+    // publisher writes it (the same seqlock the layer reads it with).
+    runtime->publisher.publish_settings_block(in);
+  } else {
+    // The in-process menu owns the block; it hands it to the features on its
+    // next frame.
+    runtime->menu.settings() = in;
+  }
+  runtime->live_settings.update(in);
+}
+
+// Whether the owner has published the block yet (the control channel must not
+// write a block it has never seen).
+auto settings_published(void* context) noexcept -> bool {
+  return static_cast<Runtime*>(context)->live_settings.published();
 }
 
 // The per-frame overlay refresh also forwards the full snapshot: the ragebot solve
@@ -327,6 +401,10 @@ DWORD WINAPI install_thread(void*) {
                                                         &cs2::payload::runtime());
     cs2::payload::runtime().menu.set_settings_sink(&on_movement_settings,
                                                    &cs2::payload::runtime());
+    // The control channel's access to the live settings block (ADR-0021): the
+    // same block the menu owns, read and written through its owner.
+    cs2::payload::runtime().control.set_settings_access(
+        &read_settings, &write_settings, &settings_published, &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_local_pawn_sink(&on_local_pawn,
                                                         &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_snapshot_sink(&on_snapshot, &cs2::payload::runtime());
@@ -372,6 +450,9 @@ DWORD WINAPI install_thread(void*) {
         cs2::game::append_log("[cs2-payload] render: external Vulkan layer (present hook)");
         break;
     }
+    // The settings block's owner follows the render mode (ADR-0021): the
+    // in-process menu owns it, and in the layer modes the shared segment does.
+    cs2::payload::runtime().layer_owns_settings.store(mode != RenderMode::present);
   }
   return 0;
 }
