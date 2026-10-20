@@ -186,6 +186,19 @@ auto write_field(wire::Settings& block, const SettingInfo& info, const Json& val
   return false;
 }
 
+// True when the field belongs to the **protocol** rather than to a feature.
+//
+// The one-shot config ops (the menu bumps the token, the payload acts on it
+// once) and the config file's path (the payload publishes it; the menu shows
+// it read-only) are the protocol's own. A `settings set` must not touch them:
+// a set of an op field would **trigger** the op, and a set of the path would
+// be reverted on the next frame — the client would see
+// `changed: ["menu_config_path"]` and the value would not stick.
+auto is_protocol_field(std::string_view name) noexcept -> bool {
+  return name == "menu_config_op" || name == "menu_config_token" || name == "menu_config_path" ||
+         name == "rage_config_op" || name == "rage_config_token";
+}
+
 }  // namespace
 
 auto run_settings(const Json& args, SettingsAccess& access)
@@ -220,6 +233,11 @@ auto run_settings(const Json& args, SettingsAccess& access)
       const SettingInfo* info = wire::find_setting(name);
       if (info == nullptr) {
         return std::unexpected(CommandError{"settings: unknown key \"" + name + "\""});
+      }
+      if (is_protocol_field(name)) {
+        // The protocol's own fields are read-only: a set of an op field would
+        // trigger the op, and a set of the path would not stick.
+        return std::unexpected(CommandError{"settings: \"" + name + "\" is read-only"});
       }
       writes.emplace_back(info, &value);
     }
@@ -293,11 +311,8 @@ auto run_settings(const Json& args, SettingsAccess& access)
   return outcome;
 }
 
-auto BatchRunner::run(const Json& steps, int depth, Dispatch dispatch, void* context, Json& results)
+auto BatchRunner::run(const Json& steps, Dispatch dispatch, void* context, Json& results)
     -> std::expected<void, CommandError> {
-  if (depth > k_max_depth) {
-    return std::unexpected(CommandError{"batch: nested too deep"});
-  }
   if (!steps.is_array()) {
     return std::unexpected(CommandError{"batch requires a \"steps\" array"});
   }
@@ -315,8 +330,9 @@ auto BatchRunner::run(const Json& steps, int depth, Dispatch dispatch, void* con
     if (cmd == nullptr || !cmd->is_string()) {
       return std::unexpected(CommandError{"batch: every step needs a \"cmd\" string"});
     }
-    // The recursion guard: a step may not be a batch (the depth is bounded
-    // too, but a nested batch is rejected outright).
+    // The recursion guard: a step may not be a batch. There is **no nesting
+    // at all** — a nested batch is rejected outright, so there is no depth to
+    // bound.
     if (cmd->as_string() == "batch") {
       return std::unexpected(CommandError{"batch: a step must not be a batch"});
     }

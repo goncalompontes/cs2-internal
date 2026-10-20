@@ -172,6 +172,10 @@ void Chams::update(const game::Snapshot& snapshot) noexcept {
     (void)install();
   }
 
+  // A new frame: the render thread drops its desc cache, so a desc address
+  // the engine recycles cannot carry a stale entity into this frame.
+  frame_stamp_.fetch_add(1, std::memory_order_relaxed);
+
   // The local player: the entity the "is local" test compares against, and
   // the team the "only enemies" test uses.
   local_pawn_.store(snapshot.local_pawn, std::memory_order_relaxed);
@@ -268,9 +272,43 @@ void Chams::on_draw(void* desc, void* render_context, void* mesh_primitive, cons
              stats, layer);
     return;
   }
-  // The entity the drawn model belongs to. Without one there is nothing to
-  // decide on (fail closed).
-  const std::uintptr_t entity = entity_of(desc);
+  // The entity the drawn model belongs to, and whether it is the view model.
+  //
+  // Both are engine reads, and the scene system draws every **primitive** of a
+  // model with the same desc — so the reads are cached per desc and paid once
+  // per **model**. They used to be four `ReadProcessMemory` syscalls per
+  // primitive (measured at 284 ns each: 0.57 ms per frame at 500 primitives,
+  // 2.3 ms at 2000), paid for every primitive in the scene and not only for
+  // the players'.
+  //
+  // The cache is dropped when the payload's per-frame step publishes a new
+  // frame stamp, so a desc address the engine recycles cannot carry a stale
+  // entity into the next frame.
+  const std::uint64_t stamp = frame_stamp_.load(std::memory_order_relaxed);
+  if (stamp != desc_cache_stamp_) {
+    desc_cache_stamp_ = stamp;
+    for (DescEntry& entry : desc_cache_) {
+      entry.desc.store(0, std::memory_order_relaxed);
+    }
+  }
+  const auto desc_address = reinterpret_cast<std::uintptr_t>(desc);
+  const auto slot = static_cast<std::size_t>((desc_address >> 4) &
+                                             static_cast<std::uintptr_t>(k_desc_cache_size - 1));
+  DescEntry& entry = desc_cache_[slot];
+  std::uintptr_t entity = 0;
+  bool view_model = false;
+  if (entry.desc.load(std::memory_order_acquire) == desc_address) {
+    entity = static_cast<std::uintptr_t>(entry.entity.load(std::memory_order_relaxed));
+    view_model = entry.view_model.load(std::memory_order_relaxed) != 0;
+  } else {
+    entity = entity_of(desc);
+    view_model = entity != 0 && is_viewmodel(entity);
+    // The desc is published last: a reader that sees it sees the entity and
+    // the flag that go with it.
+    entry.entity.store(entity, std::memory_order_relaxed);
+    entry.view_model.store(view_model ? 1 : 0, std::memory_order_relaxed);
+    entry.desc.store(desc_address, std::memory_order_release);
+  }
   if (entity == 0) {
     skipped_.fetch_add(1, std::memory_order_relaxed);
     original(desc, render_context, mesh_primitive, material, material_mode, draw_values, deferred,
@@ -306,7 +344,7 @@ void Chams::on_draw(void* desc, void* render_context, void* mesh_primitive, cons
   // The view model is never chamsed, whatever the table says: the engine
   // raises the render component's flag while the weapon in front of the camera
   // is drawn.
-  facts.is_viewmodel = is_viewmodel(entity);
+  facts.is_viewmodel = view_model;
   if (facts.is_viewmodel) {
     skipped_.fetch_add(1, std::memory_order_relaxed);
     original(desc, render_context, mesh_primitive, material, material_mode, draw_values, deferred,

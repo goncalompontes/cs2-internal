@@ -18,11 +18,17 @@
 // entity is recovered from the scene object desc the draw belongs to. See
 // `cs2/features/chams.cpp` for the chain and its provenance.
 //
-// **The render path is cheap.** The facts about a drawn player (its team, its
-// life state, whether it is the local player) come from the snapshot, which
-// the payload already reads at ~30 Hz; the draw hook only has to recover the
-// entity the desc belongs to. With the feature off, the hook does nothing but
-// one atomic load.
+// **The render path is not free.** The facts about a drawn player (its team,
+// its life state, whether it is the local player) come from the snapshot, which
+// the payload already reads at ~30 Hz; the draw hook still has to recover the
+// entity the desc belongs to and the view-model flag, and both are **engine
+// reads** — the payload reads through the OS primitive, so a read is a
+// syscall (~284 ns measured). The scene system draws every **primitive** of a
+// model with the same desc, so the reads are cached per desc and paid once
+// per **model**: without the cache they were four syscalls per primitive
+// (0.57 ms per frame at 500 primitives, 2.3 ms at 2000) and they were paid
+// for every primitive in the scene, not only for the players'. With the
+// feature off, the hook does nothing but one atomic load.
 //
 // **Fail closed.** If the scene system is not up, the hook target is not
 // where it should be, the material is not resolved, or the entity cannot be
@@ -158,6 +164,29 @@ class Chams {
   std::atomic<bool> install_failed_{false};
   std::atomic<std::uint64_t> drawn_{0};
   std::atomic<std::uint64_t> skipped_{0};
+  // --- The desc cache --------------------------------------------------------
+  //
+  // The scene system draws every **primitive** of a model with the same desc,
+  // so the two engine reads the draw path needs (the entity the desc belongs
+  // to and the view-model flag) are paid once per **model** instead of once
+  // per primitive.
+  //
+  // The entries are invalidated when the payload's per-frame step publishes a
+  // new frame stamp, so a desc address the engine recycles cannot carry a
+  // stale entity into the next frame. The invalidation is done by the render
+  // thread itself (it owns the cache), so there is no cross-thread write.
+  struct DescEntry {
+    std::atomic<std::uint64_t> desc{0};
+    std::atomic<std::uint64_t> entity{0};
+    std::atomic<std::uint8_t> view_model{0};
+  };
+  static constexpr int k_desc_cache_size = 64;  // a power of two
+  DescEntry desc_cache_[k_desc_cache_size]{};
+  // The frame stamp the cache was filled for (the render thread's own).
+  std::uint64_t desc_cache_stamp_ = 0;
+  // The payload's per-frame step bumps this; the render thread notices and
+  // drops the cache.
+  std::atomic<std::uint64_t> frame_stamp_{0};
   // The players the chams may draw, packed (see `k_target_address_mask`).
   // The payload's thread writes them, the scene system's render thread reads
   // them; one atomic store per player means a reader never sees a torn

@@ -20,11 +20,14 @@ from typing import Any, get_args, get_type_hints
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from scenario import protocol  # noqa: E402
-from scenario.control import BUTTONS, Control  # noqa: E402
+from scenario.control import BUTTONS, Control, console_button  # noqa: E402
 from scenario.protocol import (  # noqa: E402
     ButtonName,
+    CONSOLE_BUTTONS,
+    ControlError,
     ControlTransport,
     ProtocolError,
+    UsercmdButtonName,
     WaitExpr,
     validate_ping,
     validate_snapshot,
@@ -297,6 +300,32 @@ class TestButtonNames(unittest.TestCase):
         self.assertEqual(BUTTONS["w"], "forward")
         self.assertEqual(BUTTONS["space"], "jump")
         self.assertEqual(BUTTONS["mouse1"], "attack")
+
+    def test_the_typed_names_agree_with_the_console_table(self) -> None:
+        """Every console name is an engine action; the usercmd-only ones are not.
+
+        The typed set used to advertise ``moveleft`` / ``moveright`` / ``speed``
+        / ``zoom``, which CS2's console does not know: the strings do not exist
+        in ``client.dll``, so the console path issued an unknown command.
+        """
+        known = set(get_args(ButtonName))
+        for alias, button in BUTTONS.items():
+            with self.subTest(alias=alias):
+                self.assertIn(button, known)
+                self.assertIn(button, CONSOLE_BUTTONS)
+        for name in get_args(UsercmdButtonName):
+            with self.subTest(name=name):
+                self.assertNotIn(name, CONSOLE_BUTTONS)
+                self.assertNotIn(name, known)
+
+    def test_the_console_path_rejects_a_usercmd_only_name(self) -> None:
+        """A name the engine has no action for is an error, not a bad command."""
+        self.assertEqual(console_button("w"), "forward")
+        self.assertEqual(console_button("up"), "turnup")
+        for name in get_args(UsercmdButtonName):
+            with self.subTest(name=name):
+                with self.assertRaises(ControlError):
+                    console_button(name)
 
 
 class TestPredicateGrammar(unittest.TestCase):

@@ -54,6 +54,7 @@ __all__ = [
     "BasisDict",
     "BhopResult",
     "ButtonName",
+    "CONSOLE_BUTTONS",
     "CompoundDict",
     "ControlError",
     "ControlTransport",
@@ -87,6 +88,7 @@ __all__ = [
     "StepProbeDict",
     "StrafeResult",
     "TeamName",
+    "UsercmdButtonName",
     "Vec3Dict",
     "WallsDict",
     "WaitExpr",
@@ -139,21 +141,52 @@ RageMode = Literal["hold", "always", "toggle"]
 #: *strings* ``"2"``/``"3"``, which the type does not spell out).
 TeamName = Literal["T", "CT", "t", "ct", 2, 3]
 
-#: The button names the payload's button mask understands, plus the
-#: console-only view commands. The mask's own names are
-#: ``strafe_geometry.hpp``'s ``k_named_buttons``; ``turnup`` / ``turndown``
-#: are the engine's **console** commands the runner's ``BUTTONS`` table maps
-#: ``up`` / ``down`` to (the console path drives ``+turnup`` / ``+turndown`` —
-#: CS2 has no ``+lookup`` / ``+lookdown`` — and the pitch actions set no
-#: button bit, so the mask has no name for them). ``sprint`` is in both: the
-#: engine's ``sprint`` action carries the ``IN_SPEED`` bit.
+#: The engine's own input actions in CS2 — the names a console command can
+#: carry (the command is the action name with a ``+``/``-`` in front).
+#:
+#: CS2's actions are ``attack``, ``attack2``, ``back``, ``duck``, ``forward``,
+#: ``jump``, ``klook``, ``left``, ``movedown``, ``moveup``, ``reload``,
+#: ``right``, ``sprint``, ``strafe``, ``turndown``, ``turnleft``,
+#: ``turnright``, ``turnup`` and ``use``. There is **no** ``+moveleft``,
+#: ``+moveright``, ``+speed`` or ``+zoom``: the strings do not exist in
+#: ``client.dll``.
+CONSOLE_BUTTONS: frozenset[str] = frozenset({
+    "attack", "attack2", "back", "duck", "forward", "jump", "klook", "left",
+    "movedown", "moveup", "reload", "right", "sprint", "strafe", "turndown",
+    "turnleft", "turnright", "turnup", "use",
+})
+
+#: The button names the **console** path understands: the engine's own input
+#: actions and the runner's friendly aliases, which the ``BUTTONS`` table maps
+#: onto those actions. Every name here is expressible as a console command.
+#:
+#: ``turnup`` / ``turndown`` are the engine's **console** commands the runner's
+#: ``BUTTONS`` table maps ``up`` / ``down`` to (the console path drives
+#: ``+turnup`` / ``+turndown`` — CS2 has no ``+lookup`` / ``+lookdown`` — and
+#: the pitch actions set no button bit, so the mask has no name for them).
+#: ``sprint`` is in both: the engine's ``sprint`` action carries the
+#: ``IN_SPEED`` bit.
 ButtonName = Literal[
-    "attack", "mouse1", "jump", "space", "duck", "crouch", "ctrl",
-    "forward", "w", "back", "s", "use", "e", "left", "right",
-    "moveleft", "a", "moveright", "d", "turnleft", "turnright",
-    "attack2", "mouse2", "reload", "r", "speed", "sprint", "shift", "zoom",
-    "turnup", "turndown",
+    # the engine's own actions
+    "attack", "attack2", "back", "duck", "forward", "jump", "klook", "left",
+    "movedown", "moveup", "reload", "right", "sprint", "strafe", "turndown",
+    "turnleft", "turnright", "turnup", "use",
+    # the runner's friendly aliases (the ``BUTTONS`` table maps them onto the
+    # engine's actions)
+    "mouse1", "mouse2", "space", "w", "s", "a", "d", "ctrl", "crouch", "shift",
+    "r", "e", "up", "down",
 ]
+
+#: The names only the **usercmd** path understands.
+#:
+#: The payload's button mask spells the lateral buttons ``moveleft`` /
+#: ``moveright`` and the sprint key ``speed``, and it has a ``zoom`` bit (the
+#: engine's scope state) that no client action produces. CS2's console has
+#: **no** ``+moveleft``, ``+moveright``, ``+speed`` or ``+zoom`` — the strings
+#: do not exist in ``client.dll`` — so these names are only usable with
+#: ``via="usercmd"``; the console path rejects them instead of issuing an
+#: unknown console command.
+UsercmdButtonName = Literal["moveleft", "moveright", "speed", "zoom"]
 
 
 # --- the snapshot (payload/control/src/snapshot_json.cpp) --------------------

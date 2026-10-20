@@ -140,15 +140,14 @@ class BatchRunner {
   // channel must close (a `quit` step).
   using Dispatch = bool (*)(void* context, const Json& step, Json& response);
 
-  // The bounds: at most `k_max_steps` steps and a nesting depth of at most
-  // `k_max_depth`. Exceeding either is an error, never a truncation.
+  // The bounds: at most `k_max_steps` steps, and **no nesting at all** — a
+  // step may not be a batch. Exceeding either is an error, never a truncation.
   static constexpr std::size_t k_max_steps = 64;
-  static constexpr int k_max_depth = 1;
 
   // Run the steps of a `batch` request. `results` receives one
   // `{"cmd": …, "ok": …, "result"|"error": …}` per step, in order.
-  [[nodiscard]] static auto run(const Json& steps, int depth, Dispatch dispatch, void* context,
-                                Json& results) -> std::expected<void, CommandError>;
+  [[nodiscard]] static auto run(const Json& steps, Dispatch dispatch, void* context, Json& results)
+      -> std::expected<void, CommandError>;
 };
 
 // --- The `log` command ------------------------------------------------------

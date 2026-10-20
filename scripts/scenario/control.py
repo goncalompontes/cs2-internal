@@ -32,6 +32,7 @@ from .protocol import (
     AngleDict,
     BhopResult,
     ButtonName,
+    CONSOLE_BUTTONS,
     ControlError,
     EventsResult,
     ExecResult,
@@ -50,6 +51,7 @@ from .protocol import (
     ReleaseResult,
     StateSnapshotDict,
     StrafeResult,
+    UsercmdButtonName,
     WaitExpr,
     WaitResult,
     validate_ping,
@@ -154,6 +156,27 @@ BUTTONS: Mapping[str, ButtonName] = {
     "up": "turnup",
     "down": "turndown",
 }
+
+
+def console_button(name: str) -> str:
+    """The engine's console command for ``name``.
+
+    The runner's aliases are resolved through :data:`BUTTONS`; the result must
+    be one of the engine's own input actions (:data:`CONSOLE_BUTTONS`).
+
+    A name the engine has no action for is **rejected**: the console path
+    would otherwise issue an unknown command (``+zoom``), which the engine
+    answers with an error the caller never sees. The names the payload's
+    button mask understands but the console does not (``moveleft``,
+    ``moveright``, ``speed``, ``zoom``) are only usable with
+    ``via="usercmd"``.
+    """
+    button = BUTTONS.get(name.lower(), name)
+    if button.lower() not in CONSOLE_BUTTONS:
+        raise ControlError(
+            f"the button {button!r} has no console command in CS2 "
+            "(it is usercmd-only); press it with via='usercmd'")
+    return button
 
 
 class Control:
@@ -395,7 +418,7 @@ class Control:
             args["via"] = via
         return self.request("input", args)
 
-    def press(self, key: ButtonName | str, hold: float = 0.0,
+    def press(self, key: ButtonName | UsercmdButtonName | str, hold: float = 0.0,
               via: InputBackend | None = None) -> PressResult:
         """Hold a key/button; with ``hold`` seconds, release it again.
 
@@ -404,6 +427,11 @@ class Control:
         the engine's own ``+<button>`` console command is used. ``key`` is a
         friendly name (``"w"``, ``"space"``, ``"mouse1"``, ...) — the known
         names are typed, and the engine's own button names are still accepted.
+
+        The console path accepts the **console-expressible** names only
+        (:data:`~scripts.scenario.protocol.ButtonName`); the mask's own names
+        (``moveleft``, ``moveright``, ``speed``, ``zoom``) need
+        ``via="usercmd"``.
         """
         if via == "usercmd":
             name = key.lower()
@@ -412,14 +440,15 @@ class Control:
                 time.sleep(hold)
                 self.request("release", {"buttons": [name]})
             return {"button": name, "held": hold <= 0, "via": "usercmd"}
-        button = BUTTONS.get(key.lower(), key)
+        button = console_button(key)
         self.exec(f"+{button}")
         if hold > 0:
             time.sleep(hold)
             self.exec(f"-{button}")
         return {"button": button, "held": hold <= 0}
 
-    def release(self, key: ButtonName | str, via: InputBackend | None = None) -> ReleaseResult:
+    def release(self, key: ButtonName | UsercmdButtonName | str,
+                via: InputBackend | None = None) -> ReleaseResult:
         """Release a button previously held with :meth:`press`.
 
         The two backends answer differently: the console path releases the
@@ -428,7 +457,7 @@ class Control:
         """
         if via == "usercmd":
             return self.request("release", {"buttons": [key.lower()]})
-        button = BUTTONS.get(key.lower(), key)
+        button = console_button(key)
         return self.exec(f"-{button}")
 
     def move(self, *, forward: float = 0.0, side: float = 0.0, up: float = 0.0,

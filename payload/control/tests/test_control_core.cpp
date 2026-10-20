@@ -398,11 +398,35 @@ void test_settings_command() {
   assert(got->values.find("movement_thirdperson_distance")->as_number() == 64.0);
   assert(got->values.find("esp_color_enemy") == nullptr);
 
-  // A text field is truncated to the field's size and NUL-terminated.
+  // A text field is truncated to the field's size and NUL-terminated. The
+  // config path is the protocol's own (read-only, see below), so the text
+  // field here is the ragebot's per-weapon key.
   const auto text =
-      run_settings(*Json::parse(R"({"set": {"menu_config_path": "C:/tmp/cs2.cfg"}})"), access);
+      run_settings(*Json::parse(R"({"set": {"rage_weapon": "weapon_ak47"}})"), access);
   assert(text.has_value());
-  assert(std::string(fake.block.menu_config_path) == "C:/tmp/cs2.cfg");
+  assert(std::string(fake.block.rage_weapon) == "weapon_ak47");
+
+  // The protocol's own fields are read-only: a set of a one-shot op field
+  // would **trigger** the op, and a set of the config path would be reverted on
+  // the next frame (the payload publishes its own path every frame).
+  const int writes_before = fake.writes;
+  for (const char* field : {"menu_config_op", "menu_config_token", "menu_config_path",
+                            "rage_config_op", "rage_config_token"}) {
+    Json request = Json::object();
+    Json set = Json::object();
+    set.set(field, Json::integer(1));
+    request.set("set", std::move(set));
+    const auto op = run_settings(request, access);
+    assert(!op.has_value());
+    assert(op.error().message.find("read-only") != std::string::npos);
+  }
+  assert(fake.writes == writes_before);
+
+  // A get of a protocol field still works: the fields are read-only, not
+  // hidden.
+  const auto op_get = run_settings(*Json::parse(R"({"get": ["menu_config_path"]})"), access);
+  assert(op_get.has_value());
+  assert(op_get->values.find("menu_config_path") != nullptr);
 
   // With neither a get nor a set, every field is reported.
   const auto all = run_settings(*Json::parse("{}"), access);
@@ -410,7 +434,7 @@ void test_settings_command() {
   assert(all->values.members().size() == SETTING_TABLE.size());
   assert(all->values.find("esp_color_enemy") != nullptr);
   assert(all->values.find("menu_config_path") != nullptr);
-  assert(all->values.find("menu_config_path")->as_string() == "C:/tmp/cs2.cfg");
+  assert(all->values.find("menu_config_path")->as_string().empty());
 
   // A request that names nothing returns nothing: only a request with
   // neither a get nor a set returns every field.
@@ -465,7 +489,7 @@ void test_batch_runner() {
   const auto ran = BatchRunner::run(
       *Json::parse(
           R"([{"cmd":"exec","args":{"line":"sv_cheats 1"}},{"cmd":"boom"},{"cmd":"ping"}])"),
-      1, &fake_dispatch, &fake, results);
+      &fake_dispatch, &fake, results);
   assert(ran.has_value());
   assert(fake.ran.size() == 3);
   assert(fake.ran[0] == "exec");
@@ -484,26 +508,22 @@ void test_batch_runner() {
   assert(third.find("cmd")->as_string() == "ping");
   assert(third.find("ok")->as_bool());
 
-  // The recursion guard: a step must not be a batch.
+  // The recursion guard: a step must not be a batch. There is **no nesting at
+  // all** — the guard is the step's name, not a depth counter.
   FakeDispatcher nested_fake;
   Json nested_results = Json::array();
-  const auto nested = BatchRunner::run(*Json::parse(R"([{"cmd":"batch","args":{"steps":[]}}])"), 1,
+  const auto nested = BatchRunner::run(*Json::parse(R"([{"cmd":"batch","args":{"steps":[]}}])"),
                                        &fake_dispatch, &nested_fake, nested_results);
   assert(!nested.has_value());
   assert(nested.error().message.find("must not be a batch") != std::string::npos);
   assert(nested_fake.ran.empty());
-
-  // The depth is bounded too.
-  const auto deep = BatchRunner::run(*Json::parse("[]"), BatchRunner::k_max_depth + 1,
-                                     &fake_dispatch, &fake, results);
-  assert(!deep.has_value());
 
   // More steps than the limit is an error, not a truncation.
   Json many = Json::array();
   for (std::size_t i = 0; i <= BatchRunner::k_max_steps; ++i) {
     many.push_back(Json::object());
   }
-  const auto too_many = BatchRunner::run(many, 1, &fake_dispatch, &fake, results);
+  const auto too_many = BatchRunner::run(many, &fake_dispatch, &fake, results);
   assert(!too_many.has_value());
   assert(too_many.error().message.find("too many steps") != std::string::npos);
 
@@ -511,9 +531,9 @@ void test_batch_runner() {
   FakeDispatcher malformed_fake;
   Json malformed_results = Json::array();
   const auto not_array =
-      BatchRunner::run(*Json::parse("{}"), 1, &fake_dispatch, &malformed_fake, malformed_results);
+      BatchRunner::run(*Json::parse("{}"), &fake_dispatch, &malformed_fake, malformed_results);
   assert(!not_array.has_value());
-  const auto no_cmd = BatchRunner::run(*Json::parse(R"([{"args":{}}])"), 1, &fake_dispatch,
+  const auto no_cmd = BatchRunner::run(*Json::parse(R"([{"args":{}}])"), &fake_dispatch,
                                        &malformed_fake, malformed_results);
   assert(!no_cmd.has_value());
   assert(malformed_fake.ran.empty());
