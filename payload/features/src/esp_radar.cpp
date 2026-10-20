@@ -102,7 +102,10 @@ void build_radar(Frame& frame) {
     const float dy = esp_geometry::units_to_metres(player.origin.y - local->origin.y);
     const esp_geometry::RadarPoint point =
         esp_geometry::radar_offset(dx, dy, local->eye_angles.yaw, k_radar_radius_px);
-    if (std::abs(point.x) > k_radar_radius_px || std::abs(point.y) > k_radar_radius_px) {
+    // The radar is a **disc**, not the square around it: the squared distance
+    // decides, so a player at 45 degrees and 50 m is on the ring, not
+    // outside it.
+    if (point.x * point.x + point.y * point.y > k_radar_radius_px * k_radar_radius_px) {
       continue;  // outside the radar's radius
     }
     const render::Color color = accent_color(frame.config, frame.snapshot, player);
