@@ -37,6 +37,14 @@ game_matrix_test = executable('game_matrix_test', 'payload/game/tests/test_matri
 )
 test('game-matrix', game_matrix_test)
 
+# The third-person camera model (the origin/distance/angle composition) —
+# header-only and platform-independent, so the camera maths has a host
+# regression test next to the matrix one.
+game_camera_test = executable('game_camera_test', 'payload/game/tests/test_camera.cpp',
+  include_directories : include_directories('payload/game/include'),
+)
+test('game-camera', game_camera_test)
+
 # Ragebot aim geometry (the angular chart, hulls, optima) — platform-independent,
 # built natively so the aim model has a host regression test.
 aim_geometry_test = executable('aim_geometry_test',

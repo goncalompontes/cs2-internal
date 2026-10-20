@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "cs2/game/camera.hpp"
 #include "cs2/game/log.hpp"
 #include "cs2/game/snapshot.hpp"
 
@@ -471,6 +472,13 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
   // The real studio hitboxes of each live enemy (and of the ragebot's current
   // target) as screen-space capsules (`docs/re/aim.md`). Opt-in from the menu.
   if (esp_config().esp.hitboxes && hitbox_provider_ != nullptr && snapshot.local.has_value()) {
+    // The capsule silhouettes' tangent maths needs the **camera's** origin,
+    // not the player's eye: in third person the camera sits behind the
+    // player, and the eye is then the wrong vantage point for the common
+    // tangents. The camera's real position is the engine's published
+    // per-slot view state (`cs2/game/camera.hpp`); the player's eye is only
+    // the fallback when it is not readable.
+    const game::Vec3 camera_eye = game::camera_origin(0, snapshot.local->eye_origin);
     const int rage_target =
         rage_target_provider_ != nullptr ? rage_target_provider_(rage_target_context_) : -1;
     for (const game::PlayerSnapshot& player : snapshot.players) {
@@ -490,9 +498,8 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
       game::HitboxCapsule capsules[k_max_hitboxes] = {};
       const int count = hitbox_provider_(hitbox_context_, player.pawn, capsules, k_max_hitboxes);
       for (int i = 0; i < count; ++i) {
-        draw_hitbox(model_.draw, view, screen_width, screen_height, snapshot.local->eye_origin,
-                    capsules[i], hitbox_color(config, capsules[i].group, active),
-                    config.esp.hitbox_mode);
+        draw_hitbox(model_.draw, view, screen_width, screen_height, camera_eye, capsules[i],
+                    hitbox_color(config, capsules[i].group, active), config.esp.hitbox_mode);
       }
     }
   }
