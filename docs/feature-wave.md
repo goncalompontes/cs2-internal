@@ -259,6 +259,37 @@ the dispatch template in the session temp dir
 `rev` worktree — and they run **alongside** the next task's implementation,
 which is in its own worktree and therefore unaffected.
 
+## 4.3 The wave, as it landed
+
+**121 commits, 152 files, +30 130 / -1 943.** The integration branch is
+`feat/occlusion-penetration`; every task branch is merged into it, in the order
+above, and every task was followed by an **adversarial review** (four rounds:
+the settings/config work, the menu + autostrafe, the ESP + camera, and the C++
+and Python halves of the wave).
+
+| The reviews found | |
+|---|---|
+| the menu rendered into a **32x32 window** (a real ImGui maximum, not "unbounded") | blocker |
+| "Save config" persisted the **defaults** and wiped the live settings | blocker |
+| a config "Load" never reached the ESP | blocker |
+| the **triggerbot never fired** in the default input backend | blocker |
+| the strafe's **side axis was mirrored** - the default analog path steered the wrong way | blocker |
+| the repo's `IN_*` button bits were wrong (three wrong, five naming bits that do not exist) | major |
+| the ragebot's **auto-stop** counter-strafed the same way the player was already moving | major |
+| the `settings` command's clamping never reached the movement/rage/camera features | major |
+| the settings **write path** was an unsynchronised 441-byte copy against the render thread | major |
+| a **hung pipe wedged the whole MCP server** forever | major |
+| the `Game` facade did **not** satisfy the `ControlTransport` protocol it claimed | major |
+| the advertised button-name enum was a **no-op** (a typo reached the game as `+spcae`) | major |
+| the generated settings table could go **stale** in the payload build and silently corrupt the block | major |
+| the menu tests **raced** on a shared file and aborted the whole suite | major |
+
+Two of the broken clang-tidy checks were also found and excluded with a
+documented reason: `readability-convert-member-functions-to-static` emits
+`static [[nodiscard]]` (an attribute list may not appear there) and
+`modernize-use-ranges` emits `erase(ranges::remove_if(...))` (which returns a
+subrange, not an iterator). Both produced code that does not compile.
+
 ## 5. The style sweep (T8)
 
 `scripts/clang-tidy-fix.py` runs one check group per commit. The sweep already
