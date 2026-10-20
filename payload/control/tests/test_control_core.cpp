@@ -397,6 +397,12 @@ void test_settings_command() {
   assert(all->values.find("esp_color_enemy") != nullptr);
   assert(all->values.find("menu_config_path") != nullptr);
   assert(all->values.find("menu_config_path")->as_string() == "C:/tmp/cs2.cfg");
+
+  // A request that names nothing returns nothing: only a request with
+  // neither a get nor a set returns every field.
+  const auto empty_get = run_settings(*Json::parse(R"({"get": []})"), access);
+  assert(empty_get.has_value());
+  assert(empty_get->values.members().empty());
 }
 
 // The `batch` command: the failure isolation, the recursion guard and the

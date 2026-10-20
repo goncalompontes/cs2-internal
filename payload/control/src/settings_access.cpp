@@ -192,6 +192,7 @@ auto run_settings(const Json& args, SettingsAccess& access)
     -> std::expected<SettingsOutcome, CommandError> {
   // The fields to read.
   std::vector<std::string> requested;
+  const bool has_get = args.find("get") != nullptr;
   if (const Json* get = args.find("get"); get != nullptr) {
     if (get->is_string()) {
       requested.emplace_back(get->as_string());
@@ -253,7 +254,7 @@ auto run_settings(const Json& args, SettingsAccess& access)
   // The values the client asked for: the requested fields, the written
   // fields, or every field when the request named neither.
   Json values = Json::object();
-  if (requested.empty() && writes.empty()) {
+  if (!has_get && set == nullptr) {
     for (const SettingInfo& info : wire::SETTING_TABLE) {
       values.set(std::string(info.name), field_value(updated, info));
     }
