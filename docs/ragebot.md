@@ -284,6 +284,15 @@
   shot uses when the sub-tick history has no entry) — the intermittent "fires with my
   current view". And the ragebot is gated to **firearms** (`m_WeaponType` 1–6): the knife,
   C4, taser, grenades and equipment are excluded. `wire::Settings` v11.
+- **The triggerbot — the safe half of the aim (§12).** A **trigger** that fires when the
+  crosshair is on a target at a computed hit chance and **never** writes a view angle: it
+  reuses `aim::solve` and adds only the decision (the angle gate, the hitchance gate, the
+  head hitbox's lower threshold, the reaction delay). It runs on the **game thread** and
+  its solve is **gated** behind a cheap pre-check (is the crosshair plausibly on somebody?)
+  and a rate limit — the trigger costs nothing when the crosshair is off the enemies. The
+  settings travel through the `trigger` control command and the `CS2_PAYLOAD_TRIGGER`
+  environment (the wire block is versioned and full); the shot is pulled through
+  `Input::press`/`Input::release` and is always balanced.
 
 
 
@@ -466,3 +475,133 @@ save/restore the engine stream) to keep predictions exact.
 - No dense angular raster / per-pixel world buffer (costs more than it saves).
 - No spread-cone sampling (the cone is deterministic).
 - No learned model (the inputs are computable; there is nothing to learn).
+
+## 12. The trigger (the safe half of the aim)
+
+A **triggerbot**: pull the trigger when the crosshair is on a target at a
+computed hit chance — and **never** write a view angle. It is the *conservative*
+consumer of the ragebot's mathematics: it reuses `aim::solve` (the same solver,
+the same weapon model, the same hit probability) and adds only the **decision**
+on top.
+
+- **Code:** `payload/control/include/cs2/control/trigger.hpp` (the decision — a
+  pure function, header-only) and `payload/control/src/trigger.cpp` (the
+  runtime). The service owns it (`Service::trigger_`) and the `trigger` control
+  command configures it. Host test: `control-trigger`.
+- **Where it runs:** the **game thread**, in the same sink the ragebot's
+  `rage_tick` runs in (`Service::on_game_thread`, the CreateMove hook). Never on
+  the render thread, never from the control thread — the control thread only
+  *configures* it.
+
+### 12.1 The decision
+
+`decide(view, solve, config, now_ms, latch) -> TriggerDecision` is pure: the
+view angles, the solve's answer, the configuration and the clock in, a
+`{fire, hold, reason, delay_remaining_ms, latch}` out. The rules, in order:
+
+1. the feature is on and the trigger is **engaged** (`mode`: `hold` the key,
+   `always`, or `toggle` on the key's press edge);
+2. the solve found a target;
+3. the **crosshair is on the solved aim point** — the yaw error and the pitch
+   error, each against its own tolerance (`yaw_tolerance` / `pitch_tolerance`,
+   in degrees);
+4. the solve's **hit chance** is good enough — a **head** hitbox uses the lower
+   `head_hitchance` threshold (the classic "head = trigger" behaviour);
+5. the **reaction delay** (`delay_ms`) has elapsed since the conditions first
+   held.
+
+Any rule that fails disarms the delay and releases the shot, so the next
+continuous aim starts the delay again. The `reason` says *why* the trigger
+stayed quiet — the operator's window: `disabled`, `key not held`, `no target`,
+`no solution`, `yaw error`, `pitch error`, `hitchance too low`, `reaction
+delay`, `on target`, `already firing`.
+
+`fire` is an **edge** ("pull the trigger now") and `hold` a **level** ("the shot
+must stay down"): the runtime presses on the edge and releases when the level
+falls, so **one continuous aim is one press and one release**.
+
+### 12.2 The cost — the solve is gated
+
+The ragebot's solve is measured at ~5 ms of the tick at the best spot and much
+worse at dense spots, so the trigger never runs it unconditionally:
+
+- **The cheap pre-check (the gate).** Before the solve, the trigger asks a
+  question that needs no engine read at all: *is the crosshair plausibly on
+  somebody?* The players' positions are already in the snapshot, so the test is
+  a dot product per player: the view direction against the cone the player's
+  body subtends (the feet-to-eyes band, plus a slack). Below the gate the
+  trigger costs a handful of floating point operations per player and **no
+  solve at all**.
+- **The solve is single-target.** The trigger solves for **one** target — the
+  one under the crosshair — so its cost does **not** grow with the number of
+  enemies in the scene (the ragebot's solve is multi-target).
+- **The solve is rate-limited** (`solve_interval_ms`, default 16 ms ≈ every
+  other tick at 64 Hz). The decision itself still runs every tick, with the
+  **fresh** view angles against the **cached** solve.
+- **The cost is reported:** the `trigger` command returns `evaluations`,
+  `gate_skips`, `solves`, `shots` and `last_solve_us`.
+
+The estimate: the trigger's solve is one target's hitbox projection plus the
+`argmax_hitchance` search — the same stages the ragebot's per-stage
+instrumentation attributes (`docs/ragebot-perf.md` §3.6: `argmax_hitchance`
+1.1 ms on the 717-cell **merged** field, `argmax_damage` 0.15 ms) over a field
+an order of magnitude smaller, plus the model's hitbox read. So ~0.2–0.6 ms per
+solve, ~0.1–0.3 ms per tick amortized at the default rate — and **zero** when
+the crosshair is off the enemies. **Not measured live**: the game cannot be
+launched from the agent's session (no GPU), so the per-tick cost above is an
+estimate from the ragebot's measured stage breakdown, and `last_solve_us` is the
+live number to read.
+
+### 12.3 The settings surface
+
+The trigger's settings are **not** in `wire::Settings` (the block is versioned
+and full, and adding a field means bumping `wire::k_version` **and** recomputing
+the golden settings checksum). They travel through the **control channel** and
+the **environment**, like the ragebot's own tuning:
+
+- **`trigger` control command** — `on`, `hitchance` (0..1), `head_hitchance`
+  (0..1), `yaw_tolerance` (degrees), `pitch_tolerance` (degrees), `delay_ms`,
+  `key` (a Win32 virtual-key code, 0 = none), `fire` (whether the trigger
+  pulls the trigger itself), `mode` (`hold` / `always` / `toggle`), plus
+  `force` (bypass the key's check — a scenario cannot synthesize a key press)
+  and `solve_interval_ms`. **`trigger` with no arguments returns the current
+  state** and the last decision (`reason`, `firing`, `target`, the counters).
+- **`CS2_PAYLOAD_TRIGGER`** — the environment's defaults, comma-separated:
+  `on`/`off`, `fire`/`nofire`, `force`, `key=<vk>`, `mode=hold|always|toggle`,
+  `hitchance=<f>`, `head_hitchance=<f>`, `yaw_tolerance=<deg>`,
+  `pitch_tolerance=<deg>`, `delay_ms=<n>`, `solve_interval_ms=<n>`.
+
+### 12.4 The firing path
+
+- The trigger pulls the trigger through the **existing input backend**:
+  `Input::press(button::k_attack)` / `Input::release(button::k_attack)` — not a
+  console command, not a synthetic OS event.
+- **The press/release is balanced.** The runtime presses when the decision
+  starts the shot and releases when it stops. The state is **reset** when the
+  feature is disabled, when the game state changes (a new pawn, a dead local
+  player, no snapshot) and when the control channel disconnects
+  (`Service::run`/`Service::stop`) — a trigger that pressed and never released
+  would leave the gun firing.
+- **The trigger never writes a view angle.** It has no path to one: the only
+  input backend calls it makes are `press`/`release`, and the decision function
+  has no angle output. That is a property of the code, not a convention.
+- **The trigger key's state is read from the operating system's key state**, not
+  from the command's button mask — the mask is the trigger's *own* output (the
+  attack bit), so reading it would be the auto-strafe's latch landmine
+  (`docs/re/strafing.md`): the trigger would latch on its own press.
+
+### 12.5 Known limitations
+
+- **The trigger's solve is occlusion-free.** It does not project the world
+  solids (the expensive part of the ragebot's solve), so the trigger fires at
+  a target behind a wall as well — a wallbang trigger, not a "shoot what you
+  can see" one. The ragebot's `only_visible` gate is the occlusion-aware path.
+- **The press needs the `usercmd` backend.** `Input::press`/`release` write the
+  command's button mask, which `Input::apply` only applies in the `usercmd`
+  backend (the same rule the control channel's `press` command has —
+  `docs/control-harness.md` §"Input backends"). The `trigger` command reports
+  the backend.
+- **The button mask is shared.** The trigger's release clears the attack bit in
+  the shared mask, so while the trigger is enabled it owns the trigger button
+  (a manual `press("attack")` from the control channel is overridden until the
+  trigger fires again).
