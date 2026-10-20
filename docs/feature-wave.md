@@ -31,6 +31,39 @@
 | **T7** | Neverlose mining (item 6) | — | blocked on the machine |
 | **T8** | The remaining clang-tidy sweep groups + the manual refactors | repo-wide | to run at the end of the wave |
 
+### 1.1 The second workstream: the scenario / control API
+
+Requested alongside the features: the scenario API and library "fleshed out
+further so it is fully type safe", with a state machine that "covers more
+possible game states and more possible interactions", and an integration so
+"agents can directly probe and run scripts inline with the execute tool".
+
+| Id | Task | Owns | State |
+|---|---|---|---|
+| **S1** | The control channel's **interface** commands: a `settings` command (get/set the 87-field feature settings block by name), a **generated** name→offset table, a `batch` command (the "run a script" primitive), a protocol version on `ping`, an `events` `since` cursor, a `log` command, and the fix for the `heatmap` `target` argument the docs promise and the code drops | `payload/control/**`, `scripts/gen-settings-table.py`, `overlay/include/cs2/overlay/settings_table.hpp` | in progress |
+| **S3** | The **typed protocol layer**: a `protocol.py` with a `TypedDict` per command result, `Literal`s for the constrained strings, a recursive `WaitExpr` for the predicate DSL, a `ControlTransport` `Protocol`, `@overload`s on the request helper, and a **runtime validator** for payload/client version skew | `scripts/scenario/protocol.py`, `control.py` | in progress |
+| **S4** | The **wider state machine**: more screens (`LOADING`, `DISCONNECTED`, `BUY_TIME`, `PLANTED`, `DEFUSING`, `OVERTIME`, `HALF_TIME`, `PAUSED`), more capabilities (`PLANT`, `DEFUSE`, `DROP`, `INSPECT`, `SWITCH_WEAPON`, `GRENADE`, `SCORE`, `RECONNECT`), the matching `Machine` actions, the six unannotated `Game` methods, and unit tests for the machine's pure logic | `scripts/scenario/screens.py`, `awaiting.py`, `session.py` | pending |
+| **S5** | The **OpenCode integration**: a stdlib-only local MCP server exposing the API as `tools.cs2.*`, with every tool's JSON Schema **generated from the typed models**, plus the registration in the global OpenCode config | `scripts/scenario/mcp/**`, `~/.config/opencode/opencode.jsonc` | pending |
+| **S6** | The **typing gate**: a `pyproject.toml` with a strict type-checker config, the Python tests wired into `meson test`, and the missing test coverage (`awaiting`, `session`, `heatmap`, the transport, the scenario registry) | `pyproject.toml`, the root `meson.build`, `scripts/scenario/tests/**` | pending |
+
+**Why the `settings` command matters most.** The feature wave put **87
+settings** into the settings block (every ESP element, the third-person knobs,
+the chams switches, the movement modes) — and the control channel could not
+reach **any** of them: a scenario could `exec` a console command and drive the
+`CUserCmd`, but not turn on a single ESP element. `cs2_settings_set` closes
+that, and it is what lets the MCP tools drive the whole feature set with no GUI
+in the loop.
+
+### 1.2 The order and the reasoning
+
+- **S3 before S4 before S5**: the state machine consumes the typed snapshot
+  (`StateSnapshotDict`), and the MCP tools' schemas are generated from the
+  types. S1 is independent of all three and runs alongside them.
+- **S6 last**: the typing gate must judge the *final* code, not a moving
+  target.
+- The **neverlose** mining (T7) is still blocked on the machine.
+
+
 ### Why the tasks are ordered this way
 
 `wire::Settings` is the **transport** for the menu → payload settings and is
@@ -122,6 +155,50 @@ What the RE has already established for T6 (material system, `materialsystem2.dl
   name-based flat-material lookup is unconfirmed;
 - the **model-draw path is still unidentified** (no `DrawModel` string and no
   scene-system RTTI in this build) — this is the remaining blocker for T6.
+
+### 3.2 The chams RE, after the resumed round
+
+The blocker broke open, and the picture changed:
+
+- **The scene system is a separate module** — `scenesystem.dll` (sha
+  `040eb851…`), exporting `SceneSystem_002`. `CSceneSystem`'s vtable is
+  `0x1805f1710`. That is why no scene-system RTTI was found in client.dll: it
+  was never there.
+- **The draw signature is recovered** from the MSVC RTTI lambda names:
+  `CAnimatableSceneObjectDesc::DrawPrimitive(IRenderContext*,
+  CMeshDrawPrimitive_t*, const IMaterial2*, const IMaterialMode*, DrawValues_t&,
+  bool, …)`. The material reaches the GPU as an `IMaterial2*` and the blend and
+  depth state as a **separate** `IMaterialMode*`.
+- **client.dll keeps an interface-name → global table**: `client + 0x279CE48` is
+  the `CMaterialSystem2*` and `client + 0x279CF10` the `ISceneSystem*` — so the
+  payload can get the material system **without** `GetProcAddress`.
+- `CMaterialSystem2` **vtable slot 14 is `FindMaterial(name)`** (proved from
+  client.dll: `CPhysicsGameSystem::GameActivate` calls it with
+  `materials/tools/show_collision_geometry_wire_nodepth.vmat`).
+- **The real flat material is `materials/physics/flat_basic.vmat`**, with
+  `…_wire_nodepth.vmat` for the see-through variant. `debug/DebugFlat` stays
+  refuted.
+- The name→value hash is **MurmurHash2, case-folded, seed `0x31415926`,
+  `h = len ^ seed`** — reproduced exactly: `0x5D700411` = `"RepresentativeTexture"`.
+- **CS2 ships its own wallhack path**: `CPlayerVisibilityDataColorSceneObjectDesc`
+  with the convars `r_player_visibility_mode` / `_strength` / `_stencil`, the
+  scene named value `"PlayerVisibilityDataColor"`, a colour vec4 written to the
+  scene desc at `+0x5D4` / `+0x5DC`, and the materials
+  `materials/dev/player_visibility*.vmat`. **A "see enemies through walls"
+  rendering mode may therefore be reachable without a material override at
+  all** — the cheapest possible chams, if the convars do the job.
+- `C_BaseEntity`'s vtable is `0x181c47bd0`, and only **2 of its 96 slots** touch
+  the scene system ⇒ the entity-side model submission is **not** a
+  `C_BaseEntity` virtual. The client schema provably contains **no**
+  model-material field.
+
+**Still open for T6:** the client.dll function that submits the player *model*
+to the scene system (the classic chams hook, and where the entity pointer is
+available); the exact vtable slot of `DrawPrimitive`; how to identify an
+"enemy player" from inside the scene-system draw; the parameter names behind
+`0xCF382AB` / `0x28C67ADC` (they are in the game data, not in any module); and
+the "set material parameter" API.
+
 
 ## 4. Worktree discipline
 
