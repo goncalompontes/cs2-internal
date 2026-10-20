@@ -288,9 +288,9 @@ static_assert(std::is_trivially_copyable_v<Settings>,
   settings.esp_color_team[1] = 150;
   settings.esp_color_team[2] = 235;
   settings.esp_color_team[3] = 235;
-  settings.esp_color_box[0] = 255;
-  settings.esp_color_box[1] = 255;
-  settings.esp_color_box[2] = 255;
+  settings.esp_color_box[0] = 235;
+  settings.esp_color_box[1] = 70;
+  settings.esp_color_box[2] = 70;
   settings.esp_color_box[3] = 235;
   settings.esp_color_skeleton[0] = 255;
   settings.esp_color_skeleton[1] = 255;

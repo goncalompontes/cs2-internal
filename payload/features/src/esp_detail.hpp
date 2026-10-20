@@ -53,6 +53,20 @@ namespace cs2::features::esp_detail {
   return teammate ? to_render(config.esp.color_team) : to_render(config.esp.color_enemy);
 }
 
+// The box colour.
+//
+// A teammate's box follows the team colour; an enemy's follows
+// `esp_color_box`, which defaults to the enemy accent so the classic
+// red-foe / blue-friend look is preserved. The two are separate settings so
+// the box can be made to stand out from the name.
+[[nodiscard]] inline auto box_color(const Config& config, const game::Snapshot& snapshot,
+                                    const game::PlayerSnapshot& player) noexcept
+    -> render::Color {
+  const int local_team = snapshot.local.has_value() ? snapshot.local->team : 0;
+  const bool teammate = local_team != 0 && player.team == local_team;
+  return teammate ? to_render(config.esp.color_team) : to_render(config.esp.color_box);
+}
+
 // A player's visibility state.
 //
 // Without a provider the state is `unknown`, and the visibility toggles

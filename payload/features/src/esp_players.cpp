@@ -358,11 +358,11 @@ void build_players(Frame& frame) {
     const render::Color accent = accent_color(config, snapshot, player);
     // The glow tints a player that is not visible with the enemy/team
     // accent, so it stands out from the ordinary box colour.
-    const render::Color box_color = glow ? accent : to_render(config.esp.color_box);
+    const render::Color box = glow ? accent : box_color(config, snapshot, player);
     const float thickness = esp_geometry::box_thickness_px(config.esp.box_thickness);
 
     if (config.esp.box) {
-      draw_box(frame, min, max, thickness, box_color);
+      draw_box(frame, min, max, thickness, box);
     }
 
     if (config.esp.health_bar && player.max_health > 0) {
@@ -461,7 +461,7 @@ void build_players(Frame& frame) {
     }
 
     if (config.esp.head_box) {
-      draw_head_box(frame, player, box_color);
+      draw_head_box(frame, player, box);
     }
 
     if (config.esp.skeleton && player.pawn != 0) {

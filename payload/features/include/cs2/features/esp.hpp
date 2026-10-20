@@ -151,7 +151,11 @@ struct Config {
 
     Color color_enemy{235, 70, 70, 235};
     Color color_team{70, 150, 235, 235};
-    Color color_box{255, 255, 255, 235};
+    // The box colour for an *enemy*; a teammate's box follows `color_team`. It
+    // defaults to the enemy accent so the classic red-foe / blue-friend look
+    // is preserved, and it can be set independently to make the box stand out
+    // from the name.
+    Color color_box{235, 70, 70, 235};
     Color color_skeleton{255, 255, 255, 220};
     Color color_tracer{235, 70, 70, 200};
     Color color_offscreen{255, 90, 90, 220};
