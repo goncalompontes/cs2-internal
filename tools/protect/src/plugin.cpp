@@ -9,6 +9,12 @@
 //
 // This task only *selects* and *reports*; the transforms (call encryption,
 // virtualization) are T19 and T20.
+//
+// The *rewriting* pass of T19 cannot run here: it needs
+// registerOptimizerLastEPCallback, because the optimiser would undo an
+// encrypted indirect call (SimplifyIndirectCalls) and would inline a
+// selected function away before a late point could rewrite it. See the
+// "For the next task" section of tools/protect/README.md.
 
 #include <string>
 
@@ -26,9 +32,32 @@
 
 namespace {
 
+/// The module flag that marks a module the pass already ran on.
+///
+/// The pipeline-start extension point fires in the LTO pre-link phase as
+/// well as in the ordinary compile, so a module can reach the pass twice.
+/// The flag makes the second run a no-op: without it, T19 would rewrite the
+/// module twice.
+constexpr std::string_view k_done_flag = "cs2.protect.done";
+
 class ProtectPass : public llvm::PassInfoMixin<ProtectPass> {
  public:
+  /// The pass must run even when the optimisation pipeline would drop it:
+  /// a build that "protects" nothing has to say so.
+  static bool isRequired() {
+    return true;
+  }
+
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
+    if (module.getModuleFlag(k_done_flag) != nullptr) {
+      return llvm::PreservedAnalyses::all();
+    }
+    // The flag is metadata: the backend ignores it, so it does not reach
+    // the object file. The "Warning" behaviour is the gentle one: two
+    // modules that both carry the flag agree on its value, so merging them
+    // (an LTO build) is quiet.
+    module.setModuleFlag(llvm::Module::Warning, k_done_flag, 1);
+
     const auto config = cs2::protect::load_config();
     if (!config) {
       llvm::errs() << "[cs2-protect] " << config.error().message << "\n";
@@ -43,9 +72,22 @@ class ProtectPass : public llvm::PassInfoMixin<ProtectPass> {
     // typo: the compile must fail instead of protecting nothing. An entry
     // without a scope may well match in another translation unit, so the
     // build as a whole checks those (tools/protect/check_policy.py).
+    //
+    // An entry that named a function which cannot be protected (an
+    // `alwaysinline` function, a declaration, a denied function) is the
+    // same failure with a different cause: the entry protects nothing, and
+    // the operator has to know why.
     for (const cs2::protect::PolicyMatch& match : result.policy_matches) {
       if (match.module.empty() || !match.applicable || match.matched) {
         continue;
+      }
+      if (match.blocked) {
+        llvm::errs() << "[cs2-protect] " << module.getSourceFileName() << ": the policy entry '"
+                     << match.pattern << "' matched a function that cannot be protected ("
+                     << cs2::protect::to_string(*match.blocked_reason) << ")\n";
+        llvm::report_fatal_error(
+            "cs2-protect: a policy entry matched a function that cannot be protected",
+            /*gen_crash_diag=*/false);
       }
       llvm::errs() << "[cs2-protect] " << module.getSourceFileName() << ": the policy entry '"
                    << match.pattern << "' matched no function in this module\n";
@@ -55,14 +97,14 @@ class ProtectPass : public llvm::PassInfoMixin<ProtectPass> {
 
     cs2::protect::write_report(module, result, settings);
 
-    if (const auto error =
-            cs2::protect::write_coverage(settings, module.getSourceFileName(), result)) {
+    if (const auto error = cs2::protect::write_coverage(settings, module, result)) {
       llvm::errs() << "[cs2-protect] " << *error << "\n";
       llvm::report_fatal_error("cs2-protect: the coverage could not be written",
                                /*gen_crash_diag=*/false);
     }
 
-    // The pass only reports; it changes nothing, so everything is preserved.
+    // The pass only reports; it changes no code, so everything is preserved.
+    // (The module flag is metadata: it does not reach the object file.)
     return llvm::PreservedAnalyses::all();
   }
 };

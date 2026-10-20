@@ -1,341 +1,123 @@
 #include "config.hpp"
 
-#include <cctype>
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <set>
 #include <sstream>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/SHA256.h"
 
 namespace cs2::protect {
 
 namespace {
 
-// --- A minimal JSON reader --------------------------------------------------
-// The policy file is a handful of strings. A JSON library would be more
-// dependency than the tool needs, and the plugin may only use what the LLVM
-// SDK ships.
+// --- The policy reader ------------------------------------------------------
+// The reader is the SDK's (`llvm::json::parse`): the LLVM SDK ships a JSON
+// parser, `LLVMSupport` is linked anyway, and a hand-rolled reader is a
+// parser to maintain (and to get wrong: the old one accepted "1.2.3" as a
+// number and died with an access violation on a deeply nested file).
+//
+// Two checks sit on top of the SDK's parser, because the SDK's parser alone
+// is not enough:
+//
+//   * the nesting depth — the SDK's parser recurses, so a policy file that
+//     nests thousands of levels deep overflows the compiler's stack and
+//     kills the *compiler* with no message at all. The depth is therefore
+//     bounded before the text reaches the parser;
+//   * duplicate keys — the SDK's parser keeps the first of two equal keys,
+//     so a duplicated key would be silently ignored while the checker (which
+//     reads the file with Python's `json`) would see the last one. The
+//     duplicate is rejected instead, on both sides.
 
-class JsonValue;
-class JsonMember;
+/// The deepest nesting a policy file may have.
+constexpr int MAX_POLICY_DEPTH = 64;
 
-class JsonValue {
- public:
-  enum class Kind { null_value, boolean, number, string, array, object };
+/// The UTF-8 byte order mark. Some Windows editors write one, and the SDK's
+/// parser rejects it.
+constexpr std::string_view k_utf8_bom = "\xEF\xBB\xBF";
 
-  using Array = std::vector<JsonValue>;
-
-  JsonValue() = default;
-
-  [[nodiscard]] static auto make_string(std::string text) -> JsonValue;
-  [[nodiscard]] static auto make_array(Array items) -> JsonValue;
-  [[nodiscard]] static auto make_object(std::vector<JsonMember> members) -> JsonValue;
-
-  [[nodiscard]] auto kind() const noexcept -> Kind {
-    return kind_;
-  }
-  [[nodiscard]] auto is_object() const noexcept -> bool {
-    return kind_ == Kind::object;
-  }
-  [[nodiscard]] auto is_array() const noexcept -> bool {
-    return kind_ == Kind::array;
-  }
-  [[nodiscard]] auto is_string() const noexcept -> bool {
-    return kind_ == Kind::string;
-  }
-
-  [[nodiscard]] auto text() const noexcept -> std::string_view {
-    return text_;
-  }
-  [[nodiscard]] auto items() const noexcept -> const Array& {
-    return items_;
-  }
-
-  /// The member with that key, or nullptr. The object is tiny, so a linear
-  /// scan is cheaper than a map.
-  [[nodiscard]] auto member(std::string_view key) const noexcept -> const JsonValue*;
-  [[nodiscard]] auto member_keys() const noexcept -> std::vector<std::string>;
-
- private:
-  Kind kind_{Kind::null_value};
-  std::string text_;
-  Array items_;
-  std::vector<JsonMember> members_;
+/// What the pre-scan found.
+struct ScanResult {
+  int depth{0};
 };
 
-class JsonMember {
- public:
-  std::string key;
-  JsonValue value;
-};
+/// Scans the policy text for the two things the SDK's parser does not check.
+///
+/// The scan is iterative: it must not be the thing that overflows the stack
+/// when the file is pathological.
+[[nodiscard]] auto scan_policy(std::string_view text) -> std::expected<ScanResult, std::string> {
+  // One frame per open container. An object remembers the keys it has seen,
+  // so a duplicate can be named; an array has no keys.
+  struct Frame {
+    bool is_object{false};
+    bool expects_key{false};
+    std::set<std::string> keys;
+  };
 
-inline auto JsonValue::make_string(std::string text) -> JsonValue {
-  JsonValue value;
-  value.kind_ = Kind::string;
-  value.text_ = std::move(text);
-  return value;
-}
+  ScanResult result;
+  std::vector<Frame> stack;
+  std::string token;
+  bool in_string{false};
+  bool escaped{false};
 
-inline auto JsonValue::make_array(Array items) -> JsonValue {
-  JsonValue value;
-  value.kind_ = Kind::array;
-  value.items_ = std::move(items);
-  return value;
-}
-
-inline auto JsonValue::make_object(std::vector<JsonMember> members) -> JsonValue {
-  JsonValue value;
-  value.kind_ = Kind::object;
-  value.members_ = std::move(members);
-  return value;
-}
-
-inline auto JsonValue::member(std::string_view key) const noexcept -> const JsonValue* {
-  for (const JsonMember& entry : members_) {
-    if (entry.key == key) {
-      return &entry.value;
+  for (const char c : text) {
+    if (in_string) {
+      if (escaped) {
+        escaped = false;
+        token.push_back(c);
+      } else if (c == '\\') {
+        escaped = true;
+      } else if (c == '"') {
+        in_string = false;
+        if (!stack.empty() && stack.back().is_object && stack.back().expects_key) {
+          stack.back().expects_key = false;
+          if (!stack.back().keys.insert(token).second) {
+            return std::unexpected(std::string("the policy file has a duplicate key '") + token +
+                                   "'");
+          }
+        }
+        token.clear();
+      } else {
+        token.push_back(c);
+      }
+      continue;
     }
-  }
-  return nullptr;
-}
-
-inline auto JsonValue::member_keys() const noexcept -> std::vector<std::string> {
-  std::vector<std::string> keys;
-  keys.reserve(members_.size());
-  for (const JsonMember& entry : members_) {
-    keys.push_back(entry.key);
-  }
-  return keys;
-}
-
-/// A recursive-descent JSON parser. It reports the first problem it finds as
-/// a message; the caller turns that into a configuration error.
-class JsonParser {
- public:
-  explicit JsonParser(std::string_view text) noexcept : text_(text) {}
-
-  [[nodiscard]] auto parse() -> std::expected<JsonValue, std::string> {
-    skip_space();
-    auto value = parse_value();
-    if (!value) {
-      return value;
-    }
-    skip_space();
-    if (pos_ != text_.size()) {
-      return std::unexpected(std::string("trailing characters after the JSON value"));
-    }
-    return value;
-  }
-
- private:
-  [[nodiscard]] auto parse_value() -> std::expected<JsonValue, std::string> {
-    if (pos_ >= text_.size()) {
-      return std::unexpected(std::string("unexpected end of input"));
-    }
-    switch (text_[pos_]) {
+    switch (c) {
+      case '"':
+        in_string = true;
+        token.clear();
+        break;
       case '{':
-        return parse_object();
+        stack.push_back(Frame{true, true, {}});
+        break;
       case '[':
-        return parse_array();
-      case '"': {
-        auto text = parse_string();
-        if (!text) {
-          return std::unexpected(text.error());
+        stack.push_back(Frame{false, false, {}});
+        break;
+      case '}':
+      case ']':
+        if (!stack.empty()) {
+          stack.pop_back();
         }
-        return JsonValue::make_string(std::move(*text));
-      }
-      case 't':
-        return parse_literal("true");
-      case 'f':
-        return parse_literal("false");
-      case 'n':
-        return parse_literal("null");
+        break;
+      case ',':
+        if (!stack.empty() && stack.back().is_object) {
+          stack.back().expects_key = true;
+        }
+        break;
       default:
-        return parse_number();
-    }
-  }
-
-  [[nodiscard]] auto parse_object() -> std::expected<JsonValue, std::string> {
-    ++pos_;  // '{'
-    std::vector<JsonMember> members;
-    skip_space();
-    if (pos_ < text_.size() && text_[pos_] == '}') {
-      ++pos_;
-      return JsonValue::make_object(std::move(members));
-    }
-    while (true) {
-      skip_space();
-      auto key = parse_string();
-      if (!key) {
-        return std::unexpected(key.error());
-      }
-      skip_space();
-      if (pos_ >= text_.size() || text_[pos_] != ':') {
-        return std::unexpected(std::string("expected ':' after the object key"));
-      }
-      ++pos_;
-      skip_space();
-      auto value = parse_value();
-      if (!value) {
-        return std::unexpected(value.error());
-      }
-      members.push_back(JsonMember{std::move(*key), std::move(*value)});
-      skip_space();
-      if (pos_ >= text_.size()) {
-        return std::unexpected(std::string("unterminated object"));
-      }
-      if (text_[pos_] == ',') {
-        ++pos_;
-        continue;
-      }
-      if (text_[pos_] == '}') {
-        ++pos_;
         break;
-      }
-      return std::unexpected(std::string("expected ',' or '}' in the object"));
     }
-    return JsonValue::make_object(std::move(members));
+    result.depth = std::max(result.depth, static_cast<int>(stack.size()));
   }
-
-  [[nodiscard]] auto parse_array() -> std::expected<JsonValue, std::string> {
-    ++pos_;  // '['
-    JsonValue::Array items;
-    skip_space();
-    if (pos_ < text_.size() && text_[pos_] == ']') {
-      ++pos_;
-      return JsonValue::make_array(std::move(items));
-    }
-    while (true) {
-      skip_space();
-      auto value = parse_value();
-      if (!value) {
-        return std::unexpected(value.error());
-      }
-      items.push_back(std::move(*value));
-      skip_space();
-      if (pos_ >= text_.size()) {
-        return std::unexpected(std::string("unterminated array"));
-      }
-      if (text_[pos_] == ',') {
-        ++pos_;
-        continue;
-      }
-      if (text_[pos_] == ']') {
-        ++pos_;
-        break;
-      }
-      return std::unexpected(std::string("expected ',' or ']' in the array"));
-    }
-    return JsonValue::make_array(std::move(items));
-  }
-
-  [[nodiscard]] auto parse_string() -> std::expected<std::string, std::string> {
-    if (pos_ >= text_.size() || text_[pos_] != '"') {
-      return std::unexpected(std::string("expected a string"));
-    }
-    ++pos_;
-    std::string out;
-    while (pos_ < text_.size()) {
-      const char c = text_[pos_++];
-      if (c == '"') {
-        return out;
-      }
-      if (c != '\\') {
-        out.push_back(c);
-        continue;
-      }
-      if (pos_ >= text_.size()) {
-        break;
-      }
-      const char escape = text_[pos_++];
-      switch (escape) {
-        case '"':
-          out.push_back('"');
-          break;
-        case '\\':
-          out.push_back('\\');
-          break;
-        case '/':
-          out.push_back('/');
-          break;
-        case 'b':
-          out.push_back('\b');
-          break;
-        case 'f':
-          out.push_back('\f');
-          break;
-        case 'n':
-          out.push_back('\n');
-          break;
-        case 'r':
-          out.push_back('\r');
-          break;
-        case 't':
-          out.push_back('\t');
-          break;
-        case 'u': {
-          if (pos_ + 4 > text_.size()) {
-            return std::unexpected(std::string("truncated \\u escape"));
-          }
-          unsigned code = 0;
-          for (int i = 0; i < 4; ++i) {
-            const char digit = text_[pos_++];
-            code <<= 4U;
-            if (digit >= '0' && digit <= '9') {
-              code |= static_cast<unsigned>(digit - '0');
-            } else if (digit >= 'a' && digit <= 'f') {
-              code |= static_cast<unsigned>(digit - 'a' + 10);
-            } else if (digit >= 'A' && digit <= 'F') {
-              code |= static_cast<unsigned>(digit - 'A' + 10);
-            } else {
-              return std::unexpected(std::string("bad hex digit in a \\u escape"));
-            }
-          }
-          // The policy file is ASCII; anything else is passed through as '?'.
-          out.push_back(code < 0x80U ? static_cast<char>(code) : '?');
-          break;
-        }
-        default:
-          return std::unexpected(std::string("unknown escape sequence"));
-      }
-    }
-    return std::unexpected(std::string("unterminated string"));
-  }
-
-  [[nodiscard]] auto parse_literal(std::string_view literal)
-      -> std::expected<JsonValue, std::string> {
-    if (text_.compare(pos_, literal.size(), literal) != 0) {
-      return std::unexpected(std::string("expected '") + std::string(literal) + "'");
-    }
-    pos_ += literal.size();
-    return JsonValue{};
-  }
-
-  [[nodiscard]] auto parse_number() -> std::expected<JsonValue, std::string> {
-    const std::size_t start = pos_;
-    while (pos_ < text_.size() &&
-           (std::isdigit(static_cast<unsigned char>(text_[pos_])) != 0 || text_[pos_] == '-' ||
-            text_[pos_] == '+' || text_[pos_] == '.' || text_[pos_] == 'e' || text_[pos_] == 'E')) {
-      ++pos_;
-    }
-    if (start == pos_) {
-      return std::unexpected(std::string("expected a value"));
-    }
-    return JsonValue{};
-  }
-
-  void skip_space() noexcept {
-    while (pos_ < text_.size() && (text_[pos_] == ' ' || text_[pos_] == '\t' ||
-                                   text_[pos_] == '\n' || text_[pos_] == '\r')) {
-      ++pos_;
-    }
-  }
-
-  std::string_view text_;
-  std::size_t pos_{0};
-};
+  return result;
+}
 
 /// Trims the white space around an environment value.
 ///
@@ -362,6 +144,11 @@ class JsonParser {
   }
   if (digits.empty()) {
     return std::unexpected(std::string("the seed is empty"));
+  }
+  // A seed is 64 bits: more digits than that would silently wrap around.
+  if (digits.size() > 16) {
+    return std::unexpected(std::string("the seed has more than 16 hexadecimal digits: '") +
+                           std::string(text) + "'");
   }
   std::uint64_t value = 0;
   for (const char c : digits) {
@@ -392,40 +179,54 @@ class JsonParser {
                          "' (expected 'call' or 'virtualized')");
 }
 
+/// The keys of a JSON object, sorted.
+///
+/// The SDK's object is a hash map, so the order of its keys is not
+/// specified: sorting them makes the error message the same on every run,
+/// and the same as the one the checker prints.
+[[nodiscard]] auto sorted_keys(const llvm::json::Object& object) -> std::vector<std::string> {
+  std::vector<std::string> keys;
+  keys.reserve(object.size());
+  for (const auto& entry : object) {
+    keys.emplace_back(entry.first.str());
+  }
+  std::sort(keys.begin(), keys.end());
+  return keys;
+}
+
 /// Reads one `protect` entry: a bare pattern, or an object with the pattern
 /// and the optional module scope and level.
-[[nodiscard]] auto parse_protect_entry(const JsonValue& value)
+[[nodiscard]] auto parse_protect_entry(const llvm::json::Value& value)
     -> std::expected<PolicyEntry, std::string> {
   PolicyEntry entry;
-  if (value.is_string()) {
-    entry.pattern = std::string(value.text());
+  if (const auto pattern = value.getAsString(); pattern.has_value()) {
+    entry.pattern = std::string(*pattern);
     return entry;
   }
-  if (!value.is_object()) {
+  const llvm::json::Object* object = value.getAsObject();
+  if (object == nullptr) {
     return std::unexpected(std::string("a 'protect' entry must be a string or an object"));
   }
-  const JsonValue* pattern = value.member("symbol");
-  if (pattern == nullptr || !pattern->is_string()) {
+  const auto pattern = object->getString("symbol");
+  if (!pattern.has_value()) {
     return std::unexpected(std::string("a 'protect' object needs a 'symbol' string"));
   }
-  entry.pattern = std::string(pattern->text());
-  if (const JsonValue* module = value.member("module"); module != nullptr) {
-    if (!module->is_string()) {
-      return std::unexpected(std::string("the 'module' of a 'protect' entry must be a string"));
-    }
-    entry.module = std::string(module->text());
+  entry.pattern = std::string(*pattern);
+  if (const auto module = object->getString("module"); module.has_value()) {
+    entry.module = std::string(*module);
+  } else if (object->get("module") != nullptr) {
+    return std::unexpected(std::string("the 'module' of a 'protect' entry must be a string"));
   }
-  if (const JsonValue* level = value.member("level"); level != nullptr) {
-    if (!level->is_string()) {
-      return std::unexpected(std::string("the 'level' of a 'protect' entry must be a string"));
-    }
-    auto parsed = parse_level(level->text());
+  if (const auto level = object->getString("level"); level.has_value()) {
+    auto parsed = parse_level(*level);
     if (!parsed) {
       return std::unexpected(parsed.error());
     }
     entry.level = *parsed;
+  } else if (object->get("level") != nullptr) {
+    return std::unexpected(std::string("the 'level' of a 'protect' entry must be a string"));
   }
-  for (const std::string& key : value.member_keys()) {
+  for (const std::string& key : sorted_keys(*object)) {
     if (key != "symbol" && key != "module" && key != "level") {
       return std::unexpected(std::string("unknown key in a 'protect' entry: '") + key + "'");
     }
@@ -433,57 +234,69 @@ class JsonParser {
   return entry;
 }
 
-[[nodiscard]] auto parse_policy(const JsonValue& root) -> std::expected<Policy, std::string> {
-  if (!root.is_object()) {
+[[nodiscard]] auto parse_policy(const llvm::json::Value& root)
+    -> std::expected<Policy, std::string> {
+  const llvm::json::Object* object = root.getAsObject();
+  if (object == nullptr) {
     return std::unexpected(std::string("the policy file must contain a JSON object"));
   }
-  Policy policy;
-  for (const std::string& key : root.member_keys()) {
+  for (const std::string& key : sorted_keys(*object)) {
     if (key != "protect" && key != "deny" && key != "seed") {
       return std::unexpected(std::string("unknown key in the policy file: '") + key +
                              "' (expected 'protect', 'deny' or 'seed')");
     }
   }
-  if (const JsonValue* protect = root.member("protect"); protect != nullptr) {
-    if (!protect->is_array()) {
-      return std::unexpected(std::string("'protect' must be an array"));
-    }
-    for (const JsonValue& item : protect->items()) {
+
+  Policy policy;
+  if (const llvm::json::Array* protect = object->getArray("protect"); protect != nullptr) {
+    for (const llvm::json::Value& item : *protect) {
       auto entry = parse_protect_entry(item);
       if (!entry) {
         return std::unexpected(entry.error());
       }
       policy.protect.push_back(std::move(*entry));
     }
+  } else if (object->get("protect") != nullptr) {
+    return std::unexpected(std::string("'protect' must be an array"));
   }
-  if (const JsonValue* deny = root.member("deny"); deny != nullptr) {
-    if (!deny->is_array()) {
-      return std::unexpected(std::string("'deny' must be an array"));
-    }
-    for (const JsonValue& item : deny->items()) {
-      if (!item.is_string()) {
+
+  if (const llvm::json::Array* deny = object->getArray("deny"); deny != nullptr) {
+    for (const llvm::json::Value& item : *deny) {
+      const auto pattern = item.getAsString();
+      if (!pattern.has_value()) {
         return std::unexpected(std::string("a 'deny' entry must be a string"));
       }
-      policy.deny.push_back(std::string(item.text()));
+      policy.deny.push_back(std::string(*pattern));
     }
+  } else if (object->get("deny") != nullptr) {
+    return std::unexpected(std::string("'deny' must be an array"));
   }
-  if (const JsonValue* seed = root.member("seed"); seed != nullptr) {
-    if (!seed->is_string()) {
-      return std::unexpected(std::string("'seed' must be a hexadecimal string"));
-    }
-    auto parsed = parse_seed(seed->text());
+
+  if (const auto seed = object->getString("seed"); seed.has_value()) {
+    auto parsed = parse_seed(*seed);
     if (!parsed) {
       return std::unexpected(parsed.error());
     }
     policy.seed = *parsed;
+  } else if (object->get("seed") != nullptr) {
+    return std::unexpected(std::string("'seed' must be a hexadecimal string"));
   }
   return policy;
 }
 
-/// The directory the per-module coverage goes to. It lives under the temp
-/// directory by default so that a policy file in the source tree stays clean;
+/// The directory the per-module coverage goes to.
+///
+/// `CS2_PROTECT_COVERAGE` names it outright (the escape hatch for a CI
+/// build); otherwise it lives under the temp directory, keyed by the policy
+/// path, so that a policy file in the source tree stays clean.
 /// tools/protect/check_policy.py computes the same path.
 [[nodiscard]] auto default_coverage_dir(std::string_view policy_path) -> std::filesystem::path {
+  if (const char* custom = std::getenv("CS2_PROTECT_COVERAGE"); custom != nullptr) {
+    const std::string_view directory = trim(custom);
+    if (!directory.empty()) {
+      return std::filesystem::path(std::string(directory));
+    }
+  }
   std::filesystem::path root = ".";
   if (const char* temp = std::getenv("TEMP"); temp != nullptr && *temp != '\0') {
     root = temp;
@@ -498,7 +311,7 @@ class JsonParser {
 
 }  // namespace
 
-[[nodiscard]] auto to_string(ProtectionLevel level) noexcept -> std::string_view {
+[[nodiscard]] auto to_string(ProtectionLevel level) noexcept -> const char* {
   switch (level) {
     case ProtectionLevel::call:
       return "call";
@@ -508,7 +321,7 @@ class JsonParser {
   return "call";
 }
 
-[[nodiscard]] auto to_string(SelectionSource source) noexcept -> std::string_view {
+[[nodiscard]] auto to_string(SelectionSource source) noexcept -> const char* {
   switch (source) {
     case SelectionSource::annotation:
       return "annotation";
@@ -516,6 +329,35 @@ class JsonParser {
       return "policy";
   }
   return "policy";
+}
+
+auto parse_policy_text(std::string_view text) -> std::expected<Policy, ConfigError> {
+  if (text.starts_with(k_utf8_bom)) {
+    text.remove_prefix(k_utf8_bom.size());
+  }
+
+  // The depth is checked first: the SDK's parser recurses, and a file that
+  // nests deeper than the limit would kill the compiler before the parser
+  // could report anything.
+  auto scan = scan_policy(text);
+  if (!scan) {
+    return std::unexpected(ConfigError{scan.error()});
+  }
+  if (scan->depth > MAX_POLICY_DEPTH) {
+    return std::unexpected(ConfigError{std::string("the policy file is nested too deeply (") +
+                                       std::to_string(scan->depth) + " levels, the limit is " +
+                                       std::to_string(MAX_POLICY_DEPTH) + ")"});
+  }
+
+  auto parsed = llvm::json::parse(text);
+  if (!parsed) {
+    return std::unexpected(ConfigError{llvm::toString(parsed.takeError())});
+  }
+  auto policy = parse_policy(*parsed);
+  if (!policy) {
+    return std::unexpected(ConfigError{policy.error()});
+  }
+  return *policy;
 }
 
 auto load_config() -> std::expected<Config, ConfigError> {
@@ -557,16 +399,10 @@ auto load_config() -> std::expected<Config, ConfigError> {
   config.policy_path = policy_file;
   config.coverage_dir = default_coverage_dir(policy_file);
 
-  JsonParser parser(text);
-  auto root = parser.parse();
-  if (!root) {
-    return std::unexpected(
-        ConfigError{std::string("CS2_PROTECT_CONFIG: ") + policy_file + ": " + root.error()});
-  }
-  auto policy = parse_policy(*root);
+  auto policy = parse_policy_text(text);
   if (!policy) {
     return std::unexpected(
-        ConfigError{std::string("CS2_PROTECT_CONFIG: ") + policy_file + ": " + policy.error()});
+        ConfigError{"CS2_PROTECT_CONFIG: " + policy_file + ": " + policy.error().message});
   }
   config.policy = std::move(*policy);
   return config;

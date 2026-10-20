@@ -6,6 +6,7 @@
 // on the definition, and a `protect` entry of the policy file.
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -28,7 +29,7 @@ enum class SkipReason : std::uint8_t {
   intrinsic,      ///< a compiler intrinsic.
 };
 
-[[nodiscard]] auto to_string(SkipReason reason) noexcept -> std::string_view;
+[[nodiscard]] auto to_string(SkipReason reason) noexcept -> const char*;
 
 /// A function the pass selected.
 struct Selection {
@@ -48,11 +49,19 @@ struct Skipped {
 };
 
 /// What one policy entry did in one module.
+///
+/// An entry is *matched* when it named a function that the pass protects, and
+/// *blocked* when it named a function that cannot be protected (an
+/// `alwaysinline` function, a declaration, a denied function, ...). A
+/// blocked entry is **not** a matched entry: the build has to fail, because a
+/// policy that names a function that cannot be protected protects nothing.
 struct PolicyMatch {
   std::string pattern;     ///< the glob of the entry.
   std::string module;      ///< the scope of the entry ("" = any module).
   bool applicable{false};  ///< the scope of the entry names this module.
-  bool matched{false};     ///< the entry matched a function here.
+  bool matched{false};     ///< the entry named a function that is protected.
+  bool blocked{false};     ///< the entry named a function that cannot be protected.
+  std::optional<SkipReason> blocked_reason;  ///< why it cannot be protected.
 };
 
 /// What the pass decided for one module.

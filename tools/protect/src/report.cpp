@@ -24,6 +24,17 @@ namespace {
   return std::string(buffer);
 }
 
+/// The state of a policy entry in one module.
+[[nodiscard]] auto entry_state(const PolicyMatch& match) -> std::string_view {
+  if (match.matched) {
+    return "matched";
+  }
+  if (match.blocked) {
+    return "blocked";
+  }
+  return "unmatched";
+}
+
 }  // namespace
 
 void write_report(const llvm::Module& module, const SelectionResult& result, const Config& config) {
@@ -57,7 +68,10 @@ void write_report(const llvm::Module& module, const SelectionResult& result, con
 
   for (const PolicyMatch& match : result.policy_matches) {
     llvm::errs() << "[cs2-protect] " << tag << ": policy " << match.pattern << " "
-                 << (match.matched ? "matched" : "unmatched");
+                 << entry_state(match);
+    if (match.blocked && match.blocked_reason.has_value()) {
+      llvm::errs() << " reason=" << to_string(*match.blocked_reason);
+    }
     if (!match.module.empty()) {
       llvm::errs() << " module=" << match.module;
     }
@@ -68,7 +82,7 @@ void write_report(const llvm::Module& module, const SelectionResult& result, con
                << result.skipped.size() << " skipped\n";
 }
 
-auto write_coverage(const Config& config, std::string_view module_id, const SelectionResult& result)
+auto write_coverage(const Config& config, const llvm::Module& module, const SelectionResult& result)
     -> std::optional<std::string> {
   if (!config.policy) {
     return std::nullopt;
@@ -81,20 +95,39 @@ auto write_coverage(const Config& config, std::string_view module_id, const Sele
            "': " + error.message();
   }
 
-  // One file per module: two translation units never write the same file, so
-  // the parallel build does not need a lock.
-  const std::string name = hex_seed(derive_seed(module_id, "")) + ".cov";
+  // One file per (policy, module): the policy digest keeps the coverage of
+  // two policies apart, and the module identifier keeps two sources apart.
+  // The name does not depend on the build directory, so a rebuild in
+  // another build directory overwrites the file instead of adding to the
+  // directory.
+  const std::string name =
+      hex_seed(derive_seed(config.policy_digest, module.getModuleIdentifier())) + ".cov";
   const std::filesystem::path path = config.coverage_dir / name;
+
+  // The whole coverage in one buffer, written in one go: a source that is
+  // compiled into two targets of the same build writes the same file, and
+  // the content does not depend on the target -- but the write must not be
+  // able to interleave with another one.
+  std::string text;
+  text += "policy-sha256 " + config.policy_digest + "\n";
+  text += "module " + module.getSourceFileName() + "\n";
+  for (const PolicyMatch& match : result.policy_matches) {
+    text += "entry ";
+    text += entry_state(match);
+    if (match.blocked && match.blocked_reason.has_value()) {
+      text += " ";
+      text += to_string(*match.blocked_reason);
+    }
+    text += " ";
+    text += match.pattern;
+    text += "\n";
+  }
 
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) {
     return "cannot write the coverage file '" + path.string() + "'";
   }
-  out << "policy-sha256 " << config.policy_digest << "\n";
-  out << "module " << module_id << "\n";
-  for (const PolicyMatch& match : result.policy_matches) {
-    out << "entry " << (match.matched ? "matched" : "unmatched") << " " << match.pattern << "\n";
-  }
+  out.write(text.data(), static_cast<std::streamsize>(text.size()));
   out.flush();
   if (!out) {
     return "cannot write the coverage file '" + path.string() + "'";

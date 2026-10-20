@@ -58,8 +58,14 @@ protect_build_depends = []
 protect_link_depends = []
 
 if protect_enabled
-  if host_machine.system() != 'windows'
-    error('the protection pass needs the Windows payload build')
+  # The plugin is loaded with `/clang:-fpass-plugin=`, which only the clang
+  # driver understands: the *compiler* is what matters here, not the machine
+  # the build runs on (the repo cross-builds the payload from Linux with
+  # clang-cl, see toolchain/windows-msvc.ini).
+  if cpp.get_id() != 'clang-cl' and cpp.get_id() != 'clang'
+    error('the protection pass needs the clang-cl compiler: the plugin is loaded with ' +
+          '/clang:-fpass-plugin=..., which only the clang driver understands (this build ' +
+          'uses ' + cpp.get_id() + ')')
   endif
   if protect_plugin == ''
     error('-Dprotect=true needs -Dprotect_plugin=<path to Cs2Protect.dll>')
@@ -103,21 +109,33 @@ if protect_enabled
   # environment. Its digest goes into the command line, so that a policy
   # change (after a reconfigure) rebuilds the objects: the plugin has to run
   # again to write the coverage of the new policy.
+  #
+  # A protected build without a policy protects nothing, and that is
+  # indistinguishable from an unprotected build -- so the configure step
+  # fails instead. (The plugin itself stays a no-op without a policy: it is
+  # the wiring that knows that `protect` is on.)
   protect_policy_args = []
   policy_probe = run_command(
     find_program('python'), '-c',
     'import os, sys; sys.stdout.write(os.environ.get("CS2_PROTECT_CONFIG", ""))',
     check : false)
-  if policy_probe.returncode() == 0
-    protect_policy = policy_probe.stdout().strip()
-    if protect_policy != '' and fs.exists(protect_policy)
-      protect_policy_digest = fs.hash(files(protect_policy), 'sha256')
-      protect_policy_args = [
-        '-DCS2_PROTECT_POLICY_SHA256=' + protect_policy_digest.substring(0, 16),
-      ]
-      protect_link_depends = protect_link_depends + [files(protect_policy)]
-    endif
+  if policy_probe.returncode() != 0
+    error('-Dprotect=true needs CS2_PROTECT_CONFIG: the configure step could not read the environment')
   endif
+  protect_policy = policy_probe.stdout().strip()
+  if protect_policy == ''
+    error('-Dprotect=true needs a policy file: set CS2_PROTECT_CONFIG=<path to a policy ' +
+          'JSON file> (see tools/protect/policy.example.json). A protected build without ' +
+          'a policy protects nothing, and that is indistinguishable from an unprotected one.')
+  endif
+  if not fs.exists(protect_policy)
+    error('the policy file does not exist: ' + protect_policy)
+  endif
+  protect_policy_digest = fs.hash(files(protect_policy), 'sha256')
+  protect_policy_args = [
+    '-DCS2_PROTECT_POLICY_SHA256=' + protect_policy_digest.substring(0, 16),
+  ]
+  protect_link_depends = protect_link_depends + [files(protect_policy)]
 
   add_project_arguments(
     '/clang:-fpass-plugin=' + protect_plugin.replace('\\', '/'),

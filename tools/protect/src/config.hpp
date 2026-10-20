@@ -24,7 +24,7 @@ enum class ProtectionLevel : std::uint8_t {
   virtualized,  ///< move the body into an interpreter (T20).
 };
 
-[[nodiscard]] auto to_string(ProtectionLevel level) noexcept -> std::string_view;
+[[nodiscard]] auto to_string(ProtectionLevel level) noexcept -> const char*;
 
 /// Where a selection came from.
 enum class SelectionSource : std::uint8_t {
@@ -32,7 +32,7 @@ enum class SelectionSource : std::uint8_t {
   policy,      ///< a `protect` entry of the policy file.
 };
 
-[[nodiscard]] auto to_string(SelectionSource source) noexcept -> std::string_view;
+[[nodiscard]] auto to_string(SelectionSource source) noexcept -> const char*;
 
 /// One `protect` entry of the policy file.
 ///
@@ -72,5 +72,19 @@ struct ConfigError {
 /// A malformed policy file is an error *value*, never an exception: the pass
 /// must not throw out into the driver, which is built without exceptions.
 [[nodiscard]] auto load_config() -> std::expected<Config, ConfigError>;
+
+/// Parses the text of a policy file.
+///
+/// The reader is the SDK's (`llvm::json::parse`), with two checks on top of
+/// it, because the SDK's parser alone is not enough:
+///
+/// * the SDK's parser recurses, so a file that nests thousands of levels
+///   deep overflows the compiler's stack and kills it without a message —
+///   the nesting depth is therefore bounded *before* the text is parsed;
+/// * the SDK's parser keeps the *first* of two equal keys, so a duplicated
+///   key would be silently ignored — the duplicate is rejected instead.
+///
+/// The policy *format* is the one of the spec; only the reader changed.
+[[nodiscard]] auto parse_policy_text(std::string_view text) -> std::expected<Policy, ConfigError>;
 
 }  // namespace cs2::protect

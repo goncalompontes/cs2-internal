@@ -29,7 +29,13 @@ void write_report(const llvm::Module& module, const SelectionResult& result, con
 /// policy entry matched *somewhere* in the build. The coverage file records
 /// what each module decided; tools/protect/check_policy.py reads them all
 /// after the build and fails it when an entry matched nothing.
-[[nodiscard]] auto write_coverage(const Config& config, std::string_view module_id,
+///
+/// The file name carries the policy digest and the module identifier, so
+/// that the coverage of one policy is never mistaken for the coverage of
+/// another, and so that two sources never write the same file. The name does
+/// not depend on the build directory, so a rebuild overwrites the file
+/// instead of adding to the directory.
+[[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
                                   const SelectionResult& result) -> std::optional<std::string>;
 
 }  // namespace cs2::protect

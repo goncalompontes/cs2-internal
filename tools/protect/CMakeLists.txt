@@ -97,14 +97,38 @@ set_target_properties(Cs2Protect PROPERTIES PREFIX "" OUTPUT_NAME "Cs2Protect")
 # spells the flags `/GR-` and `/MT`; the `-fno-rtti` and
 # `-fms-runtime-lib=static` spellings are rejected by clang-cl ("unknown
 # argument ignored in clang-cl").
-target_compile_features(Cs2Protect PRIVATE cxx_std_23)
+set(CS2_PROTECT_CXX_STANDARD cxx_std_23)
+set(CS2_PROTECT_COMPILE_OPTIONS "")
+set(CS2_PROTECT_DEFINITIONS "")
+if(MSVC)
+  set(CS2_PROTECT_COMPILE_OPTIONS /W4 /GR- /EHs-c- /MT)
+else()
+  set(CS2_PROTECT_COMPILE_OPTIONS -Wall -Wextra -fno-rtti)
+endif()
+
+target_compile_features(Cs2Protect PRIVATE ${CS2_PROTECT_CXX_STANDARD})
 target_include_directories(Cs2Protect SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(Cs2Protect PRIVATE ${LLVM_DEFINITIONS})
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
 target_compile_options(Cs2Protect PRIVATE ${LLVM_DEFINITIONS_LIST})
+target_compile_options(Cs2Protect PRIVATE ${CS2_PROTECT_COMPILE_OPTIONS})
 
-if(MSVC)
-  target_compile_options(Cs2Protect PRIVATE /W4 /GR- /EHs-c- /MT)
-else()
-  target_compile_options(Cs2Protect PRIVATE -Wall -Wextra -fno-rtti)
-endif()
+# --- The tests --------------------------------------------------------------
+# The plugin is a build-time tool, so its tests live with it and run under
+# CTest. They cover the policy reader (a malformed policy must be a reported
+# error, never a crash), the qualified name and the selection.
+enable_testing()
+add_executable(cs2-protect-tests
+  tests/protect_tests.cpp
+  src/config.cpp
+  src/selection.cpp
+  src/report.cpp
+)
+target_compile_features(cs2-protect-tests PRIVATE ${CS2_PROTECT_CXX_STANDARD})
+target_include_directories(cs2-protect-tests SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_include_directories(cs2-protect-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(cs2-protect-tests PRIVATE ${LLVM_DEFINITIONS})
+target_compile_options(cs2-protect-tests PRIVATE ${LLVM_DEFINITIONS_LIST})
+target_compile_options(cs2-protect-tests PRIVATE ${CS2_PROTECT_COMPILE_OPTIONS})
+target_link_libraries(cs2-protect-tests PRIVATE ${LLVM_LIBS_FIXED})
+add_test(NAME protect-tests COMMAND cs2-protect-tests)

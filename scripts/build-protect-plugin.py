@@ -16,10 +16,13 @@ Usage: build-protect-plugin.py [--sdk DIR] [--build-dir DIR] [--clean]
   --build-dir the CMake build directory (default: tools/protect/build)
   --clean     remove the build directory before configuring
 
-The path of the built DLL is printed on stdout; everything else goes to
-stderr, so a caller can capture the path with
+The path of the built DLL is printed on **stdout**, and nothing else: the
+CMake and ninja output goes to a log file whose path is printed on stderr,
+so that a caller can capture the path with
 
     python scripts/build-protect-plugin.py
+
+without capturing the build log as well.
 """
 import argparse
 import os
@@ -47,6 +50,9 @@ DEFAULT_CMAKE = Path(
     r"\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
 )
 VSWHERE = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
+
+#: How many lines of the build log are printed when the build fails.
+LOG_TAIL_LINES = 40
 
 
 def fail(message: str) -> int:
@@ -87,9 +93,6 @@ def find_clang_cl() -> str:
     env = os.environ.get("CS2_CLANG_CL")
     if env and Path(env).is_file():
         return env
-    found = shutil.which("clang-cl")
-    if found:
-        return "clang-cl"
     return "clang-cl"
 
 
@@ -120,7 +123,7 @@ def msvc_environment_ready() -> bool:
     return bool(os.environ.get("INCLUDE")) and bool(os.environ.get("LIB"))
 
 
-def run(command: list[str], use_vcvars: bool) -> int:
+def run(command: list[str], use_vcvars: bool, log: Path) -> int:
     """Runs a command, under vcvars64 when the shell has no MSVC toolchain.
 
     The plugin links the static CRT (`/MT`), so it needs the MSVC import and
@@ -129,9 +132,16 @@ def run(command: list[str], use_vcvars: bool) -> int:
     The command goes through a temporary batch file: `cmd.exe` does not
     understand the quoting that Python uses for an argument that contains
     quotes of its own.
+
+    The output goes to the log file: the script's stdout carries the path of
+    the built DLL and nothing else, so that a caller can capture it.
     """
     if not use_vcvars:
-        return subprocess.run(command, check=False).returncode
+        with log.open("w", encoding="utf-8", errors="replace") as handle:
+            completed = subprocess.run(
+                command, check=False, stdout=handle, stderr=subprocess.STDOUT
+            )
+        return completed.returncode
 
     vcvars = find_vcvars()
     if vcvars is None:
@@ -151,9 +161,26 @@ def run(command: list[str], use_vcvars: bool) -> int:
         batch.write("exit /b %ERRORLEVEL%\n")
         script = Path(batch.name)
     try:
-        return subprocess.run(["cmd", "/c", str(script)], check=False).returncode
+        with log.open("w", encoding="utf-8", errors="replace") as handle:
+            completed = subprocess.run(
+                ["cmd", "/c", str(script)],
+                check=False,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+            )
+        return completed.returncode
     finally:
         script.unlink(missing_ok=True)
+
+
+def print_log_tail(log: Path) -> None:
+    """Prints the end of the build log, so that a failure says why."""
+    try:
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    for line in lines[-LOG_TAIL_LINES:]:
+        print(f"build-protect-plugin: | {line}", file=sys.stderr)
 
 
 def main(argv: list[str]) -> int:
@@ -191,6 +218,12 @@ def main(argv: list[str]) -> int:
     build_dir = args.build_dir
     if args.clean and build_dir.exists():
         shutil.rmtree(build_dir)
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    # The build log lives next to the build: the stdout of this script is
+    # the path of the DLL and nothing else.
+    log = build_dir / "build-protect-plugin.log"
+    print(f"build-protect-plugin: the build log is '{log}'", file=sys.stderr)
 
     use_vcvars = not msvc_environment_ready()
     configure = [
@@ -202,21 +235,24 @@ def main(argv: list[str]) -> int:
         "-G",
         "Ninja",
         "-DCMAKE_BUILD_TYPE=Release",
-        f"-DCMAKE_C_COMPILER={find_clang_cl()}",
         f"-DCMAKE_CXX_COMPILER={find_clang_cl()}",
         f"-DLLVM_DIR={llvm_dir}",
     ]
-    if run(configure, use_vcvars) != 0:
+    if run(configure, use_vcvars, log) != 0:
+        print_log_tail(log)
         return fail("the CMake configure step failed")
 
-    if run([str(cmake), "--build", str(build_dir)], use_vcvars) != 0:
+    if run([str(cmake), "--build", str(build_dir)], use_vcvars, log) != 0:
+        print_log_tail(log)
         return fail("the build failed")
 
     dll = build_dir / "Cs2Protect.dll"
     if not dll.is_file():
+        print_log_tail(log)
         return fail(f"the build did not produce '{dll}'")
 
-    print(dll)
+    # The absolute path, and nothing else: a caller captures stdout.
+    print(dll.resolve())
     return 0
 
 
