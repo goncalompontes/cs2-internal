@@ -80,7 +80,7 @@ alone.** Steering has to come from rotating the *movement yaw*.
    (`roll`), not from the command's `viewangles` directly. That indirection is
    what makes the sub-tick yaw channel possible (below).
 2. `wish = fwd * *(float *)(movedata + 0x2c)          // forwardmove
-          + right * *(float *)(movedata + 0x30)`      // sidemove/leftmove
+          + right * *(float *)(movedata + 0x30)`      // leftmove (the side axis)
 3. `wishspeed = min(|wish|, *(float *)(movedata + 0x120))` (the CMoveData's max
    speed bound), normalise `wish` → `wishdir`.
 4. `AirAccelerate(svc, movedata, &wishdir, wishspeed, sv_airaccelerate)`.
@@ -91,6 +91,37 @@ alone.** Steering has to come from rotating the *movement yaw*.
    jump bookkeeping runs from `AirMove` too.
 7. jump-apex handling (`svc + 0x70c` = `m_bJumpApexPending`, `svc + 0x710` = a
    per-tick sub-tick accumulator clamped to 1.0).
+
+### The sign convention: which way does the side axis point?
+
+**The `right` in the wish above is the player's LEFT, and the side axis is
+positive to the LEFT.** Both facts were re-derived from the engine's own code
+on the live build 25947352 (`client.dll` sha `659940c1…`); the full
+derivation with the addresses is in **[`strafe-sign.md`](strafe-sign.md)**.
+
+| fact | where (RVA, build 25947352) |
+|---|---|
+| the basis function's **second** output is `(-sin yaw, +cos yaw)` — the forward vector rotated **+90°** | `0x173cb90` (`AngleVectors`; an identical copy at `0x1742af0`) |
+| `AirMove` multiplies the side axis by that second output | `0x8e57b0` (`PreSource1AirMove`) |
+| the engine's own input forms the lateral axis as `value("left") - value("right")` | `0xb8f6e0`; the action names at `0x1c60548` / `0x1c60550` |
+| the side field is the *left* move: `m_flCmdLeftMove` (there is **no** `m_flCmdSideMove` in the build) | the schema strings at `0x1c39998`; the command's protobuf field is `leftmove` |
+
+So, with the camera at `yaw`: `A` (`IN_MOVELEFT`) writes a side axis of `+1`
+and the wish's lateral part is `(-sin yaw, +cos yaw)` — the heading `yaw + 90°`,
+the player's **left**; `D` (`IN_MOVERIGHT`) writes `-1` and the lateral part is
+`(sin yaw, -cos yaw)` — the heading `yaw - 90°`, the player's **right**.
+
+> **The old note in this document was wrong in two cancelling halves:** it
+> called the engine's second basis output "the right vector" (it is its
+> negation) *and* called a positive side axis "the right" (it is the left).
+> The two cancelled in `strafe_geometry.hpp`'s goal heading — so the goal was
+> never wrong — but **not** in the analog write, which still writes the side
+> axis with the old sign (see `strafe-sign.md` §4.2; the fix is in
+> `payload/control/src/input.cpp`).
+>
+> The convention now lives in exactly one place,
+> `strafe_geometry.hpp`'s `k_engine_side_axis_positive_is_left`, and the host
+> test pins it.
 
 ## `AirAccelerate` — the gain rule
 
@@ -344,7 +375,7 @@ air-movement RVA — so the addresses are documentation, not a runtime dependenc
 | schema field | offset | role |
 |---|---|---|
 | `m_flCmdForwardMove` | `+0x1a0` | forward axis |
-| `m_flCmdSideMove` | `+0x1a4` | side axis |
+| `m_flCmdLeftMove` | `+0x1a4` | side axis (the **left** move — see the sign convention above) |
 | `m_flCmdUpMove` | `+0x1a8` | up axis |
 
 — and **only for the axes whose button bit is held** (`CInButtonState` word 0 at
