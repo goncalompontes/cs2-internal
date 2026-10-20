@@ -36,8 +36,10 @@ namespace {
 // costs two scattered reads (the designer-name pointer and the name's first
 // word), so a full walk in one frame would cost milliseconds. The walk is
 // therefore spread over the frames: a fixed budget per frame, and the
-// entities are published when a sweep finishes. An empty page costs one
-// read, so the populated pages are what the budget is spent on.
+// entities are published when a sweep finishes. An empty page costs a whole
+// iteration of the budget (its slots are skipped in one step, but the budget
+// is spent on it), so the budget — not the number of reads — is what bounds
+// the walk.
 constexpr int k_world_slots_per_frame = 1024;
 
 // `CEntityIdentity`'s layout (`cs2/game/entity_system.hpp`): the instance
@@ -62,6 +64,8 @@ enum class WorldClass : std::uint8_t {
   incendiary,
   he,
   decoy,
+  sensor,    // the motion grenade
+  bumpmine,  // the proximity mine
   c4,
   weapon,
 };
@@ -89,6 +93,14 @@ auto classify(const char* name) noexcept -> WorldClass {
   if (matches(name, "decoy_p", 7)) {
     return WorldClass::decoy;
   }
+  // The two grenades the list did not name: without them they got no marker
+  // at all.
+  if (matches(name, "sensorgr", 8)) {
+    return WorldClass::sensor;
+  }
+  if (matches(name, "bumpmine", 8)) {
+    return WorldClass::bumpmine;
+  }
   if (matches(name, "planted", 7)) {
     return WorldClass::c4;
   }
@@ -99,6 +111,17 @@ auto classify(const char* name) noexcept -> WorldClass {
     return WorldClass::weapon;
   }
   return WorldClass::none;
+}
+
+// The deployed incendiary (`weapon_taggrenade`) is a grenade, not a dropped
+// weapon. The seven-character prefix cannot tell the two apart, so the name
+// is read once more when the prefix says "weapon_".
+auto is_deployed_incendiary(std::uintptr_t name_ptr) noexcept -> bool {
+  char rest[10] = {};
+  if (!game::read_bytes(name_ptr + 7, rest, sizeof(rest))) {
+    return false;
+  }
+  return matches(rest, "taggrenad", 9);
 }
 
 auto grenade_kind(WorldClass type) noexcept -> GrenadeKind {
@@ -113,8 +136,11 @@ auto grenade_kind(WorldClass type) noexcept -> GrenadeKind {
       return GrenadeKind::incendiary;
     case WorldClass::decoy:
       return GrenadeKind::decoy;
-    default:
+    case WorldClass::he:
       return GrenadeKind::he;
+    default:
+      // The sensor grenade and the bump mine have no tint of their own.
+      return GrenadeKind::other;
   }
 }
 
@@ -138,8 +164,12 @@ auto tint_for(GrenadeKind kind) noexcept -> Tint {
     case GrenadeKind::decoy:
       return Tint{.r = 0.8F, .g = 0.65F, .b = 1.0F};
     case GrenadeKind::he:
-    default:
       return Tint{.r = 0.7F, .g = 0.8F, .b = 0.9F};
+    case GrenadeKind::other:
+    default:
+      // A neutral grey: the sensor grenade and the bump mine have no tint of
+      // their own.
+      return Tint{.r = 0.75F, .g = 0.75F, .b = 0.75F};
   }
 }
 
@@ -251,6 +281,65 @@ void walk(Frame& frame) {
   }
   std::uintptr_t page_base = 0;
 
+  // Examine one identity slot and push what it holds. The function returns
+  // when the slot holds nothing of interest — the publish must happen after
+  // the slot has been classified, so it is not done here.
+  const auto examine = [&](const std::uintptr_t identity) -> void {
+    // The designer name's pointer, then the name's first word: the class
+    // prefix is what the walk matches on, and a word is one read instead of
+    // a string.
+    std::uintptr_t name_ptr = 0;
+    if (!game::read(identity + k_identity_designer, name_ptr) || name_ptr == 0) {
+      return;
+    }
+    char prefix[8] = {};
+    if (!game::read_bytes(name_ptr, prefix, sizeof(prefix))) {
+      return;
+    }
+    WorldClass type = classify(prefix);
+    if (type == WorldClass::none) {
+      return;
+    }
+    // The deployed incendiary is a grenade, not a dropped weapon.
+    if (type == WorldClass::weapon && is_deployed_incendiary(name_ptr)) {
+      type = WorldClass::incendiary;
+    }
+
+    std::uintptr_t instance = 0;
+    if (!game::read(identity + k_identity_instance, instance) || instance == 0) {
+      return;
+    }
+    if (type == WorldClass::weapon && is_held(held, instance)) {
+      return;  // the weapon a player is carrying, not a dropped one
+    }
+
+    WorldEntity entity;
+    if (type == WorldClass::weapon) {
+      entity.kind = WorldEntityKind::dropped_weapon;
+      entity.name = game::read_cstring(name_ptr, 48);
+    } else if (type == WorldClass::c4) {
+      entity.kind = WorldEntityKind::c4;
+    } else {
+      entity.kind = WorldEntityKind::grenade;
+      entity.grenade = grenade_kind(type);
+    }
+    if (!read_origin(instance, entity.origin)) {
+      return;
+    }
+    if (entity.kind == WorldEntityKind::c4 && blow_field != 0) {
+      float blow = 0.0F;
+      if (game::read(instance + blow_field, blow) && blow > now) {
+        entity.time_left = blow - now;
+      }
+      std::uint8_t ticking = 0;
+      if (ticking_field != 0) {
+        (void)game::read(instance + ticking_field, ticking);
+      }
+      entity.ticking = ticking != 0;
+    }
+    cache.scratch.push_back(std::move(entity));
+  };
+
   for (int i = 0; i < k_world_slots_per_frame; ++i) {
     if (slot == 0) {
       page_base = cache.entity_system.page(page);
@@ -272,59 +361,15 @@ void walk(Frame& frame) {
       page = (page + 1) % k_page_count;
     }
     cache.cursor = page * k_slots + slot;
-    if (cache.cursor == 0) {
+    // The publish happens **after** the slot has been classified: the slot
+    // that wraps the cursor must not appear one sweep late.
+    const bool wrapped = cache.cursor == 0;
+
+    examine(identity);
+
+    if (wrapped) {
       publish();
     }
-
-    // The designer name's pointer, then the name's first word: the class
-    // prefix is what the walk matches on, and a word is one read instead of
-    // a string.
-    std::uintptr_t name_ptr = 0;
-    if (!game::read(identity + k_identity_designer, name_ptr) || name_ptr == 0) {
-      continue;
-    }
-    char prefix[8] = {};
-    if (!game::read_bytes(name_ptr, prefix, sizeof(prefix))) {
-      continue;
-    }
-    const WorldClass type = classify(prefix);
-    if (type == WorldClass::none) {
-      continue;
-    }
-
-    std::uintptr_t instance = 0;
-    if (!game::read(identity + k_identity_instance, instance) || instance == 0) {
-      continue;
-    }
-    if (type == WorldClass::weapon && is_held(held, instance)) {
-      continue;  // the weapon a player is carrying, not a dropped one
-    }
-
-    WorldEntity entity;
-    if (type == WorldClass::weapon) {
-      entity.kind = WorldEntityKind::dropped_weapon;
-      entity.name = game::read_cstring(name_ptr, 48);
-    } else if (type == WorldClass::c4) {
-      entity.kind = WorldEntityKind::c4;
-    } else {
-      entity.kind = WorldEntityKind::grenade;
-      entity.grenade = grenade_kind(type);
-    }
-    if (!read_origin(instance, entity.origin)) {
-      continue;
-    }
-    if (entity.kind == WorldEntityKind::c4 && blow_field != 0) {
-      float blow = 0.0F;
-      if (game::read(instance + blow_field, blow) && blow > now) {
-        entity.time_left = blow - now;
-      }
-      std::uint8_t ticking = 0;
-      if (ticking_field != 0) {
-        (void)game::read(instance + ticking_field, ticking);
-      }
-      entity.ticking = ticking != 0;
-    }
-    cache.scratch.push_back(std::move(entity));
   }
   cache.last_walk_ms = frame.now_ms;
   if (frame.stats != nullptr) {
