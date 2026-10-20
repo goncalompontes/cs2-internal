@@ -460,6 +460,13 @@ class InputStatus(TypedDict, total=False):
     strafe_deadzone_deg: float
     strafe_writes: int
     strafe_raw_writes: int
+    # The auto-strafe's **outcome** (the speed gained over the last airtime) and
+    # its **gate verdict** (did the engine apply the requested basis rotation?
+    # `docs/re/strafing.md` §"The gate").
+    strafe_gain: float
+    strafe_steered: bool
+    strafe_steered_ticks: int
+    strafe_ignored: int
     bhop_presses: int
     bhop_writes: int
     bhop_landed_tick: int

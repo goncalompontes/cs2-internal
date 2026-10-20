@@ -46,7 +46,7 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2") -> dict
         raise SessionError(f"usercmd backend not hooked: {status}")
 
     try:
-        menu = settings.read()
+        menu = settings.read(game)
     except settings.SettingsError as error:
         print(f"[bhop] cannot read the menu settings: {error}", flush=True)
         menu = None

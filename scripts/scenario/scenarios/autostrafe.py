@@ -49,7 +49,7 @@ def run(game: Game, *, watch: float = WATCH, min_gain: float = MIN_GAIN,
     awaiting.ensure_live_round(game, map_name=map_name, verify_movable=False)
 
     try:
-        operator_settings = settings.read()
+        operator_settings = settings.read(game)
     except settings.SettingsError as error:
         print(f"[autostrafe] cannot read the menu settings: {error}", flush=True)
         operator_settings = None
@@ -65,6 +65,7 @@ def run(game: Game, *, watch: float = WATCH, min_gain: float = MIN_GAIN,
     status = game.input()
     writes_before = status.get("strafe_writes") or 0
     presses_before = status.get("bhop_presses") or 0
+    ignored_before = status.get("strafe_ignored") or 0
     eye_before = (awaiting.local(game).get("eye_angles") or {}).get("yaw")
     speeds: list[float] = []
     airborne_samples = 0
@@ -102,6 +103,7 @@ def run(game: Game, *, watch: float = WATCH, min_gain: float = MIN_GAIN,
     status = game.input()
     writes_after = status.get("strafe_writes") or 0
     presses_after = status.get("bhop_presses") or 0
+    ignored_after = status.get("strafe_ignored") or 0
     eye_after = (awaiting.local(game).get("eye_angles") or {}).get("yaw")
     eye_drift = None
     if eye_before is not None and eye_after is not None:
@@ -124,6 +126,17 @@ def run(game: Game, *, watch: float = WATCH, min_gain: float = MIN_GAIN,
         "eye_yaw_before": eye_before,
         "eye_yaw_after": eye_after,
         "eye_drift": eye_drift,
+        # The payload's own **outcome** and **gate verdict**: the speed gained
+        # over the last airtime (u/s) and whether the engine applied the
+        # requested basis rotation. The rotation is applied only when the
+        # server honours the sub-tick view angles
+        # (`sv_subtick_movement_view_angles`); when it does not, the feature
+        # writes every tick and gains nothing — the operator has to be able to
+        # see that (`docs/re/strafing.md` §"The gate").
+        "strafe_gain": round(float(status.get("strafe_gain") or 0.0), 1),
+        "strafe_steered": bool(status.get("strafe_steered")),
+        "strafe_ignored_during_window": ignored_after - ignored_before,
+        "strafe_subticks": status.get("strafe_subticks"),
     }
 
     if not enabled:
@@ -157,4 +170,19 @@ def run(game: Game, *, watch: float = WATCH, min_gain: float = MIN_GAIN,
         f"({observed_writes} step writes), speed {round(min(speeds), 0)}->"
         f"{round(max(speeds), 0)} units/s, eye drift {eye_drift} deg (silent)"
     )
+    # The **gate**: the silent encoding writes the wish as a sub-tick yaw
+    # delta, and the engine only applies it when the server honours the
+    # sub-tick view angles (`sv_subtick_movement_view_angles`). When the
+    # server ignores them the feature writes every tick, the velocity never
+    # turns, and nothing accelerates — the symptom the operator reported. The
+    # payload measures it (`strafe_steered` / `strafe_ignored`), so the report
+    # says it outright instead of leaving the operator to guess.
+    if result["strafe_ignored_during_window"] and not result["strafe_steered"]:
+        result["verdict"] += (
+            f" — BUT the server ignored the rotation ({result['strafe_ignored_during_window']}"
+            " ticks): sv_subtick_movement_view_angles is off on this server, so the"
+            " silent encoding cannot steer (docs/re/strafing.md §\"The gate\")"
+        )
+    elif result["strafe_gain"] != 0.0:
+        result["verdict"] += f" (last airtime gained {result['strafe_gain']:+.1f} u/s)"
     return result
