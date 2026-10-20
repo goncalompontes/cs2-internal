@@ -190,7 +190,7 @@ auto occlude_polygon(const Vec3& eye, const Basis& basis, const Polygon& silhoue
     const ConvexClipper clipper = prepare_convex_clipper(occluder->polygon);
     std::vector<Fragment> next;
     next.reserve(fragments.size() * 2);
-    for (Fragment& fragment : fragments) {
+    for (const Fragment& fragment : fragments) {
       // Only fragments that could already be over budget need the (relatively costly)
       // exact block test; a fragment with fewer coverings is kept and split.
       if (fragment.covering.size() > max_penetrations &&
@@ -218,7 +218,7 @@ auto occlude_polygon(const Vec3& eye, const Basis& basis, const Polygon& silhoue
     }
   }
 
-  for (Fragment& fragment : fragments) {
+  for (const Fragment& fragment : fragments) {
     if (fragment.polygon.empty()) {
       continue;
     }

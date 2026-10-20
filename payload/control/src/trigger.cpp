@@ -272,7 +272,7 @@ void Trigger::tick(const game::Snapshot& snapshot, Input& input, std::uint64_t n
   const bool target_changed = target != solved_target_;
   if (target_changed || now - last_solve_ms_ >= config.solve_interval_ms) {
     const std::uint64_t start = now_us();
-    aim::WeaponProfile weapon;
+    const aim::WeaponProfile weapon;
     std::optional<aim::SolveInput> input_data = aim::build_input(snapshot, weapon, target, true);
     if (input_data.has_value() && !input_data->hitboxes.empty()) {
       input_data->objective = aim::AimObjective::hitchance;

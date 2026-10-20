@@ -62,18 +62,18 @@ struct LiveSettings {
 
   // The owner published the block it owns.
   void update(const cs2::overlay::wire::Settings& in) noexcept {
-    std::lock_guard<std::mutex> lock(mutex);
+    const std::lock_guard<std::mutex> lock(mutex);
     block = in;
     valid = true;
   }
 
   void read(cs2::overlay::wire::Settings& out) const noexcept {
-    std::lock_guard<std::mutex> lock(mutex);
+    const std::lock_guard<std::mutex> lock(mutex);
     out = block;
   }
 
   [[nodiscard]] bool published() const noexcept {
-    std::lock_guard<std::mutex> lock(mutex);
+    const std::lock_guard<std::mutex> lock(mutex);
     return valid;
   }
 };

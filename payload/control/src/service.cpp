@@ -631,7 +631,7 @@ auto Service::dispatch_step(void* context, const Json& step, Json& response) noe
   if (const Json* step_args = step.find("args"); step_args != nullptr) {
     request.set("args", *step_args);
   }
-  std::string line = request.dump();
+  const std::string line = request.dump();
   std::string text;
   const bool keep_going = self->handle(line, text);
   if (!keep_going) {
@@ -1066,7 +1066,7 @@ void Service::set_rage_features(bool on, int key, bool fire, int objective, int 
   rage_stop_speed_.store(stop_speed);
   rage_backtrack_.store(backtrack);
   {
-    std::lock_guard<std::mutex> lock(rage_config_mutex_);
+    const std::lock_guard<std::mutex> lock(rage_config_mutex_);
     if (weapon != nullptr) {
       rage_weapon_key(weapon, rage_weapon_, sizeof(rage_weapon_));
     }
@@ -1089,7 +1089,7 @@ void Service::apply_rage_config_op(int op, const char* weapon) noexcept {
   char key[24] = {};
   bool persist = false;
   {
-    std::lock_guard<std::mutex> lock(rage_config_mutex_);
+    const std::lock_guard<std::mutex> lock(rage_config_mutex_);
     rage_weapon_key(weapon != nullptr ? weapon : rage_weapon_, key, sizeof(key));
     switch (op) {
       case 1: {  // save the live globals into the weapon's profile
@@ -1153,7 +1153,7 @@ void Service::apply_rage_config_op(int op, const char* weapon) noexcept {
   // Persist after an edit (and for an explicit save). Re-take the lock so a concurrent
   // profile edit on the control thread cannot race the read; the write is tiny and rare.
   if (op == 3 || persist) {
-    std::lock_guard<std::mutex> lock(rage_config_mutex_);
+    const std::lock_guard<std::mutex> lock(rage_config_mutex_);
     (void)rage_config_save(rage_profiles_);
   }
 }
@@ -1177,7 +1177,7 @@ auto Service::effective_rage_tuning(const char* active_weapon) noexcept -> RageT
   if (!rage_per_weapon_.load() || active_weapon == nullptr || active_weapon[0] == '\0') {
     return tuning;
   }
-  std::lock_guard<std::mutex> lock(rage_config_mutex_);
+  const std::lock_guard<std::mutex> lock(rage_config_mutex_);
   const RageProfile* profile = rage_profile_find(rage_profiles_, active_weapon, false);
   if (profile == nullptr) {
     return tuning;
@@ -1280,7 +1280,7 @@ void Service::sample_records(const game::Snapshot& snapshot) noexcept {
   // (`docs/re/lagcomp.md`). Fall back to a sample counter before a level is up.
   const std::int32_t tick_base = snapshot.local->tick_base;
   const std::int32_t tick = tick_base > 0 ? tick_base : (record_tick_.fetch_add(1) + 1);
-  aim::WeaponProfile weapon;  // the heatmap re-values heads with its own weapon
+  const aim::WeaponProfile weapon;  // the heatmap re-values heads with its own weapon
 
   // Read every enemy's hitboxes **outside** the lock (the memory walk is slow and
   // must not stall a concurrent `heatmap` read), then publish them together.
@@ -1308,7 +1308,7 @@ void Service::sample_records(const game::Snapshot& snapshot) noexcept {
 
   std::vector<std::uintptr_t> alive;
   alive.reserve(samples.size());
-  std::lock_guard<std::mutex> lock(records_mutex_);
+  const std::lock_guard<std::mutex> lock(records_mutex_);
   for (Sampled& sample : samples) {
     aim::Record record;
     record.tick = tick;
@@ -1398,7 +1398,7 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
   // Every sampled lag pose, so a backtrack aim has its own walls enumerated too. Only
   // when backtracking (or the live heatmap) actually consumes them.
   if (rage_backtrack_.load() || occlusion_live_.load()) {
-    std::lock_guard<std::mutex> lock(records_mutex_);
+    const std::lock_guard<std::mutex> lock(records_mutex_);
     for (const std::uintptr_t pawn : records_.pawns()) {
       aim::Aabb* target = target_for(pawn);
       if (target == nullptr) {
@@ -1445,7 +1445,7 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
   if (!have_geometry) {
     return;
   }
-  std::lock_guard<std::mutex> lock(occlusion_mutex_);
+  const std::lock_guard<std::mutex> lock(occlusion_mutex_);
   // Enumerate every frame: the eye→hitboxes volume is the exact query volume, and caching
   // it would make the solid set stale (docs/ragebot.md — correctness over cost). Only the
   // *parse* of the static world body is cached.
@@ -1505,7 +1505,7 @@ void Service::on_game_thread() noexcept {
     int target_count = 0;
     bool inputs_complete = true;
     {
-      std::lock_guard<std::mutex> lock(occlusion_mutex_);
+      const std::lock_guard<std::mutex> lock(occlusion_mutex_);
       eye = occlusion_eye_;
       box_min = occlusion_lo_;
       box_max = occlusion_hi_;
@@ -1540,7 +1540,7 @@ void Service::on_game_thread() noexcept {
     }
     rage_occlusion_query_complete_.store(query.complete(), std::memory_order_relaxed);
     rage_occlusion_query_issues_.store(query.stats.incomplete_reasons, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lock(occlusion_mutex_);
+    const std::lock_guard<std::mutex> lock(occlusion_mutex_);
     occlusion_hulls_ = std::move(query.hulls);
     occlusion_stats_ = query.stats;
   }
@@ -1551,7 +1551,7 @@ void Service::on_game_thread() noexcept {
       visibility_wanted_.load(std::memory_order_relaxed)) {
     game::Snapshot visibility_snapshot;
     {
-      std::lock_guard<std::mutex> lock(snapshot_mutex_);
+      const std::lock_guard<std::mutex> lock(snapshot_mutex_);
       if (have_snapshot_.load(std::memory_order_relaxed)) {
         visibility_snapshot = last_snapshot_;
       }
@@ -1578,7 +1578,7 @@ void Service::on_game_thread() noexcept {
   game::Snapshot snapshot;
   bool have_snapshot = false;
   {
-    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    const std::lock_guard<std::mutex> lock(snapshot_mutex_);
     have_snapshot = have_snapshot_.load(std::memory_order_relaxed);
     if (have_snapshot) {
       snapshot = last_snapshot_;
@@ -1608,7 +1608,7 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   // heatmap's history) + build the occlusion-query box. The **solve itself runs on the
   // game thread** (`rage_tick` from the CreateMove hook), not here.
   {
-    std::lock_guard<std::mutex> lock(snapshot_mutex_);
+    const std::lock_guard<std::mutex> lock(snapshot_mutex_);
     last_snapshot_ = snapshot;
     have_snapshot_.store(true, std::memory_order_relaxed);
   }
@@ -1616,7 +1616,7 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   // origin). The snapshot's players are in entity-index order — the order the
   // provider's slot -> player resolution relies on.
   {
-    std::lock_guard<std::mutex> lock(sound_mutex_);
+    const std::lock_guard<std::mutex> lock(sound_mutex_);
     sound_player_count_ = 0;
     for (const game::PlayerSnapshot& player : snapshot.players) {
       if (sound_player_count_ >= k_max_sound_players) {
@@ -1666,7 +1666,7 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
 void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // Ragebot instrumentation (`docs/ragebot-perf.md`): time the whole solve and each stage.
   perf_.frames.fetch_add(1, std::memory_order_relaxed);
-  FrameScope frame_scope(perf_.total_us, perf_.last_total_us, perf_.max_total_us);
+  const FrameScope frame_scope(perf_.total_us, perf_.last_total_us, perf_.max_total_us);
   // Auto-scope is re-decided every tick; the same sink applies the transition (`+zoom`).
   rage_scope_wanted_.store(false);
   const bool forced = rage_force_.load();
@@ -1871,7 +1871,7 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     lo = game::Vec3{lo.x - k_margin, lo.y - k_margin, lo.z - k_margin};
     hi = game::Vec3{hi.x + k_margin, hi.y + k_margin, hi.z + k_margin};
     const std::uint64_t t_project = now_us();
-    std::lock_guard<std::mutex> lock(occlusion_mutex_);
+    const std::lock_guard<std::mutex> lock(occlusion_mutex_);
     for (const OcclusionHull& hull : occlusion_hulls_) {
       if (hull.has_bounds &&
           !(hull.bounds_max.x >= lo.x && hull.bounds_min.x <= hi.x && hull.bounds_max.y >= lo.y &&
@@ -1987,7 +1987,7 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
       rage_backtrack_.load() &&
       perf_.last_total_us.load(std::memory_order_relaxed) <= k_backtrack_budget_us;
   if (allow_backtrack) {
-    std::lock_guard<std::mutex> lock(records_mutex_);
+    const std::lock_guard<std::mutex> lock(records_mutex_);
     const std::int32_t newest =
         backtrack_tick_base > 0 ? backtrack_tick_base : records_.newest_tick();
     const std::int32_t floor_tick =
@@ -2220,7 +2220,7 @@ auto Service::recent_sounds(SoundEvent* out, int max) noexcept -> int {
   //    so no allocation and no copy of the snapshot's vectors).
   const std::uint64_t now = now_ms();
   int written = 0;
-  std::lock_guard<std::mutex> lock(sound_mutex_);
+  const std::lock_guard<std::mutex> lock(sound_mutex_);
   for (int i = 0; i < captured_count && written < max; ++i) {
     const SoundPlayer* player =
         resolve_sound_player(sound_players_.data(), sound_player_count_, captured[i].slot);
@@ -2247,7 +2247,7 @@ void Service::set_esp_features(bool glow, bool visible_only) noexcept {
   visibility_enabled_.store(enabled, std::memory_order_relaxed);
   if (!enabled) {
     // The toggles are off: the states would be stale anyway, so drop them.
-    std::lock_guard<std::mutex> lock(visibility_mutex_);
+    const std::lock_guard<std::mutex> lock(visibility_mutex_);
     visibility_.clear();
   }
 }
@@ -2258,7 +2258,7 @@ auto Service::visibility(int player_index) const noexcept -> Visibility {
   }
   // The ask arms the world query behind the answer.
   visibility_wanted_.store(true, std::memory_order_relaxed);
-  std::lock_guard<std::mutex> lock(visibility_mutex_);
+  const std::lock_guard<std::mutex> lock(visibility_mutex_);
   return visibility_.get(player_index, now_ms());
 }
 
@@ -2276,7 +2276,7 @@ void Service::refresh_visibility(const game::Snapshot& snapshot) noexcept {
   // The eye the enumeration used (the same snapshot the solids belong to).
   game::Vec3 eye{};
   {
-    std::lock_guard<std::mutex> lock(occlusion_mutex_);
+    const std::lock_guard<std::mutex> lock(occlusion_mutex_);
     eye = occlusion_eye_;
   }
 
@@ -2316,7 +2316,7 @@ void Service::refresh_visibility(const game::Snapshot& snapshot) noexcept {
   std::array<bool, k_max_visibility_players> hidden{};
   aim::OccluderCell cell;  // reused: the ray test reads the planes / the BVH
   {
-    std::lock_guard<std::mutex> lock(occlusion_mutex_);
+    const std::lock_guard<std::mutex> lock(occlusion_mutex_);
     for (const OcclusionHull& hull : occlusion_hulls_) {
       // The cell carries what the ray test reads: a polytope's inward
       // half-spaces, the analytic sphere / capsule, and the mesh's BVH
@@ -2354,7 +2354,7 @@ void Service::refresh_visibility(const game::Snapshot& snapshot) noexcept {
   }
 
   // Publish the states (the render thread only ever reads them).
-  std::lock_guard<std::mutex> lock(visibility_mutex_);
+  const std::lock_guard<std::mutex> lock(visibility_mutex_);
   for (int i = 0; i < ray_count; ++i) {
     visibility_.publish(
         rays[static_cast<std::size_t>(i)].index,
@@ -2608,7 +2608,7 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   }
   char weapon[24] = {};
   {
-    std::lock_guard<std::mutex> lock(rage_config_mutex_);
+    const std::lock_guard<std::mutex> lock(rage_config_mutex_);
     if (const Json* value = args.find("weapon"); value != nullptr && value->is_string()) {
       rage_weapon_key(std::string(value->as_string()).c_str(), rage_weapon_, sizeof(rage_weapon_));
     }
@@ -2677,7 +2677,7 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   payload.set("mode", Json::number(static_cast<double>(rage_mode_.load())));
   payload.set("per_weapon", Json::boolean(rage_per_weapon_.load()));
   {
-    std::lock_guard<std::mutex> lock(rage_config_mutex_);
+    const std::lock_guard<std::mutex> lock(rage_config_mutex_);
     payload.set("weapon", Json::string(std::string(rage_weapon_)));
     payload.set("profiles", Json::number(static_cast<double>(rage_profiles_.count)));
   }
@@ -2847,7 +2847,7 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
     heatmap_sampling_.store(*sample);
   }
   if (const std::optional<bool> clear = flag("clear"); clear.has_value() && *clear) {
-    std::lock_guard<std::mutex> lock(records_mutex_);
+    const std::lock_guard<std::mutex> lock(records_mutex_);
     records_.clear();
   }
 
@@ -2954,7 +2954,7 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   // guard, and age the records against the current tick base.
   std::vector<std::size_t> record_counts(targets.size(), 0);
   {
-    std::lock_guard<std::mutex> lock(records_mutex_);
+    const std::lock_guard<std::mutex> lock(records_mutex_);
     const std::int32_t newest = tick_base > 0 ? tick_base : records_.newest_tick();
     for (std::size_t i = 0; i < targets.size(); ++i) {
       const std::vector<aim::Record>& ring = records_.records(targets[i]->pawn);
@@ -3018,7 +3018,7 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   if (walls) {
     input_.refresh();  // install the CreateMove hook (the game-thread query site)
     // The solids were enumerated on the game thread; project the cached hulls.
-    std::lock_guard<std::mutex> lock(occlusion_mutex_);
+    const std::lock_guard<std::mutex> lock(occlusion_mutex_);
     walls_stats = occlusion_stats_;
     for (const OcclusionHull& hull : occlusion_hulls_) {
       std::optional<aim::OccluderCell> cell;
@@ -3172,7 +3172,7 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   walls_json.set("shapes", Json::integer(walls_stats.shapes));
   walls_json.set("hulls", Json::integer(walls_stats.hulls));
   Json type_counts = Json::array();
-  for (int type_count : walls_stats.type_counts) {
+  for (const int type_count : walls_stats.type_counts) {
     type_counts.push_back(Json::integer(type_count));
   }
   walls_json.set("type_counts", std::move(type_counts));

@@ -123,7 +123,7 @@ auto rage_config_load(RageConfigStore& store) noexcept -> bool {
       ++next;
     }
     // Skip comments / blanks.
-    char* p = line;
+    const char* p = line;
     while (*p == ' ' || *p == '\t' || *p == '\r') {
       ++p;
     }

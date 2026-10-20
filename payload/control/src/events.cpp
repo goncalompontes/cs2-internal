@@ -152,7 +152,7 @@ void EventLog::remember(std::string_view name) noexcept {
 }
 
 void EventLog::refresh() noexcept {
-  std::lock_guard<std::mutex> lock(mutex_);
+  const std::lock_guard<std::mutex> lock(mutex_);
   refresh_locked();
 }
 
@@ -216,7 +216,7 @@ auto EventLog::subscribe(std::string_view name) noexcept -> std::int32_t {
   // harness's `events` command) and the render thread (the sound provider's
   // lazy subscription) can both ask for the events, and two concurrent
   // installs would patch the dispatch vtable twice and chain the detours.
-  std::lock_guard<std::mutex> lock(mutex_);
+  const std::lock_guard<std::mutex> lock(mutex_);
   if (!installed_) {
     refresh_locked();
   }

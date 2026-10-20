@@ -1925,7 +1925,7 @@ void Input::refresh() noexcept {
     return;
   }
   // Find the slot holding `create_move` rather than assuming an index.
-  void* target = reinterpret_cast<void*>(module.base + move_offset->rva);
+  const void* target = reinterpret_cast<void*>(module.base + move_offset->rva);
   std::size_t index = k_max_vtable_slots;
   for (std::size_t i = 0; i < k_max_vtable_slots; ++i) {
     if (vtable[i] == target) {
@@ -1958,7 +1958,7 @@ void Input::refresh() noexcept {
   // the one the movement services simulate (the slot-25 command is a copy).
   if (const OffsetInfo* move_in = find_offset("create_move_input");
       move_in != nullptr && move_in->module == "client.dll") {
-    void* target5 = reinterpret_cast<void*>(module.base + move_in->rva);
+    const void* target5 = reinterpret_cast<void*>(module.base + move_in->rva);
     for (std::size_t i = 0; i < k_max_vtable_slots; ++i) {
       if (vtable[i] == target5) {
         void** slot5 = &vtable[i];

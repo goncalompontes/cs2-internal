@@ -160,7 +160,7 @@ void test_cancelled_capture_drops_its_result() {
 // A captured key's character and its key release never reach ImGui: the key
 // was swallowed, so the text field the user is editing must not see it.
 void test_captured_key_does_not_reach_the_text_field() {
-  cs2::overlay::menu::test::ImGuiFixture fixture;
+  const cs2::overlay::menu::test::ImGuiFixture fixture;
   ImGuiIO& io = ImGui::GetIO();
 
   // The key is captured: its character is dropped.

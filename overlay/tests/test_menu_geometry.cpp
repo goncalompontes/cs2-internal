@@ -88,8 +88,8 @@ void test_window_opens_at_the_persisted_size() {
   assert(nearly(window->Pos.y, 200.0F));
 
   // The content is not collapsed: the sidebar and the page have room.
-  ImGuiWindow* sidebar = menu_child(window, "##sidebar");
-  ImGuiWindow* content = menu_child(window, "##content");
+  const ImGuiWindow* sidebar = menu_child(window, "##sidebar");
+  const ImGuiWindow* content = menu_child(window, "##content");
   assert(sidebar != nullptr);
   assert(content != nullptr);
   assert(sidebar->Size.x > 0.0F);
@@ -113,7 +113,7 @@ void test_window_can_be_resized() {
   Settings settings = settings_for(config);
   reset_ui_state();
   ImGuiFixture fixture;
-  ImGuiWindow* window = draw_frame(settings);
+  const ImGuiWindow* window = draw_frame(settings);
   assert(window != nullptr);
   assert(nearly(window->Size.x, 700.0F));
 
@@ -151,7 +151,7 @@ void test_window_keeps_the_minimum() {
   Settings settings = settings_for(config);
   reset_ui_state();
   ImGuiFixture fixture;
-  ImGuiWindow* window = draw_frame(settings);
+  const ImGuiWindow* window = draw_frame(settings);
   assert(window != nullptr);
   assert(window->Size.x >= cs2::overlay::menu::k_min_width);
   assert(window->Size.y >= cs2::overlay::menu::k_min_height);

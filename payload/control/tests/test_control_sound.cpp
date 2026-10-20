@@ -120,13 +120,13 @@ void test_player_resolution() {
       {200, {4.0F, 5.0F, 6.0F}},
   };
   // The rank: the slot is the player's rank in the snapshot's list.
-  const auto ranked = cs2::control::resolve_sound_player(players, 2, 1);
+  const auto* const ranked = cs2::control::resolve_sound_player(players, 2, 1);
   assert(ranked != nullptr);
   assert(ranked->index == 200);
   assert(ranked->origin.x == 4.0F);
 
   // The exact match (the fallback): the slot is the entity index.
-  const auto exact = cs2::control::resolve_sound_player(players, 2, 200);
+  const auto* const exact = cs2::control::resolve_sound_player(players, 2, 200);
   assert(exact != nullptr);
   assert(exact->index == 200);
 

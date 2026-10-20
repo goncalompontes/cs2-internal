@@ -445,7 +445,7 @@ void invoke_transform(void* context) {
   if (call->object == nullptr) {
     return;
   }
-  auto** vtable = *reinterpret_cast<void***>(call->object);
+  auto* const* vtable = *reinterpret_cast<void***>(call->object);
   if (vtable == nullptr) {
     return;
   }
