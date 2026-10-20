@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ranges>
 #include <string>
 #include <string_view>
 
@@ -1678,19 +1679,19 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     constexpr std::int32_t k_pose_radius = 3;
     constexpr std::size_t k_fallback_poses = 8;  // when the tick base is unknown
     std::size_t record_poses = 0;
-    for (auto it = ring.rbegin(); it != ring.rend(); ++it) {
+    for (const auto& it : std::views::reverse(ring)) {
       if (backtrack_tick_base > 0) {
-        if (it->tick < floor_tick - 1 || it->tick > floor_tick + k_pose_radius) {
+        if (it.tick < floor_tick - 1 || it.tick > floor_tick + k_pose_radius) {
           continue;  // not near the pose the server will rewind to
         }
       } else if (record_poses >= k_fallback_poses) {
         break;
       }
-      std::vector<aim::Hitbox> record_hitboxes = it->hitboxes;
+      std::vector<aim::Hitbox> record_hitboxes = it.hitboxes;
       for (aim::Hitbox& hitbox : record_hitboxes) {
         hitbox.target = best_target;
       }
-      poses.push_back(aim::PoseCandidate{it->tick, static_cast<float>(newest - it->tick),
+      poses.push_back(aim::PoseCandidate{it.tick, static_cast<float>(newest - it.tick),
                                          std::move(record_hitboxes)});
       ++record_poses;
     }
@@ -2524,8 +2525,8 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   walls_json.set("shapes", Json::integer(walls_stats.shapes));
   walls_json.set("hulls", Json::integer(walls_stats.hulls));
   Json type_counts = Json::array();
-  for (int t = 0; t < 8; ++t) {
-    type_counts.push_back(Json::integer(walls_stats.type_counts[t]));
+  for (int type_count : walls_stats.type_counts) {
+    type_counts.push_back(Json::integer(type_count));
   }
   walls_json.set("type_counts", std::move(type_counts));
   walls_json.set("iface", Json::string(hex(walls_stats.iface)));
