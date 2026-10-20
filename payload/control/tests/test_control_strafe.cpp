@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <string_view>
 
 #include "cs2/control/strafe_geometry.hpp"
 
@@ -500,6 +501,196 @@ void test_the_button_names_map_to_the_engine_bits() {
   assert(cs2::control::button_bit("no-such-button") == 0);
 }
 
+// --- the engine's button-bit table ------------------------------------------
+//
+// **The engine's own button-name table**, read from `client.dll` (build
+// 25947352, sha256 `659940c1…`, image base `0x180000000`): the table at
+// `0x181b28cf0` — 20 records of `{const char* name; uint64_t bit;}` — and
+// the name strings at `0x181b28f70`. The engine uses that very table to
+// force a button from the console (`in_forceinput <IN_NAME> 0/1`,
+// `client.dll` `0x180b85b80`), so the bits below are the ones the engine
+// itself puts in a command's button mask.
+//
+// It is pinned here **as data**, with the address it was read from: a game
+// update that moves a bit then fails this test instead of silently changing
+// what a button means.
+
+struct EngineButton {
+  const char* name;
+  std::uint64_t bit;
+};
+
+constexpr EngineButton k_engine_buttons[] = {
+    {"IN_ALL", 0xffffffffffffffffull},  // the "every button" mask
+    {"IN_ATTACK", 1ull << 0},
+    {"IN_JUMP", 1ull << 1},
+    {"IN_DUCK", 1ull << 2},
+    {"IN_FORWARD", 1ull << 3},
+    {"IN_BACK", 1ull << 4},
+    {"IN_USE", 1ull << 5},
+    {"IN_TURNLEFT", 1ull << 7},
+    {"IN_TURNRIGHT", 1ull << 8},
+    {"IN_MOVELEFT", 1ull << 9},
+    {"IN_MOVERIGHT", 1ull << 10},
+    {"IN_ATTACK2", 1ull << 11},
+    {"IN_RELOAD", 1ull << 13},
+    {"IN_SPEED", 1ull << 16},
+    {"IN_JOYAUTOSPRINT", 1ull << 17},
+    {"IN_FIRST_MOD_SPECIFIC_BIT", 1ull << 32},  // the mod-specific range starts here
+    {"IN_USEORRELOAD", 1ull << 32},
+    {"IN_SCORE", 1ull << 33},
+    {"IN_ZOOM", 1ull << 34},
+    {"IN_LOOK_AT_WEAPON", 1ull << 35},
+};
+
+// The engine's **input actions** and the button mask each one puts in the
+// command (`client.dll`: the console-command objects at `0x182233d80`ff carry
+// their mask at `<object> - 8`). The look and strafe **analog** actions set no
+// button at all — they are a float, not a bit.
+struct EngineAction {
+  const char* action;
+  std::uint64_t bit;
+};
+
+constexpr EngineAction k_engine_actions[] = {
+    {"attack", 1ull << 0},
+    {"jump", 1ull << 1},
+    {"duck", 1ull << 2},
+    {"forward", 1ull << 3},
+    {"back", 1ull << 4},
+    {"use", 1ull << 5},
+    {"turnleft", 1ull << 7},
+    {"turnright", 1ull << 8},
+    {"left", 1ull << 9},
+    {"right", 1ull << 10},
+    {"attack2", 1ull << 11},
+    {"reload", 1ull << 13},
+    {"sprint", 1ull << 16},
+    {"turnup", 0},
+    {"turndown", 0},
+    {"moveup", 0},
+    {"movedown", 0},
+    {"strafe", 0},
+    {"klook", 0},
+};
+
+// The repo's constants, by the engine's own name.
+struct RepoButton {
+  const char* engine_name;
+  std::uint64_t bit;
+};
+
+constexpr RepoButton k_repo_buttons[] = {
+    {"IN_ATTACK", button::k_attack},     {"IN_JUMP", button::k_jump},
+    {"IN_DUCK", button::k_duck},         {"IN_FORWARD", button::k_forward},
+    {"IN_BACK", button::k_back},         {"IN_USE", button::k_use},
+    {"IN_TURNLEFT", button::k_turnleft}, {"IN_TURNRIGHT", button::k_turnright},
+    {"IN_MOVELEFT", button::k_moveleft}, {"IN_MOVERIGHT", button::k_moveright},
+    {"IN_ATTACK2", button::k_attack2},   {"IN_RELOAD", button::k_reload},
+    {"IN_SPEED", button::k_speed},       {"IN_SCORE", button::k_score},
+    {"IN_ZOOM", button::k_zoom},
+};
+
+// The engine's bit for one `IN_*` name (0 when the name is unknown).
+auto engine_bit(std::string_view name) -> std::uint64_t {
+  for (const EngineButton& entry : k_engine_buttons) {
+    if (name == entry.name) {
+      return entry.bit;
+    }
+  }
+  return 0;
+}
+
+// The engine's button mask for one input action (0 when it sets no button).
+auto engine_action_bit(std::string_view action) -> std::uint64_t {
+  for (const EngineAction& entry : k_engine_actions) {
+    if (action == entry.action) {
+      return entry.bit;
+    }
+  }
+  return 0;
+}
+
+void test_the_button_bits_are_the_engine_bits() {
+  // The table's shape is pinned too: a build that adds or drops a row has to
+  // be looked at, not absorbed.
+  assert(sizeof(k_engine_buttons) / sizeof(k_engine_buttons[0]) == 20);
+  assert(sizeof(k_engine_actions) / sizeof(k_engine_actions[0]) == 19);
+
+  // Every constant the repo defines is the engine's bit for that name — this
+  // is the assertion that catches a wrong constant (the community's CS2 SDK
+  // header still has the old `IN_SCORE` 16 / `IN_ZOOM` 19 / `IN_SPEED` 17).
+  for (const RepoButton& repo : k_repo_buttons) {
+    const std::uint64_t expected = engine_bit(repo.engine_name);
+    assert(expected != 0);
+    assert(repo.bit == expected);
+  }
+
+  // And no repo constant sits on a bit the engine does not name: a bit the
+  // engine never reads is a bit that cannot mean anything.
+  for (const RepoButton& repo : k_repo_buttons) {
+    bool named = false;
+    for (const EngineButton& entry : k_engine_buttons) {
+      if (entry.bit == repo.bit) {
+        named = true;
+        break;
+      }
+    }
+    assert(named);
+  }
+
+  // The bits that were wrong (T14): the engine moved `IN_SCORE` to 33 and
+  // `IN_ZOOM` to 34, and `IN_SPEED` is 16 (bit 17 is `IN_JOYAUTOSPRINT`).
+  assert(button::k_score == (1ull << 33));
+  assert(button::k_zoom == (1ull << 34));
+  assert(button::k_speed == (1ull << 16));
+  assert(engine_bit("IN_JOYAUTOSPRINT") == (1ull << 17));
+
+  // The engine's **action** table is a second, independent reading of the same
+  // bits (the console-command objects carry the mask themselves), so the two
+  // must agree — and the console command's action is what the runner's
+  // `BUTTONS` table drives.
+  assert(engine_action_bit("forward") == button::k_forward);
+  assert(engine_action_bit("back") == button::k_back);
+  assert(engine_action_bit("left") == button::k_moveleft);
+  assert(engine_action_bit("right") == button::k_moveright);
+  assert(engine_action_bit("attack") == button::k_attack);
+  assert(engine_action_bit("attack2") == button::k_attack2);
+  assert(engine_action_bit("jump") == button::k_jump);
+  assert(engine_action_bit("duck") == button::k_duck);
+  assert(engine_action_bit("use") == button::k_use);
+  assert(engine_action_bit("reload") == button::k_reload);
+  assert(engine_action_bit("turnleft") == button::k_turnleft);
+  assert(engine_action_bit("turnright") == button::k_turnright);
+  // The shift key is the **sprint** key, and `sprint` carries `IN_SPEED`.
+  assert(engine_action_bit("sprint") == button::k_speed);
+  // The pitch/strafe analog actions set no button at all.
+  assert(engine_action_bit("turnup") == 0);
+  assert(engine_action_bit("turndown") == 0);
+
+  // Every name the payload's mask accepts resolves to a bit the engine names
+  // — so the mask can never set a bit the engine does not read.
+  for (const cs2::control::NamedButton& entry : cs2::control::k_named_buttons) {
+    bool named = false;
+    for (const EngineButton& engine : k_engine_buttons) {
+      if (engine.bit == entry.bit) {
+        named = true;
+        break;
+      }
+    }
+    assert(named);
+  }
+  // The engine's own action names are in the mask's map too, with the engine's
+  // bits.
+  assert(cs2::control::button_bit("sprint") == button::k_speed);
+  assert(cs2::control::button_bit("speed") == button::k_speed);
+  assert(cs2::control::button_bit("shift") == button::k_speed);
+  assert(cs2::control::button_bit("zoom") == button::k_zoom);
+  // The Source-1 buttons CS2 dropped are not accepted any more.
+  assert(cs2::control::button_bit("run") == 0);
+  assert(cs2::control::button_bit("walk") == 0);
+}
+
 }  // namespace
 
 auto main() -> int {
@@ -523,6 +714,7 @@ auto main() -> int {
   test_the_goal_headings_are_the_players_left_and_right();
   test_the_written_side_axis_carries_the_engine_sign();
   test_the_button_names_map_to_the_engine_bits();
+  test_the_button_bits_are_the_engine_bits();
   std::puts("control-strafe: ok");
   return 0;
 }
