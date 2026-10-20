@@ -16,7 +16,7 @@ namespace cs2::features {
 class Overlay {
  public:
   Overlay() = default;
-  explicit Overlay(EspConfig esp_config) : esp_(esp_config) {}
+  explicit Overlay(Config esp_config) : esp_(esp_config) {}
 
   // Resolve the target state reader. Idempotent; retries while the target is
   // not ready. Safe to call off the loader lock (from the install thread).
@@ -28,16 +28,26 @@ class Overlay {
   [[nodiscard]] bool ready() const noexcept {
     return reader_.has_value() && reader_->ready();
   }
-  [[nodiscard]] const render::OverlayModel& model() const noexcept { return model_; }
+  [[nodiscard]] const render::OverlayModel& model() const noexcept {
+    return model_;
+  }
 
   // ESP toggles, applied from the menu's shared settings (ADR-0021).
-  [[nodiscard]] const EspConfig& esp_config() const noexcept { return esp_.config(); }
-  void set_esp_config(const EspConfig& config) noexcept { esp_.config() = config; }
+  [[nodiscard]] const Config& esp_config() const noexcept {
+    return esp_.config();
+  }
+  void set_esp_config(const Config& config) noexcept {
+    esp_.config() = config;
+  }
 
   // Whether the debug HUD window is drawn. Set by the in-process menu's
   // "Debug HUD window" toggle; the layer gates it from its own settings.
-  void set_show_hud(bool show) noexcept { show_hud_ = show; }
-  [[nodiscard]] bool show_hud() const noexcept { return show_hud_; }
+  void set_show_hud(bool show) noexcept {
+    show_hud_ = show;
+  }
+  [[nodiscard]] bool show_hud() const noexcept {
+    return show_hud_;
+  }
 
   // Forward the local pawn from each state refresh. The control thread's movement
   // features (strafe/bhop prediction) need it fresh even when no scenario is

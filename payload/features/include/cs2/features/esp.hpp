@@ -242,12 +242,6 @@ struct Config {
   [[nodiscard]] auto operator==(const Config&) const noexcept -> bool = default;
 };
 
-// The flat `EspConfig` was replaced by the sectioned `Config` above. The alias
-// keeps the files that still name `EspConfig` compiling
-// (`cs2/features/overlay.hpp`, outside this change's ownership); new code
-// should spell `Config`.
-using EspConfig = Config;
-
 // Per-build counters, for diagnostics/logging (never used for rendering).
 struct EspStats {
   int players = 0;
