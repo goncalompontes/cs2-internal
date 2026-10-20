@@ -119,6 +119,19 @@ There is no `+moveleft` / `+moveright` in CS2; the button bits themselves are
 `IN_MOVELEFT = 1 << 9` and `IN_MOVERIGHT = 1 << 10` (the engine's own
 button-name table, `client.dll` `0x181b28cf0`).
 
+> **The button bits were audited against that table (T14).** The table is the
+> engine's own button registry — the `in_forceinput` console command looks a
+> name up in it and ORs the enumerator's value into the forced-button mask —
+> so it is the authority, not the community's CS2 SDK header (which still has
+> the Source-1 `IN_SCORE` 16 / `IN_ZOOM` 19 next to the CS2 `IN_SCORE` 33 /
+> `IN_ZOOM` 34). The strafe bits above are confirmed; three other constants
+> were wrong (`k_score` 16 → **33**, `k_speed` 17 → **16**, `k_zoom` 19 →
+> **34**) and five named bits this build does not have were removed. The whole
+> table is pinned as data by the host test
+> (`test_the_button_bits_are_the_engine_bits`); the details, including what
+> the auto-scope's `IN_ZOOM` write does, are in
+> [`strafe-sign.md`](strafe-sign.md) §4.4.
+
 > **The old note in this document was wrong in two cancelling halves:** it
 > called the engine's second basis output "the right vector" (it is its
 > negation) *and* called a positive side axis "the right" (it is the left).

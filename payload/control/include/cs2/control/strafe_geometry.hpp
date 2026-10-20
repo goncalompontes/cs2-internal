@@ -43,32 +43,42 @@ namespace cs2::control {
 // §"The command build"); the source of the mask is the `CUserCmd` button word
 // at `cmd + 0x60`.
 //
-// The engine's own button-name table (client.dll build 25947352: the table at
-// `0x181b28cf0`, the names at `0x181b28f70`) is the authority for the bits —
-// and it spells them the way CS2 does: the bits 7/8 are `IN_TURNLEFT` /
+// **The engine's own button-name table is the authority for the bits**
+// (`client.dll` build 25947352, sha256 `659940c1…`, image base `0x180000000`:
+// the table at `0x181b28cf0`, the name strings at `0x181b28f70` — 20 records
+// of `{const char* name; uint64_t bit;}`). The engine uses that very table to
+// force a button from the console (`in_forceinput <IN_NAME> 0/1`,
+// `client.dll` `0x180b85b80`), so the bits below are the ones the engine
+// itself puts in a command's button mask — and the host test pins the whole
+// table as data (`test_control_strafe.cpp`).
+//
+// The table spells them the way CS2 does: the bits 7/8 are `IN_TURNLEFT` /
 // `IN_TURNRIGHT` (the **look**) and 9/10 are `IN_MOVELEFT` / `IN_MOVERIGHT`
 // (the **strafe**). There is no `IN_LEFT`/`IN_RIGHT` in CS2.
+//
+// The bits this build does **not** have are gone from CS2: the Source-1
+// `IN_CANCEL` (6), `IN_RUN` (12), `IN_ALT1` (14), `IN_ALT2` (15) and
+// `IN_WALK` (18) have no name anywhere in `client.dll`, so a constant for one
+// of them would be a bit the engine never reads. The community's CS2 SDK
+// header still lists them — and still has the old `IN_SCORE` 16 / `IN_ZOOM`
+// 19, which is where the wrong bits in this file used to come from: **the
+// engine's table is the truth, not the SDK header.**
 namespace button {
-inline constexpr std::uint64_t k_attack = 1ull << 0;
-inline constexpr std::uint64_t k_jump = 1ull << 1;
-inline constexpr std::uint64_t k_duck = 1ull << 2;
-inline constexpr std::uint64_t k_forward = 1ull << 3;
-inline constexpr std::uint64_t k_back = 1ull << 4;
-inline constexpr std::uint64_t k_use = 1ull << 5;
-inline constexpr std::uint64_t k_cancel = 1ull << 6;
-inline constexpr std::uint64_t k_turnleft = 1ull << 7;
-inline constexpr std::uint64_t k_turnright = 1ull << 8;
-inline constexpr std::uint64_t k_moveleft = 1ull << 9;
-inline constexpr std::uint64_t k_moveright = 1ull << 10;
-inline constexpr std::uint64_t k_attack2 = 1ull << 11;
-inline constexpr std::uint64_t k_run = 1ull << 12;
-inline constexpr std::uint64_t k_reload = 1ull << 13;
-inline constexpr std::uint64_t k_alt1 = 1ull << 14;
-inline constexpr std::uint64_t k_alt2 = 1ull << 15;
-inline constexpr std::uint64_t k_score = 1ull << 16;
-inline constexpr std::uint64_t k_speed = 1ull << 17;
-inline constexpr std::uint64_t k_walk = 1ull << 18;
-inline constexpr std::uint64_t k_zoom = 1ull << 19;
+inline constexpr std::uint64_t k_attack = 1ull << 0;      // IN_ATTACK
+inline constexpr std::uint64_t k_jump = 1ull << 1;        // IN_JUMP
+inline constexpr std::uint64_t k_duck = 1ull << 2;        // IN_DUCK
+inline constexpr std::uint64_t k_forward = 1ull << 3;     // IN_FORWARD
+inline constexpr std::uint64_t k_back = 1ull << 4;        // IN_BACK
+inline constexpr std::uint64_t k_use = 1ull << 5;         // IN_USE
+inline constexpr std::uint64_t k_turnleft = 1ull << 7;    // IN_TURNLEFT
+inline constexpr std::uint64_t k_turnright = 1ull << 8;   // IN_TURNRIGHT
+inline constexpr std::uint64_t k_moveleft = 1ull << 9;    // IN_MOVELEFT
+inline constexpr std::uint64_t k_moveright = 1ull << 10;  // IN_MOVERIGHT
+inline constexpr std::uint64_t k_attack2 = 1ull << 11;    // IN_ATTACK2
+inline constexpr std::uint64_t k_reload = 1ull << 13;     // IN_RELOAD
+inline constexpr std::uint64_t k_speed = 1ull << 16;      // IN_SPEED
+inline constexpr std::uint64_t k_score = 1ull << 33;      // IN_SCORE
+inline constexpr std::uint64_t k_zoom = 1ull << 34;       // IN_ZOOM
 }  // namespace button
 
 // --- The engine's button names -----------------------------------------------
@@ -121,12 +131,16 @@ inline constexpr NamedButton k_named_buttons[] = {
     {"turnright", button::k_turnright},
     {"attack2", button::k_attack2},
     {"mouse2", button::k_attack2},
-    {"run", button::k_run},
     {"reload", button::k_reload},
     {"r", button::k_reload},
+    // `IN_SPEED` is the **sprint** key: the engine's own `sprint` action
+    // carries that mask (the console command object at `client.dll`
+    // `0x182233d80`, the mask at `0x182233d80`), and CS2's shipped binds put
+    // `"SHIFT" -> "+sprint"`. The Source-1 `IN_WALK` / `IN_RUN` are not in
+    // this build at all, so there is no "walk" (or "run") button to name.
     {"speed", button::k_speed},
+    {"sprint", button::k_speed},
     {"shift", button::k_speed},
-    {"walk", button::k_walk},
     {"zoom", button::k_zoom},
 };
 

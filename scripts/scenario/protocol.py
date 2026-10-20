@@ -138,18 +138,20 @@ RageMode = Literal["hold", "always", "toggle"]
 #: *strings* ``"2"``/``"3"``, which the type does not spell out).
 TeamName = Literal["T", "CT", "t", "ct", 2, 3]
 
-#: The button names the payload's button mask understands, plus the two
-#: console-only view commands: the mask's own names are
-#: ``payload/control/src/input.cpp``'s ``k_named_bits``, and ``lookup`` /
-#: ``lookdown`` are the engine's console commands the runner's ``BUTTONS`` table
-#: maps ``up`` / ``down`` to (the console path drives ``+lookup``, the mask has
-#: no such bit).
+#: The button names the payload's button mask understands, plus the
+#: console-only view commands. The mask's own names are
+#: ``strafe_geometry.hpp``'s ``k_named_buttons``; ``turnup`` / ``turndown``
+#: are the engine's **console** commands the runner's ``BUTTONS`` table maps
+#: ``up`` / ``down`` to (the console path drives ``+turnup`` / ``+turndown`` —
+#: CS2 has no ``+lookup`` / ``+lookdown`` — and the pitch actions set no
+#: button bit, so the mask has no name for them). ``sprint`` is in both: the
+#: engine's ``sprint`` action carries the ``IN_SPEED`` bit.
 ButtonName = Literal[
     "attack", "mouse1", "jump", "space", "duck", "crouch", "ctrl",
     "forward", "w", "back", "s", "use", "e", "left", "right",
-    "moveleft", "a", "moveright", "d", "attack2", "mouse2",
-    "run", "reload", "r", "speed", "shift", "walk", "zoom",
-    "lookup", "lookdown",
+    "moveleft", "a", "moveright", "d", "turnleft", "turnright",
+    "attack2", "mouse2", "reload", "r", "speed", "sprint", "shift", "zoom",
+    "turnup", "turndown",
 ]
 
 

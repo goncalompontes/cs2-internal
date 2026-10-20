@@ -393,6 +393,12 @@ void Input::rage_tick(std::uint8_t* cmd, std::uint64_t* buttons) noexcept {
   const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
   std::uint64_t extra = *buttons & button::k_attack;
   if (rage_scope_.load()) {
+    // `IN_ATTACK2` (the right mouse) is what *triggers* the scope; `IN_ZOOM` is
+    // the engine's own zoom bit (`1 << 34`, see `strafe_geometry.hpp`'s
+    // `button` namespace). The engine's action table has no action that
+    // produces `IN_ZOOM` — it is in the "mod specific" range the engine
+    // populates itself — so the zoom bit is a state assertion, and the scope
+    // itself rides on `IN_ATTACK2`.
     extra |= button::k_attack2 | button::k_zoom;
   }
   if (rage_reload_.load()) {
@@ -1698,6 +1704,9 @@ void Input::apply(void* cmd) noexcept {
   // Auto-scope / auto-reload (common ragebot assists, `docs/ragebot.md`): hold zoom
   // and/or reload while a solve is active. The engine ignores zoom on a weapon that
   // cannot scope; reload is a no-op when the clip is full.
+  // The scope is triggered by `IN_ATTACK2` (the right mouse); `IN_ZOOM` is the
+  // engine's own zoom bit (`1 << 34`) and no client action produces it, so it
+  // only states the scope the attack2 press has already asked for.
   if (rage_solved && rage_scope_.load()) {
     value |= button::k_attack2 | button::k_zoom;
   }

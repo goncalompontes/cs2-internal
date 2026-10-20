@@ -92,6 +92,34 @@ DEFAULT_PIPE = r"\\.\pipe\cs2-internal-control"
 # `"LEFTARROW" -> "+turnleft"`). There is no `+moveleft`/`+moveright` in CS2
 # (the strings do not exist in `client.dll`), so `exec "+moveleft"` was an
 # unknown command and the player's A/D never reached the engine.
+#
+# Every value below is a command the engine **registers** (`client.dll`: the
+# registrations are `FUN_1800d0660`ff, the action names at `0x181c60448`ff),
+# and the shipped binds are the ground truth:
+#
+# | runner key | console command | the engine's action |
+# |---|---|---|
+# | `w` | `+forward` | `forward` (`IN_FORWARD`) |
+# | `s` | `+back` | `back` (`IN_BACK`) |
+# | `a` | `+left` | `left` (`IN_MOVELEFT`) |
+# | `d` | `+right` | `right` (`IN_MOVERIGHT`) |
+# | `space` | `+jump` | `jump` (`IN_JUMP`) |
+# | `ctrl` | `+duck` | `duck` (`IN_DUCK`) |
+# | `shift` | `+sprint` | `sprint` (`IN_SPEED`) |
+# | `mouse1` | `+attack` | `attack` (`IN_ATTACK`) |
+# | `mouse2` | `+attack2` | `attack2` (`IN_ATTACK2`) |
+# | `r` | `+reload` | `reload` (`IN_RELOAD`) |
+# | `e` | `+use` | `use` (`IN_USE`) |
+# | `up` | `+turnup` | `turnup` (an **analog** pitch action: no button bit) |
+# | `down` | `+turndown` | `turndown` (ditto) |
+#
+# **There is no `+speed` and no `+walk` in CS2** (nor `+lookup` / `+lookdown`):
+# the strings do not exist in `client.dll`, and the shipped binds put the shift
+# key on `+sprint` (`"SHIFT" -> "+sprint"`) and the arrow keys on
+# `+turnup` / `+turndown` / `+turnleft` / `+turnright`
+# (`game/core/cfg/user_keys_default.vcfg`). `+sprint` is the engine's
+# `sprint` action, and that action carries the `IN_SPEED` button
+# (`client.dll` `0x182233d80`).
 BUTTONS: Mapping[str, ButtonName] = {
     # movement
     "w": "forward",
@@ -102,8 +130,10 @@ BUTTONS: Mapping[str, ButtonName] = {
     "jump": "jump",
     "ctrl": "duck",
     "crouch": "duck",
-    "shift": "speed",
-    "walk": "speed",
+    # the shift key is the **sprint** key in CS2 (`IN_SPEED`); there is no
+    # `+speed` and no `+walk`.
+    "shift": "sprint",
+    "sprint": "sprint",
     # action
     "mouse1": "attack",
     "attack": "attack",
@@ -118,10 +148,11 @@ BUTTONS: Mapping[str, ButtonName] = {
     "left": "left",
     "right": "right",
     # view (turn/pitch; `look` uses `setang` for absolute angles).
-    # The engine's look commands are `+turnup`/`+turndown`; `ButtonName` does
-    # not spell them yet, so these two still name the source-1 commands.
-    "up": "lookup",
-    "down": "lookdown",
+    # The engine's look commands are `+turnup` / `+turndown` — CS2 has no
+    # `+lookup` / `+lookdown` — and the pitch actions are analog (they set no
+    # button bit), so these two are console-only.
+    "up": "turnup",
+    "down": "turndown",
 }
 
 

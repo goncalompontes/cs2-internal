@@ -227,12 +227,14 @@ So the repo's `+moveleft` / `+moveright` were **unknown console commands**: the
 scenario runner's `press("a")` never registered the player's strafe-left, and
 the payload's own name table accepted a name the engine does not know.
 
-The engine's own **button-name table** (`client.dll` build 25947352: the table
-at `0x181b28cf0`, the names at `0x181b28f70`) gives the bits and spells them
-the way CS2 does:
+The engine's own **button-name table** (`client.dll` build 25947352, sha256
+`659940c1…`, image base `0x180000000`: the table at `0x181b28cf0`, the names
+at `0x181b28f70` — 20 records of `{const char* name; uint64_t bit;}`) gives
+the bits and spells them the way CS2 does:
 
 | name | mask | meaning |
 |---|---|---|
+| `IN_ALL` | `~0` | every button |
 | `IN_ATTACK` | `1 << 0` | |
 | `IN_JUMP` | `1 << 1` | |
 | `IN_DUCK` | `1 << 2` | |
@@ -245,12 +247,29 @@ the way CS2 does:
 | `IN_MOVERIGHT` | `1 << 10` | the **strafe** right |
 | `IN_ATTACK2` | `1 << 11` | |
 | `IN_RELOAD` | `1 << 13` | |
-| `IN_SPEED` | `1 << 16` | |
+| `IN_SPEED` | `1 << 16` | the **sprint** key (`+sprint`) |
 | `IN_JOYAUTOSPRINT` | `1 << 17` | |
 | `IN_FIRST_MOD_SPECIFIC_BIT` | `1 << 32` | the mod-specific range starts here |
-| `IN_SCORE` | `1 << 33` | |
+| `IN_USEORRELOAD` | `1 << 32` | |
+| `IN_SCORE` | `1 << 33` | the scoreboard (`+showscores`) |
 | `IN_ZOOM` | `1 << 34` | |
-| `IN_LOOK_AT_WEAPON` | `1 << 35` | |
+| `IN_LOOK_AT_WEAPON` | `1 << 35` | (`+lookatweapon`) |
+
+The table is the engine's **own** button registry, not a header: the
+`in_forceinput` console command (`client.dll` `0x180b85b80`) looks a name up in
+it (`FUN_1804b6750`), resolves it to the enumerator's value
+(`FUN_181982160`) and ORs that value into the forced-button mask
+(`DAT_18255f140` / `DAT_18255f138`). So these are the bits the engine itself
+puts in a command's button mask.
+
+The **input actions** carry the same bits independently: each console-command
+object holds the mask its action sets at `<object> - 8` (`client.dll`
+`0x182233d80`ff), so `attack` → `1 << 0`, `jump` → `1 << 1`, `duck` →
+`1 << 2`, `forward` → `1 << 3`, `back` → `1 << 4`, `use` → `1 << 5`,
+`turnleft` → `1 << 7`, `turnright` → `1 << 8`, `left` → `1 << 9`, `right` →
+`1 << 10`, `attack2` → `1 << 11`, `reload` → `1 << 13` and **`sprint` →
+`1 << 16`** (the shift key). The **analog** actions (`turnup`, `turndown`,
+`moveup`, `movedown`, `strafe`, `klook`) set no button at all.
 
 The strafe bits the payload uses (`IN_MOVELEFT = 1 << 9`,
 `IN_MOVERIGHT = 1 << 10`) are therefore **right**; only the *names* were
@@ -265,13 +284,102 @@ wrong. The fix (T13):
 * `scripts/scenario/control.py`'s `BUTTONS` table maps `"a" -> "left"` and
   `"d" -> "right"`, so `press("a")` now issues `+left`.
 
-> **Still open (not this task's scope):** the same table shows that CS2 moved
-> `IN_SCORE` to `1 << 33` and `IN_ZOOM` to `1 << 34`, while the repo still
-> uses `1 << 16` / `1 << 19` for them (`strafe_geometry.hpp`'s `button`
-> namespace). The ragebot's auto-scope (`button::k_zoom`) and anything else
-> that uses those bits should be re-checked against the command's mask.
+> **Closed by T14.** The same table shows that CS2 moved `IN_SCORE` to
+> `1 << 33` and `IN_ZOOM` to `1 << 34` (and that `1 << 16` is `IN_SPEED`, the
+> **sprint** key), while the repo still used `1 << 16` / `1 << 19` / `1 << 17`
+> for them (`strafe_geometry.hpp`'s `button` namespace). The whole `button`
+> namespace has been re-derived from the engine's table and pinned by a host
+> test (`test_the_button_bits_are_the_engine_bits`, the table as data with the
+> address it was read from) — see §4.4.
 
-### 4.4 Naming clean-ups the same finding implies
+### 4.4 The button bits, audited (T14)
+
+Every `IN_*` constant the repo defines was compared with the engine's own
+button-name table (the table above). Three were **wrong** and five did not
+exist in this build at all:
+
+| repo constant | was | now | the engine's name |
+|---|---|---|---|
+| `k_score` | `1 << 16` | **`1 << 33`** | `IN_SCORE` |
+| `k_speed` | `1 << 17` | **`1 << 16`** | `IN_SPEED` (the sprint key) |
+| `k_zoom` | `1 << 19` | **`1 << 34`** | `IN_ZOOM` |
+| `k_cancel` | `1 << 6` | *(removed)* | not in this build |
+| `k_run` | `1 << 12` | *(removed)* | not in this build |
+| `k_alt1` | `1 << 14` | *(removed)* | not in this build |
+| `k_alt2` | `1 << 15` | *(removed)* | not in this build |
+| `k_walk` | `1 << 18` | *(removed)* | not in this build |
+
+The wrong three came from the **community's CS2 SDK header**, which still
+lists the Source-1 `IN_SCORE` 16 / `IN_SPEED` 17 / `IN_WALK` 18 / `IN_ZOOM` 19
+*and* the CS2 `IN_SCORE` 33 / `IN_ZOOM` 34 — the two `IN_SCORE` and two
+`IN_ZOOM` entries cannot both be the engine's. The engine's own table has
+exactly one of each (`client.dll` contains one `IN_SCORE` string and one
+`IN_ZOOM` string, both in that table), so **the engine's table is the truth**
+and the SDK header is a stale reconstruction.
+
+The five removed constants name bits that do not exist in this build: the
+strings `IN_CANCEL`, `IN_RUN`, `IN_ALT1`, `IN_ALT2` and `IN_WALK` occur
+**nowhere** in `client.dll`. A constant for them is a bit the engine never
+reads — the same hazard the three wrong ones were. `k_run` and `k_walk` were
+also in the payload's name map (`"run"`, `"walk"`), so those two names are
+gone from it; `"sprint"` was added instead (the engine's own action for
+`IN_SPEED`).
+
+**The bits the payload uses elsewhere are unaffected:** the auto-strafe, the
+bunnyhop (`IN_JUMP`), the triggerbot (`IN_ATTACK`) and the ragebot's
+auto-stop (`IN_FORWARD` / `IN_BACK` / `IN_MOVELEFT` / `IN_MOVERIGHT`) all use
+bits the table confirms.
+
+**The auto-scope** is the one feature that depended on a wrong bit: it
+pressed `IN_ATTACK2 | IN_ZOOM`. `IN_ATTACK2` (`1 << 11`) is unchanged and is
+what *triggers* the scope (it is the right mouse, the engine's `attack2`
+action); the `IN_ZOOM` half was `1 << 19`, a bit this build's table does not
+name at all, so the write was inert. It is now the engine's real `IN_ZOOM`
+(`1 << 34`). `IN_ZOOM` sits in the "mod specific" range that starts at
+`IN_FIRST_MOD_SPECIFIC_BIT` (`1 << 32`) and no client action produces it — the
+engine sets it itself — so the write is a *state* assertion, and the scope
+still rides on `IN_ATTACK2`. **Not verified in a live game**: whether a
+client-written `IN_ZOOM` is accepted, ignored or rejected by the server, and
+whether it makes the local model read as scoped a command early.
+
+The **console-command table** (`scripts/scenario/control.py`) was audited
+against the same build at the same time; see §4.5.
+
+### 4.5 The console commands (T14)
+
+The runner's `BUTTONS` table maps a friendly key to an engine **console
+command**, and the engine's console commands are its **input action** names
+with a `+` in front. The engine registers these actions (`client.dll`, the
+registrations `FUN_1800d0660`ff, the names at `0x181c60448`ff):
+
+`attack`, `attack2`, `back`, `duck`, `forward`, `jump`, `klook`, `left`,
+`movedown`, `moveup`, `reload`, `right`, `sprint`, `strafe`, `turndown`,
+`turnleft`, `turnright`, `turnup`, `use`.
+
+CS2's own shipped binds are the ground truth
+(`game/csgo/cfg/user_keys_default.vcfg` and
+`game/core/cfg/user_keys_default.vcfg`): `"a" -> "+left"`, `"d" -> "+right"`,
+`"w" -> "+forward"`, `"s" -> "+back"`, `"e" -> "+use"`, `"r" -> "+reload"`,
+`"CTRL" -> "+duck"`, `"SHIFT" -> "+sprint"`, `"SPACE" -> "+jump"`,
+`"MOUSE1" -> "+attack"`, `"MOUSE2" -> "+attack2"`, `"UPARROW" -> "+turnup"`,
+`"DOWNARROW" -> "+turndown"`, `"LEFTARROW" -> "+turnleft"`,
+`"RIGHTARROW" -> "+turnright"`.
+
+Four more of the repo's entries were wrong (or named a command CS2 does not
+have):
+
+| runner key | was | now | why |
+|---|---|---|---|
+| `shift` | `+speed` | **`+sprint`** | there is no `+speed` in CS2; the shift key is `+sprint` (`IN_SPEED`) |
+| `up` | `+lookup` | **`+turnup`** | CS2 has no `+lookup` (nor `+lookdown`) |
+| `down` | `+lookdown` | **`+turndown`** | the look commands are `+turnup` / `+turndown` |
+| `walk` | `+speed` | *(removed)* | there is no `+walk` in CS2 either, and no `IN_WALK` |
+
+`+turnup` / `+turndown` are **analog** pitch actions: they set no button bit
+at all, so they are console-only names (the payload's mask has no bit for
+them).
+
+### 4.6 Naming clean-ups the same finding implies
 
 * `docs/re/strafing.md` called the field `m_flCmdSideMove`; the build's schema
   says **`m_flCmdLeftMove`**.
@@ -327,6 +435,7 @@ right, the write of §4.2 is still mirrored.
 | 5 | the CMoveData's move axes are at `+0x2c` / `+0x30` | `0x8e47e0` (`SetupMove`) zeroes them |
 | 6 | the button bits: `IN_TURNLEFT` = `1 << 7`, `IN_TURNRIGHT` = `1 << 8`, `IN_MOVELEFT` = `1 << 9`, `IN_MOVERIGHT` = `1 << 10` | the button-name table at `0x181b28cf0`, the names at `0x181b28f70` |
 | 7 | the console command for an action is `+` + the action name (`+left`, `+turnleft`, …); there is no `+moveleft` | CS2's shipped binds, `game/csgo/cfg/user_keys_default.vcfg` |
+| 8 | the whole button-name table, and the action → button mask (e.g. `sprint` → `IN_SPEED` = `1 << 16`); the `in_forceinput` command ORs the table's values into the forced-button mask | the table at `0x181b28cf0`; the action objects at `0x182233d80`ff (mask at `<object> - 8`); `in_forceinput` at `0x180b85b80` |
 
 Companion documents: [`strafing.md`](strafing.md) (the engine model),
 [`research-strafe.md`](research-strafe.md) (the community research, §9.3
