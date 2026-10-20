@@ -22,6 +22,9 @@ from .awaiting import (
     wait_round_started,
 )
 from .control import DEFAULT_PIPE, Control, ControlError
+from .mcp import TOOLS as MCP_TOOLS
+from .mcp import Session as McpSession
+from .mcp import schema_for, validate_arguments
 from .protocol import (
     AimObjective,
     ButtonName,
@@ -76,7 +79,9 @@ __all__ = [
     "HeatmapPen",
     "InputBackend",
     "InputStatus",
+    "MCP_TOOLS",
     "Machine",
+    "McpSession",
     "PingResult",
     "PressResult",
     "ProtocolError",
@@ -99,9 +104,11 @@ __all__ = [
     "is_movable",
     "measure_move",
     "require",
+    "schema_for",
     "screen",
     "screens",
     "state",
+    "validate_arguments",
     "wait_airborne",
     "wait_alive",
     "wait_movable",
