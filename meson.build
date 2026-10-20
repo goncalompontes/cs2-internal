@@ -192,6 +192,26 @@ control_core_test = executable('control_core_test',
 )
 test('control-core', control_core_test)
 
+# The feature settings foundation: the wire <-> config conversion and the
+# config store's round trip. The settings block is a POD and the conversion is
+# pure, so the feature sources are built natively here (the payload itself
+# needs the game).
+features_config_test = executable('features_config_test',
+  files(
+    'payload/features/tests/test_features_config.cpp',
+    'payload/features/src/settings.cpp',
+    'payload/features/src/config_store.cpp',
+    'payload/game/src/log.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/features/include'),
+    include_directories('overlay/include'),
+    include_directories('payload/game/include'),
+    include_directories('payload/render/include'),
+  ],
+)
+test('features-config', features_config_test)
+
 # --- Generated C++ SDK headers -------------------------------------------
 # Render payload/sdk/*.hpp from the calibration dumps in calibration/. The
 # generator is the Rust dumper, built on demand by scripts/gen-sdk.py. With

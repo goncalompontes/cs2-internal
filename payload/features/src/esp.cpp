@@ -12,19 +12,18 @@ namespace {
 using game::PlayerSnapshot;
 using game::Vec2;
 using game::Vec3;
-using render::Color;
 
-constexpr Color k_color_enemy{.r = 235, .g = 70, .b = 70, .a = 235};
-constexpr Color k_color_team{.r = 70, .g = 150, .b = 235, .a = 235};
-constexpr Color k_color_health_high{.r = 80, .g = 210, .b = 80, .a = 255};
-constexpr Color k_color_health_mid{.r = 230, .g = 200, .b = 60, .a = 255};
-constexpr Color k_color_health_low{.r = 230, .g = 70, .b = 70, .a = 255};
-constexpr Color k_color_ammo{.r = 235, .g = 175, .b = 40, .a = 255};
-constexpr Color k_color_text{.r = 240, .g = 240, .b = 240, .a = 255};
-constexpr Color k_color_flag{.r = 205, .g = 205, .b = 205, .a = 255};
-constexpr Color k_color_flag_alert{.r = 240, .g = 90, .b = 90, .a = 255};
-constexpr Color k_color_track{.r = 0, .g = 0, .b = 0, .a = 150};
-constexpr Color k_color_border{.r = 0, .g = 0, .b = 0, .a = 200};
+constexpr render::Color k_color_enemy{.r = 235, .g = 70, .b = 70, .a = 235};
+constexpr render::Color k_color_team{.r = 70, .g = 150, .b = 235, .a = 235};
+constexpr render::Color k_color_health_high{.r = 80, .g = 210, .b = 80, .a = 255};
+constexpr render::Color k_color_health_mid{.r = 230, .g = 200, .b = 60, .a = 255};
+constexpr render::Color k_color_health_low{.r = 230, .g = 70, .b = 70, .a = 255};
+constexpr render::Color k_color_ammo{.r = 235, .g = 175, .b = 40, .a = 255};
+constexpr render::Color k_color_text{.r = 240, .g = 240, .b = 240, .a = 255};
+constexpr render::Color k_color_flag{.r = 205, .g = 205, .b = 205, .a = 255};
+constexpr render::Color k_color_flag_alert{.r = 240, .g = 90, .b = 90, .a = 255};
+constexpr render::Color k_color_track{.r = 0, .g = 0, .b = 0, .a = 150};
+constexpr render::Color k_color_border{.r = 0, .g = 0, .b = 0, .a = 200};
 
 // ESP text is rasterized at this pixel size (matches the backend font size);
 // used to lay out stacked labels.
@@ -74,7 +73,7 @@ auto project_box(const game::Matrix4x4& view, const PlayerSnapshot& player, floa
   return max.x > min.x && max.y > min.y;
 }
 
-auto health_color(float fraction) -> Color {
+auto health_color(float fraction) -> render::Color {
   if (fraction > 0.5F) {
     return k_color_health_high;
   }
@@ -100,13 +99,13 @@ void Esp::build(const game::Snapshot& snapshot, const game::Matrix4x4& view, flo
     if (stats != nullptr) {
       ++stats->players;
     }
-    if (config_.only_enemies && player.is_local) {
+    if (config_.esp.only_enemies && player.is_local) {
       if (stats != nullptr) {
         ++stats->skipped_local;
       }
       continue;
     }
-    if (!config_.show_dead && !player.alive) {
+    if (!config_.esp.show_dead && !player.alive) {
       if (stats != nullptr) {
         ++stats->skipped_dead;
       }
@@ -131,16 +130,16 @@ void Esp::build(const game::Snapshot& snapshot, const game::Matrix4x4& view, flo
     if (stats != nullptr) {
       ++stats->drawn;
     }
-    const Color accent =
+    const render::Color accent =
         (local_team != 0 && player.team != local_team) ? k_color_enemy : k_color_team;
 
-    if (config_.box) {
+    if (config_.esp.box) {
       // 1px black border so the box reads against any background.
       out.outline(min.x - 1.0F, min.y - 1.0F, max.x + 1.0F, max.y + 1.0F, k_color_border, 1.0F);
       out.outline(min.x, min.y, max.x, max.y, accent, 1.5F);
     }
 
-    if (config_.health_bar && player.max_health > 0) {
+    if (config_.esp.health_bar && player.max_health > 0) {
       const float fraction =
           std::clamp(static_cast<float>(player.health) / static_cast<float>(player.max_health),
                      0.0F, 1.0F);
@@ -151,7 +150,7 @@ void Esp::build(const game::Snapshot& snapshot, const game::Matrix4x4& view, flo
       out.outline(x0 - 1.0F, min.y - 1.0F, x0 + bar_w + 1.0F, max.y + 1.0F, k_color_border, 1.0F);
     }
 
-    if (config_.ammo_bar && player.clip >= 0) {
+    if (config_.esp.ammo_bar && player.clip >= 0) {
       // Magazine size is not exposed by the schema; 30 is a reasonable ceiling
       // for the bar fraction.
       const float fraction = std::clamp(static_cast<float>(player.clip) / 30.0F, 0.0F, 1.0F);
@@ -162,20 +161,20 @@ void Esp::build(const game::Snapshot& snapshot, const game::Matrix4x4& view, flo
       out.outline(min.x - 1.0F, y0 - 1.0F, max.x + 1.0F, y0 + bar_h + 1.0F, k_color_border, 1.0F);
     }
 
-    if (config_.name && !player.name.empty()) {
+    if (config_.esp.name && !player.name.empty()) {
       // The name is the one ESP label that is *not* outlined.
       out.text((min.x + max.x) * 0.5F, min.y - k_text_height - 2.0F, k_color_text, player.name,
                true);
     }
 
-    if (config_.weapon && !player.weapon.empty()) {
+    if (config_.esp.weapon && !player.weapon.empty()) {
       out.text((min.x + max.x) * 0.5F, max.y + 8.0F, k_color_text, weapon_label(player.weapon),
                true, true);
     }
 
-    if (config_.flags) {
+    if (config_.esp.flags) {
       float y = min.y;
-      const auto flag = [&](std::string value, Color color) -> void {
+      const auto flag = [&](std::string value, render::Color color) -> void {
         out.text(max.x + 4.0F, y, color, std::move(value), false, true);
         y += k_text_height;
       };

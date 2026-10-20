@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 
 #include "cs2/game/matrix.hpp"
@@ -15,48 +16,235 @@ enum class HitboxMode : std::uint8_t {
   wireframe = 2,  // the capsule mesh cage (rim/cap rings + longitudinals)
 };
 
-// Which ESP elements to draw.
-struct EspConfig {
-  bool box = true;
-  bool health_bar = true;
-  bool ammo_bar = true;
-  bool name = true;
-  bool weapon = true;
-  bool flags = true;
-  bool only_enemies = true;  // skip the local player
-  bool show_dead = false;
-  // Draw the real studio hitbox capsules (`docs/re/aim.md`). Enabled from the
-  // menu's ESP tab; the mode and colour are menu-owned (`wire::Settings`).
-  bool hitboxes = false;
-  HitboxMode hitbox_mode = HitboxMode::outline;
-  // false = the automatic per-hitgroup scheme; true = `hitbox_color`.
-  bool hitbox_custom_color = false;
-  std::uint8_t hitbox_color[4] = {90, 255, 130, 220};
-
-  // Ragebot tuning (`docs/ragebot.md`), menu-owned via `wire::Settings`.
-  std::uint8_t rage_objective = 1;      // 0 = damage, 1 = hitchance, 2 = expected
-  std::uint8_t rage_hitbox = 0;         // 0 = auto (head→body), 1 = head, 2 = body
-  float rage_fov = 0.0F;                // target cone (degrees; 0 = unlimited)
-  float rage_min_damage = 0.0F;         // don't aim/fire below this damage
-  float rage_min_hitchance = 0.0F;      // don't aim/fire below this hitchance
-  // The common ragebot assists (docs/ragebot.md): auto-stop / auto-scope modes
-  // (0 off, 1 always while solving, 2 only while firing), auto-reload, only-visible.
-  std::uint8_t rage_autostop = 0;
-  std::uint8_t rage_autoscope = 0;
-  std::uint8_t rage_autoreload = 0;
-  std::uint8_t rage_only_visible = 0;
-  // The trigger mode (0 hold / 1 always / 2 toggle) and the per-weapon profile state.
-  std::uint8_t rage_mode = 0;
-  std::uint8_t rage_per_weapon = 0;
-  char rage_weapon[24] = {};
-  // Recoil compensation, and the auto-stop speed threshold in units/s (0 = full stop).
-  std::uint8_t rage_recoil = 0;
-  float rage_stop_speed = 0.0F;
-  // Lag-record backtracking (`docs/ragebot.md` §8). Off by default: each pose is a full
-  // solve and record sampling is ~0.6 ms/tick, so it is disabled until the perf work
-  // lands. The feature is retained and can be re-enabled here / via `rage backtrack=1`.
-  std::uint8_t rage_backtrack = 0;
+// How the player box is drawn.
+enum class BoxStyle : std::uint8_t {
+  straight = 0,  // a full rectangle
+  corner = 1,    // corner brackets
 };
+
+// Where a tracer line starts.
+enum class TracerOrigin : std::uint8_t {
+  screen_bottom = 0,  // the bottom edge of the screen
+  eye = 1,            // the local player's eye
+};
+
+// How the auto-strafe steers.
+enum class StrafeMode : std::uint8_t {
+  off = 0,              // no auto-strafe
+  camera_relative = 1,  // the wish direction follows the camera
+  directional = 2,      // the wish direction follows WASD
+};
+
+// How the chams are drawn.
+enum class ChamsMode : std::uint8_t {
+  flat = 0,
+  glow = 1,
+  wireframe = 2,
+};
+
+// Which shoulder the third-person camera sits over.
+enum class ThirdPersonSide : std::uint8_t {
+  left = 0,
+  right = 1,
+};
+
+// An RGBA colour, in the wire's byte order.
+struct Color {
+  std::uint8_t r = 255;
+  std::uint8_t g = 255;
+  std::uint8_t b = 255;
+  std::uint8_t a = 255;
+
+  // Copy the colour into the wire's four bytes (RGBA order).
+  void to_wire(std::uint8_t (&out)[4]) const noexcept {
+    out[0] = r;
+    out[1] = g;
+    out[2] = b;
+    out[3] = a;
+  }
+
+  // Read a colour from the wire's four bytes.
+  [[nodiscard]] static auto from_wire(const std::uint8_t (&bytes)[4]) noexcept -> Color {
+    return Color{.r = bytes[0], .g = bytes[1], .b = bytes[2], .a = bytes[3]};
+  }
+
+  [[nodiscard]] auto operator==(const Color&) const noexcept -> bool = default;
+};
+
+// --- The legal range of every numeric setting -------------------------------
+//
+// The `from_wire_settings` conversion clamps with these, so a stale or corrupt
+// shared segment can never push a slider out of the range the menu draws it
+// for. The ranges are the ones documented on the wire fields.
+inline constexpr std::uint8_t k_esp_box_thickness_max = 20;    // -> 0.5..5.0 px
+inline constexpr std::uint8_t k_esp_max_distance_m_max = 255;  // 0 = unlimited
+inline constexpr float k_esp_max_box_scale_min = 0.25F;
+inline constexpr float k_esp_max_box_scale_max = 2.0F;
+inline constexpr float k_movement_strafe_wishspeed_max = 3200.0F;
+inline constexpr std::uint8_t k_movement_strafe_subticks_max = 255;
+inline constexpr float k_movement_thirdperson_distance_min = 64.0F;
+inline constexpr float k_movement_thirdperson_distance_max = 512.0F;
+inline constexpr float k_movement_thirdperson_angle_max = 360.0F;
+inline constexpr float k_movement_thirdperson_pivot_z_max = 64.0F;
+inline constexpr float k_movement_thirdperson_fov_max = 180.0F;
+inline constexpr std::uint8_t k_menu_transparency_max = 100;
+inline constexpr float k_rage_fov_max = 360.0F;
+inline constexpr float k_rage_min_damage_max = 200.0F;
+inline constexpr float k_rage_min_hitchance_max = 1.0F;
+inline constexpr float k_rage_stop_speed_max = 3200.0F;
+
+// The typed, sectioned settings the features read.
+//
+// This is the *same* configuration as the flat `wire::Settings` block, but
+// with real types: `bool` for the flags, `float` for the numbers, `Color` for
+// the RGBA bytes and an `enum class` for each enumerated mode. The mapping is
+// one-to-one and exhaustive in both directions — `to_wire_settings` /
+// `from_wire_settings` (`cs2/features/settings.hpp`) are the only places that
+// translate, and the host test `features-config` proves the two directions
+// cover the same field set.
+//
+// The defaults are conservative: every added element is off, the third-person
+// camera and the chams are off, the menu key is Insert and the auto-strafe is
+// camera-relative. They mirror `wire::default_settings()`.
+struct Config {
+  // Which ESP elements to draw, and how.
+  struct Esp {
+    bool box = true;
+    bool health_bar = true;
+    bool ammo_bar = true;
+    bool name = true;
+    bool weapon = true;
+    bool flags = true;
+    bool only_enemies = true;  // skip the local player
+    bool show_dead = false;
+    // Draw the real studio hitbox capsules (`docs/re/aim.md`). Enabled from the
+    // menu's ESP tab; the mode and colour are menu-owned (`wire::Settings`).
+    bool hitboxes = false;
+    HitboxMode hitbox_mode = HitboxMode::outline;
+    // false = the automatic per-hitgroup scheme; true = `hitbox_color`.
+    bool hitbox_custom_color = false;
+    Color hitbox_color{90, 255, 130, 220};
+
+    // The line width of the player box: 0..20 maps to 0.5..5.0 px.
+    std::uint8_t box_thickness = 4;
+    BoxStyle box_style = BoxStyle::straight;
+    bool head_box = false;
+    bool skeleton = false;
+    bool tracer = false;
+    TracerOrigin tracer_origin = TracerOrigin::screen_bottom;
+    bool offscreen = false;
+    bool glow = false;
+    bool visible_only = false;
+    bool distance = false;
+    bool scale_by_distance = false;
+    std::uint8_t max_distance_m = 0;  // 0 = unlimited
+    bool radar = false;
+    bool sound = false;
+    bool grenades = false;
+    bool c4 = false;
+    bool weapons = false;  // dropped weapons
+    bool local_player = false;
+    bool show_spectators = false;
+    bool show_teammates = false;
+    float max_box_scale = 1.0F;
+
+    Color color_enemy{235, 70, 70, 235};
+    Color color_team{70, 150, 235, 235};
+    Color color_box{255, 255, 255, 235};
+    Color color_skeleton{255, 255, 255, 220};
+    Color color_tracer{235, 70, 70, 200};
+    Color color_offscreen{255, 90, 90, 220};
+    Color color_sound{255, 200, 60, 220};
+    Color color_grenade{90, 200, 255, 220};
+    Color color_c4{255, 120, 40, 235};
+
+    [[nodiscard]] auto operator==(const Esp&) const noexcept -> bool = default;
+  } esp;
+
+  // The movement features (`docs/re/subtick.md`).
+  struct Movement {
+    bool auto_strafe = false;
+    bool bhop = false;
+    StrafeMode strafe_mode = StrafeMode::camera_relative;
+    bool strafe_ignore_keys = false;  // true = A/D stands down
+    float strafe_wishspeed = 0.0F;    // 0 = the game's own wish speed
+    std::uint8_t strafe_subticks = 0;
+    bool thirdperson = false;
+    float thirdperson_distance = 64.0F;
+    float thirdperson_angle = 0.0F;
+    float thirdperson_pivot_z = 0.0F;
+    float thirdperson_fov = 0.0F;  // 0 = keep the game's FOV
+    ThirdPersonSide thirdperson_side = ThirdPersonSide::right;
+
+    [[nodiscard]] auto operator==(const Movement&) const noexcept -> bool = default;
+  } movement;
+
+  // The ragebot's tuning (`docs/ragebot.md`).
+  struct Rage {
+    bool enabled = false;
+    std::uint8_t key = 0;        // the virtual-key code held to trigger (0 = none)
+    bool fire = false;           // auto-fire while aiming
+    std::uint8_t objective = 1;  // 0 = damage, 1 = hitchance, 2 = expected
+    std::uint8_t hitbox = 0;     // 0 = auto (head->body), 1 = head, 2 = body
+    float fov = 0.0F;            // target cone (degrees; 0 = unlimited)
+    float min_damage = 0.0F;     // don't aim/fire below this damage
+    float min_hitchance = 0.0F;  // don't fire below this hitchance
+    // The assists: auto-stop / auto-scope modes (0 off, 1 always while solving,
+    // 2 only while firing), auto-reload, only-visible.
+    std::uint8_t autostop = 0;
+    std::uint8_t autoscope = 0;
+    std::uint8_t autoreload = 0;
+    std::uint8_t only_visible = 0;
+    // The trigger mode (0 hold / 1 always / 2 toggle) and the per-weapon profile state.
+    std::uint8_t mode = 0;
+    std::uint8_t per_weapon = 0;
+    std::uint8_t config_op = 0;      // one-shot op, see `config_store.hpp`
+    std::uint32_t config_token = 0;  // bumped by the menu to signal the op
+    std::array<char, 24> weapon{};   // the designer name the profile is keyed on
+    // Recoil compensation, and the auto-stop speed threshold in units/s (0 = full stop).
+    std::uint8_t recoil = 0;
+    float stop_speed = 0.0F;
+    // Lag-record backtracking (`docs/ragebot.md` §8). Off by default: each pose is a
+    // full solve and record sampling is ~0.6 ms/tick, so it is disabled until the
+    // perf work lands. The feature is retained and can be re-enabled here.
+    std::uint8_t backtrack = 0;
+
+    [[nodiscard]] auto operator==(const Rage&) const noexcept -> bool = default;
+  } rage;
+
+  // The material overrides (chams).
+  struct Visuals {
+    bool chams = false;
+    ChamsMode chams_mode = ChamsMode::flat;
+    bool chams_visible = false;  // only when the player is visible
+    bool chams_local = false;    // also chams the local player
+    Color chams_color{120, 200, 255, 160};
+
+    [[nodiscard]] auto operator==(const Visuals&) const noexcept -> bool = default;
+  } visuals;
+
+  // The menu's own state and the config file's one-shot op.
+  struct Menu {
+    bool show_hud = true;     // the debug HUD window
+    bool open = false;        // written by the layer; the payload may suppress input
+    std::uint8_t key = 0x2E;  // the virtual-key code that opens the menu (Insert)
+    Color accent{90, 160, 255, 255};
+    std::uint8_t transparency = 100;      // the window alpha, 0..100
+    std::uint8_t config_op = 0;           // 1 = save, 2 = load, 3 = reset
+    std::uint32_t config_token = 0;       // bumped by the menu to signal the op
+    std::array<char, 128> config_path{};  // the config file's path (read-only)
+
+    [[nodiscard]] auto operator==(const Menu&) const noexcept -> bool = default;
+  } menu;
+
+  [[nodiscard]] auto operator==(const Config&) const noexcept -> bool = default;
+};
+
+// The flat `EspConfig` was replaced by the sectioned `Config` above. The alias
+// keeps the files that still name `EspConfig` compiling
+// (`cs2/features/overlay.hpp`, outside this change's ownership); new code
+// should spell `Config`.
+using EspConfig = Config;
 
 // Per-build counters, for diagnostics/logging (never used for rendering).
 struct EspStats {
@@ -73,16 +261,20 @@ struct EspStats {
 class Esp {
  public:
   Esp() = default;
-  explicit Esp(EspConfig config) : config_(config) {}
+  explicit Esp(Config config) : config_(config) {}
 
-  void build(const game::Snapshot& snapshot, const game::Matrix4x4& view, float width,
-             float height, render::DrawList& out, EspStats* stats = nullptr) const;
+  void build(const game::Snapshot& snapshot, const game::Matrix4x4& view, float width, float height,
+             render::DrawList& out, EspStats* stats = nullptr) const;
 
-  [[nodiscard]] const EspConfig& config() const noexcept { return config_; }
-  EspConfig& config() noexcept { return config_; }
+  [[nodiscard]] const Config& config() const noexcept {
+    return config_;
+  }
+  Config& config() noexcept {
+    return config_;
+  }
 
  private:
-  EspConfig config_{};
+  Config config_{};
 };
 
 }  // namespace cs2::features

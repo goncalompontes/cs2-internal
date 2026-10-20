@@ -58,10 +58,10 @@ auto format_float(double value) -> std::string {
 // One hitbox's colour: the menu's custom pick, or the automatic per-hitgroup
 // scheme (the head stands out, the rest a dim body colour, brighter when the
 // ragebot is aiming at this pawn).
-auto hitbox_color(const EspConfig& config, int group, bool active) -> render::Color {
-  if (config.hitbox_custom_color) {
-    return render::Color{config.hitbox_color[0], config.hitbox_color[1],
-                         config.hitbox_color[2], config.hitbox_color[3]};
+auto hitbox_color(const Config& config, int group, bool active) -> render::Color {
+  if (config.esp.hitbox_custom_color) {
+    const Color& color = config.esp.hitbox_color;
+    return render::Color{color.r, color.g, color.b, color.a};
   }
   if (group == 1) {  // HITGROUP_HEAD
     return active ? render::Color{255, 70, 70, 235} : render::Color{255, 96, 96, 150};
@@ -470,7 +470,7 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
 
   // The real studio hitboxes of each live enemy (and of the ragebot's current
   // target) as screen-space capsules (`docs/re/aim.md`). Opt-in from the menu.
-  if (esp_config().hitboxes && hitbox_provider_ != nullptr && snapshot.local.has_value()) {
+  if (esp_config().esp.hitboxes && hitbox_provider_ != nullptr && snapshot.local.has_value()) {
     const int rage_target =
         rage_target_provider_ != nullptr ? rage_target_provider_(rage_target_context_) : -1;
     for (const game::PlayerSnapshot& player : snapshot.players) {
@@ -482,17 +482,17 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
       if (player.team != 2 && player.team != 3) {
         continue;
       }
-      if (esp_config().only_enemies && player.team == snapshot.local->team) {
+      if (esp_config().esp.only_enemies && player.team == snapshot.local->team) {
         continue;
       }
       const bool active = player.index == rage_target;
-      const EspConfig& config = esp_config();
+      const Config& config = esp_config();
       game::HitboxCapsule capsules[k_max_hitboxes] = {};
       const int count = hitbox_provider_(hitbox_context_, player.pawn, capsules, k_max_hitboxes);
       for (int i = 0; i < count; ++i) {
         draw_hitbox(model_.draw, view, screen_width, screen_height, snapshot.local->eye_origin,
                     capsules[i], hitbox_color(config, capsules[i].group, active),
-                    config.hitbox_mode);
+                    config.esp.hitbox_mode);
       }
     }
   }

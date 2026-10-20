@@ -431,24 +431,12 @@ void image_barrier(const Functions& fn, VkCommandBuffer command_buffer, VkImage 
                           &barrier);
 }
 
-// Defaults match `features::EspConfig` so a fresh segment renders the same ESP
-// as before the menu existed.
+// The defaults for a fresh shared segment. The shared `wire::default_settings()`
+// is the single source of truth: the payload's `features::default_wire_settings()`
+// uses the same function, so the two can never disagree about what a fresh
+// segment means.
 auto default_ui_settings() -> wire::Settings {
-  wire::Settings settings{};
-  settings.box = 1;
-  settings.health_bar = 1;
-  settings.ammo_bar = 1;
-  settings.name = 1;
-  settings.weapon = 1;
-  settings.flags = 1;
-  settings.only_enemies = 1;
-  settings.show_dead = 0;
-  settings.show_hud = 1;
-  // Movement features are off until the payload (env) or the menu turns them on: an
-  // injected payload moving the player by itself would be surprising.
-  settings.auto_strafe = 0;
-  settings.bhop = 0;
-  return settings;
+  return wire::default_settings();
 }
 
 void draw_overlay_model(const wire::Model& model, const wire::Settings& settings) {
