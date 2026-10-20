@@ -128,7 +128,7 @@ inline constexpr std::array<SettingInfo, 87> SETTING_TABLE = {{
     {"menu_transparency", "Menu / config", SettingType::flag, 175, 1, 1},
     {"menu_config_op", "Menu / config", SettingType::flag, 176, 1, 1},
     {"menu_config_token", "Menu / config", SettingType::unsigned_number, 177, 4, 1},
-    {"menu_config_path", "Menu / config", SettingType::text, 181, 128, 128},
+    {"menu_config_path", "Menu / config", SettingType::text, 181, 260, 260},
 }};
 
 // The field named `name`, or null when the struct has no such field.
