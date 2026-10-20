@@ -91,12 +91,12 @@ auto main() -> int {
 
   // --- The forward vector (the engine's `AngleVectors`) --------------------
   {
-    const auto forward = cs2::game::view_forward(Angle{0.0F, 0.0F, 0.0F});
-    expect(near(forward, Vec3{1.0F, 0.0F, 0.0F}), "yaw 0 looks along +X");
-    const auto yaw_90 = cs2::game::view_forward(Angle{0.0F, 90.0F, 0.0F});
-    expect(near(yaw_90, Vec3{0.0F, 1.0F, 0.0F}), "yaw 90 looks along +Y");
-    const auto pitch_90 = cs2::game::view_forward(Angle{90.0F, 0.0F, 0.0F});
-    expect(near(pitch_90, Vec3{0.0F, 0.0F, 1.0F}), "pitch 90 looks along +Z");
+    const auto forward = cs2::game::view_forward(Angle{.pitch = 0.0F, .yaw = 0.0F, .roll = 0.0F});
+    expect(near(forward, Vec3{.x = 1.0F, .y = 0.0F, .z = 0.0F}), "yaw 0 looks along +X");
+    const auto yaw_90 = cs2::game::view_forward(Angle{.pitch = 0.0F, .yaw = 90.0F, .roll = 0.0F});
+    expect(near(yaw_90, Vec3{.x = 0.0F, .y = 1.0F, .z = 0.0F}), "yaw 90 looks along +Y");
+    const auto pitch_90 = cs2::game::view_forward(Angle{.pitch = 90.0F, .yaw = 0.0F, .roll = 0.0F});
+    expect(near(pitch_90, Vec3{.x = 0.0F, .y = 0.0F, .z = 1.0F}), "pitch 90 looks along +Z");
   }
 
   // --- The camera sits behind the player ------------------------------------
@@ -105,8 +105,8 @@ auto main() -> int {
     params.enabled = true;
     params.distance = 64.0F;
     params.pivot_z = 0.0F;
-    const Vec3 eye{100.0F, 200.0F, 50.0F};
-    const Angle view{0.0F, 0.0F, 0.0F};
+    const Vec3 eye{.x = 100.0F, .y = 200.0F, .z = 50.0F};
+    const Angle view{.pitch = 0.0F, .yaw = 0.0F, .roll = 0.0F};
     const auto origin = cs2::game::third_person_origin(eye, view, params);
     // The player looks along +X, so the camera is 64 units behind it.
     expect(near(origin.x, 36.0F), "the camera is behind the player (x)");
@@ -121,8 +121,8 @@ auto main() -> int {
     params.enabled = true;
     params.distance = 64.0F;
     params.angle = 90.0F;
-    const Vec3 eye{0.0F, 0.0F, 0.0F};
-    const Angle view{0.0F, 0.0F, 0.0F};
+    const Vec3 eye{.x = 0.0F, .y = 0.0F, .z = 0.0F};
+    const Angle view{.pitch = 0.0F, .yaw = 0.0F, .roll = 0.0F};
     expect(near(cs2::game::third_person_yaw(view, params), 90.0F), "the camera yaw is the offset");
     const auto origin = cs2::game::third_person_origin(eye, view, params);
     // A 90 degree offset puts the camera 64 units along -Y (the player looks
@@ -137,8 +137,8 @@ auto main() -> int {
     ThirdPersonParams params;
     params.enabled = true;
     params.distance = 64.0F;
-    const Vec3 eye{0.0F, 0.0F, 0.0F};
-    const Angle view{0.0F, 0.0F, 0.0F};
+    const Vec3 eye{.x = 0.0F, .y = 0.0F, .z = 0.0F};
+    const Angle view{.pitch = 0.0F, .yaw = 0.0F, .roll = 0.0F};
     params.right_shoulder = true;
     const auto right = cs2::game::third_person_origin(eye, view, params);
     params.right_shoulder = false;
@@ -157,8 +157,8 @@ auto main() -> int {
     params.enabled = true;
     params.distance = 64.0F;
     params.pivot_z = 24.0F;
-    const Vec3 eye{0.0F, 0.0F, 50.0F};
-    const Angle view{0.0F, 0.0F, 0.0F};
+    const Vec3 eye{.x = 0.0F, .y = 0.0F, .z = 50.0F};
+    const Angle view{.pitch = 0.0F, .yaw = 0.0F, .roll = 0.0F};
     const auto origin = cs2::game::third_person_origin(eye, view, params);
     expect(near(origin.z, 74.0F), "the pivot lifts the camera by pivot_z");
   }
@@ -168,8 +168,8 @@ auto main() -> int {
     ThirdPersonParams params;
     params.enabled = true;
     params.distance = 0.0F;
-    const Vec3 eye{10.0F, 20.0F, 30.0F};
-    const Angle view{0.0F, 0.0F, 0.0F};
+    const Vec3 eye{.x = 10.0F, .y = 20.0F, .z = 30.0F};
+    const Angle view{.pitch = 0.0F, .yaw = 0.0F, .roll = 0.0F};
     const auto origin = cs2::game::third_person_origin(eye, view, params);
     expect(near(origin.x, 10.0F), "a zero distance keeps the camera on the pivot (x)");
     expect(near(origin.z, 30.0F), "a zero distance keeps the camera on the pivot (z)");
@@ -213,7 +213,7 @@ auto main() -> int {
     expect(!published.valid, "the published view is refused on an unverified build");
 
     const auto setup = cs2::game::read_view_setup_origin(engine, 0);
-    expect(near(setup, Vec3{0.0F, 0.0F, 0.0F}),
+    expect(near(setup, Vec3{.x = 0.0F, .y = 0.0F, .z = 0.0F}),
            "the view setup origin is refused on an unverified build");
 
     const auto fov = cs2::game::read_view_setup_fov(engine, 0);
@@ -225,7 +225,7 @@ auto main() -> int {
 
     // The fallback the caller owns is what the renderer gets — never a
     // garbage camera origin.
-    const Vec3 fallback{11.0F, 22.0F, 33.0F};
+    const Vec3 fallback{.x = 11.0F, .y = 22.0F, .z = 33.0F};
     const auto origin = cs2::game::camera_origin(engine, 0, fallback);
     expect(near(origin, fallback), "the camera origin falls back on an unverified build");
 

@@ -74,7 +74,7 @@ struct WindowSearch {
 
 BOOL CALLBACK largest_process_window(HWND window, LPARAM param) {
   auto* search = reinterpret_cast<WindowSearch*>(param);
-  if (IsWindowVisible(window) == FALSE || owns_window(window) == FALSE) {
+  if (IsWindowVisible(window) == FALSE || static_cast<int>(owns_window(window)) == FALSE) {
     return TRUE;
   }
   RECT rect{};

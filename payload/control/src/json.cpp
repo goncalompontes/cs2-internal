@@ -91,13 +91,19 @@ class Parser {
         result = parse_string_value();
         break;
       case 't':
-        if (consume("true")) result = Json::boolean(true);
+        if (consume("true")) {
+          result = Json::boolean(true);
+        }
         break;
       case 'f':
-        if (consume("false")) result = Json::boolean(false);
+        if (consume("false")) {
+          result = Json::boolean(false);
+        }
         break;
       case 'n':
-        if (consume("null")) result = Json();
+        if (consume("null")) {
+          result = Json();
+        }
         break;
       default:
         result = parse_number();

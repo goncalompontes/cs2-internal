@@ -90,7 +90,8 @@ auto main() -> int {
     const float ex = rng.range(1.0F, 60.0F);
     const float ey = rng.range(1.0F, 60.0F);
     const float ez = rng.range(1.0F, 60.0F);
-    boxes.push_back(Aabb{{x, y, z}, {x + ex, y + ey, z + ez}});
+    boxes.push_back(
+        Aabb{.min = {.x = x, .y = y, .z = z}, .max = {.x = x + ex, .y = y + ey, .z = z + ez}});
   }
 
   AabbBvh bvh;
@@ -106,7 +107,8 @@ auto main() -> int {
     const float ex = rng.range(1.0F, 400.0F);
     const float ey = rng.range(1.0F, 400.0F);
     const float ez = rng.range(1.0F, 400.0F);
-    const Aabb query{{x, y, z}, {x + ex, y + ey, z + ez}};
+    const Aabb query{.min = {.x = x, .y = y, .z = z},
+                     .max = {.x = x + ex, .y = y + ey, .z = z + ez}};
 
     std::vector<int> linear;
     for (int i = 0; i < k_count; ++i) {
@@ -125,10 +127,14 @@ auto main() -> int {
   // every index.
   {
     std::vector<int> none;
-    bvh.query(Aabb{{100000.0F, 100000.0F, 100000.0F}, {100001.0F, 100001.0F, 100001.0F}}, none);
+    bvh.query(Aabb{.min = {.x = 100000.0F, .y = 100000.0F, .z = 100000.0F},
+                   .max = {.x = 100001.0F, .y = 100001.0F, .z = 100001.0F}},
+              none);
     expect(none.empty(), "a far query returns nothing");
     std::vector<int> all;
-    bvh.query(Aabb{{-1e6F, -1e6F, -1e6F}, {1e6F, 1e6F, 1e6F}}, all);
+    bvh.query(
+        Aabb{.min = {.x = -1e6F, .y = -1e6F, .z = -1e6F}, .max = {.x = 1e6F, .y = 1e6F, .z = 1e6F}},
+        all);
     expect(all.size() == static_cast<std::size_t>(k_count), "a covering query returns every box");
   }
 
@@ -137,7 +143,9 @@ auto main() -> int {
     AabbBvh empty_bvh;
     empty_bvh.build({});
     std::vector<int> out;
-    empty_bvh.query(Aabb{{-1.0F, -1.0F, -1.0F}, {1.0F, 1.0F, 1.0F}}, out);
+    empty_bvh.query(
+        Aabb{.min = {.x = -1.0F, .y = -1.0F, .z = -1.0F}, .max = {.x = 1.0F, .y = 1.0F, .z = 1.0F}},
+        out);
     expect(empty_bvh.empty() && out.empty(), "an empty BVH has no hits");
   }
 
@@ -151,14 +159,17 @@ auto main() -> int {
     int missed = 0;
     int rays = 0;
     for (int q = 0; q < 40; ++q) {
-      const Vec3 eye{rng.range(-100.0F, 100.0F), rng.range(-100.0F, 100.0F),
-                     rng.range(-100.0F, 100.0F)};
-      const Vec3 c{rng.range(-400.0F, 400.0F), rng.range(-400.0F, 400.0F),
-                   rng.range(-400.0F, 400.0F)};
+      const Vec3 eye{.x = rng.range(-100.0F, 100.0F),
+                     .y = rng.range(-100.0F, 100.0F),
+                     .z = rng.range(-100.0F, 100.0F)};
+      const Vec3 c{.x = rng.range(-400.0F, 400.0F),
+                   .y = rng.range(-400.0F, 400.0F),
+                   .z = rng.range(-400.0F, 400.0F)};
       const float ex = rng.range(4.0F, 30.0F);
       const float ey = rng.range(4.0F, 30.0F);
       const float ez = rng.range(4.0F, 30.0F);
-      const Aabb hitbox{{c.x - ex, c.y - ey, c.z - ez}, {c.x + ex, c.y + ey, c.z + ez}};
+      const Aabb hitbox{.min = {.x = c.x - ex, .y = c.y - ey, .z = c.z - ez},
+                        .max = {.x = c.x + ex, .y = c.y + ey, .z = c.z + ez}};
 
       std::vector<int> via_pyramid;
       bvh.query_pyramid(eye, hitbox, via_pyramid);
@@ -167,14 +178,14 @@ auto main() -> int {
       // Sample the hitbox: its centre, 8 corners and a few random interior points.
       std::vector<Vec3> samples = {c};
       for (int corner = 0; corner < 8; ++corner) {
-        samples.push_back(Vec3{(corner & 1) != 0 ? hitbox.max.x : hitbox.min.x,
-                               (corner & 2) != 0 ? hitbox.max.y : hitbox.min.y,
-                               (corner & 4) != 0 ? hitbox.max.z : hitbox.min.z});
+        samples.push_back(Vec3{.x = (corner & 1) != 0 ? hitbox.max.x : hitbox.min.x,
+                               .y = (corner & 2) != 0 ? hitbox.max.y : hitbox.min.y,
+                               .z = (corner & 4) != 0 ? hitbox.max.z : hitbox.min.z});
       }
       for (int i = 0; i < 4; ++i) {
-        samples.push_back(Vec3{rng.range(hitbox.min.x, hitbox.max.x),
-                               rng.range(hitbox.min.y, hitbox.max.y),
-                               rng.range(hitbox.min.z, hitbox.max.z)});
+        samples.push_back(Vec3{.x = rng.range(hitbox.min.x, hitbox.max.x),
+                               .y = rng.range(hitbox.min.y, hitbox.max.y),
+                               .z = rng.range(hitbox.min.z, hitbox.max.z)});
       }
       for (const Vec3& point : samples) {
         ++rays;

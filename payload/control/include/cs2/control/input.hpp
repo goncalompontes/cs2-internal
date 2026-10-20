@@ -611,7 +611,7 @@ class Input {
   void write_silent_angles(void* cmd, float pitch, float yaw, float roll) noexcept;
   // One tick of the ragebot: write the render-thread solve as the silent sub-tick
   // view angles and (optionally) press attack.
-  void rage_tick(std::uint8_t* cmd, std::uint64_t* buttons) noexcept;
+  void rage_tick(std::uint8_t* cmd, const std::uint64_t* buttons) noexcept;
   // Assert/clear bits in the engine's own held-button word (`CInButtonState` at the
   // movement services `+0x58`); some weapon actions read it instead of the command mask.
   void write_engine_buttons(std::uint64_t set_bits, std::uint64_t clear_bits) noexcept;

@@ -248,14 +248,21 @@ struct NamedKey {
 // convention the pre-T2 menu used. `0x04` is the middle button, and `0x03` is
 // `VK_CANCEL`, which is not a mouse button at all.
 inline constexpr NamedKey k_named_keys[] = {
-    {0x01, "Mouse 1"},    {0x02, "Mouse 2"},     {0x04, "Middle Mouse"}, {0x05, "Mouse 4"},
-    {0x06, "Mouse 5"},    {0x08, "Backspace"},   {0x09, "Tab"},          {0x0D, "Enter"},
-    {0x14, "Caps Lock"},  {0x1B, "Escape"},      {0x20, "Space"},        {0x21, "Page Up"},
-    {0x22, "Page Down"},  {0x23, "End"},         {0x24, "Home"},         {0x25, "Left"},
-    {0x26, "Up"},         {0x27, "Right"},       {0x28, "Down"},         {0x2D, "Insert"},
-    {0x2E, "Delete"},     {0x5B, "Left Super"},  {0x5C, "Right Super"},  {0x5D, "Menu"},
-    {0xA0, "Left Shift"}, {0xA1, "Right Shift"}, {0xA2, "Left Ctrl"},    {0xA3, "Right Ctrl"},
-    {0xA4, "Left Alt"},   {0xA5, "Right Alt"},
+    {.key = 0x01, .name = "Mouse 1"},      {.key = 0x02, .name = "Mouse 2"},
+    {.key = 0x04, .name = "Middle Mouse"}, {.key = 0x05, .name = "Mouse 4"},
+    {.key = 0x06, .name = "Mouse 5"},      {.key = 0x08, .name = "Backspace"},
+    {.key = 0x09, .name = "Tab"},          {.key = 0x0D, .name = "Enter"},
+    {.key = 0x14, .name = "Caps Lock"},    {.key = 0x1B, .name = "Escape"},
+    {.key = 0x20, .name = "Space"},        {.key = 0x21, .name = "Page Up"},
+    {.key = 0x22, .name = "Page Down"},    {.key = 0x23, .name = "End"},
+    {.key = 0x24, .name = "Home"},         {.key = 0x25, .name = "Left"},
+    {.key = 0x26, .name = "Up"},           {.key = 0x27, .name = "Right"},
+    {.key = 0x28, .name = "Down"},         {.key = 0x2D, .name = "Insert"},
+    {.key = 0x2E, .name = "Delete"},       {.key = 0x5B, .name = "Left Super"},
+    {.key = 0x5C, .name = "Right Super"},  {.key = 0x5D, .name = "Menu"},
+    {.key = 0xA0, .name = "Left Shift"},   {.key = 0xA1, .name = "Right Shift"},
+    {.key = 0xA2, .name = "Left Ctrl"},    {.key = 0xA3, .name = "Right Ctrl"},
+    {.key = 0xA4, .name = "Left Alt"},     {.key = 0xA5, .name = "Right Alt"},
 };
 
 // The name of a virtual-key code ("X", "Left Alt", "Mouse 4", "None").
@@ -829,21 +836,35 @@ struct SectionEntry {
 };
 
 inline constexpr SectionEntry k_sections[] = {
-    {Section::players, "Players", "Player boxes, labels and colours",
-     "The colours apply to what is drawn; the sliders are live."},
-    {Section::world, "World", "Radar, sounds, grenades and dropped items",
-     "The world ESP draws the radar, the sounds and the dropped items."},
-    {Section::ragebot, "Ragebot", "The aim solver and its assists",
-     "The trigger key is captured by the window: the game never sees it."},
-    {Section::movement, "Movement", "Auto-strafe, bunnyhop and the camera",
-     "The movement features run per tick in the payload."},
-    {Section::visuals, "Visuals", "Chams and the menu's own look",
-     "The accent and the transparency apply to this window."},
-    {Section::config, "Config", "The settings file",
-     "Save writes the settings file, Load reads it, Reset restores the "
-     "defaults."},
-    {Section::about, "About", "What this build is",
-     "Insert or Delete toggles the menu while the game is in a map."},
+    {.section = Section::players,
+     .name = "Players",
+     .subtitle = "Player boxes, labels and colours",
+     .hint = "The colours apply to what is drawn; the sliders are live."},
+    {.section = Section::world,
+     .name = "World",
+     .subtitle = "Radar, sounds, grenades and dropped items",
+     .hint = "The world ESP draws the radar, the sounds and the dropped items."},
+    {.section = Section::ragebot,
+     .name = "Ragebot",
+     .subtitle = "The aim solver and its assists",
+     .hint = "The trigger key is captured by the window: the game never sees it."},
+    {.section = Section::movement,
+     .name = "Movement",
+     .subtitle = "Auto-strafe, bunnyhop and the camera",
+     .hint = "The movement features run per tick in the payload."},
+    {.section = Section::visuals,
+     .name = "Visuals",
+     .subtitle = "Chams and the menu's own look",
+     .hint = "The accent and the transparency apply to this window."},
+    {.section = Section::config,
+     .name = "Config",
+     .subtitle = "The settings file",
+     .hint = "Save writes the settings file, Load reads it, Reset restores the "
+             "defaults."},
+    {.section = Section::about,
+     .name = "About",
+     .subtitle = "What this build is",
+     .hint = "Insert or Delete toggles the menu while the game is in a map."},
 };
 
 inline constexpr int k_section_count = static_cast<int>(sizeof(k_sections) / sizeof(k_sections[0]));

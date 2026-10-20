@@ -24,17 +24,17 @@ using game::Vec2;
 using game::Vec3;
 
 // The neutral label colours: the settings have no entry for them.
-constexpr render::Color k_color_text{240, 240, 240, 255};
-constexpr render::Color k_color_flag{205, 205, 205, 255};
-constexpr render::Color k_color_flag_alert{240, 90, 90, 255};
-constexpr render::Color k_color_track{0, 0, 0, 150};
-constexpr render::Color k_color_border{0, 0, 0, 200};
+constexpr render::Color k_color_text{.r = 240, .g = 240, .b = 240, .a = 255};
+constexpr render::Color k_color_flag{.r = 205, .g = 205, .b = 205, .a = 255};
+constexpr render::Color k_color_flag_alert{.r = 240, .g = 90, .b = 90, .a = 255};
+constexpr render::Color k_color_track{.r = 0, .g = 0, .b = 0, .a = 150};
+constexpr render::Color k_color_border{.r = 0, .g = 0, .b = 0, .a = 200};
 // The health bar's ramp and the ammo bar's colour: the spec lets them keep
 // their ramps, and there is no setting for them.
-constexpr render::Color k_color_health_high{80, 210, 80, 255};
-constexpr render::Color k_color_health_mid{230, 200, 60, 255};
-constexpr render::Color k_color_health_low{230, 70, 70, 255};
-constexpr render::Color k_color_ammo{235, 175, 40, 255};
+constexpr render::Color k_color_health_high{.r = 80, .g = 210, .b = 80, .a = 255};
+constexpr render::Color k_color_health_mid{.r = 230, .g = 200, .b = 60, .a = 255};
+constexpr render::Color k_color_health_low{.r = 230, .g = 70, .b = 70, .a = 255};
+constexpr render::Color k_color_ammo{.r = 235, .g = 175, .b = 40, .a = 255};
 
 // The ESP text is rasterized at this pixel size (matches the backend font
 // size); used to lay out stacked labels.

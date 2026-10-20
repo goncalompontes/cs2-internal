@@ -83,8 +83,8 @@ auto main() -> int {
     const float a1 = t.random_float(0.0F, k_two_pi);
     const float r2 = t.random_float(0.0F, 1.0F);
     const float a2 = t.random_float(0.0F, k_two_pi);
-    const Vec2 expected{0.01F * r1 * std::cos(a1) + 0.02F * r2 * std::cos(a2),
-                        0.01F * r1 * std::sin(a1) + 0.02F * r2 * std::sin(a2)};
+    const Vec2 expected{.x = 0.01F * r1 * std::cos(a1) + 0.02F * r2 * std::cos(a2),
+                        .y = 0.01F * r1 * std::sin(a1) + 0.02F * r2 * std::sin(a2)};
     expect(near(offsets[0].x, expected.x) && near(offsets[0].y, expected.y),
            "the first pellet follows the recipe");
     expect(offsets[0].x != offsets[1].x || offsets[0].y != offsets[1].y, "pellets differ");

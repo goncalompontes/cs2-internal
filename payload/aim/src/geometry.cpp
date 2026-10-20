@@ -54,7 +54,8 @@ void clip_half_plane_into(const Polygon& polygon, const Vec2& normal, float offs
                                  float& offset_out) noexcept -> float {
   const Vec2 e = b - a;
   const float len = game::length(e);
-  normal_out = len <= k_epsilon ? Vec2{0.0F, 0.0F} : Vec2{e.y / len, -e.x / len};
+  normal_out =
+      len <= k_epsilon ? Vec2{.x = 0.0F, .y = 0.0F} : Vec2{.x = e.y / len, .y = -e.x / len};
   offset_out = game::dot(normal_out, a);
   return offset_out - game::dot(normal_out, p);
 }
@@ -147,12 +148,12 @@ auto Basis::project(const Vec3& direction) const noexcept -> std::optional<Vec2>
   const float nz = direction.z / len;
   // Absolute world yaw/pitch (radians): a function of the world only, never the
   // camera. `u` is yaw about +Z, `v` is pitch above the XY plane.
-  return Vec2{std::atan2(ny, nx), std::asin(std::clamp(nz, -1.0F, 1.0F))};
+  return Vec2{.x = std::atan2(ny, nx), .y = std::asin(std::clamp(nz, -1.0F, 1.0F))};
 }
 
 auto Basis::unproject(const Vec2& point) const noexcept -> Vec3 {
   const float cp = std::cos(point.y);
-  return Vec3{cp * std::cos(point.x), cp * std::sin(point.x), std::sin(point.y)};
+  return Vec3{.x = cp * std::cos(point.x), .y = cp * std::sin(point.x), .z = std::sin(point.y)};
 }
 
 auto Obb::corners() const noexcept -> std::array<Vec3, 8> {
@@ -322,7 +323,7 @@ auto polygon_margin(const Polygon& polygon, const Vec2& point) -> float {
     if (len > k_epsilon) {
       // Interior is `dot(normal, p) <= offset` with this normal (the same convention the
       // clipper uses), so the point is outside an edge when the dot product is positive.
-      const Vec2 normal{e.y / len, -e.x / len};
+      const Vec2 normal{.x = e.y / len, .y = -e.x / len};
       if (game::dot(point - a, normal) > 0.0F) {
         distance = -distance;
       }
@@ -398,7 +399,8 @@ auto project_sphere(const Vec3& eye, const Vec3& center, float radius, const Bas
   // axis. Each boundary direction is built in 3-D and projected, so the silhouette is
   // exact at any pitch — a chart-space circle of angular radius `rho` would be wrong by
   // `1/cos(pitch)` in yaw (the aim-dependent error this replaces).
-  const Vec3 reference = std::fabs(axis.z) < 0.9F ? Vec3{0.0F, 0.0F, 1.0F} : Vec3{1.0F, 0.0F, 0.0F};
+  const Vec3 reference = std::fabs(axis.z) < 0.9F ? Vec3{.x = 0.0F, .y = 0.0F, .z = 1.0F}
+                                                  : Vec3{.x = 1.0F, .y = 0.0F, .z = 0.0F};
   const Vec3 right = game::normalized(game::cross(reference, axis));
   const Vec3 up = game::cross(axis, right);
   const float rho = std::asin(std::clamp(radius / dist, 0.0F, 1.0F));

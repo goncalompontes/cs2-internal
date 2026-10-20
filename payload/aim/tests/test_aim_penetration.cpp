@@ -46,8 +46,9 @@ auto box_vertices(float cx, float cy, float cz, float hx, float hy, float hz)
     -> std::vector<cs2::game::Vec3> {
   std::vector<cs2::game::Vec3> v;
   for (int i = 0; i < 8; ++i) {
-    v.push_back(cs2::game::Vec3{cx + ((i & 1) != 0 ? hx : -hx), cy + ((i & 2) != 0 ? hy : -hy),
-                                cz + ((i & 4) != 0 ? hz : -hz)});
+    v.push_back(cs2::game::Vec3{.x = cx + ((i & 1) != 0 ? hx : -hx),
+                                .y = cy + ((i & 2) != 0 ? hy : -hy),
+                                .z = cz + ((i & 4) != 0 ? hz : -hz)});
   }
   return v;
 }
@@ -57,20 +58,21 @@ auto box_planes(float cx, float cy, float cz, float hx, float hy, float hz)
   using cs2::aim::OccluderPlane;
   using cs2::game::Vec3;
   return {
-      OccluderPlane{Vec3{1.0F, 0.0F, 0.0F}, cx + hx},
-      OccluderPlane{Vec3{-1.0F, 0.0F, 0.0F}, -(cx - hx)},
-      OccluderPlane{Vec3{0.0F, 1.0F, 0.0F}, cy + hy},
-      OccluderPlane{Vec3{0.0F, -1.0F, 0.0F}, -(cy - hy)},
-      OccluderPlane{Vec3{0.0F, 0.0F, 1.0F}, cz + hz},
-      OccluderPlane{Vec3{0.0F, 0.0F, -1.0F}, -(cz - hz)},
+      OccluderPlane{.normal = Vec3{.x = 1.0F, .y = 0.0F, .z = 0.0F}, .dist = cx + hx},
+      OccluderPlane{.normal = Vec3{.x = -1.0F, .y = 0.0F, .z = 0.0F}, .dist = -(cx - hx)},
+      OccluderPlane{.normal = Vec3{.x = 0.0F, .y = 1.0F, .z = 0.0F}, .dist = cy + hy},
+      OccluderPlane{.normal = Vec3{.x = 0.0F, .y = -1.0F, .z = 0.0F}, .dist = -(cy - hy)},
+      OccluderPlane{.normal = Vec3{.x = 0.0F, .y = 0.0F, .z = 1.0F}, .dist = cz + hz},
+      OccluderPlane{.normal = Vec3{.x = 0.0F, .y = 0.0F, .z = -1.0F}, .dist = -(cz - hz)},
   };
 }
 
 auto head_capsule(float x) -> cs2::aim::Hitbox {
   cs2::aim::Hitbox hitbox;
   hitbox.is_capsule = true;
-  hitbox.capsule =
-      cs2::aim::Capsule{cs2::game::Vec3{x, 0.0F, 0.0F}, cs2::game::Vec3{x, 0.0F, 4.0F}, 4.0F};
+  hitbox.capsule = cs2::aim::Capsule{.a = cs2::game::Vec3{.x = x, .y = 0.0F, .z = 0.0F},
+                                     .b = cs2::game::Vec3{.x = x, .y = 0.0F, .z = 4.0F},
+                                     .radius = 4.0F};
   hitbox.group = 1;
   hitbox.multiplier = 4.0F;
   return hitbox;

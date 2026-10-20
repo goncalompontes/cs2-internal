@@ -62,18 +62,18 @@ struct LiveSettings {
 
   // The owner published the block it owns.
   void update(const cs2::overlay::wire::Settings& in) noexcept {
-    const std::lock_guard<std::mutex> lock(mutex);
+    const std::scoped_lock lock(mutex);
     block = in;
     valid = true;
   }
 
   void read(cs2::overlay::wire::Settings& out) const noexcept {
-    const std::lock_guard<std::mutex> lock(mutex);
+    const std::scoped_lock lock(mutex);
     out = block;
   }
 
   [[nodiscard]] bool published() const noexcept {
-    const std::lock_guard<std::mutex> lock(mutex);
+    const std::scoped_lock lock(mutex);
     return valid;
   }
 };
@@ -169,8 +169,8 @@ auto parse_movement_env() noexcept -> MovementConfig {
     return config;
   }
   const std::string names(value);
-  config.strafe = names.find("strafe") != std::string::npos;
-  config.bhop = names.find("bhop") != std::string::npos;
+  config.strafe = names.contains("strafe");
+  config.bhop = names.contains("bhop");
   return config;
 }
 

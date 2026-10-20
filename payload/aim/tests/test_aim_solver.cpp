@@ -26,8 +26,9 @@ auto box_vertices(float cx, float cy, float cz, float hx, float hy, float hz)
     -> std::vector<cs2::game::Vec3> {
   std::vector<cs2::game::Vec3> v;
   for (int i = 0; i < 8; ++i) {
-    v.push_back(cs2::game::Vec3{cx + ((i & 1) != 0 ? hx : -hx), cy + ((i & 2) != 0 ? hy : -hy),
-                                cz + ((i & 4) != 0 ? hz : -hz)});
+    v.push_back(cs2::game::Vec3{.x = cx + ((i & 1) != 0 ? hx : -hx),
+                                .y = cy + ((i & 2) != 0 ? hy : -hy),
+                                .z = cz + ((i & 4) != 0 ? hz : -hz)});
   }
   return v;
 }
@@ -37,12 +38,12 @@ auto box_planes(float cx, float cy, float cz, float hx, float hy, float hz)
   using cs2::aim::OccluderPlane;
   using cs2::game::Vec3;
   return {
-      OccluderPlane{Vec3{1.0F, 0.0F, 0.0F}, cx + hx},
-      OccluderPlane{Vec3{-1.0F, 0.0F, 0.0F}, -(cx - hx)},
-      OccluderPlane{Vec3{0.0F, 1.0F, 0.0F}, cy + hy},
-      OccluderPlane{Vec3{0.0F, -1.0F, 0.0F}, -(cy - hy)},
-      OccluderPlane{Vec3{0.0F, 0.0F, 1.0F}, cz + hz},
-      OccluderPlane{Vec3{0.0F, 0.0F, -1.0F}, -(cz - hz)},
+      OccluderPlane{.normal = Vec3{.x = 1.0F, .y = 0.0F, .z = 0.0F}, .dist = cx + hx},
+      OccluderPlane{.normal = Vec3{.x = -1.0F, .y = 0.0F, .z = 0.0F}, .dist = -(cx - hx)},
+      OccluderPlane{.normal = Vec3{.x = 0.0F, .y = 1.0F, .z = 0.0F}, .dist = cy + hy},
+      OccluderPlane{.normal = Vec3{.x = 0.0F, .y = -1.0F, .z = 0.0F}, .dist = -(cy - hy)},
+      OccluderPlane{.normal = Vec3{.x = 0.0F, .y = 0.0F, .z = 1.0F}, .dist = cz + hz},
+      OccluderPlane{.normal = Vec3{.x = 0.0F, .y = 0.0F, .z = -1.0F}, .dist = -(cz - hz)},
   };
 }
 
@@ -57,22 +58,23 @@ auto main() -> int {
   using cs2::aim::Vec2;
   using cs2::aim::Vec3;
 
-  const Basis basis{.forward = Vec3{1.0F, 0.0F, 0.0F},
-                    .right = Vec3{0.0F, 1.0F, 0.0F},
-                    .up = Vec3{0.0F, 0.0F, 1.0F}};
+  const Basis basis{.forward = Vec3{.x = 1.0F, .y = 0.0F, .z = 0.0F},
+                    .right = Vec3{.x = 0.0F, .y = 1.0F, .z = 0.0F},
+                    .up = Vec3{.x = 0.0F, .y = 0.0F, .z = 1.0F}};
 
   // --- hitbox construction -------------------------------------------------
   {
-    const auto boxes = cs2::aim::split_player_bounds(Vec3{-16.0F, -16.0F, 0.0F},
-                                                     Vec3{16.0F, 16.0F, 72.0F}, 8.0F, 4.0F, 1.0F);
+    const auto boxes =
+        cs2::aim::split_player_bounds(Vec3{.x = -16.0F, .y = -16.0F, .z = 0.0F},
+                                      Vec3{.x = 16.0F, .y = 16.0F, .z = 72.0F}, 8.0F, 4.0F, 1.0F);
     expect(near(boxes[0].box.center.z, 68.0F), "head box sits on top");
     expect(near(boxes[1].box.center.z, 32.0F), "body box below the head");
     expect(near(boxes[0].multiplier, 4.0F), "head multiplier");
 
     // The head box rides the eye (a real reference), not the AABB top.
-    const auto at_head =
-        cs2::aim::split_player_at_head(Vec3{-16.0F, -16.0F, 0.0F}, Vec3{16.0F, 16.0F, 72.0F},
-                                       Vec3{0.0F, 0.0F, 60.0F}, 4.0F, 4.0F, 1.0F);
+    const auto at_head = cs2::aim::split_player_at_head(
+        Vec3{.x = -16.0F, .y = -16.0F, .z = 0.0F}, Vec3{.x = 16.0F, .y = 16.0F, .z = 72.0F},
+        Vec3{.x = 0.0F, .y = 0.0F, .z = 60.0F}, 4.0F, 4.0F, 1.0F);
     expect(near(at_head[0].box.center.z, 60.0F), "head box rides the eye");
     expect(near(at_head[0].box.half.x, 4.0F), "head box is small");
     expect(near(at_head[1].box.center.z, 28.0F), "body box below the head");
@@ -85,7 +87,8 @@ auto main() -> int {
     input.basis = basis;
     input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F, .range_modifier = 0.98F};
     input.hitboxes.push_back(
-        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F}, Vec3{11.0F, 1.0F, 1.0F}),
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{.x = 9.0F, .y = -1.0F, .z = -1.0F},
+                                         Vec3{.x = 11.0F, .y = 1.0F, .z = 1.0F}),
                .multiplier = 1.0F});
 
     const auto result = cs2::aim::solve(input);
@@ -98,8 +101,9 @@ auto main() -> int {
 
   // --- capsule hitbox (the real studio shape) ------------------------------
   {
-    const auto polygon = cs2::aim::project_capsule(Vec3{}, Vec3{10.0F, -3.0F, 0.0F},
-                                                   Vec3{10.0F, 3.0F, 0.0F}, 1.0F, basis);
+    const auto polygon =
+        cs2::aim::project_capsule(Vec3{}, Vec3{.x = 10.0F, .y = -3.0F, .z = 0.0F},
+                                  Vec3{.x = 10.0F, .y = 3.0F, .z = 0.0F}, 1.0F, basis);
     expect(!polygon.empty(), "capsule projects to a polygon");
     expect(cs2::aim::polygon_area(polygon) > 0.0F, "capsule silhouette has area");
 
@@ -109,8 +113,9 @@ auto main() -> int {
     input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F, .range_modifier = 0.98F};
     Hitbox capsule;
     capsule.is_capsule = true;
-    capsule.capsule = cs2::aim::Capsule{
-        .a = Vec3{10.0F, -3.0F, 0.0F}, .b = Vec3{10.0F, 3.0F, 0.0F}, .radius = 1.0F};
+    capsule.capsule = cs2::aim::Capsule{.a = Vec3{.x = 10.0F, .y = -3.0F, .z = 0.0F},
+                                        .b = Vec3{.x = 10.0F, .y = 3.0F, .z = 0.0F},
+                                        .radius = 1.0F};
     capsule.multiplier = 4.0F;
     input.hitboxes.push_back(capsule);
     const auto result = cs2::aim::solve(input);
@@ -127,10 +132,12 @@ auto main() -> int {
     input.basis = basis;
     input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F, .range_modifier = 0.98F};
     input.hitboxes.push_back(
-        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F}, Vec3{11.0F, 1.0F, 1.0F}),
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{.x = 9.0F, .y = -1.0F, .z = -1.0F},
+                                         Vec3{.x = 11.0F, .y = 1.0F, .z = 1.0F}),
                .multiplier = 1.0F});
     input.hitboxes.push_back(
-        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.5F, -0.5F, 4.5F}, Vec3{10.5F, 0.5F, 5.5F}),
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{.x = 9.5F, .y = -0.5F, .z = 4.5F},
+                                         Vec3{.x = 10.5F, .y = 0.5F, .z = 5.5F}),
                .multiplier = 4.0F});
 
     const auto result = cs2::aim::solve(input);
@@ -146,13 +153,15 @@ auto main() -> int {
     input.basis = basis;
     input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F, .range_modifier = 0.98F};
     input.hitboxes.push_back(
-        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F}, Vec3{11.0F, 1.0F, 1.0F}),
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{.x = 9.0F, .y = -1.0F, .z = -1.0F},
+                                         Vec3{.x = 11.0F, .y = 1.0F, .z = 1.0F}),
                .multiplier = 1.0F});
     input.hitboxes.push_back(
-        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.5F, -0.5F, 4.5F}, Vec3{10.5F, 0.5F, 5.5F}),
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{.x = 9.5F, .y = -0.5F, .z = 4.5F},
+                                         Vec3{.x = 10.5F, .y = 0.5F, .z = 5.5F}),
                .multiplier = 4.0F});
     // Keep v <= 0.4 (an occluder below the head).
-    input.occluders.push_back(Occluder{.normal = Vec2{0.0F, 1.0F}, .offset = 0.4F});
+    input.occluders.push_back(Occluder{.normal = Vec2{.x = 0.0F, .y = 1.0F}, .offset = 0.4F});
 
     const auto result = cs2::aim::solve(input);
     expect(result.valid, "occluded field still solves");
@@ -175,8 +184,9 @@ auto main() -> int {
     head.penetration_params.weapon_penetration = 1.0F;
     Hitbox cap;
     cap.is_capsule = true;
-    cap.capsule = cs2::aim::Capsule{
-        .a = Vec3{20.0F, -1.0F, -1.0F}, .b = Vec3{20.0F, 1.0F, 1.0F}, .radius = 1.0F};
+    cap.capsule = cs2::aim::Capsule{.a = Vec3{.x = 20.0F, .y = -1.0F, .z = -1.0F},
+                                    .b = Vec3{.x = 20.0F, .y = 1.0F, .z = 1.0F},
+                                    .radius = 1.0F};
     cap.multiplier = 4.0F;
     head.hitboxes.push_back(cap);
 
@@ -233,7 +243,8 @@ auto main() -> int {
     input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F};
     input.objective = AimObjective::hitchance;
     input.hitboxes.push_back(
-        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F}, Vec3{11.0F, 1.0F, 1.0F}),
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{.x = 9.0F, .y = -1.0F, .z = -1.0F},
+                                         Vec3{.x = 11.0F, .y = 1.0F, .z = 1.0F}),
                .multiplier = 1.0F});
     const auto result = cs2::aim::solve(input);
     expect(result.valid, "hitchance solves");
@@ -253,16 +264,16 @@ auto main() -> int {
     poses.push_back(cs2::aim::PoseCandidate{
         .record = -1,
         .age = 0.0F,
-        .hitboxes = {
-            Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -1.0F, -1.0F}, Vec3{11.0F, 1.0F, 1.0F}),
-                   .multiplier = 1.0F}}});
+        .hitboxes = {Hitbox{.box = cs2::aim::aabb_obb(Vec3{.x = 9.0F, .y = -1.0F, .z = -1.0F},
+                                                      Vec3{.x = 11.0F, .y = 1.0F, .z = 1.0F}),
+                            .multiplier = 1.0F}}});
     // A lag record carrying a head (multiplier 4) — the server can rewind to it.
     poses.push_back(cs2::aim::PoseCandidate{
         .record = 53,
         .age = 4.0F,
-        .hitboxes = {
-            Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.5F, -0.5F, 4.5F}, Vec3{10.5F, 0.5F, 5.5F}),
-                   .multiplier = 4.0F}}});
+        .hitboxes = {Hitbox{.box = cs2::aim::aabb_obb(Vec3{.x = 9.5F, .y = -0.5F, .z = 4.5F},
+                                                      Vec3{.x = 10.5F, .y = 0.5F, .z = 5.5F}),
+                            .multiplier = 4.0F}}});
 
     const auto best = cs2::aim::solve_backtrack(input, poses);
     expect(best.valid, "a pose is selected");
@@ -290,12 +301,14 @@ auto main() -> int {
     input.objective = cs2::aim::AimObjective::pellets;
     // Two boxes a pellet-offset apart along the view-up axis (z ~ 1.1 at x ~ 10).
     input.hitboxes.push_back(
-        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -0.5F, -0.1F}, Vec3{11.0F, 0.5F, 0.1F}),
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{.x = 9.0F, .y = -0.5F, .z = -0.1F},
+                                         Vec3{.x = 11.0F, .y = 0.5F, .z = 0.1F}),
                .multiplier = 1.0F});
     input.hitboxes.push_back(
-        Hitbox{.box = cs2::aim::aabb_obb(Vec3{9.0F, -0.5F, 1.0F}, Vec3{11.0F, 0.5F, 1.2F}),
+        Hitbox{.box = cs2::aim::aabb_obb(Vec3{.x = 9.0F, .y = -0.5F, .z = 1.0F},
+                                         Vec3{.x = 11.0F, .y = 0.5F, .z = 1.2F}),
                .multiplier = 1.0F});
-    input.pellet_offsets = {Vec2{0.0F, 0.0F}, Vec2{0.0F, 0.11F}};
+    input.pellet_offsets = {Vec2{.x = 0.0F, .y = 0.0F}, Vec2{.x = 0.0F, .y = 0.11F}};
     const auto result = cs2::aim::solve(input);
     expect(result.valid, "the pellet objective solves");
     expect(result.value > 150.0F, "the pellet aim sums two hitboxes");

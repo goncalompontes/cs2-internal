@@ -43,8 +43,9 @@ constexpr float k_rad_to_deg = 57.295779513082320876F;
 [[nodiscard]] auto forward_of(float yaw_deg, float pitch_deg) noexcept -> game::Vec3 {
   const float yaw = yaw_deg * k_deg_to_rad;
   const float pitch = pitch_deg * k_deg_to_rad;
-  return game::Vec3{std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw),
-                    -std::sin(pitch)};
+  return game::Vec3{.x = std::cos(pitch) * std::cos(yaw),
+                    .y = std::cos(pitch) * std::sin(yaw),
+                    .z = -std::sin(pitch)};
 }
 
 // The angle between two directions, in degrees.
@@ -71,9 +72,9 @@ constexpr float k_rad_to_deg = 57.295779513082320876F;
     if (player.team != 2 && player.team != 3) {
       continue;  // not an enemy
     }
-    const game::Vec3 centre{(player.origin.x + player.eye_origin.x) * 0.5F,
-                            (player.origin.y + player.eye_origin.y) * 0.5F,
-                            (player.origin.z + player.eye_origin.z) * 0.5F};
+    const game::Vec3 centre{.x = (player.origin.x + player.eye_origin.x) * 0.5F,
+                            .y = (player.origin.y + player.eye_origin.y) * 0.5F,
+                            .z = (player.origin.z + player.eye_origin.z) * 0.5F};
     const game::Vec3 to_centre = centre - eye;
     const float distance = game::length(to_centre);
     if (distance <= 1.0F) {
@@ -239,8 +240,9 @@ void Trigger::tick(const game::Snapshot& snapshot, Input& input, std::uint64_t n
   key_held = key > 0 && (GetAsyncKeyState(key) & 0x8000) != 0;
 #endif
 
-  const TriggerView view{local.eye_angles.yaw, local.eye_angles.pitch,
-                         config.force ? true : key_held};
+  const TriggerView view{.yaw = local.eye_angles.yaw,
+                         .pitch = local.eye_angles.pitch,
+                         .key_held = config.force ? true : key_held};
   const game::Vec3 forward = forward_of(view.yaw, view.pitch);
 
   // --- The cheap pre-check: is the crosshair plausibly on somebody? ---------

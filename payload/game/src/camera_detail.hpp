@@ -61,7 +61,7 @@ inline constexpr std::uintptr_t k_camera_update_rva = 0xb62a20;
 inline constexpr std::uintptr_t k_input_object_rva = 0x257b640;
 
 // The client build the offsets above were verified on.
-inline constexpr std::uint32_t k_client_timestamp = 0x6ad01314u;
+inline constexpr std::uint32_t k_client_timestamp = 0x6ad01314U;
 
 // --- The reads --------------------------------------------------------------
 

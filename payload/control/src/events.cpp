@@ -59,7 +59,7 @@ struct EventKey {
   const char* str;
 };
 
-constexpr std::uint32_t k_string_token_seed = 0x31415926u;
+constexpr std::uint32_t k_string_token_seed = 0x31415926U;
 
 using key_hash_fn = std::uint32_t (*)(const char* str, std::size_t length, std::uint32_t seed);
 using get_int_fn = std::int32_t (*)(void* self, const void* key, std::int32_t def);
@@ -152,7 +152,7 @@ void EventLog::remember(std::string_view name) noexcept {
 }
 
 void EventLog::refresh() noexcept {
-  const std::lock_guard<std::mutex> lock(mutex_);
+  const std::scoped_lock lock(mutex_);
   refresh_locked();
 }
 
@@ -216,7 +216,7 @@ auto EventLog::subscribe(std::string_view name) noexcept -> std::int32_t {
   // harness's `events` command) and the render thread (the sound provider's
   // lazy subscription) can both ask for the events, and two concurrent
   // installs would patch the dispatch vtable twice and chain the detours.
-  const std::lock_guard<std::mutex> lock(mutex_);
+  const std::scoped_lock lock(mutex_);
   if (!installed_) {
     refresh_locked();
   }
@@ -280,8 +280,8 @@ auto EventLog::read_args(void* event, void** vtable, std::string_view name, Even
         g_key_hash != nullptr
             ? g_key_hash(key_buf, key_length,
                          static_cast<std::uint32_t>(key_length) ^ k_string_token_seed)
-            : 0u;
-    const EventKey key{hash, 0, key_buf};
+            : 0U;
+    const EventKey key{.hash = hash, .pad = 0, .str = key_buf};
     char value[EventArg::k_max_value_length + 1] = {};
     if (field.kind == 'i') {
       std::snprintf(value, sizeof(value), "%d",
@@ -298,7 +298,7 @@ auto EventLog::read_args(void* event, void** vtable, std::string_view name, Even
     } else if (field.kind == 'f') {
       std::snprintf(value, sizeof(value), "%g",
                     static_cast<double>(reinterpret_cast<get_float_fn>(
-                        vtable[k_event_get_float_slot])(event, &key, 0.0f)));
+                        vtable[k_event_get_float_slot])(event, &key, 0.0F)));
     } else {
       const char* text =
           reinterpret_cast<get_string_fn>(vtable[k_event_get_string_slot])(event, &key, "");
