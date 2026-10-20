@@ -83,6 +83,9 @@ ctest --test-dir tools/protect/build --output-on-failure
 #   1/1 Test #1: protect-tests ....................   Passed
 ```
 
+(`ctest` is not on `PATH` on this machine: it is next to the CMake of
+Visual Studio, `…\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe`.)
+
 They cover the policy reader (a malformed policy is a *reported* error,
 never a crash), the qualified name, the selection (an entry that named a
 function that cannot be protected is *blocked*, not matched) and the
