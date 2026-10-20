@@ -247,7 +247,9 @@ auto run_settings(const Json& args, SettingsAccess& access)
       changed.emplace_back(info->name);
     }
   }
-  if (!writes.empty()) {
+  if (!changed.empty()) {
+    // Only a real change is published: a set to the value the field already
+    // has leaves the owner's block alone.
     access.write(updated);
   }
 

@@ -348,12 +348,13 @@ void test_settings_command() {
   assert(fake.writes == 0);
   assert(fake.block.box == 1);
 
-  // A set to the value the field already has is not a change.
+  // A set to the value the field already has is not a change, and nothing is
+  // published to the owner.
   const auto same = run_settings(*Json::parse(R"({"set": {"box": 1}})"), access);
   assert(same.has_value());
   assert(same->wrote);
   assert(same->changed.empty());
-  assert(fake.writes == 1);
+  assert(fake.writes == 0);
 
   // A real change is listed, and the owner holds the new value.
   const auto changed = run_settings(
@@ -362,7 +363,7 @@ void test_settings_command() {
   assert(changed->changed.size() == 2);
   assert(changed->changed[0] == "box");
   assert(changed->changed[1] == "esp_color_enemy");
-  assert(fake.writes == 2);
+  assert(fake.writes == 1);
   assert(fake.block.box == 0);
   assert(fake.block.esp_color_enemy[0] == 255);
   assert(fake.block.esp_color_enemy[1] == 0);
@@ -417,8 +418,9 @@ void test_batch_runner() {
   // The steps run in order; a failing step is recorded and the batch
   // continues.
   const auto ran = BatchRunner::run(
-      *Json::parse(R"([{"cmd":"exec","args":{"line":"sv_cheats 1"}},{"cmd":"boom"},{"cmd":"ping"}])"), 1,
-      &fake_dispatch, &fake, results);
+      *Json::parse(
+          R"([{"cmd":"exec","args":{"line":"sv_cheats 1"}},{"cmd":"boom"},{"cmd":"ping"}])"),
+      1, &fake_dispatch, &fake, results);
   assert(ran.has_value());
   assert(fake.ran.size() == 3);
   assert(fake.ran[0] == "exec");
