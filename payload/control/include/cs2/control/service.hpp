@@ -235,6 +235,10 @@ class Service {
   // The number of world solids projected into the last rage solve's chart (the
   // wallbang-aware occlusion, `docs/ragebot.md` §3). 0 = no solids enumerated.
   std::atomic<int> rage_occluders_{0};
+  std::atomic<bool> rage_occlusion_candidates_complete_{true};
+  std::atomic<bool> rage_occlusion_query_complete_{false};
+  std::atomic<std::uint32_t> rage_occlusion_query_issues_{
+      static_cast<std::uint32_t>(OcclusionQueryIssue::not_invoked)};
   // Ragebot instrumentation (`docs/ragebot-perf.md`). `on_snapshot` accumulates
   // per-stage wall time (µs) and the last frame's counts; the `rage` command reads
   // and resets them so each poll reports the interval. This is how the solve's cost
@@ -307,6 +311,7 @@ class Service {
   std::uint16_t occlusion_exclude_[k_max_occlusion_exclude] = {};
   std::uintptr_t occlusion_pawns_[k_max_occlusion_exclude] = {};
   int occlusion_exclude_count_ = 0;
+  bool occlusion_inputs_complete_ = true;
   std::vector<OcclusionHull> occlusion_hulls_;
   OcclusionQueryStats occlusion_stats_;
   // The latest snapshot handed over by the render thread's per-frame refresh, for the

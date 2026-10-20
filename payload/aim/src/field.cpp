@@ -46,19 +46,23 @@ constexpr double k_gl_w[8] = {0.1012285362903763, 0.2223810344533745, 0.31370664
 // integrated with 8-point Gauss-Legendre (the integrand is peaked on the σ scale, so a
 // single rule per edge would undersample a long edge). O(edges · segments).
 //
-// When `gradient_u`/`gradient_v` are non-null, it also returns the derivative of the mass
-// with respect to the *un-scaled* translation of the polygon (the boundary-flux form):
+// When translation gradient pointers are non-null, it also returns the derivative of the
+// mass with respect to the *un-scaled* translation of the polygon (the boundary-flux form):
 //   ∂M/∂a_u = (1/σu)·∮ φφ dv,   ∂M/∂a_v = -(1/σv)·∮ φφ du
-// (the caller divides by sigma). The same quadrature nodes are reused.
+// For fixed unscaled polygon/aim, the scale derivative is
+//   ∂M/∂σu = -(1/σu)·∮ φ(x)Φ(y)(x² - 1) dx.
+// All derivatives reuse the same quadrature nodes.
 [[nodiscard]] auto polygon_normal_mass(const Polygon& scaled, double* gradient_u,
-                                       double* gradient_v) noexcept -> double {
+                                       double* gradient_v, double* gradient_sigma_u = nullptr,
+                                       double sigma_u = 1.0) noexcept -> double {
   const std::size_t n = scaled.points.size();
   if (n < 3) {
     return 0.0;
   }
-  double total = 0.0;   // ∮ φΦ du
-  double flux_u = 0.0;  // ∮ φφ dv
-  double flux_v = 0.0;  // ∮ φφ du
+  double total = 0.0;         // ∮ φΦ du
+  double flux_u = 0.0;        // ∮ φφ dv
+  double flux_v = 0.0;        // ∮ φφ du
+  double flux_sigma_u = 0.0;  // ∮ φΦ (u² - 1) du
   for (std::size_t i = 0; i < n; ++i) {
     const Vec2 a = scaled.points[i];
     const Vec2 b = scaled.points[(i + 1) % n];
@@ -77,13 +81,15 @@ constexpr double k_gl_w[8] = {0.1012285362903763, 0.2223810344533745, 0.31370664
     }
     const double seg_dx = dx / segments;
     const double seg_dy = dy / segments;
-    double edge_mass = 0.0;  // ∫ edge φΦ du
-    double edge_grad = 0.0;  // ∫ edge φφ dt
+    double edge_mass = 0.0;     // ∫ edge φΦ du
+    double edge_grad = 0.0;     // ∫ edge φφ dt
+    double edge_sigma_u = 0.0;  // ∫ edge φΦ (u² - 1) du
     for (int s = 0; s < segments; ++s) {
       const double x0 = static_cast<double>(a.x) + s * seg_dx;
       const double y0 = static_cast<double>(a.y) + s * seg_dy;
       double local_mass = 0.0;
       double local_grad = 0.0;
+      double local_sigma_u = 0.0;
       for (int k = 0; k < 8; ++k) {
         const double t = 0.5 * (k_gl_x[k] + 1.0);
         const double x = x0 + t * seg_dx;
@@ -91,13 +97,16 @@ constexpr double k_gl_w[8] = {0.1012285362903763, 0.2223810344533745, 0.31370664
         const double pdf = std_pdf(x);
         local_mass += 0.5 * k_gl_w[k] * pdf * std_cdf(y);
         local_grad += 0.5 * k_gl_w[k] * pdf * std_pdf(y);
+        local_sigma_u += 0.5 * k_gl_w[k] * pdf * std_cdf(y) * (x * x - 1.0);
       }
       edge_mass += seg_dx * local_mass;
       edge_grad += local_grad;
+      edge_sigma_u += seg_dx * local_sigma_u;
     }
     total += edge_mass;
     flux_u += seg_dy * edge_grad;
     flux_v += seg_dx * edge_grad;
+    flux_sigma_u += edge_sigma_u;
   }
   // The signed mass `-total` follows the winding; flip the flux with it so the gradient
   // matches the (positive) mass.
@@ -108,6 +117,9 @@ constexpr double k_gl_w[8] = {0.1012285362903763, 0.2223810344533745, 0.31370664
   }
   if (gradient_v != nullptr) {
     *gradient_v = sign * flux_v;
+  }
+  if (gradient_sigma_u != nullptr) {
+    *gradient_sigma_u = sign * -flux_sigma_u / sigma_u;
   }
   return std::fabs(mass);
 }
@@ -214,6 +226,11 @@ struct MassGradient {
                                  float sigma_v, bool weighted) -> MassGradient {
   MassGradient out;
   Polygon scaled;
+  const double cosine = std::cos(static_cast<double>(aim.y));
+  const double sigma_u_pitch =
+      cosine > 0.05
+          ? static_cast<double>(sigma_v) * std::sin(static_cast<double>(aim.y)) / (cosine * cosine)
+          : 0.0;
   for (const Cell& cell : cells) {
     scaled.points.clear();
     scaled.points.reserve(cell.polygon.points.size());
@@ -225,13 +242,16 @@ struct MassGradient {
     }
     double gx = 0.0;
     double gy = 0.0;
-    const double mass = polygon_normal_mass(scaled, &gx, &gy);
+    double sigma_u_gradient = 0.0;
+    const double mass = polygon_normal_mass(scaled, &gx, &gy, &sigma_u_gradient, sigma_u);
     const double weight = weighted ? static_cast<double>(cell.value) : 1.0;
     out.value += weight * mass;
     // ∂mass/∂a_u = -(1/σu)·∮φφ dv ; ∂mass/∂a_v = +(1/σv)·∮φφ du  (the translate
     // direction flips the flux sign; `gx`/`gy` are `∮φφ dv` / `∮φφ du`).
     out.gx -= weight * gx / sigma_u;
     out.gy += weight * gy / sigma_v;
+    // The chart covariance depends on pitch: σu = σv / cos(pitch). Include its chain rule.
+    out.gy += weight * sigma_u_gradient * sigma_u_pitch;
   }
   return out;
 }

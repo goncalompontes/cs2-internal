@@ -54,6 +54,7 @@ struct HeatmapOptions {
 };
 
 struct Heatmap {
+  bool occlusion_candidates_complete = true;  // false if the per-hitbox cap truncated the field
   Basis basis{};
   Vec3 eye{};
   // The chart is absolute world yaw/pitch. `view` is the camera direction (absolute
@@ -69,7 +70,9 @@ struct Heatmap {
   // phase). The renderer reports only these, not every solid the enumeration box caught.
   std::vector<const OccluderCell*> used_occluders;
 
-  [[nodiscard]] auto empty() const noexcept -> bool { return cells.empty(); }
+  [[nodiscard]] auto empty() const noexcept -> bool {
+    return cells.empty();
+  }
 };
 
 // Project every pose's hitboxes into the absolute `basis` about `eye`, value each by

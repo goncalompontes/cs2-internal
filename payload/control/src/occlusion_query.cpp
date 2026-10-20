@@ -21,6 +21,13 @@ namespace {
 
 using cs2::aim::Vec3;
 
+void mark_incomplete(OcclusionQueryStats* stats, OcclusionQueryIssue issue) {
+  if (stats != nullptr) {
+    stats->incomplete_reasons |= static_cast<std::uint32_t>(issue);
+    stats->complete = false;
+  }
+}
+
 // client.dll RVAs. They are now resolved by the dumper's curated signatures
 // (ADR-0012 — `external/dumper/src/analysis.rs`: `physics_query_interface`,
 // `physics_query_filter`, `entities_in_box`) into `cs2/sdk/offsets.hpp`. The literals
@@ -204,6 +211,8 @@ constexpr std::uintptr_t k_body_transform_slot = 0x1B0;
 // The world body holds one shape per map brush (~10k on de_dust2).
 constexpr int k_max_body_shapes = 32768;
 constexpr int k_max_bodies = 256;        // unique overlap bodies walked per query
+constexpr int k_max_query_targets = 64;
+constexpr int k_max_query_exclude = 64;
 constexpr int k_large_body_shapes = 64;  // above this = a static world body (cached)
 // Hulls projected into the chart per query. The view volume can bring in ~1–2k world
 // brushes; a low cap silently drops an arbitrary subset (e.g. the wall you are facing)
@@ -278,28 +287,35 @@ static_assert(sizeof(SurfaceRecord) == 0x20, "CGameSurfaceProperties is 0x20 byt
 
 // Read a shape's real surface (`shape+0x48` -> material object -> `+0x10` index ->
 // `SurfacePropertiesList[index]`). Neutral defaults on any validation failure, so a
-// bad read can never fabricate a penetrating wall.
+// bad read can never fabricate a penetrating wall (the query is marked incomplete and
+// rage fails closed). A real zero distance modifier is valid and means impenetrable.
 auto read_shape_surface(std::uintptr_t shape, OcclusionQueryStats* stats) -> ShapeSurface {
   ShapeSurface surface;
   if (g_surface_array < 0x10000) {
+    mark_incomplete(stats, OcclusionQueryIssue::surface_metadata);
     return surface;
   }
   std::uintptr_t material_object = 0;
   if (!cs2::game::read(shape + k_shape_surface, material_object) || material_object < 0x10000) {
+    mark_incomplete(stats, OcclusionQueryIssue::surface_metadata);
     return surface;
   }
   std::int32_t index = 0;
   if (!cs2::game::read(material_object + k_surface_object_index, index) || index < 0 ||
       index > 65535) {
+    mark_incomplete(stats, OcclusionQueryIssue::surface_metadata);
     return surface;
   }
   SurfaceRecord record{};
   if (!cs2::game::read(g_surface_array + static_cast<std::uintptr_t>(index) * k_surface_stride,
                        record)) {
+    mark_incomplete(stats, OcclusionQueryIssue::surface_metadata);
     return surface;
   }
-  if (!(record.distance_modifier > 0.0F) || !(record.distance_modifier <= 1000.0F)) {
-    return surface;  // implausible -> keep the neutral surface
+  if (!(record.distance_modifier >= 0.0F) || !(record.distance_modifier <= 1000.0F) ||
+      record.material < 0) {
+    mark_incomplete(stats, OcclusionQueryIssue::surface_metadata);
+    return surface;
   }
   surface.distance = record.distance_modifier;
   surface.damage = record.damage_modifier;
@@ -457,13 +473,17 @@ auto read_transform(std::uintptr_t object, BodyTransform& out) -> bool {
 }
 
 auto parse_hull(std::uintptr_t hull, const BodyTransform& transform,
-                std::vector<OcclusionHull>& out, const ShapeSurface& surface) -> bool {
+                std::vector<OcclusionHull>& out, const ShapeSurface& surface,
+                OcclusionQueryStats* stats) -> bool {
   std::int32_t count = 0;
   std::uintptr_t vertices = 0;
   if (!cs2::game::read(hull + k_hull_vertex_count, count) || count < 3 || count > 65536) {
+    mark_incomplete(stats, count > 65536 ? OcclusionQueryIssue::parser_limit
+                                         : OcclusionQueryIssue::parser_failure);
     return false;
   }
   if (!cs2::game::read(hull + k_hull_vertices, vertices) || vertices == 0) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
     return false;
   }
   std::vector<Vec3> points;
@@ -471,11 +491,13 @@ auto parse_hull(std::uintptr_t hull, const BodyTransform& transform,
   for (std::int32_t i = 0; i < count; ++i) {
     Vec3 point{};
     if (!cs2::game::read(vertices + static_cast<std::uintptr_t>(i) * k_vertex_stride, point)) {
+      mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
       break;
     }
     points.push_back(transform.apply(point));
   }
   if (points.size() < 3) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
     return false;
   }
   // The hull's planes: the exact test for "is this solid between the eye and a
@@ -494,6 +516,7 @@ auto parse_hull(std::uintptr_t hull, const BodyTransform& transform,
         float dist;
       } raw{};
       if (!cs2::game::read(plane_array + static_cast<std::uintptr_t>(i) * k_plane_stride, raw)) {
+        mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
         break;
       }
       planes.push_back(cs2::aim::OccluderPlane{raw.normal, raw.dist});
@@ -506,6 +529,9 @@ auto parse_hull(std::uintptr_t hull, const BodyTransform& transform,
     // the wall is drawn and *never* occludes (`docs/re/occlusion.md`).
     planes = cs2::aim::convex_hull_3d(points);
     ++g_hulls_no_planes;
+  }
+  if (planes.empty()) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
   }
   OcclusionHull solid;
   solid.kind = cs2::aim::SolidKind::polytope;
@@ -535,10 +561,10 @@ auto parse_hull(std::uintptr_t hull, const BodyTransform& transform,
 // so it is split by the widest axis at the median until each cluster is small. Each
 // cluster carries its own world AABB (cached for the per-query broad phase when the
 // body transform is identity — the static world).
-void emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_identity,
-                        std::vector<OcclusionHull>& out, const ShapeSurface& surface) {
+auto emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_identity,
+                        std::vector<OcclusionHull>& out, const ShapeSurface& surface) -> bool {
   if (tris.empty()) {
-    return;
+    return true;
   }
   struct Range {
     int begin = 0;
@@ -547,6 +573,7 @@ void emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_i
   std::vector<Range> stack;
   stack.push_back(Range{0, static_cast<int>(tris.size())});
   int emitted = 0;
+  bool complete = true;
   while (!stack.empty() && emitted < k_max_mesh_clusters) {
     const Range range = stack.back();
     stack.pop_back();
@@ -632,23 +659,28 @@ void emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_i
                      });
     const int pivot_index = static_cast<int>(pivot_pos);
     if (pivot_index <= range.begin || pivot_index >= range.end) {
+      complete = false;
       continue;  // degenerate split; drop the range rather than loop forever
     }
     stack.push_back(Range{range.begin, pivot_index});
     stack.push_back(Range{pivot_index, range.end});
   }
+  return complete && stack.empty();
 }
 
 // Read an `RnMesh_t` (a triangle soup; docs/re/vphysics2.md), split it into clusters
 // and transform each to world space. `scale` is the shape's uniform scale (a Vec3),
 // `transform` the owning body's world transform.
 auto parse_mesh(std::uintptr_t mesh, const Vec3& scale, const BodyTransform& transform,
-                std::vector<OcclusionHull>& out, const ShapeSurface& surface) -> bool {
+                std::vector<OcclusionHull>& out, const ShapeSurface& surface,
+                OcclusionQueryStats* stats) -> bool {
   std::int32_t count = 0;
   std::uintptr_t vertices = 0;
   if (!cs2::game::read(mesh + k_mesh_vertex_count, count) || count < 3 ||
       count > k_max_mesh_vertices || !cs2::game::read(mesh + k_mesh_vertices, vertices) ||
       vertices < 0x10000) {
+    mark_incomplete(stats, count > k_max_mesh_vertices ? OcclusionQueryIssue::parser_limit
+                                                       : OcclusionQueryIssue::parser_failure);
     return false;
   }
   std::int32_t tri_count = 0;
@@ -656,12 +688,15 @@ auto parse_mesh(std::uintptr_t mesh, const Vec3& scale, const BodyTransform& tra
   if (!cs2::game::read(mesh + k_mesh_tri_count, tri_count) || tri_count <= 0 ||
       tri_count > k_max_mesh_triangles || !cs2::game::read(mesh + k_mesh_indices, indices) ||
       indices < 0x10000) {
+    mark_incomplete(stats, tri_count > k_max_mesh_triangles ? OcclusionQueryIssue::parser_limit
+                                                            : OcclusionQueryIssue::parser_failure);
     return false;
   }
   // Batch-read the vertex array (one syscall) then the triangle indices.
   std::vector<Vec3> points(static_cast<std::size_t>(count));
   if (!cs2::game::read_bytes(vertices, points.data(),
                              static_cast<std::size_t>(count) * k_vertex_stride)) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
     return false;
   }
   for (Vec3& point : points) {
@@ -671,6 +706,7 @@ auto parse_mesh(std::uintptr_t mesh, const Vec3& scale, const BodyTransform& tra
   std::vector<std::int32_t> tri_indices(static_cast<std::size_t>(tri_count) * 3);
   if (!cs2::game::read_bytes(indices, tri_indices.data(),
                              static_cast<std::size_t>(tri_count) * 3 * sizeof(std::int32_t))) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
     return false;
   }
   std::vector<std::array<Vec3, 3>> tris;
@@ -680,6 +716,7 @@ auto parse_mesh(std::uintptr_t mesh, const Vec3& scale, const BodyTransform& tra
     const std::int32_t ib = tri_indices[t + 1];
     const std::int32_t ic = tri_indices[t + 2];
     if (ia < 0 || ia >= count || ib < 0 || ib >= count || ic < 0 || ic >= count) {
+      mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
       continue;
     }
     tris.push_back(std::array<Vec3, 3>{points[static_cast<std::size_t>(ia)],
@@ -687,10 +724,13 @@ auto parse_mesh(std::uintptr_t mesh, const Vec3& scale, const BodyTransform& tra
                                        points[static_cast<std::size_t>(ic)]});
   }
   if (tris.empty()) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
     return false;
   }
   const int before = static_cast<int>(out.size());
-  emit_mesh_clusters(tris, transform.is_identity(), out, surface);
+  if (!emit_mesh_clusters(tris, transform.is_identity(), out, surface)) {
+    mark_incomplete(stats, OcclusionQueryIssue::mesh_cluster_limit);
+  }
   return static_cast<int>(out.size()) > before;
 }
 
@@ -698,10 +738,12 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
                  std::vector<OcclusionHull>& out, int& shapes, int* type_counts,
                  OcclusionQueryStats* stats) -> bool {
   if (shape == 0) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
     return false;
   }
   std::int32_t type = -1;
   if (!cs2::game::read(shape + k_shape_type, type)) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
     return false;
   }
   ++shapes;
@@ -717,13 +759,18 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
       if (!cs2::game::read(shape + k_shape_hull, hull) || hull == 0) {
         return false;
       }
-      return parse_hull(hull, transform, out, surface);
+      const bool parsed = parse_hull(hull, transform, out, surface, stats);
+      if (!parsed) {
+        mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
+      }
+      return parsed;
     }
     case 0: {  // GENERIC_SHAPE_SPHERE
       Vec3 center{};
       float radius = 0.0F;
       if (!cs2::game::read(shape + k_shape_sphere_center, center) ||
           !cs2::game::read(shape + k_shape_sphere_radius, radius) || !(radius > 0.0F)) {
+        mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
         return false;
       }
       OcclusionHull solid;
@@ -741,6 +788,7 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
       if (!cs2::game::read(shape + k_shape_capsule_a, a) ||
           !cs2::game::read(shape + k_shape_capsule_b, b) ||
           !cs2::game::read(shape + k_shape_capsule_radius, radius) || !(radius > 0.0F)) {
+        mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
         return false;
       }
       OcclusionHull solid;
@@ -755,17 +803,24 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
     case 3: {  // GENERIC_SHAPE_MESH — a triangle soup; the map's large walls.
       std::uintptr_t mesh = 0;
       if (!cs2::game::read(shape + k_shape_mesh, mesh) || mesh == 0) {
+        mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
         return false;
       }
       Vec3 scale{1.0F, 1.0F, 1.0F};
-      (void)cs2::game::read(shape + k_shape_mesh_scale, scale);
-      return parse_mesh(mesh, scale, transform, out, surface);
+      if (!cs2::game::read(shape + k_shape_mesh_scale, scale)) {
+        mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
+      }
+      return parse_mesh(mesh, scale, transform, out, surface, stats);
     }
     case 4: {  // GENERIC_SHAPE_COMPOUND — the pool of sub-shapes (docs/re/vphysics2.md)
       std::uintptr_t compound = 0;
       if (!cs2::game::read(shape + k_shape_compound, compound) || compound < 0x10000) {
+        mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
         return false;
       }
+      // The instance records and the g100/g110/g120 child pools are unresolved. Even
+      // though hull and mesh pools are parsed below, this shape cannot be called complete.
+      mark_incomplete(stats, OcclusionQueryIssue::unsupported_compound);
       // RE probe (docs/re/vphysics2.md): the first type-4 shape's group counts.
       if (stats != nullptr && stats->compound == 0) {
         stats->compound = compound;
@@ -791,10 +846,14 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
           cs2::game::read(compound + k_compound_hull_block, hull_block) && hull_block >= 0x10000) {
         for (std::int32_t i = 0; i < hull_count; ++i) {
           if (parse_hull(hull_block + static_cast<std::uintptr_t>(i) * k_compound_hull_stride,
-                         transform, out, surface)) {
+                         transform, out, surface, stats)) {
             any = true;
+          } else {
+            mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
           }
         }
+      } else if (hull_count > k_max_compound_parts) {
+        mark_incomplete(stats, OcclusionQueryIssue::parser_limit);
       }
       std::int32_t mesh_count = 0;
       std::uintptr_t mesh_block = 0;
@@ -804,14 +863,20 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
         const Vec3 scale{1.0F, 1.0F, 1.0F};
         for (std::int32_t i = 0; i < mesh_count; ++i) {
           if (parse_mesh(mesh_block + static_cast<std::uintptr_t>(i) * k_compound_mesh_stride,
-                         scale, transform, out, surface)) {
+                         scale, transform, out, surface, stats)) {
             any = true;
           }
         }
+      } else if (mesh_count > k_max_compound_parts) {
+        mark_incomplete(stats, OcclusionQueryIssue::parser_limit);
+      }
+      if (!any) {
+        mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
       }
       return any;
     }
     default:
+      mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
       return false;
   }
 }
@@ -861,6 +926,7 @@ struct WorldHullCache {
   std::uintptr_t first_shape = 0;
   OcclusionHull* hulls = nullptr;
   int count = 0;
+  std::uint32_t incomplete_reasons = 0;
 };
 WorldHullCache g_world_cache;
 
@@ -919,11 +985,19 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
                int target_count) {
   std::uintptr_t data = 0;
   if (!cs2::game::read(body + k_body_data, data) || data < 0x10000) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
     return;
   }
   std::int32_t count = 0;
-  (void)cs2::game::read(data + k_body_shape_count, count);
-  if (count <= 0 || count > k_max_body_shapes) {
+  if (!cs2::game::read(data + k_body_shape_count, count)) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
+    return;
+  }
+  if (count <= 0) {
+    return;
+  }
+  if (count > k_max_body_shapes) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_limit);
     return;
   }
   if (stats != nullptr && collect) {
@@ -932,9 +1006,13 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
 
   std::uintptr_t array = data + k_body_shapes_ptr;
   if (count > 1) {
-    (void)cs2::game::read(data + k_body_shapes_ptr, array);
+    if (!cs2::game::read(data + k_body_shapes_ptr, array)) {
+      mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
+      return;
+    }
   }
   if (array < 0x10000) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
     return;
   }
 
@@ -949,17 +1027,41 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
       delete[] g_world_cache.hulls;
       g_world_cache.hulls = nullptr;
       g_world_cache.count = 0;
+      g_world_cache.incomplete_reasons = 0;
       g_world_cache.body = body;
       g_world_cache.data = data;
       g_world_cache.first_shape = first_shape;
     }
     if (g_world_cache.count == 0) {
       std::vector<OcclusionHull> parsed;
+      OcclusionQueryStats cache_stats;
       for (int j = 0; j < count; ++j) {
         std::uintptr_t shape = 0;
-        if (cs2::game::read(array + static_cast<std::uintptr_t>(j) * 8, shape) &&
-            shape >= 0x10000) {
-          (void)parse_shape(shape, BodyTransform{}, parsed, shapes, type_counts, stats);
+        if (!cs2::game::read(array + static_cast<std::uintptr_t>(j) * 8, shape) ||
+            shape < 0x10000) {
+          mark_incomplete(&cache_stats, OcclusionQueryIssue::parser_failure);
+          continue;
+        }
+        if (!parse_shape(shape, BodyTransform{}, parsed, shapes, type_counts, &cache_stats)) {
+          mark_incomplete(&cache_stats, OcclusionQueryIssue::parser_failure);
+        }
+      }
+      g_world_cache.incomplete_reasons = cache_stats.incomplete_reasons;
+      if (stats != nullptr) {
+        stats->surface_hits += cache_stats.surface_hits;
+        if (stats->surface_index < 0 && cache_stats.surface_index >= 0) {
+          stats->surface_index = cache_stats.surface_index;
+          stats->surface_distance = cache_stats.surface_distance;
+          stats->surface_material = cache_stats.surface_material;
+        }
+        if (stats->compound == 0 && cache_stats.compound != 0) {
+          stats->compound = cache_stats.compound;
+          stats->compound_instances = cache_stats.compound_instances;
+          stats->compound_meshes = cache_stats.compound_meshes;
+          stats->compound_hulls = cache_stats.compound_hulls;
+          stats->compound_g100 = cache_stats.compound_g100;
+          stats->compound_g110 = cache_stats.compound_g110;
+          stats->compound_g120 = cache_stats.compound_g120;
         }
       }
       g_world_cache.count = static_cast<int>(parsed.size());
@@ -973,6 +1075,10 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
                     boxes[static_cast<std::size_t>(i)].max);
       }
       g_world_bvh.build(std::move(boxes));
+    }
+    if (g_world_cache.incomplete_reasons != 0 && stats != nullptr) {
+      stats->incomplete_reasons |= g_world_cache.incomplete_reasons;
+      stats->complete = false;
     }
     if (stats != nullptr && collect) {
       stats->world_cache_body = g_world_cache.body;
@@ -1054,6 +1160,9 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
         ++stats->world_box_kept;
       }
       if (++pushed >= k_max_occluders) {
+        if (hits.size() > static_cast<std::size_t>(pushed)) {
+          mark_incomplete(stats, OcclusionQueryIssue::occluder_capacity);
+        }
         break;
       }
     }
@@ -1067,11 +1176,18 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
   // transform (`CPhysicsBody::vtable[0x1b0]`, validated live).
   BodyTransform transform;
   const bool have_transform = read_transform(body, transform);
+  if (!have_transform) {
+    mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
+  }
   for (int j = 0; j < count; ++j) {
     std::uintptr_t shape = 0;
-    if (cs2::game::read(array + static_cast<std::uintptr_t>(j) * 8, shape) && shape >= 0x10000) {
-      (void)parse_shape(shape, have_transform ? transform : BodyTransform{}, out, shapes,
-                        type_counts, stats);
+    if (!cs2::game::read(array + static_cast<std::uintptr_t>(j) * 8, shape) || shape < 0x10000) {
+      mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
+      continue;
+    }
+    if (!parse_shape(shape, have_transform ? transform : BodyTransform{}, out, shapes, type_counts,
+                     stats)) {
+      mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
     }
   }
 }
@@ -1088,14 +1204,21 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
   std::uintptr_t bodies[k_max_bodies] = {};
   int body_count = 0;
 
-  const int limit = std::min<std::int32_t>(count, 4096);
+  constexpr int k_record_scan_limit = 4096;
+  const int limit = std::min<std::int32_t>(count, k_record_scan_limit);
+  if (count > k_record_scan_limit) {
+    mark_incomplete(stats, OcclusionQueryIssue::record_scan_limit);
+  }
   for (int i = 0; i < limit; ++i) {
     const std::uintptr_t record = data + static_cast<std::uintptr_t>(i) * k_record_stride;
 
     // One-record RE probe (docs/re/occlusion.md): the material token's type is still
     // unresolved, so surface it for a live run to settle.
     std::uint32_t handle = 0;
-    (void)cs2::game::read(record + k_record_handle, handle);
+    if (!cs2::game::read(record + k_record_handle, handle)) {
+      mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
+      continue;
+    }
     if (stats != nullptr) {
       ++stats->material_records;
       if (i < 1) {
@@ -1143,6 +1266,7 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
 
     std::uintptr_t body = 0;
     if (!cs2::game::read(record + k_record_body, body) || body < 0x10000) {
+      mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
       continue;
     }
     bool seen = false;
@@ -1152,8 +1276,12 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
         break;
       }
     }
-    if (!seen && body_count < k_max_bodies) {
-      bodies[body_count++] = body;
+    if (!seen) {
+      if (body_count < k_max_bodies) {
+        bodies[body_count++] = body;
+      } else {
+        mark_incomplete(stats, OcclusionQueryIssue::body_capacity);
+      }
     }
   }
 
@@ -1181,27 +1309,47 @@ void set_occlusion_exclude_pawns(const std::uintptr_t* pawns, int count) noexcep
 }
 
 auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& box_max, bool invoke,
-                           OcclusionQueryStats* stats, const std::uint16_t* exclude,
-                           int exclude_count, const cs2::aim::Aabb* targets, int target_count,
-                           bool verify_enum) -> std::vector<OcclusionHull> {
-  std::vector<OcclusionHull> out;
+                           const std::uint16_t* exclude, int exclude_count,
+                           const cs2::aim::Aabb* targets, int target_count, bool verify_enum)
+    -> OcclusionQueryResult {
+  OcclusionQueryResult result;
+  OcclusionQueryStats* const stats = &result.stats;
   g_verify_enum = verify_enum;
-  if (stats != nullptr) {
-    *stats = OcclusionQueryStats{};
-    stats->enum_targets = target_count;
-    for (int i = 0; i < target_count; ++i) {
-      const Vec3 centre{(targets[i].min.x + targets[i].max.x) * 0.5F,
-                        (targets[i].min.y + targets[i].max.y) * 0.5F,
-                        (targets[i].min.z + targets[i].max.z) * 0.5F};
-      const Vec3 delta{centre.x - from.x, centre.y - from.y, centre.z - from.z};
-      const float distance = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
-      stats->enum_target_max_distance = std::max(stats->enum_target_max_distance, distance);
+  if (target_count < 0 || target_count > k_max_query_targets ||
+      (target_count > 0 && targets == nullptr)) {
+    mark_incomplete(stats, OcclusionQueryIssue::target_capacity);
+    target_count = std::clamp(target_count, 0, k_max_query_targets);
+    if (targets == nullptr) {
+      target_count = 0;
     }
+  }
+  if (exclude_count < 0 || exclude_count > k_max_query_exclude ||
+      (exclude_count > 0 && exclude == nullptr)) {
+    mark_incomplete(stats, OcclusionQueryIssue::target_capacity);
+    exclude_count = std::clamp(exclude_count, 0, k_max_query_exclude);
+    if (exclude == nullptr) {
+      exclude_count = 0;
+    }
+  }
+  stats->enum_targets = target_count;
+  for (int i = 0; i < target_count; ++i) {
+    const Vec3 centre{(targets[i].min.x + targets[i].max.x) * 0.5F,
+                      (targets[i].min.y + targets[i].max.y) * 0.5F,
+                      (targets[i].min.z + targets[i].max.z) * 0.5F};
+    const Vec3 delta{centre.x - from.x, centre.y - from.y, centre.z - from.z};
+    const float distance = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+    stats->enum_target_max_distance = std::max(stats->enum_target_max_distance, distance);
+  }
+  if (!invoke) {
+    mark_incomplete(stats, OcclusionQueryIssue::not_invoked);
   }
 
   const cs2::game::ModuleInfo client = cs2::game::find_module("client.dll");
   if (!client.valid()) {
-    return out;
+    if (invoke) {
+      mark_incomplete(stats, OcclusionQueryIssue::query_unavailable);
+    }
+    return result;
   }
   const std::uintptr_t base = client.base;
   const std::uintptr_t query_global =
@@ -1227,45 +1375,45 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
   if (g_surface_array < 0x10000) {
     g_surface_array = 0;
   }
-  if (stats != nullptr) {
-    stats->surface_array = g_surface_array;
-  }
+  stats->surface_array = g_surface_array;
 
   std::uintptr_t iface = 0;
   if (!cs2::game::read(base + query_global, iface) || iface == 0) {
-    return out;
+    if (invoke) {
+      mark_incomplete(stats, OcclusionQueryIssue::query_unavailable);
+    }
+    return result;
   }
-  if (stats != nullptr) {
-    stats->iface = iface;
-    stats->filter = base + static_filter;
-    std::uintptr_t world = 0;
-    std::uintptr_t filter_vtable = 0;
-    (void)cs2::game::read(iface, world);
-    (void)cs2::game::read(base + static_filter, filter_vtable);
-    stats->world = world;
-    stats->filter_vtable = filter_vtable;
-  }
+  stats->iface = iface;
+  stats->filter = base + static_filter;
+  std::uintptr_t world = 0;
+  std::uintptr_t filter_vtable = 0;
+  (void)cs2::game::read(iface, world);
+  (void)cs2::game::read(base + static_filter, filter_vtable);
+  stats->world = world;
+  stats->filter_vtable = filter_vtable;
   if (!invoke) {
-    return out;  // diagnostics only
+    return result;  // diagnostics only
   }
+  stats->complete = true;
 
   g_entities_in_box = reinterpret_cast<EntitiesInBoxFn>(base + entities_in_box);
 
   // The custom bullet filter (see `k_bullet_mask`): a copy of the engine's filter with
   // the shot's collision mask, so the enumerated set matches what a bullet crosses.
   void* filter = build_bullet_filter(base + static_filter);
-  if (stats != nullptr) {
-    stats->filter = reinterpret_cast<std::uintptr_t>(filter);
-    stats->filter_custom = g_bullet_filter_ready;
-    if (g_bullet_filter_ready) {
-      stats->filter_mask = *reinterpret_cast<std::int64_t*>(g_bullet_filter + k_filter_mask);
-      stats->filter_group = g_bullet_filter[k_filter_group];
-      stats->filter_flags = g_bullet_filter[k_filter_flags];
-    }
+  stats->filter = reinterpret_cast<std::uintptr_t>(filter);
+  stats->filter_custom = g_bullet_filter_ready;
+  if (g_bullet_filter_ready) {
+    stats->filter_mask = *reinterpret_cast<std::int64_t*>(g_bullet_filter + k_filter_mask);
+    stats->filter_group = g_bullet_filter[k_filter_group];
+    stats->filter_flags = g_bullet_filter[k_filter_flags];
+  } else {
+    mark_incomplete(stats, OcclusionQueryIssue::query_unavailable);
   }
 
   int shapes = 0;
-  int* type_counts = stats != nullptr ? stats->type_counts : nullptr;
+  int* type_counts = stats->type_counts;
 
   auto do_query = [&](const Vec3& lo, const Vec3& hi, bool collect) {
     ResultVector vector;
@@ -1275,17 +1423,30 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
     bool ok = false;
     const std::int32_t count =
         run_box_query(reinterpret_cast<void*>(iface), filter, lo, hi, vector, &ok);
-    if (stats != nullptr) {
-      stats->ok = ok;
-      stats->faulted = !ok;
-      stats->records = count;
+    stats->ok = ok;
+    stats->faulted = !ok;
+    stats->records = count;
+    if (!ok) {
+      mark_incomplete(stats, OcclusionQueryIssue::query_fault);
+      return;
+    }
+    if (count < 0) {
+      mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
+      return;
+    }
+    if (count >= k_max_records) {
+      mark_incomplete(stats, OcclusionQueryIssue::record_capacity);
+    }
+    if (count > k_max_records || vector.data != g_record_buffer) {
+      mark_incomplete(stats, OcclusionQueryIssue::record_capacity);
+      return;
     }
     if (!ok || count <= 0 || vector.data == nullptr) {
       return;
     }
     const std::uintptr_t data = reinterpret_cast<std::uintptr_t>(vector.data);
-    walk_records(data, count, from, lo, hi, out, stats, shapes, type_counts, collect, entity_blocks,
-                 exclude, exclude_count, targets, target_count);
+    walk_records(data, count, from, lo, hi, result.hulls, stats, shapes, type_counts, collect,
+                 entity_blocks, exclude, exclude_count, targets, target_count);
   };
 
   // The box spans the eye and every target hitbox (the caller's AABB), plus the
@@ -1299,7 +1460,7 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
 
   if (stats != nullptr) {
     stats->shapes = shapes;
-    stats->hulls = static_cast<int>(out.size());
+    stats->hulls = static_cast<int>(result.hulls.size());
     stats->hulls_no_planes = g_hulls_no_planes;
     stats->mesh_clusters = g_mesh_clusters;
     // The surface probe persists across queries: the world body is parsed only on the
@@ -1310,7 +1471,8 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
       stats->surface_material = g_surface_probe_material;
     }
   }
-  return out;
+  stats->complete = stats->incomplete_reasons == 0;
+  return result;
 }
 
 }  // namespace cs2::control

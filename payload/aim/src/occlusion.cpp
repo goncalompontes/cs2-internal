@@ -8,10 +8,7 @@ namespace {
 
 constexpr float k_epsilon = 1e-6F;
 
-struct HalfPlane {
-  Vec2 normal;
-  float offset;
-};
+using HalfPlane = ConvexClipEdge;
 
 // The inward half-planes of a convex CCW polygon: inside is `dot(normal, p) <= offset`.
 [[nodiscard]] auto inward_edges(const Polygon& polygon) -> std::vector<HalfPlane> {
@@ -741,14 +738,23 @@ auto clip_convex(const Polygon& a, const Polygon& b) -> Polygon {
   return result;
 }
 
+auto prepare_convex_clipper(const Polygon& polygon) -> ConvexClipper {
+  return ConvexClipper{inward_edges(polygon)};
+}
+
 void subtract_convex(const Polygon& a, const Polygon& b, Polygon& inside,
+                     std::vector<Polygon>& outside) {
+  subtract_convex(a, prepare_convex_clipper(b), inside, outside);
+}
+
+void subtract_convex(const Polygon& a, const ConvexClipper& clipper, Polygon& inside,
                      std::vector<Polygon>& outside) {
   inside = a;
   outside.clear();
   if (a.empty()) {
     return;
   }
-  for (const HalfPlane& edge : inward_edges(b)) {
+  for (const ConvexClipEdge& edge : clipper.edges) {
     // The part on the far side of this edge is outside `b` and is kept as a
     // (still convex) piece; the remainder keeps splitting against later edges.
     Polygon out_part = clip_half_plane(inside, edge.normal * -1.0F, -edge.offset);

@@ -560,9 +560,11 @@ target's lag-compensated pose.
 - The optima are exact and finite: a cell's nearest point (damage), a cell's
   Chebyshev centre (hitchance), the pose-blurred max (robust). Pose uncertainty
   enters as an analytic blur, not extra traces.
-- **Tier 1 (ship now):** few-trace exact — project hitboxes analytically, probe
-  with `TraceShapeWithSortedResults` / `TraceLineIntervals` (the full layer stack
-  per call), reconstruct occluder edges from planar faces.
+- **Tier 1 (proposed; oracle not yet validated):** few-trace — project hitboxes
+  analytically, probe with `TraceShapeWithSortedResults` / `TraceLineIntervals`, then
+  reconstruct occluder edges from planar faces. Current-build RE confirms the actual
+  `FX_FireBullets` path uses `TraceLineIntervals` plus repeated penetration advance;
+  neither API is yet proven to return the full material/mesh layer stack assumed here.
 - **Tier 2 (target):** zero-trace — read collision hulls/meshes directly from
   `vphysics2` (shape type `+0x18`, hull pointer `+0xC0`, `RnHull_t` vertices
   `+0x70/+0x78`; `docs/re/vphysics2.md`), project, assemble the heat map

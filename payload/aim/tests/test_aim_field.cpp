@@ -78,6 +78,36 @@ auto main() -> int {
   const Vec2 blurred = field.argmax_expected(0.05F);
   expect(blurred.x < 0.03F, "wide blur prefers the large body cell");
 
+  // --- the pitch-dependent yaw covariance contributes to the gradient --------
+  {
+    constexpr float pitch = 0.7F;
+    constexpr float sigma = 0.12F;
+    DamageField pitched;
+    pitched.add(square(-0.04F, pitch - 0.01F, 0.04F, pitch + 0.01F), 100.0F);
+    const auto objective = [&](float aim_pitch) {
+      return pitched.expected_exact(Vec2{0.0F, aim_pitch}, sigma * cs2::aim::yaw_scale(aim_pitch),
+                                    sigma);
+    };
+    const float at_centre = objective(pitch);
+    const Vec2 optimum = pitched.argmax_expected(sigma);
+    float grid_best = 0.0F;
+    float grid_pitch = pitch;
+    for (int i = -120; i <= 120; ++i) {
+      const float candidate = pitch + static_cast<float>(i) * 0.0005F;
+      const float value = objective(candidate);
+      if (value > grid_best) {
+        grid_best = value;
+        grid_pitch = candidate;
+      }
+    }
+    expect(optimum.y < pitch - 0.003F,
+           "the yaw-width derivative moves the expected aim away from cell centre pitch");
+    expect(std::fabs(optimum.y - grid_pitch) < 0.003F,
+           "the pitch-aware ascent agrees with a dense one-dimensional search");
+    expect(objective(optimum.y) > at_centre,
+           "including the covariance derivative improves the objective");
+  }
+
   // --- the pellet-sum objective (docs/ragebot.md §2/§3) --------------------
   {
     DamageField pellet_field;

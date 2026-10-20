@@ -24,8 +24,9 @@ project seeded from `C:\Users\gpmpo\ghidra-analysis`.
   `TraceLineIntervals(*(client+0x2227058), &results, start, end, filter+8, -1.0f)`;
   its results are `0x38`-byte interval records in a `CUtlVector`.
 - Penetration is a **loop** of `TraceLineIntervals` in `FUN_18089ca80` (RVA
-  `0x89ca80`): it accumulates the crossed thickness and stops at ≈ 90 units (or 6
-  iterations), then resolves the final hit with a second query (`FUN_180200f20`).
+  `0x89ca80`): it accumulates crossed thickness, stops at ≈ 90 units, and has a
+  separate `iVar6 > 4` retry guard. The actual shot passes a 4-span limit to this
+  helper; it then resolves the final hit with `FUN_180200f20`.
 
 ## The call graph
 
@@ -153,6 +154,37 @@ FUN_180200f20(PTR_DAT_182227058, &local_198, &local_1a8, param_5, local_178);
 The interface singleton global is `PTR_DAT_182227058` = `client + 0x2227058`
 (`docs/re/occlusion.md`). All query methods take it as arg1.
 
+## Current-build call-path cross-check (REA, 2026-10-19)
+
+Rechecked with Ghidra 12.1.4 on the Steam `client.dll` whose SHA-256 is
+`659940c1db362ed981d1df10637cec8c2a3d99409b77fc3b73e435e4649e36b0`:
+
+- The observed shot chain is `FX_FireBullets` (`FUN_180d237d0`) → per-pellet
+  `FUN_180887d60` → `FUN_1808830e0` → `FUN_18089ca80` →
+  `TraceLineIntervals` (`FUN_180a19e90`). `FUN_1808830e0` calls the interval trace
+  again after the penetration advance, and `FUN_18089ca80` contains the repeated
+  advance loop plus the final `FUN_180200f20` query. `FUN_180885710`, called by the
+  same per-pellet function, walks the modulation entries and calls
+  `HandleBulletPenetration` (`FUN_1808a1820`).
+- The `TraceShapeWithSortedResults` entry (`FUN_180a1af60`, world vtable `+0x560`)
+  is a distinct API. It gathers/sorts `0x48`-byte hit records and converts them to
+  `0xc0`-byte trace records via `FUN_1809d2f60`. Its complete *resolved direct*
+  caller set is `0x18089fb40`, `0x180a1a510`, and `0x180b93860`; the verified
+  per-pellet path above does not call it. This is consistent with the community
+  `CreateTrace` releases using a sorted-result wrapper, but does not establish that
+  wrapper as the game's `FX_FireBullets` implementation.
+- In the direct shot caller, `FUN_180d237d0` places literal `4` at the sixth
+  argument to `FUN_180887d60`. That value reaches `FUN_18089ca80` as its span-count
+  limit; the decompile increments `local_res8` for counted solid spans and stops
+  when `param_6 < local_res8`. The same helper has a separate `iVar6 > 4` retry
+  guard and the accumulated `90.0`-unit thickness guard. Do not infer the game's
+  actual shot budget from the fifth argument of a community `CreateTrace` helper.
+
+This resolves the **call-path dispute**, not the complete trace oracle. The full
+`0x38` interval-record surface mapping, exact mesh/open-soup behavior, and runtime
+damage differential are still unverified. Ghidra pseudocode is provider output, not
+original source; the caller set above covers resolved direct references only.
+
 ## What this means for the occlusion enumeration (the fix)
 
 The engine's bullet traces a **segment** with `TraceLineIntervals` and takes the
@@ -277,12 +309,12 @@ silhouette. `walls.mesh_clusters` reports the count.
 
 1. **Compound (4) shapes** — still skipped (`docs/re/occlusion.md` "Still to pin" 3).
 2. **The interval record's full layout** — only the distance `+0x0C` and the
-   enter/exit byte `+0x32` are pinned; the surface/material field is not, so a
-   trace-based *oracle* (fire the engine's own `TraceLineIntervals` and diff the
-   solids) still needs that record mapped end-to-end.
-3. The map's ~10k-triangle mesh is split into clusters now, but a per-cluster mesh
-   **BVH** (`RnNode_t`) is still the performance follow-up (a cluster's `ray_span`
-   scans its triangles).
+   enter/exit byte `+0x32` are pinned. Map the remaining `0x38` bytes and surface
+   provenance before treating interval output as a complete damage oracle.
+3. **Mesh interval semantics** — the aim-side mesh ray path keeps only two triangle
+   crossings. The host BVH test proves BVH-vs-flat equivalence for that rule, not
+   equivalence to the engine's ordered intervals, especially on open/disconnected
+   clusters and rays starting inside a mesh.
 4. **The mesh vertex scale** (`shape+0xB8`) is assumed uniform; a non-uniform mesh
    scale is not modelled.
 5. The enumeration is still a body-box overlap; swapping it for the engine's own

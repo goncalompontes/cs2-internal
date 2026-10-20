@@ -104,7 +104,7 @@ auto penetration_after_walls(float damage, const PenetrationParams& params,
     if (penetrations >= params.max_penetrations) {
       return 0.0F;
     }
-    if (layer.entry > params.max_trace_length) {
+    if (layer.entry + layer.thickness > params.max_trace_length) {
       return 0.0F;  // the shot has travelled too far to keep penetrating
     }
     if (crossed + layer.thickness > params.max_total_thickness) {
@@ -120,6 +120,45 @@ auto penetration_after_walls(float damage, const PenetrationParams& params,
     ++penetrations;
   }
   return remaining;
+}
+
+auto penetration_damage_at_target(float damage, float range_modifier, float target_distance,
+                                  const PenetrationParams& params,
+                                  std::span<const PenetrationLayer> layers) noexcept -> float {
+  if (damage <= 0.0F) {
+    return 0.0F;
+  }
+  float remaining = damage;
+  float travelled = 0.0F;
+  float crossed = 0.0F;
+  int penetrations = 0;
+  for (const PenetrationLayer& layer : layers) {
+    if (penetrations >= params.max_penetrations) {
+      return 0.0F;
+    }
+    const float exit = layer.entry + layer.thickness;
+    if (exit > params.max_trace_length) {
+      return 0.0F;
+    }
+    if (crossed + layer.thickness > params.max_total_thickness) {
+      return 0.0F;
+    }
+
+    const float free_flight = std::max(0.0F, layer.entry - travelled);
+    remaining *= std::pow(range_modifier, free_flight / 500.0F);
+    const std::optional<float> next =
+        penetration_layer_damage(remaining, params.weapon_penetration, layer);
+    if (!next.has_value()) {
+      return 0.0F;
+    }
+    remaining = *next;
+    travelled = std::max(travelled, exit);
+    crossed += layer.thickness;
+    ++penetrations;
+  }
+
+  const float final_flight = std::max(0.0F, target_distance - travelled);
+  return remaining * std::pow(range_modifier, final_flight / 500.0F);
 }
 
 }  // namespace cs2::aim

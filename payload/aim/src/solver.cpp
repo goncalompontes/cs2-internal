@@ -24,7 +24,6 @@ auto solve(const SolveInput& input, SolveStats* stats) -> SolveResult {
   if (stats != nullptr) {
     ++stats->solves;
   }
-
   DamageField field;
   std::uint32_t fragments_emitted = 0;
   // Per-hitbox occluders: only the solids enumerated for this hitbox's target (plus the
@@ -82,12 +81,19 @@ auto solve(const SolveInput& input, SolveStats* stats) -> SolveResult {
       // fragment with the engine penetration model (the wallbang-aware field, the
       // same as the heatmap render).
       const std::uint64_t t_occlude = stats != nullptr ? ticks_us() : 0;
-      const std::vector<DamageFragment> fragments =
-          occlude_polygon(input.eye, input.basis, polygon, hitbox.multiplier, distance,
-                          occluders, input.weapon, input.penetration,
-                          input.penetration_params);
+      bool candidates_complete = true;
+      const std::vector<DamageFragment> fragments = occlude_polygon(
+          input.eye, input.basis, polygon, hitbox.multiplier, distance, occluders, input.weapon,
+          input.penetration, input.penetration_params, candidates_complete);
       if (stats != nullptr) {
         stats->occlude_us += ticks_us() - t_occlude;
+      }
+      if (!candidates_complete) {
+        result.occlusion_candidates_complete = false;
+        if (stats != nullptr) {
+          stats->total_us += ticks_us() - t_begin;
+        }
+        return result;
       }
       for (const DamageFragment& fragment : fragments) {
         field.add(fragment.polygon, fragment.value, fragment.base_value);
@@ -161,6 +167,11 @@ auto solve_backtrack(const SolveInput& base, const std::vector<PoseCandidate>& p
     SolveInput input = base;
     input.hitboxes = pose.hitboxes;
     const SolveResult result = solve(input, stats);
+    if (!result.occlusion_candidates_complete) {
+      best.valid = false;
+      best.occlusion_candidates_complete = false;
+      return best;
+    }
     if (!result.valid) {
       continue;
     }

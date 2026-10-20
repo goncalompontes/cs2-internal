@@ -32,11 +32,12 @@
   re-enable). Turning it off also skips record sampling (~0.6 ms/tick) and the redundant
   live-pose re-solve (~4 ms/tick).
 - **Research phase done** — three deep briefs under [`docs/research/`](research/README.md):
-  *no public cheat builds a projected damage field* (all trace; in CS2 one call returns the
-  whole sorted surface stack), our clipping primitive is **6× faster than Clipper2** so the
-  *algorithm* is the problem, and the hitchance σ is **√6 too wide** (a gameplay bug:
-  0.221 reported vs 0.777 true for a head-sized target). Also: Osiris is **MIT** (the
-  earlier note said GPL-3.0) and its `master` has no combat code at all.
+  *no public cheat builds a projected damage field* (all trace; public CS2 `CreateTrace`
+  wrappers describe a sorted stack, while current-build `FX_FireBullets` uses
+  `TraceLineIntervals` plus repeated advance), our clipping primitive is **6× faster
+  than Clipper2** so the *algorithm* is the problem, and the hitchance σ is **√6 too
+  wide** (a gameplay bug: 0.221 reported vs 0.777 true for a head-sized target). Also:
+  Osiris is **MIT** (the earlier note said GPL-3.0) and its `master` has no combat code.
 - **Committed and clean**: `5dd49fb`, `9296a42`, `e8ba263`, `33672a5` on
   `feat/occlusion-penetration`. 17/17 host tests; `payload.dll` builds.
 
@@ -274,6 +275,15 @@ new debug-renderer mode.
 9. **REA `client.dll` cache:** the seeded cache works, but the underlying
    `feat/ghidra-project-cache` reopen bug remains (a cold re-analysis from the MCP still
    fails to launch).
+   - **Update (2026-10-20): the reopen bug is fixed** upstream (`morluto/rea#3531`, our
+     branch `feat/ghidra-project-cache`, head `d4b8afbba`): a Windows cache root that is
+     not owner-only is now rebuilt as a private directory instead of being refused, and
+     the durable root is no longer the sealed native runtime root, so publishes and
+     rebuilds work. Verified live — the root is owner-only and a hit reuses the stored
+     project. **But the seeded entries were lost** during that session (a stray probe
+     script deleted the old cache root), so `engine2.dll` / `client.dll` must be
+     re-seeded (`scripts/seed-rea-project-cache.mjs`, see `docs/re/README.md` §8) or
+     re-imported once. `client.dll` costs ~21 min to import, then hits in ~49 s.
 
 `NEXT_SESSION_OCCLUSION.md` is now **done** (its goal — make the enumeration match the
 engine — is addressed by the mesh fix + camera-independence + between-pruning); treat

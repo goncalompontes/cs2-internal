@@ -29,10 +29,10 @@ starting a RE session: it saves the trial-and-error that produced it.
 
 | What | Where |
 |---|---|
-| REA (MCP + CLI) | installed build: `C:\Users\gpmpo\rea-src-install` (v6.4.0 + persistent Ghidra project cache), `npm link`ed as `rea`; PR source: `C:\Users\gpmpo\rea-src` (branch `feat/ghidra-project-cache`) |
+| REA (MCP + CLI) | OpenCode registration refreshed with `rea setup` on 2026-10-19; the build was updated to the fixed persistent-project-cache PR (`d4b8afbba`) and reinstalled on 2026-10-20. The global CLI is v6.7.0 (`rea-agents@6.7.0`, `npm link`ed to `C:\Users\gpmpo\rea-src`) and the MCP command is `C:\Users\gpmpo\AppData\Roaming\npm\node_modules\rea-agents\scripts\rea.mjs`. `C:\Users\gpmpo\rea-src-install` is a **stale** checkout — do not use it. |
 | Ghidra | `C:\Users\gpmpo\ghidra\ghidra_12.1.4_PUBLIC` (12.1.4) |
 | Java | `C:\Program Files\Java\jdk-21` |
-| MCP config | `C:\Users\gpmpo\.config\opencode\opencode.jsonc` → `mcp.rea` (`REA_ANALYSIS_PROVIDER=ghidra`, `GHIDRA_INSTALL_DIR`, `JAVA_HOME`, `REA_GHIDRA_STARTUP_TIMEOUT_MS=1800000`, `REA_GHIDRA_PROJECT_CACHE=on`) |
+| MCP config | `C:\Users\gpmpo\.config\opencode\opencode.jsonc` → `mcp.rea` (`REA_ANALYSIS_PROVIDER=ghidra`, `GHIDRA_INSTALL_DIR`, `JAVA_HOME`, `REA_GHIDRA_STARTUP_TIMEOUT_MS=1800000`, `REA_GHIDRA_PROJECT_CACHE=on`, `REA_GHIDRA_PROJECT_CACHE_DIR`) |
 
 - The MCP server is already running and **hot-reloads** config edits. **Do not run
   `opencode service restart`** — it kills the agent session.
@@ -252,14 +252,23 @@ no per-module switch.
   cache…"*, while a cold run has no such line and takes minutes.
 
 **Where REA is installed.** `C:\Users\gpmpo\rea-src` tracks the PR branch
-`feat/ghidra-project-cache` (merged with `main`), but **Windows cannot run the
-merged build**: `main` added a native-loader requirement
-(`privateBridgeDescriptorAccess`) the prebuilt native addon (v6.4.0) does not
-report, and the addon build lane is Linux + MinGW only. The installed build is
-the pre-merge worktree **`C:\Users\gpmpo\rea-src-install`** (v6.4.0, native addon
-matches, full cache feature); both the MCP entry and the global `rea` shim point
-at it. Rebuild with `npm run compile` there. (Its `native/windows/build/manifest.json`
-is a local, gitignored version binding — do not commit it.)
+`feat/ghidra-project-cache` (upstream `morluto/rea#3531`, head `d4b8afbba`) and is
+`npm link`ed to the global `rea` as `rea-agents@6.7.0`; the MCP entry runs the
+same link (`…\npm\node_modules\rea-agents\scripts\rea.mjs mcp`). **Windows runs
+this build**: the native addon is present in `native\windows\build\` and
+`rea doctor --provider ghidra` reports `ghidra-native_authority` healthy.
+Rebuild with `npm run compile` there. (Its
+`native/windows/build/manifest.json` is a local, gitignored version binding — do
+not commit it.) `C:\Users\gpmpo\rea-src-install` is a **stale** checkout — do not
+use it.
+
+**The cache root is private.** `C:\Users\gpmpo\.rea\cache\ghidra-projects` is owned
+by the current user with a protected DACL (that user + SYSTEM only). Upstream
+`d4b8afbba` **rebuilds** a root that is not owner-only as a private directory that
+keeps the stored projects, and reports the rebuild in the session Evidence
+(*"The Ghidra project cache root was not owner-only and was rebuilt as a private
+directory; N stored item(s) were preserved."*). A root that lost its DACL
+therefore no longer disables the cache.
 
 **Seeding from an operator project** (no re-analysis). Upstream `rea cache
 import` does not exist yet, so `scripts/seed-rea-project-cache.mjs` computes the
@@ -268,16 +277,20 @@ identity REA resolves and publishes an existing headless project under it:
 ```powershell
 $env:GHIDRA_INSTALL_DIR = "C:\Users\gpmpo\ghidra\ghidra_12.1.4_PUBLIC"
 $env:JAVA_HOME          = "C:\Program Files\Java\jdk-21"
-$env:REA_SRC            = "C:\Users\gpmpo\rea-src-install"
+$env:REA_SRC            = "C:\Users\gpmpo\rea-src"
 node scripts/seed-rea-project-cache.mjs `
   --target  C:\Users\gpmpo\ghidra-analysis\client.dll `
   --project C:\Users\gpmpo\ghidra-analysis\client-warm --program client.dll
 ```
 
-Seeded here: `engine2.dll` (from `ghidra-analysis\rea-project`) and `client.dll`
-(from `ghidra-analysis\client-warm`). The old `REA_GHIDRA_EXISTING_PROJECT` pair
-still exists for a one-off manual project, but it binds the session to that one
-program — prefer the cache.
+**Seeded here: none (the entries were lost on 2026-10-20).** `engine2.dll` (from
+`ghidra-analysis\rea-project`) and `client.dll` (from `ghidra-analysis\client-warm`)
+were seeded in earlier sessions, but a stray probe script deleted the old cache
+root during the fix session. Only `where.exe` is warm now. Re-seed the two
+targets with the command above (the operator projects are still on disk) or let
+them re-import once. The old `REA_GHIDRA_EXISTING_PROJECT` pair still exists for a
+one-off manual project, but it binds the session to that one program — prefer the
+cache.
 
 **One program per session.** A headless Ghidra session holds exactly one
 program, and one cache entry is one analyzed program. `rea cache-list` shows

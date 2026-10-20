@@ -417,7 +417,7 @@ fork-only *persistent Ghidra project cache* (so a first `client.dll` import is
 slow, ~20 min instead of ~1 min on a warm project).
 
 ```powershell
-npm install --global rea-agents@6.4.0
+npm install --global rea-agents@6.7.0
 rea doctor          # expect the `ghidra` scope check healthy once env vars are set
 ```
 
@@ -427,19 +427,19 @@ The published package ships a prebuilt Windows native addon, so no compiler is
 needed.
 
 **(exact match) The primary machine's fork build.** The project cache is an
-unmerged upstream PR; the primary machine runs a local build of it. Its source
-is public — the user's fork, branch `feat/ghidra-project-cache`, pinned at commit
-`df7877296`:
+unmerged upstream PR (`morluto/rea#3531`); the primary machine runs a local
+build of it. Its source is public — the user's fork, branch
+`feat/ghidra-project-cache`, pinned at commit `d4b8afbba`:
 
 ```powershell
 # The native addon only ships inside the npm tarball (the repo's own addon build
 # lane is Linux + MinGW only), so take it from the published package:
-npm install --global rea-agents@6.4.0
+npm install --global rea-agents@6.7.0
 $addon = Join-Path (npm root -g) 'rea-agents\native\windows\build'
 
 git clone https://github.com/goncalompontes/rea.git C:\rea
 Set-Location C:\rea
-git checkout df7877296
+git checkout d4b8afbba
 npm install
 Copy-Item "$addon\*" native\windows\build\ -Force
 npm run compile          # tsc + bundle into dist/
@@ -460,6 +460,10 @@ Notes for either path:
   server; set them in your shell too for CLI use).
 - The cache lives under `~/.rea/cache/ghidra-projects`; inspect it with
   `rea cache-list`, bound it with `REA_GHIDRA_PROJECT_CACHE_MAX_BYTES`.
+- **The cache root must be owner-only on Windows** (current user + SYSTEM, with a
+  protected DACL). A root that inherited the profile's DACL is refused by REA;
+  the fork build (`d4b8afbba`+) rebuilds such a root as a private directory
+  instead and reports the rebuild in the session Evidence.
 - To **seed** the cache from an already-analyzed project, use
   `scripts/seed-rea-project-cache.mjs` (see `docs/re/README.md` §8).
 - Ghidra targets: copy `engine2.dll` and `client.dll` out of the CS2 install

@@ -31,8 +31,9 @@ Build under analysis: `client.dll` sha256
   its material object via **`shape+0x48`**; that object's `+0x10` is the list index
   (`FUN_1809e3560`). **Live-verified:** the world body's brushes resolve to 29
   distinct surfaces (concrete 0.5, metal 0.4, wood 0.9, glass 0.99, …).
-- A shot also stops at the **4-wall budget** and the **≈90-unit crossed-thickness
-  cap** (the reversed trace-advance `FUN_18089ca80`, `docs/re/bullet-trace.md`).
+- The direct `FX_FireBullets` path passes a **4-span limit** into
+  `FUN_18089ca80`; that helper also has a separate **≈90-unit crossed-thickness
+  cap** (`docs/re/bullet-trace.md`, "Current-build call-path cross-check").
 
 ## The surface table — `CGameSurfaceProperties`
 
@@ -54,6 +55,12 @@ manager `+0x28`). Fields (live-verified on the current map):
 The list manager is the global `DAT_18254e100` (`client + 0x254e100`); the array is
 `*(manager + 0x28)`. `FUN_1809e3560(param)` resolves an entry:
 `*(int*)(param + 0x10) * 0x20 + *(manager + 0x28)`.
+
+**Do not normalize a zero distance modifier to the neutral value.** The current shot's
+`HandleBulletPenetration` gate stops when the entry modifier is `< 0.1`, so a legitimate
+`bulletPenetrationDistanceModifier == 0` must remain zero in the payload. Surface lookup
+failures are different: the occlusion query marks surface metadata incomplete and the
+rage solver fails closed rather than pretending the wall has modifier `1.0`.
 
 **The per-shape surface.** Each `IPhysicsShape` holds a pointer to its surface-material
 object at **`shape + 0x48`**; that object's `+0x10` is the `SurfacePropertiesList`
@@ -115,10 +122,28 @@ if (bullet->Damage < 1) PenetrationStopped = true;         // blocked
 else --PenetrationCount;
 ```
 
-`thickness` is the world distance between the span's entry and exit positions. The
-shot-level budget is the caller's `PenetrationCount` (the engine's own autowall uses
-**5** — "4 penetrable walls" plus the loop's off-by-one[^uc-release]) and the ≈90-unit
-crossed-thickness cap from the trace advance.
+`thickness` is the world distance between the span's entry and exit positions. For
+the current build's actual `FX_FireBullets` path, the observed caller passes `4` to
+`FUN_180887d60`; it reaches `FUN_18089ca80` as the solid-span count limit. That helper
+also stops after its separate retry guard (`iVar6 > 4`) or when accumulated crossed
+thickness reaches 90 units. Do not conflate these with `CreateTrace` argument values in
+community releases: `CreateTrace` is a separate sorted-results path, not the verified
+`FX_FireBullets` call path. The `5` value reported by the community release remains
+historical evidence for that wrapper, not the current shot's observed argument.
+
+### Pinned single-wall live check (2026-10-19)
+
+On the current Steam `client.dll` (`659940c1…`), a user-pinned bot behind a wall was
+queried with complete occlusion enumeration (`query_complete=true`, no issue bits,
+14 occluders). The selected attenuated head-cell centroid predicted **72.134** damage
+versus **142.698** unobstructed base damage. A one-round AK tap at that centroid consumed
+one round; the later `player_hurt` event/state showed health `100→45`, armor `100→92`
+(the target had no helmet), and `dmg_health=55`. Under the standard armor accounting,
+the raw hit is approximately `55 + 2×8 = 71`, within 1.6% of the model value.
+
+This is useful one-ray/one-wall evidence, not full engine parity: the shot's exact
+interval/surface list was not captured, the armor-ratio input was not read independently,
+and multi-wall behavior and the mesh-crossing rule remain untested.
 
 ## What the code does
 
@@ -152,5 +177,7 @@ untouched, red = mostly removed). `docs/ragebot.md` §0.
     calculation* (2026-07) — the CS2 structs (`TraceData_t`, `BulletModulationEntry_t`,
     `BulletPenetrationData_t`, `CGameTrace`) and the `HandleBulletPenetration`
     signature (`48 8B C4 44 89 48 ? 48 89 50 ? 48 89 48 ? 55 57`), plus the
-    penetration-count-5 note. Matches the decompile below.
+    penetration-count-5 note for its `CreateTrace` wrapper. The per-wall arithmetic
+    matches the decompile below; the wrapper's count is not the observed current-build
+    `FX_FireBullets` span limit (see the current-build note above).
     <https://www.unknowncheats.me/forum/counter-strike-2-a/764290-penetration-autowall-damage-calculation.html>

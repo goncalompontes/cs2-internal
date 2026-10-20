@@ -133,6 +133,8 @@ auto main() -> int {
   {
     expect(!cs2::aim::penetration_layer_damage(100.0F, 1.0F, layer(0.0F, 0.05F, 67)).has_value(),
            "a < 0.1 distance modifier blocks the shot");
+    expect(!cs2::aim::penetration_layer_damage(100.0F, 1.0F, layer(0.0F, 0.0F, 67)).has_value(),
+           "a zero distance modifier blocks the shot");
   }
 
   // A wall that absorbs the whole bullet is blocked, and a weak shot too.
@@ -171,8 +173,47 @@ auto main() -> int {
     const PenetrationLayer far_one[1] = {far};
     expect(near(cs2::aim::penetration_after_walls(100.0F, params, far_one), 0.0F),
            "a wall beyond 3000 units stops the shot");
+    PenetrationLayer exits_beyond_gate = layer(10.0F);
+    exits_beyond_gate.entry = 2995.0F;
+    const PenetrationLayer exit_far[1] = {exits_beyond_gate};
+    expect(near(cs2::aim::penetration_after_walls(100.0F, params, exit_far), 0.0F),
+           "a wall whose exit passes 3000 units stops penetration");
     expect(near(cs2::aim::penetration_after_walls(100.0F, params, {}), 100.0F),
            "the trace-length cap does not zero an unobstructed shot");
+  }
+
+  // --- free-flight falloff is applied before and after walls ----------------
+  {
+    const PenetrationParams params{.weapon_penetration = 1.0F,
+                                   .max_penetrations = 4,
+                                   .max_total_thickness = 90.0F,
+                                   .max_trace_length = 3000.0F};
+    PenetrationLayer wall = layer(10.0F);
+    wall.entry = 500.0F;
+    const PenetrationLayer layers[1] = {wall};
+    const float at_wall = 100.0F * cs2::aim::range_falloff(0.81F, 500.0F);
+    const auto through_wall = cs2::aim::penetration_layer_damage(at_wall, 1.0F, wall);
+    expect(through_wall.has_value(), "the ranged test wall is penetrable");
+    if (through_wall.has_value()) {
+      const float expected = *through_wall * cs2::aim::range_falloff(0.81F, 490.0F);
+      expect(near(cs2::aim::penetration_damage_at_target(100.0F, 0.81F, 1000.0F, params, layers),
+                  expected, 1e-3F),
+             "range falloff applies to free flight before and after the wall");
+      const float target_faded_first = cs2::aim::penetration_after_walls(
+          100.0F * cs2::aim::range_falloff(0.81F, 1000.0F), params, layers);
+      expect(!near(expected, target_faded_first, 1.0F),
+             "fading to the target before wall loss is not equivalent");
+    }
+    expect(near(cs2::aim::penetration_damage_at_target(100.0F, 0.81F, 1000.0F, params, {}),
+                100.0F * cs2::aim::range_falloff(0.81F, 1000.0F), 1e-3F),
+           "an unobstructed shot falls off over its full distance");
+
+    PenetrationLayer crosses_trace_gate = layer(10.0F);
+    crosses_trace_gate.entry = 2995.0F;
+    const PenetrationLayer far_wall[1] = {crosses_trace_gate};
+    expect(
+        near(cs2::aim::penetration_damage_at_target(100.0F, 1.0F, 3100.0F, params, far_wall), 0.0F),
+        "a wall whose exit passes 3000 units stops penetration");
   }
 
   // --- heatmap integration: engine vs simple, base_value bookkeeping ---------
@@ -218,6 +259,9 @@ auto main() -> int {
     expect(near(engine_hi, 400.0F, 1.0F), "the uncovered part keeps full damage");
     expect(engine_lo < engine_hi, "the wall attenuates the covered part");
     expect(engine_lo > 0.0F, "a thin wall does not block the shot");
+    const auto raw_after_wall = cs2::aim::penetration_layer_damage(100.0F, 1.0F, layer(0.5F));
+    expect(raw_after_wall.has_value() && near(engine_lo, *raw_after_wall * 4.0F, 5.0F),
+           "hitgroup multiplier is applied after wall penetration");
     for (const auto& cell : engine.cells) {
       expect(cell.value <= cell.base_value + 1e-3F, "no cell exceeds its base damage");
     }

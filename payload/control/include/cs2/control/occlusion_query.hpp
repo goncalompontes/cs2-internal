@@ -57,6 +57,8 @@ struct OcclusionHull {
 };
 
 struct OcclusionQueryStats {
+  bool complete = false;  // false if query, geometry, or penetration-surface data is incomplete
+  std::uint32_t incomplete_reasons = 0;  // bitset of OcclusionQueryIssue
   bool ok = false;       // the engine query returned (no fault)
   bool faulted = false;  // a guarded fault was recovered
   int records = 0;       // overlap records the query returned
@@ -133,6 +135,34 @@ struct OcclusionQueryStats {
   int record_handle_count = 0;
 };
 
+// A query can return useful geometry and still be incomplete. Keep this result separate
+// from the per-hitbox candidate cap: these issues describe omissions upstream of the
+// solver and must fail closed for rage solves.
+enum class OcclusionQueryIssue : std::uint32_t {
+  not_invoked = 1U << 0,
+  query_unavailable = 1U << 1,
+  query_fault = 1U << 2,
+  record_capacity = 1U << 3,
+  record_scan_limit = 1U << 4,
+  body_capacity = 1U << 5,
+  parser_failure = 1U << 6,
+  parser_limit = 1U << 7,
+  mesh_cluster_limit = 1U << 8,
+  unsupported_compound = 1U << 9,
+  occluder_capacity = 1U << 10,
+  target_capacity = 1U << 11,
+  surface_metadata = 1U << 12,
+};
+
+struct OcclusionQueryResult {
+  std::vector<OcclusionHull> hulls;
+  OcclusionQueryStats stats;
+
+  [[nodiscard]] auto complete() const noexcept -> bool {
+    return stats.complete;
+  }
+};
+
 // Set the entity pointers the payload's trace filter must reject (the players) — the
 // engine calls the filter's `ShouldHitEntity` for every non-worldspawn overlap, so the
 // filter removes a player's collision body (a target, not a solid) from the
@@ -159,10 +189,12 @@ void set_occlusion_exclude_pawns(const std::uintptr_t* pawns, int count) noexcep
 // is exact — a conservative superset of the true occluders, never a subset — and it is
 // what keeps one distant enemy from making the query map-wide (`docs/ragebot-perf.md`
 // §2.1). `box_min`/`box_max` remain the outer bound (and the entity/prop query box).
-[[nodiscard]] auto query_world_occluders(
-    const cs2::aim::Vec3& from, const cs2::aim::Vec3& box_min, const cs2::aim::Vec3& box_max,
-    bool invoke, OcclusionQueryStats* stats, const std::uint16_t* exclude = nullptr,
-    int exclude_count = 0, const cs2::aim::Aabb* targets = nullptr, int target_count = 0,
-    bool verify_enum = false) -> std::vector<OcclusionHull>;
+[[nodiscard]] auto query_world_occluders(const cs2::aim::Vec3& from, const cs2::aim::Vec3& box_min,
+                                         const cs2::aim::Vec3& box_max, bool invoke,
+                                         const std::uint16_t* exclude = nullptr,
+                                         int exclude_count = 0,
+                                         const cs2::aim::Aabb* targets = nullptr,
+                                         int target_count = 0, bool verify_enum = false)
+    -> OcclusionQueryResult;
 
 }  // namespace cs2::control

@@ -22,12 +22,13 @@
    codebases below computes a projected damage field or an arrangement. The state of
    the art is "one trace per candidate direction (or per hitbox point), then N cheap
    penetration steps".
-2. **CS2 changed the cost model.** `CreateTrace` returns the *entire sorted surface
-   stack* for a ray in one call (`TraceData_t.mod_array`), and
-   `HandleBulletPenetration` is a pure arithmetic step over one stack entry. So a
-   correct CS2 autowall is **one engine call + ≤5 arithmetic steps**, not the CS:GO
-   `TraceRay`/`TraceToExit` loop. The public CS2 code that does this is the
-   UC "EngineTrace / TraceShape" release lineage (§3.7, §4.1).
+2. **There are two distinct CS2 trace designs.** Public `CreateTrace` releases describe
+   a sorted `TraceData_t.mod_array` stack and per-entry `HandleBulletPenetration`. But
+   the current build's actual `FX_FireBullets` path was rechecked in Ghidra: it uses
+   `TraceLineIntervals` plus the repeated advance in `FUN_18089ca80`, then processes
+   modulation entries. The public one-call wrapper is not evidence that the shipped
+   shot path makes one call. See [`bullet-trace.md`](../re/bullet-trace.md) for the
+   current-build call graph and the still-open interval/material oracle.
 3. **The bugs are consistent and instructive**: averaging enter/exit penetration
    modifiers (CS:GO v1 rule applied to CS2), `0.18` entry loss instead of `0.16`,
    advancing the ray along **Z** instead of the direction, `fraction > 0.97` as a
@@ -55,7 +56,7 @@
 | **alza54/opensource2** [`aimbot.cpp`](https://raw.githubusercontent.com/alza54/opensource2/main/OpenSource2-SDK/src/features/aim_enhancement/aimbot.cpp) | `TraceShape` per head; checks `HitEntity`; **no autowall** | none | 1 trace per player per tick | MIT | `TraceShape` call convention + `C_TraceFilter` layout ([c_trace.hpp](https://raw.githubusercontent.com/alza54/opensource2/main/OpenSource2-SDK/src/sdk/source-sdk/classes/types/c_trace.hpp)) |
 | **Ripper99-x/CS2-Internal** [`Tracing.h`](https://raw.githubusercontent.com/Ripper99-x/CS2-Internal/main/SourceEngine/Tracing.h) | Wraps `TraceShape`, `CreateTrace`, `HandleBulletPenetration`; aimbot uses `TraceShape` per bone only | none | 1 trace/bone, cached in entity list | **none** | Signatures + the `C_TraceFilter`/`TraceData_t` layouts; not the visibility test |
 | **Read1dno/ExternalAutoWallCS2** [`VisCheck.cpp`](https://raw.githubusercontent.com/Read1dno/ExternalAutoWallCS2/main/VisCheck.cpp) | Own **triangle BVH from VPK**; collect *all* hits, pair them as enter/exit; arithmetic per span | median-split BVH, longest axis, leaf ≤ 4 tris; cached to `.bvh` | ~**1 ms/ray** in the sibling project ([VisCheckCS2](https://raw.githubusercontent.com/Read1dno/VisCheckCS2/main/README.md)) | **MIT** | The VPK→triangles pipeline; the *warning* that pairing hits is fragile |
-| **UC 747109** (FOrna) [`EngineTrace / TraceShape release`](https://www.unknowncheats.me/forum/counter-strike-2-a/747109-enginetrace-traceshape-release.html) | **CS2 pipeline**: `InitTraceData` → `CreateTrace(pen=4)` → loop `mod_array` → `GetTraceInfo` → `HandleBulletPenetration` | engine's own `TraceData_t`/`mod_array` | 1 `CreateTrace` per candidate; O(#spans) math | forum (no grant) | The **correct CS2 autowall architecture** |
+| **UC 747109** (FOrna) [`EngineTrace / TraceShape release`](https://www.unknowncheats.me/forum/counter-strike-2-a/747109-enginetrace-traceshape-release.html) | Public `CreateTrace(pen=4)` wrapper over sorted trace results → loop `mod_array` → `GetTraceInfo` → `HandleBulletPenetration`; **not the verified current `FX_FireBullets` call path** | engine's `TraceData_t` / sorted result API | 1 wrapper call per candidate; O(#spans) arithmetic | forum (no grant) | Candidate alternative API/model; verify field semantics against the shipped shot |
 | **UC 764290** (airduck) [Full Penetration / Autowall](https://www.unknowncheats.me/forum/counter-strike-2-a/764290-penetration-autowall-damage-calculation.html) | Same pipeline; `PenetrationCount = 5`; calls `HandleBulletPenetration` *before* the hit test; adds `ScaleDamage` | engine | same | forum | `ScaleDamage` (VData headshot multiplier, body scale convars, armour formula); the 5-vs-4 note |
 | **UC 608159** (W1lliam1337) [CS2 AutoWall](https://www.unknowncheats.me/forum/counter-strike-2-a/608159-cs2-autowall-penetration-system.html) | Same pipeline (2023); includes a decompile of `HandleBulletPenetration` | engine | same | forum | The decompile that confirms `min()` over surfaces and the special cases |
 | **Valthrun** `aim-assist` branch | External VPK parse + own raycast (POC); maintainer says perf needs work | own (map tracer) | "significant improvements … proof of concept" ([issue #180](https://github.com/Valthrun/valthrun-cs2/issues/180)) | **GPL-2.0** | What *not* to do at 1 ms/ray; the honest perf caveat |
@@ -72,11 +73,10 @@
 ```
 candidate point (bone / multipoint / scan cell)
         │
-        ├─► engine trace ──────────────► layer stack ─┐
-        │     CS:GO  TraceRay + TraceToExit           │
-        │     CS2    CreateTrace (whole stack)         │
-        │                                              ├─► per-wall arithmetic ─► damage
-        └─► own raycast ───────────────► spans ────────┘
+        ├─► current CS2 shot: TraceLineIntervals ─► advance/retrace ─► damage entries
+        ├─► public CS2 wrapper: CreateTrace / sorted TraceShape results ─► mod_array
+        ├─► CS:GO: TraceRay + TraceToExit ─────────► layer spans
+        └─► own raycast ───────────────────────────► spans
               VPK/engine shapes → BVH → ray query
 ```
 
@@ -90,10 +90,11 @@ The two engine paths differ in a way that matters for us:
 - **CS:GO**: `TraceRay` stops at the first solid; you must find the exit yourself by
   marching 4 units at a time and tracing backwards. That loop is the expensive,
   fragile part (23 point-contents probes worst case per wall).
-- **CS2**: `CreateTrace` is given the full segment and returns **all** modulation
-  spans (`mod_array`), each with `startFrac`, `endFrac`, surface indices and a damage
-  value. There is no exit-marching. This is exactly the "sorted layer stack" our
-  [`docs/ragebot.md`](../ragebot.md) §4 Tier 1 already assumes.
+- **Public CS2 `CreateTrace` wrapper**: given the full segment, it returns modulation
+  spans (`mod_array`) with fractions and surface indices, without exit-marching. This
+  describes that wrapper's contract, not the current build's `FX_FireBullets` path;
+  current-build RE shows the shot uses `TraceLineIntervals` and repeated advance. The
+  repo's Tier-1 design must validate which API best serves its candidate oracle.
 
 ---
 
@@ -288,15 +289,18 @@ for (i = 0; i < td.mod_array.size; ++i) {
 
 Key points, each visible in the post:
 
-- **`CreateTrace` is the whole trace.** `mod_array` is the sorted stack; no
-  `TraceRay`/`TraceToExit` loop exists. One call per candidate direction.
+- **Within FOrna's public wrapper, `CreateTrace` is the whole trace.** `mod_array` is
+  the sorted stack; no `TraceRay`/`TraceToExit` loop exists in that wrapper. This does
+  not describe the current `FX_FireBullets` implementation (see §4.0 and
+  [`bullet-trace.md`](../re/bullet-trace.md)).
 - **`penetrationCount` is passed twice**: as the 5th argument to `CreateTrace` (4) and
   in `handle_bullet_data_t` (4). airduck's later post uses **5** and says it fixes
   multi-wall cases (the "loop 10 times but run 9 or 11" off-by-one)
   ([764290](https://www.unknowncheats.me/forum/counter-strike-2-a/764290-penetration-autowall-damage-calculation.html)).
-  Our [`docs/re/penetration.md`](../re/penetration.md) independently concluded the
-  engine caller passes **5** ("4 penetrable walls plus the loop's off-by-one"). Treat
-  the exact count as a live-validated constant, not a guess.
+  This 4-vs-5 difference belongs to the public wrapper lineage. The current shot path's
+  `FUN_18089ca80` span limit is separately re-derived as 4 in
+  [`docs/re/penetration.md`](../re/penetration.md); do not transfer the wrapper's
+  `penetrationCount` argument to that call path.
 - **Order of the hit test vs the penetration call differs** between the two releases.
   airduck deliberately calls `HandleBulletPenetration` *before* checking the hit
   entity; FOrna checks the entity first. This changes how many spans are consumed
@@ -393,20 +397,25 @@ up. From our RE ([`bullet-trace.md`](../re/bullet-trace.md)) and the public rele
 | Entry point | Returns | Use it for |
 |---|---|---|
 | `CGamePhysicsQueryInterface::TraceShape` (`0x180a1a000`, vtable `+0x558`) | **first** hit only (`CGameTrace`: entity, hitbox, surface, fraction, end) | visibility; a single-point damage estimate is *not* enough |
-| `TraceShapeWithSortedResults` (`0x180a1af60`, `+0x560`) | the result set in sorted order (name/vtable verified; per-record semantics not mapped here) | a stack, but less well mapped than `CreateTrace`'s |
-| `TraceLineIntervals` (`0x180a19e90`) | `0x38`-byte interval records (distance `+0x0C`, enter/exit `+0x32`); **no shape pointer** | exact solid stack when we only need distances (material field still unmapped — [`bullet-trace.md`](../re/bullet-trace.md) "Still open") |
+| `TraceShapeWithSortedResults` (`0x180a1af60`, `+0x560`) | sorted raw hits converted to `0xc0`-byte trace records; distinct from the interval API | candidate sorted-hit stack; not used by the verified `FX_FireBullets` path |
+| `TraceLineIntervals` (`0x180a19e90`) | `0x38`-byte interval records (distance `+0x0C`, enter/exit `+0x32`); **full material/surface layout remains unmapped** | used by the actual shot, with repeated advance/retrace in `FUN_18089ca80` |
 | `EntitiesInBox` / `EntitiesAlongLinearSweep` | body list (`0x70` records), then shapes | broad phase / our current occluder enumeration ([`occlusion.md`](../re/occlusion.md)) |
-| `CreateTrace` + `GetTraceInfo` + `HandleBulletPenetration` | **the whole sorted surface stack** + per-span arithmetic | the engine's own autowall, one call per direction (§4.1) |
+| Public `CreateTrace` + `GetTraceInfo` + `HandleBulletPenetration` | community-described whole sorted surface stack + per-span arithmetic | an alternative wrapper/model; do not label it the current shot implementation |
 | `ClipTraceToPlayers` | fixes up a trace with player hitboxes outside the collision AABB | CS:GO-era capsule mismatch; CS2's `CreateTrace` includes hitboxes via the mask |
 
-The important distinction: **`TraceShape` is a first-hit query and cannot do an
-autowall in one call**; `CreateTrace` can. Several public aimbots use `TraceShape` and
-then walk walls by re-tracing, which is the CS:GO shape and strictly more work.
+The important distinction: **`TraceShape` is a first-hit query**. Public `CreateTrace`
+code wraps sorted-result APIs, but the current build's actual shot path is different:
+`FX_FireBullets` calls `TraceLineIntervals` through `FUN_1808830e0` and the repeated
+advance in `FUN_18089ca80`. The sorted-results wrapper may still be useful for a new
+candidate oracle, but its equivalence to the shot's intervals, surfaces, and stop rules
+is not established.
 
-### 4.1 CS2 engine pipeline (what the game does; pseudocode)
+### 4.1 Public `CreateTrace` whole-stack model (not the verified shot path)
 
-This is the version to validate against, because it *is* the engine. Types and offsets
-are ours ([`docs/re/penetration.md`](../re/penetration.md),
+The following pseudocode summarizes the public UC release lineage, **not** a confirmed
+decompilation of the current build's `FX_FireBullets` call path. Types and offsets are
+from the public releases and this repo's separate `HandleBulletPenetration` analysis
+([`docs/re/penetration.md`](../re/penetration.md),
 [`docs/re/bullet-trace.md`](../re/bullet-trace.md)).
 
 ```
@@ -613,18 +622,20 @@ The `4×` head multiplier in Osiris/iCollin is CS:GO; CS2 uses the weapon's
 
 | Structure | Where | Build | Query | Published cost |
 |---|---|---|---|---|
-| Engine physics world (BVH internal) | all engine-trace code | Valve | `TraceShape`/`CreateTrace` | not published; one call returns the whole stack |
+| Engine physics world (BVH internal) | Valve | Valve | `TraceShape` / sorted results / `TraceLineIntervals` | implementation not published; the current shot uses interval queries and repeated advance |
 | Median-split triangle BVH, leaf 4 | Read1dno | longest axis, median centre, cached `.bvh` | collect **all** hits, sort | ~1 ms/ray ([VisCheckCS2](https://raw.githubusercontent.com/Read1dno/VisCheckCS2/main/README.md)) |
 | Our `AabbBvh` (median split over hull AABBs) | `payload/aim/src/bvh.cpp` | once per level | `query_pyramid`, O(log n + k) | 1792 → 14 hulls at one spot ([`ragebot-perf.md`](../ragebot-perf.md) §3.7) |
 | Our `MeshBvh` (median split over triangles) | `payload/aim/src/bvh.cpp` | at parse | O(log n) `ray_span` | replaced O(2048) scan per ray |
 | BVH8 + per-tri layer palette | CS2FOW | offline bake, CRC-validated | AVX packet traversal | 1 ms avg / 8 ms worst claimed (**unverified**) |
 | Baked masked BVH + swept SAT | cs2-bvhtrace | offline, cache v2 | 13-axis SAT, ordered descent | ~3 µs/sweep (search snippet) |
-| No acceleration | Osiris, iCollin, qo0, UC posts | — | engine | 1 trace/candidate, ≤ 5 math steps |
+| No acceleration | Osiris, iCollin, qo0, UC posts | — | engine | public wrappers: 1 trace/candidate; current shot path: interval/retrace loop |
 
-**What this means for a 50-candidate solve.** With the engine pipeline: 50
-`CreateTrace` calls, each returning the whole stack — no per-wall re-trace. With our
-own caster: 50 BVH queries, each returning k spans — also no re-trace. Neither is
-remotely close to 0.6 s. The expensive thing is the **arrangement**, not the queries.
+**What this means for a 50-candidate solve.** A public `CreateTrace`-style candidate
+oracle would make 50 sorted-result calls if that API is validated for our objective.
+The shipped shot instead uses the interval/retrace path. Our own caster would make 50
+BVH queries, each aggregating the candidate's geometric spans. None of these costs has
+been measured on a saved scene; the current measured hot-path cost is still the
+**arrangement**, not a validated replacement trace path.
 
 ---
 
@@ -785,15 +796,17 @@ number.
 
 ### 8.2 Copy conceptually
 
-- **One query per candidate returns the whole stack.** Our `ray_span` already does
-  this per solid; a BVH query that returns all spans in `[0, distance]` nearest-first
-  is the missing piece, and it is a small change to `AabbBvh`.
+- **Aggregate all relevant spans per candidate.** Our `ray_span` returns one solid's
+  interval; a BVH query can gather candidate intervals nearest-first. A single engine
+  `TraceShapeWithSortedResults` call is another candidate, but it is not the verified
+  `FX_FireBullets` path and is not yet proven equivalent for damage/materials.
 - **Nearest-first + exact early-out** (already in `occlude_polygon`'s blocked-fragment
   pruning): stop as soon as the 4-wall budget / 90 u / `< 1` damage / `< 0.1`
   modifier gates fail. This is exact because adding walls only decreases damage.
-- **Validate against the engine pipeline.** Use the UC 747109/764290 path as an
-  oracle on a handful of rays per map: same eye, same point, compare damage to
-  <1 %. That catches material/mask/offset mistakes that no host test can.
+- **Validate against the shipped shot path.** Compare candidate traces and damage on
+  the current build using the actual `TraceLineIntervals`/advance path. UC 747109/764290
+  can be a separate sorted-results comparison, not the sole engine oracle. Same eye and
+  point; compare ordered spans and damage on saved geometry.
 - **Material data from the engine**, not from a VPK: ours already reads
   `shape+0x48 → +0x10 → SurfacePropertiesList` ([`penetration.md`](../re/penetration.md)).
 - **Conservative visibility ordering** (Osiris): visible → shoot; invisible →
@@ -869,9 +882,12 @@ copyrightable; expression is.
 
 ## 9. Open questions / unverified
 
-1. **Exact `penetration_count`** the live engine passes (4 vs 5) and whether
-   `CreateTrace`'s 5th argument and `BulletPenetrationData_t.count` must differ. Our
-   RE says 5; the public code is split. Needs a live probe (fire N walls, count).
+1. **Exact stop semantics and accounting for the current shot.** Static RE now shows
+   `FX_FireBullets` passes 4 through `FUN_180887d60` into the `FUN_18089ca80` span
+   limit, alongside an independent retry guard and 90-unit cap. Map how that limit,
+   `FUN_180885710`'s modulation entries, and `HandleBulletPenetration`'s separate
+   secondary-trace argument interact; do not reuse the public `CreateTrace` 4-vs-5
+   convention as the live shot's count. Runtime N-wall differential remains open.
 2. **`GetDamageToPoint`** (`4C 8B DC 53 55 41`) — exists, call convention unknown,
    public attempts fail. Potentially a one-call oracle; worth RE if we want a
    ground-truth harness.

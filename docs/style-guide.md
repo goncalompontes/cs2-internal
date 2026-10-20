@@ -4,6 +4,10 @@ Practical house style for this repo. It documents what the tree actually does,
 and calls out the few places where the code deviates from the normative ADR so
 you know which is authoritative.
 
+The cross-project baseline is the user-level `cpp-coding-standards` skill. This
+guide records this repository's overrides and toolchain-specific rules; where
+the project does not specify a choice, follow the shared baseline.
+
 **Normative sources, in order:**
 
 1. `.clang-format` — formatting is mechanical; don't argue about layout, run the
@@ -12,6 +16,8 @@ you know which is authoritative.
 3. `docs/decisions.md` **ADR-0010 (Naming & no globals, Rust-style)** — naming
    and the "no global mutable state" rule.
 4. This file — everything else (idioms, file layout, errors, tests, tooling).
+5. The user-level `cpp-coding-standards` skill — shared defaults only where
+   this repository's sources do not specify a rule.
 
 When this file and an ADR disagree, the ADR wins; open a PR to fix this file.
 
@@ -51,7 +57,7 @@ Rust-style, **no Hungarian/Windows prefixes** (`C_`, `m_`, `g_`, `p`, `dw`, `b`)
 | Variables, params, namespaces | `snake_case` | `local_controller`, `cs2::hooks` |
 | Public struct fields | `snake_case`, no suffix | `virtual_size`, `rip_disp` |
 | Private class members | `snake_case` + trailing `_` | `installed_`, `trampoline_`, `overlay_` |
-| Constants / `constexpr` | `k_` + `snake_case` | `k_dos_magic`, `k_page_count`, `k_teb_tls_pointer` |
+| Constants / `constexpr` | `SCREAMING_SNAKE_CASE` | `DOS_MAGIC`, `PAGE_COUNT`, `TEB_TLS_POINTER` |
 | `enum class` values | `snake_case` | `InlineError::unsupported_instruction` |
 | Macros | avoid; if unavoidable, `SCREAMING_SNAKE_CASE` | `CS2_NATIVE_WINDOWS_BUILD` |
 
@@ -64,6 +70,9 @@ Notes:
 - **Deviations you will see** (know them, don't copy the bad ones):
   - `host_probe.cpp` uses `PascalCase` enum values (`ParseError::Empty`). New
     code uses `snake_case`; `host_probe` predates the rule.
+  - Some existing constants use the former `k_snake_case` spelling. Treat them
+    as legacy: new constants use `SCREAMING_SNAKE_CASE`; do not mass-rename old
+    identifiers as drive-by cleanup.
   - The **Vulkan layer** (`overlay/`) and a few tests keep `g_`-prefixed file
     statics and globals (`g_lock`, `g_devices`, `g_original`). These are C-ABI
     entry points / fixtures where an explicit context object is impractical;
@@ -74,7 +83,8 @@ Notes:
 
 ## 3. Language & idioms
 
-- **C++23** (`meson.build` selects `--std=c++23` for GCC/Clang and
+- **C++23** (the shared cross-project baseline is C++20; this repo opts into
+  C++23. `meson.build` selects `--std=c++23` for GCC/Clang and
   `-std:c++latest` for `clang-cl`/`cl.exe`).
 - **Always fully qualify**: `std::uint32_t`, `std::span`, `std::size_t`. No
   `using namespace std;`.
@@ -98,6 +108,27 @@ Notes:
   applied across the tree; keep new signatures consistent.
 - **Rule of zero**: prefer value types; when a class owns a resource, make it
   non-copyable/non-movable explicitly with `= delete` (see `InlineHook`).
+- **No new global mutable state** (ADR-0010). Where a documented ABI or test
+  constraint requires shared state, keep it behind a typed accessor/wrapper;
+  use thread-safe one-time initialization (`static` local or `std::call_once`)
+  and separately synchronize every later mutation. Initialization-once is not
+  mutation safety. Since this repo returns errors as `std::expected` and does
+  not use exceptions, a once initializer returning an error normally still
+  counts as initialized; choose deliberately whether to cache or retry it. Avoid
+  re-entering the same lazy accessor during initialization. Do not widen the
+  existing C-ABI exceptions.
+- **Prefer iterator/range protocols**: use standard algorithms, range-for, and
+  C++20/23 ranges when they make the operation clearer. Keep views within the
+  lifetime of their source when they borrow, and avoid repeated traversal of
+  single-pass ranges. Straight loops remain appropriate for complex control
+  flow and measured hot paths.
+- **Prefer composition over implementation inheritance**. Use public
+  inheritance for genuine substitutability or deliberate interfaces, not just
+  to reuse code.
+- **Use generic programming for real reuse**: constrain templates with concepts
+  and range/iterator requirements. Prefer `constexpr` functions for value
+  computation; keep complex type-level metaprogramming deliberate and reviewable
+  because template complexity affects diagnostics and build times.
 - **Platform-independent core must not include `<windows.h>`** — `payload/loader`
   and `payload/game` are built both into the Windows payload and into host tests,
   so they stay free of OS headers. Guard truly platform-specific code with
@@ -227,10 +258,16 @@ over IDE settings) and can batch them via **Code ▸ Code Cleanup**.
 
 - [ ] Ran `clang-format` (or CLion) — layout is not a review topic.
 - [ ] Names follow §2; no `g_`/`m_`/Hungarian; target names only in comments.
-- [ ] New constants are `k_snake_case`; new types `PascalCase`; new members
+- [ ] New constants are `SCREAMING_SNAKE_CASE`; new types `PascalCase`; new members
       `snake_case_`.
 - [ ] Fallible calls return `std::expected`/`std::optional`; non-throwing code is
       `noexcept`.
+- [ ] No new global mutable state; approved shared state has typed access and
+      synchronization for every mutation.
+- [ ] Algorithms use ranges/iterators where they clarify intent; borrowed views
+      do not outlive or become invalid with their source.
+- [ ] Inheritance models real substitutability; code reuse uses composition or
+      appropriate generic algorithms instead.
 - [ ] `[[nodiscard]]` on result-carrying helpers; `{}` value-init; `static_cast`.
 - [ ] Platform-specific code behind `#if defined(_WIN32)` with a host stub.
 - [ ] Style bulk changes went through `scripts/clang-tidy-fix.py`, one group per

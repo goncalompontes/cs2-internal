@@ -348,15 +348,17 @@ the special case `K=1`, `D` binary-visibility, no penetration.
 ### Tier 1 — few-trace exact (no raw geometry)
 
 1. Project hitboxes → `Ω_i` (analytic).
-2. Probe `Ω_i` vertices + centroids with one `TraceShapeWithSortedResults`
-   (or `TraceLineIntervals`) each — the trace returns the **whole sorted layer
-   stack** in one call, so penetration is `O(1)` calls.
+2. Probe `Ω_i` vertices + centroids with a trace oracle. `TraceShapeWithSortedResults`
+   returns sorted hit records, while the current `FX_FireBullets` path uses
+   `TraceLineIntervals` plus repeated penetration advance; neither API's full material
+   and mesh semantics are yet validated as a drop-in oracle for our field.
 3. Where the value changes between adjacent probes, reconstruct the occluder
    edge from its reported entry/exit points (faces are planar → 3 points pin a
    plane) → the exact boundary.
 4. Assemble cells → nearest point / Chebyshev centre / blurred max.
 
-Cost: tens of calls. Fallback: bisect a straddle to tolerance.
+Cost and retry count depend on the selected trace API; do not budget Tier 1 as one
+whole-stack call until its behavior is validated. Fallback: bisect a straddle to tolerance.
 
 ### Tier 2 — zero-trace geometry (the chosen direction)
 

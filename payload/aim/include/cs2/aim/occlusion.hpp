@@ -160,10 +160,25 @@ struct OccluderCell {
 // Intersect two convex polygons (clip `a` by `b`'s half-planes). Empty when disjoint.
 [[nodiscard]] auto clip_convex(const Polygon& a, const Polygon& b) -> Polygon;
 
+// The inward half-planes for a convex polygon, prepared for repeated clipping. Preparing
+// once per occluder avoids rebuilding edge normals for every fragment in the arrangement.
+struct ConvexClipEdge {
+  Vec2 normal{};
+  float offset = 0.0F;
+};
+
+struct ConvexClipper {
+  std::vector<ConvexClipEdge> edges;
+};
+
+[[nodiscard]] auto prepare_convex_clipper(const Polygon& polygon) -> ConvexClipper;
+
 // Split `a` into the part inside `b` and the (convex) parts outside `b`. The inside
 // part is returned; the outside pieces are appended to `outside`. Both inputs must
 // be convex and wound the same way.
 void subtract_convex(const Polygon& a, const Polygon& b, Polygon& inside,
+                     std::vector<Polygon>& outside);
+void subtract_convex(const Polygon& a, const ConvexClipper& clipper, Polygon& inside,
                      std::vector<Polygon>& outside);
 
 }  // namespace cs2::aim

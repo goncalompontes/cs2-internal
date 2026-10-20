@@ -29,12 +29,13 @@ struct DamageFragment {
 // (optional, sized to `occlusion`) is marked for every solid that ended up between the
 // eye and the hitbox — the renderer's "between" set. Solids behind the hitbox or merely
 // overlapping its silhouette contribute nothing (the exact `OccluderCell::ray_span`
-// depth test, `docs/re/occlusion.md`).
+// depth test, `docs/re/occlusion.md`). `candidates_complete` is false if `max_occluders`
+// truncated this function's candidate list; callers must not score those partial fragments.
 [[nodiscard]] auto occlude_polygon(const Vec3& eye, const Basis& basis, const Polygon& silhouette,
                                    float multiplier, float distance,
                                    std::span<const OccluderCell> occlusion,
                                    const WeaponProfile& weapon, PenetrationModel model,
-                                   const PenetrationParams& params, std::span<char> used = {})
-    -> std::vector<DamageFragment>;
+                                   const PenetrationParams& params, bool& candidates_complete,
+                                   std::span<char> used = {}) -> std::vector<DamageFragment>;
 
 }  // namespace cs2::aim

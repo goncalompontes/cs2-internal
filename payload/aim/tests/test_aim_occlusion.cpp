@@ -136,6 +136,36 @@ auto main() -> int {
     }
     expect(near(total, 4.0F, 0.05F), "inside + outside = a");
     expect(!outside.empty(), "the outside is made of convex pieces");
+    const auto clipper = cs2::aim::prepare_convex_clipper(b);
+    cs2::aim::Polygon prepared_inside;
+    std::vector<cs2::aim::Polygon> prepared_outside;
+    cs2::aim::subtract_convex(a, clipper, prepared_inside, prepared_outside);
+    expect(prepared_inside.points.size() == inside.points.size(),
+           "prepared clipper preserves the inside polygon topology");
+    expect(prepared_outside.size() == outside.size(),
+           "prepared clipper preserves the outside fragment count");
+    bool same_inside = prepared_inside.points.size() == inside.points.size();
+    for (std::size_t i = 0; i < inside.points.size() && same_inside; ++i) {
+      same_inside = near(prepared_inside.points[i].x, inside.points[i].x, 1e-6F) &&
+                    near(prepared_inside.points[i].y, inside.points[i].y, 1e-6F);
+    }
+    expect(same_inside, "prepared clipper preserves inside vertices");
+    bool same_outside = prepared_outside.size() == outside.size();
+    for (std::size_t i = 0; i < outside.size() && same_outside; ++i) {
+      same_outside = prepared_outside[i].points.size() == outside[i].points.size();
+      for (std::size_t j = 0; j < outside[i].points.size() && same_outside; ++j) {
+        same_outside = near(prepared_outside[i].points[j].x, outside[i].points[j].x, 1e-6F) &&
+                       near(prepared_outside[i].points[j].y, outside[i].points[j].y, 1e-6F);
+      }
+    }
+    expect(same_outside, "prepared clipper preserves outside vertices");
+    expect(near(cs2::aim::polygon_area(prepared_inside), cs2::aim::polygon_area(inside), 1e-6F),
+           "prepared clipper preserves inside area");
+    float prepared_total = cs2::aim::polygon_area(prepared_inside);
+    for (const auto& piece : prepared_outside) {
+      prepared_total += cs2::aim::polygon_area(piece);
+    }
+    expect(near(prepared_total, total, 1e-6F), "prepared clipper preserves total area");
   }
 
   // --- the heatmap splits a silhouette by an occluder ----------------------
@@ -165,6 +195,15 @@ auto main() -> int {
     }
     expect(near(hi, 400.0F, 1.0F), "the uncovered part keeps full damage");
     expect(near(lo, 200.0F, 2.0F), "the covered part keeps half (1 - 0.5)");
+
+    if (occ.has_value()) {
+      HeatmapOptions capped = options;
+      capped.penetration_params.max_occluders = 1;
+      capped.occlusion.push_back(*occ);
+      const auto incomplete = cs2::aim::build_heatmap(Vec3{}, basis, 1.0F, poses, capped);
+      expect(!incomplete.occlusion_candidates_complete,
+             "the heatmap reports when an occluder cap truncated its geometry");
+    }
 
     // A blocking wall (thickness >= penetration) drops the hitbox entirely.
     HeatmapOptions blocking = options;

@@ -515,27 +515,34 @@ TBD).
 REA now has a **persistent Ghidra project cache**: a target is imported and
 analyzed once and reused by later sessions (CLI and MCP). The one-time Windows
 gap in the existing-project launch path was fixed upstream (PR #2358, commit
-`9adad2c`); the cache itself is the new PR `feat/ghidra-project-cache` (merged
-with `main`).
+`9adad2c`); the cache itself is the PR `feat/ghidra-project-cache`
+(`morluto/rea#3531`).
 
-- Installed build: `C:\Users\gpmpo\rea-src-install` (v6.4.0 + cache), `npm link`ed
-  so the global `rea` shim points there. The PR source is
-  `C:\Users\gpmpo\rea-src` (branch `feat/ghidra-project-cache`). **Windows cannot
-  run the merged build** — its native loader needs an addon field the prebuilt
-  v6.4.0 artifact lacks, and the addon lane is Linux + MinGW.
+- Installed build: `C:\Users\gpmpo\rea-src` (branch `feat/ghidra-project-cache`,
+  head `d4b8afbba`), `npm link`ed so the global `rea` shim points there as
+  `rea-agents@6.7.0`. The MCP entry runs
+  `C:\Users\gpmpo\AppData\Roaming\npm\node_modules\rea-agents\scripts\rea.mjs mcp`,
+  which is that link. `C:\Users\gpmpo\rea-src-install` is a **stale** checkout — do
+  not use it. **Windows runs this build** (the native addon is present and
+  `rea doctor --provider ghidra` reports `ghidra-native_authority` healthy).
 - Ghidra **12.1.4**: `C:\Users\gpmpo\ghidra\ghidra_12.1.4_PUBLIC`; Java 21:
   `C:\Program Files\Java\jdk-21`.
 - OpenCode MCP entry (`C:\Users\gpmpo\.config\opencode\opencode.jsonc`): command
-  `node C:\Users\gpmpo\rea-src-install\scripts\rea.mjs mcp`, env
-  `REA_ANALYSIS_PROVIDER=ghidra`, `GHIDRA_INSTALL_DIR`, `JAVA_HOME`,
-  `REA_GHIDRA_STARTUP_TIMEOUT_MS=1800000`, **`REA_GHIDRA_PROJECT_CACHE=on`**.
-- Warm targets are automatic and keyed by target, so no config edit to switch:
-  `engine2.dll` (first open 256.8 s → hit ~31 s) and `client.dll` (~21 min → hit
-  ~49 s) are seeded from `ghidra-analysis\rea-project` / `client-warm`. See
-  `docs/re/README.md` §8 for setup, seeding and `rea cache-*`.
+  `node C:\Users\gpmpo\AppData\Roaming\npm\node_modules\rea-agents\scripts\rea.mjs mcp`,
+  env `REA_ANALYSIS_PROVIDER=ghidra`, `GHIDRA_INSTALL_DIR`, `JAVA_HOME`,
+  `REA_GHIDRA_STARTUP_TIMEOUT_MS=1800000`, **`REA_GHIDRA_PROJECT_CACHE=on`**,
+  `REA_GHIDRA_PROJECT_CACHE_DIR`.
+- Warm targets are automatic and keyed by target, so no config edit to switch.
+  **The previously seeded entries were lost on 2026-10-20** (a stray probe script
+  deleted the old cache root) — only `where.exe` is warm now; re-seed
+  `engine2.dll` / `client.dll` with
+  `scripts/seed-rea-project-cache.mjs` (see `docs/re/README.md` §8) or let them
+  re-import once (`client.dll` ~21 min → hit ~49 s). `rea cache-list` shows what
+  is warm.
 - The running `rea` MCP server **hot-reloads** config edits; do **not**
-  `opencode service restart` (it kills the agent session). Windows Ghidra P0 is
-  **read-only** (no annotation).
+  `opencode service restart` (it kills the agent session). A config edit also
+  **respawns** the MCP servers, which is how a rebuilt REA reaches the session.
+  Windows Ghidra P0 is **read-only** (no annotation).
 
 Warm-analysis env for CLI use:
 
@@ -545,7 +552,7 @@ $env:JAVA_HOME                = "C:\Program Files\Java\jdk-21"
 $env:REA_ANALYSIS_PROVIDER    = "ghidra"
 $env:REA_GHIDRA_PROJECT_CACHE = "on"
 # Run the installed build so the native addon matches:
-node C:\Users\gpmpo\rea-src-install\scripts\rea.mjs analyze <target> --provider ghidra --json
+node C:\Users\gpmpo\AppData\Roaming\npm\node_modules\rea-agents\scripts\rea.mjs analyze <target> --provider ghidra --json
 ```
 
 ## Next actions (pick up here)

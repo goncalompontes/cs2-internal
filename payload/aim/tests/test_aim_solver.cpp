@@ -175,8 +175,8 @@ auto main() -> int {
     head.penetration_params.weapon_penetration = 1.0F;
     Hitbox cap;
     cap.is_capsule = true;
-    cap.capsule =
-        cs2::aim::Capsule{.a = Vec3{20.0F, -1.0F, -1.0F}, .b = Vec3{20.0F, 1.0F, 1.0F}, .radius = 1.0F};
+    cap.capsule = cs2::aim::Capsule{
+        .a = Vec3{20.0F, -1.0F, -1.0F}, .b = Vec3{20.0F, 1.0F, 1.0F}, .radius = 1.0F};
     cap.multiplier = 4.0F;
     head.hitboxes.push_back(cap);
 
@@ -199,6 +199,30 @@ auto main() -> int {
       blocked.occlusion.push_back(*w);
     }
     expect(!cs2::aim::solve(blocked).valid, "an impenetrable surface leaves nothing to aim at");
+
+    SolveInput capped = head;
+    capped.penetration_params.max_occluders = 1;
+    if (const auto w = wall(1.0F); w.has_value()) {
+      capped.occlusion.push_back(*w);
+      capped.occlusion.push_back(*w);
+    }
+    const auto incomplete = cs2::aim::solve(capped);
+    expect(!incomplete.valid && !incomplete.occlusion_candidates_complete,
+           "an occluder cap overflow fails closed instead of scoring a partial field");
+
+    SolveInput tagged = capped;
+    tagged.occlusion[0].target = 2;
+    tagged.occlusion[1].target = 2;
+    Hitbox valid_pose_hitbox = cap;
+    valid_pose_hitbox.target = 1;  // neither tagged wall belongs to this pose's target
+    Hitbox capped_pose_hitbox = cap;
+    capped_pose_hitbox.target = 2;
+    const std::vector<cs2::aim::PoseCandidate> capped_poses{
+        cs2::aim::PoseCandidate{.record = -1, .hitboxes = {valid_pose_hitbox}},
+        cs2::aim::PoseCandidate{.record = 1, .hitboxes = {capped_pose_hitbox}}};
+    const auto capped_backtrack = cs2::aim::solve_backtrack(tagged, capped_poses);
+    expect(!capped_backtrack.valid && !capped_backtrack.occlusion_candidates_complete,
+           "backtracking fails closed if any candidate pose has incomplete geometry");
   }
 
   // --- hitchance objective -------------------------------------------------

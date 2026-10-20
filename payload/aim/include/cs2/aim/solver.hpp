@@ -56,9 +56,10 @@ struct SolveInput {
 
 struct SolveResult {
   bool valid = false;
-  Vec2 aim{};          // chart point
-  Vec3 direction{};    // world direction
-  float value = 0.0F;  // field value at the aim
+  bool occlusion_candidates_complete = true;  // false when the per-hitbox cap truncated input
+  Vec2 aim{};                                 // chart point
+  Vec3 direction{};                           // world direction
+  float value = 0.0F;                         // field value at the aim
   // The probability the shot lands on the target for the chosen aim (the cone
   // `spread_sigma`): 1 when the whole cone is inside a hitbox, 0 when it misses.
   float hitchance = 0.0F;
@@ -73,14 +74,14 @@ struct SolveResult {
 // non-null pointer is passed (the default keeps the hot path unmeasured). This is
 // how the pipeline's cost is attributed without a profiler.
 struct SolveStats {
-  std::uint64_t project_us = 0;    // hitbox silhouette projection
-  std::uint64_t occlude_us = 0;    // occlude_polygon (fragment split + penetration)
-  std::uint64_t argmax_us = 0;     // the objective's optimum search
+  std::uint64_t project_us = 0;  // hitbox silhouette projection
+  std::uint64_t occlude_us = 0;  // occlude_polygon (fragment split + penetration)
+  std::uint64_t argmax_us = 0;   // the objective's optimum search
   std::uint64_t total_us = 0;
-  std::uint32_t solves = 0;        // number of `solve` calls
-  std::uint32_t hitboxes = 0;      // hitbox silhouettes projected
-  std::uint32_t fragments = 0;     // damage fragments emitted
-  std::uint32_t cells = 0;         // field cells after occlusion
+  std::uint32_t solves = 0;     // number of `solve` calls
+  std::uint32_t hitboxes = 0;   // hitbox silhouettes projected
+  std::uint32_t fragments = 0;  // damage fragments emitted
+  std::uint32_t cells = 0;      // field cells after occlusion
 };
 
 [[nodiscard]] auto solve(const SolveInput& input, SolveStats* stats = nullptr) -> SolveResult;
@@ -95,6 +96,7 @@ struct PoseCandidate {
 
 struct BacktrackResult {
   bool valid = false;
+  bool occlusion_candidates_complete = true;
   SolveResult solve{};  // the winning pose's aim / value / cells
   int record = -1;      // the winning pose's record (-1 = live)
   float age = 0.0F;

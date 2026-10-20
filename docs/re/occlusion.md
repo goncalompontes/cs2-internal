@@ -325,6 +325,12 @@ contents, results, flag)`), then walk the `0x70`-stride records.
 
 ## Tooling note — REA's Ghidra cache is broken on this host
 
+> **Resolved 2026-10-20.** The reopen failure below was a cache-root problem, not a
+> stored-DB problem: the root was not owner-only, and the durable root was the sealed
+> native runtime root. Upstream `d4b8afbba` (`morluto/rea#3531`) fixes both, and the
+> cache root is now private and self-repairing. The entries seeded before the fix were
+> lost, so re-seed them (`docs/re/README.md` §8).
+
 REA (`v6.4.0`, `REA_GHIDRA_PROJECT_CACHE=on`) writes a cached Ghidra project for a
 new target, but **reopening it fails** with
 `java.io.IOException: Unrecognized file format` at `LocalBufferFile.readHeader`

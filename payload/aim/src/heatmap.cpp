@@ -76,14 +76,15 @@ auto build_heatmap(const Vec3& eye, const Basis& basis, float extent,
       const Vec3 center = hitbox_center(hitbox);
       const float distance = game::distance(eye, center);
 
-      const float multiplier = hitbox.group == k_hitgroup_head
-                                     ? options.weapon.headshot_multiplier
-                                     : hitbox.multiplier;
+      const float multiplier =
+          hitbox.group == k_hitgroup_head ? options.weapon.headshot_multiplier : hitbox.multiplier;
       // Split the silhouette by the solids in front and value each fragment with the
       // chosen penetration model (the shared `occlude_polygon`, docs/ragebot.md §3).
-      const std::vector<DamageFragment> fragments =
-          occlude_polygon(eye, basis, base, multiplier, distance, options.occlusion,
-                          options.weapon, options.penetration, options.penetration_params, used);
+      bool candidates_complete = true;
+      const std::vector<DamageFragment> fragments = occlude_polygon(
+          eye, basis, base, multiplier, distance, options.occlusion, options.weapon,
+          options.penetration, options.penetration_params, candidates_complete, used);
+      map.occlusion_candidates_complete = map.occlusion_candidates_complete && candidates_complete;
       for (const DamageFragment& fragment : fragments) {
         map.cells.push_back(HeatCell{fragment.polygon, fragment.value, fragment.base_value,
                                      pose.target, hitbox.group, pose.record, pose.age});

@@ -1095,6 +1095,7 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
   aim::Aabb targets[k_max_occlusion_targets] = {};
   std::uintptr_t target_pawns[k_max_occlusion_targets] = {};
   int target_count = 0;
+  bool inputs_complete = true;
   const auto target_for = [&](std::uintptr_t pawn) -> aim::Aabb* {
     for (int i = 0; i < target_count; ++i) {
       if (target_pawns[i] == pawn) {
@@ -1102,6 +1103,7 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
       }
     }
     if (target_count >= k_max_occlusion_targets) {
+      inputs_complete = false;
       return nullptr;
     }
     target_pawns[target_count] = pawn;
@@ -1178,6 +1180,8 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
       if (target_count < k_max_occlusion_targets) {
         const game::Vec3 pad{24.0F, 24.0F, 72.0F};  // a player-sized proxy box
         targets[target_count++] = aim::Aabb{player.eye_origin - pad, player.eye_origin + pad};
+      } else {
+        inputs_complete = false;
       }
     }
   }
@@ -1192,6 +1196,7 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
   occlusion_lo_ = lo;
   occlusion_hi_ = hi;
   occlusion_target_count_ = target_count;
+  occlusion_inputs_complete_ = inputs_complete;
   for (int i = 0; i < target_count; ++i) {
     occlusion_targets_[i] = targets[i];
   }
@@ -1199,7 +1204,12 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
   // entity identity index, exactly the record handle's `& 0x7fff`.
   int n = 0;
   for (const game::PlayerSnapshot& player : snapshot.players) {
-    if (n >= k_max_occlusion_exclude || player.index < 0) {
+    if (n >= k_max_occlusion_exclude) {
+      occlusion_inputs_complete_ = false;
+      continue;
+    }
+    if (player.index < 0) {
+      occlusion_inputs_complete_ = false;
       continue;
     }
     occlusion_exclude_[n] = static_cast<std::uint16_t>(player.index & 0x7fff);
@@ -1236,6 +1246,7 @@ void Service::on_game_thread() noexcept {
     aim::Aabb targets[k_max_occlusion_targets] = {};
     int exclude_count = 0;
     int target_count = 0;
+    bool inputs_complete = true;
     {
       std::lock_guard<std::mutex> lock(occlusion_mutex_);
       eye = occlusion_eye_;
@@ -1243,6 +1254,7 @@ void Service::on_game_thread() noexcept {
       box_max = occlusion_hi_;
       exclude_count = occlusion_exclude_count_;
       target_count = occlusion_target_count_;
+      inputs_complete = occlusion_inputs_complete_;
       for (int i = 0; i < exclude_count; ++i) {
         exclude[i] = occlusion_exclude_[i];
         pawns[i] = occlusion_pawns_[i];
@@ -1254,7 +1266,6 @@ void Service::on_game_thread() noexcept {
     // The payload trace filter rejects the players (a target, not a solid) — the engine
     // calls it for every non-worldspawn overlap (`docs/re/occlusion.md`).
     set_occlusion_exclude_pawns(pawns, exclude_count);
-    OcclusionQueryStats stats;
     // The enumeration volume: the per-target pyramid union by default, or the older
     // single AABB when the diagnostic asks for it (`occlusion_enum_mode_`).
     // `enum=box` forces the single-AABB volume; `enum=both` uses the pyramid for the
@@ -1262,12 +1273,19 @@ void Service::on_game_thread() noexcept {
     const int enum_mode = occlusion_enum_mode_.load();
     const bool use_pyramid = enum_mode != 1;
     const bool verify_enum = enum_mode == 2;
-    std::vector<OcclusionHull> hulls = query_world_occluders(
-        eye, box_min, box_max, occlusion_invoke_.load(), &stats, exclude, exclude_count,
+    OcclusionQueryResult query = query_world_occluders(
+        eye, box_min, box_max, occlusion_invoke_.load(), exclude, exclude_count,
         use_pyramid ? targets : nullptr, use_pyramid ? target_count : 0, verify_enum);
+    if (!inputs_complete) {
+      query.stats.complete = false;
+      query.stats.incomplete_reasons |=
+          static_cast<std::uint32_t>(OcclusionQueryIssue::target_capacity);
+    }
+    rage_occlusion_query_complete_.store(query.complete(), std::memory_order_relaxed);
+    rage_occlusion_query_issues_.store(query.stats.incomplete_reasons, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(occlusion_mutex_);
-    occlusion_hulls_ = std::move(hulls);
-    occlusion_stats_ = stats;
+    occlusion_hulls_ = std::move(query.hulls);
+    occlusion_stats_ = query.stats;
   }
 
   // The ragebot solve, on the **game thread** (this hook runs per simulated command), so
@@ -1331,9 +1349,14 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     input_.clear_rage_aim();
     return;
   }
-  // The hook is what runs `apply()` per tick; install it on first use so the ragebot
-  // works during menu-only play (no scenario attached).
+  rage_occlusion_candidates_complete_.store(true, std::memory_order_relaxed);
+  // Install the game-thread hook before gating on query completeness: the next hook
+  // invocation is what drains the pending occlusion request and can make this gate pass.
   input_.refresh();
+  if (!rage_occlusion_query_complete_.load(std::memory_order_relaxed)) {
+    input_.clear_rage_aim_keep_aux();
+    return;
+  }
   if (!snapshot.valid || !snapshot.local.has_value() || !snapshot.local->alive) {
     input_.clear_rage_aim();
     return;
@@ -1554,14 +1577,14 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     }
     perf_.project_us.fetch_add(now_us() - t_project, std::memory_order_relaxed);
   }
-  // Occlusion work bound for the rage solve (`PenetrationParams::max_occluders`): the
-  // nearest solids per hitbox. Tune here if a spot still stalls the game.
+  // Temporary occlusion work bound (`PenetrationParams::max_occluders`). If this
+  // truncates a hitbox's candidates, `solve` fails closed; it never commits the partial
+  // damage score. Remove this cap only after the complete ray-query path is validated.
   static constexpr int k_max_solve_occluders = 24;
   solve_input->penetration = aim::PenetrationModel::engine;
   solve_input->penetration_params.weapon_penetration = solve_input->weapon.penetration;
-  // Bound the arrangement cost: examine the nearest solids per hitbox only. Without it a
-  // dense position (a long eye→enemy cone) exploded into ~15k fragments and ~0.6 s per
-  // tick. See `PenetrationParams::max_occluders` for the tradeoff.
+  // Bound arrangement work temporarily. Overflow is surfaced as an incomplete solve, not
+  // accepted as an approximate aim. See `PenetrationParams::max_occluders`.
   solve_input->penetration_params.max_occluders = k_max_solve_occluders;
   rage_occluders_.store(static_cast<int>(solve_input->occlusion.size()));
   solve_input->pose_sigma = rage_sigma_.load();
@@ -1598,6 +1621,8 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   perf_.solve_argmax_us.fetch_add(solve_stats.argmax_us, std::memory_order_relaxed);
   perf_.hitboxes.store(solve_stats.hitboxes, std::memory_order_relaxed);
   perf_.cells.store(solve_stats.cells, std::memory_order_relaxed);
+  rage_occlusion_candidates_complete_.store(multi_result.occlusion_candidates_complete,
+                                            std::memory_order_relaxed);
   if (!multi_result.valid) {
     input_.clear_rage_aim_keep_aux();
     return;
@@ -1683,6 +1708,8 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     perf_.solve_project_us.fetch_add(backtrack_stats.project_us, std::memory_order_relaxed);
     perf_.solve_occlude_us.fetch_add(backtrack_stats.occlude_us, std::memory_order_relaxed);
     perf_.solve_argmax_us.fetch_add(backtrack_stats.argmax_us, std::memory_order_relaxed);
+    rage_occlusion_candidates_complete_.store(backtrack.occlusion_candidates_complete,
+                                              std::memory_order_relaxed);
     if (!backtrack.valid) {
       input_.clear_rage_aim_keep_aux();
       return;
@@ -1794,13 +1821,15 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
     return false;
   }
   const int target = input_.rage_target();
-  std::snprintf(out, size, "rage: %s target %d box %d w%llu s%llu bt%llu rec%d occ%d fire %d%s",
-                input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(),
-                static_cast<unsigned long long>(input_.rage_writes()),
-                static_cast<unsigned long long>(input_.rage_shots()),
-                static_cast<unsigned long long>(rage_backtracks_.load()), rage_last_record_.load(),
-                rage_occluders_.load(), input_.rage_fire() ? 1 : 0,
-                input_.rage_stop() ? " stop" : "");
+  std::snprintf(
+      out, size, "rage: %s target %d box %d w%llu s%llu bt%llu rec%d occ%d fire %d%s%s%s",
+      input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(),
+      static_cast<unsigned long long>(input_.rage_writes()),
+      static_cast<unsigned long long>(input_.rage_shots()),
+      static_cast<unsigned long long>(rage_backtracks_.load()), rage_last_record_.load(),
+      rage_occluders_.load(), input_.rage_fire() ? 1 : 0, input_.rage_stop() ? " stop" : "",
+      rage_occlusion_query_complete_.load(std::memory_order_relaxed) ? "" : " occlusion-incomplete",
+      rage_occlusion_candidates_complete_.load(std::memory_order_relaxed) ? "" : " occlusion-cap");
   return true;
 }
 
@@ -1889,7 +1918,9 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
 
   const aim::SolveResult result = aim::solve(*input);
   if (!result.valid) {
-    set_error(out, "aim unavailable: no hittable target");
+    set_error(out, result.occlusion_candidates_complete
+                       ? "aim unavailable: no hittable target"
+                       : "aim unavailable: per-hitbox occluder cap");
     return;
   }
 
@@ -2093,6 +2124,11 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   payload.set("writes", Json::number(static_cast<double>(input_.rage_writes())));
   payload.set("shots", Json::number(static_cast<double>(input_.rage_shots())));
   payload.set("occluders", Json::number(static_cast<double>(rage_occluders_.load())));
+  payload.set("occlusion_query_complete",
+              Json::boolean(rage_occlusion_query_complete_.load(std::memory_order_relaxed)));
+  payload.set("occlusion_query_issues",
+              Json::integer(static_cast<std::int64_t>(
+                  rage_occlusion_query_issues_.load(std::memory_order_relaxed))));
   payload.set("backtracks", Json::number(static_cast<double>(rage_backtracks_.load())));
   payload.set("record", Json::number(static_cast<double>(rage_last_record_.load())));
   payload.set("objective", Json::number(static_cast<double>(rage_objective_.load())));
@@ -2456,6 +2492,33 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   walls_json.set("called", Json::boolean(walls_call));
   walls_json.set("ok", Json::boolean(walls_stats.ok));
   walls_json.set("faulted", Json::boolean(walls_stats.faulted));
+  walls_json.set("query_complete", Json::boolean(walls_stats.complete));
+  Json query_issues = Json::array();
+  constexpr struct {
+    OcclusionQueryIssue issue;
+    const char* name;
+  } k_query_issue_names[] = {
+      {OcclusionQueryIssue::not_invoked, "not-invoked"},
+      {OcclusionQueryIssue::query_unavailable, "query-unavailable"},
+      {OcclusionQueryIssue::query_fault, "query-fault"},
+      {OcclusionQueryIssue::record_capacity, "record-capacity"},
+      {OcclusionQueryIssue::record_scan_limit, "record-scan-limit"},
+      {OcclusionQueryIssue::body_capacity, "body-capacity"},
+      {OcclusionQueryIssue::parser_failure, "parser-failure"},
+      {OcclusionQueryIssue::parser_limit, "parser-limit"},
+      {OcclusionQueryIssue::mesh_cluster_limit, "mesh-cluster-limit"},
+      {OcclusionQueryIssue::unsupported_compound, "unsupported-compound"},
+      {OcclusionQueryIssue::occluder_capacity, "occluder-capacity"},
+      {OcclusionQueryIssue::target_capacity, "target-capacity"},
+      {OcclusionQueryIssue::surface_metadata, "surface-metadata"},
+  };
+  for (const auto& entry : k_query_issue_names) {
+    const auto bit = static_cast<std::uint32_t>(entry.issue);
+    if ((walls_stats.incomplete_reasons & bit) != 0) {
+      query_issues.push_back(Json::string(entry.name));
+    }
+  }
+  walls_json.set("incomplete_reasons", std::move(query_issues));
   walls_json.set("records", Json::integer(walls_stats.records));
   walls_json.set("bodies", Json::integer(walls_stats.bodies));
   walls_json.set("shapes", Json::integer(walls_stats.shapes));
@@ -2489,6 +2552,9 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   walls_json.set("occluders", Json::integer(static_cast<std::int64_t>(options.occlusion.size())));
   // The penetration model this chart was valued with (docs/re/penetration.md).
   walls_json.set("penetration_model", Json::string(engine_pen ? "engine" : "simple"));
+  // This flag is only the downstream per-hitbox candidate-cap status; it does not mean
+  // the engine query/parser returned the whole scene (see query_complete above).
+  walls_json.set("occlusion_candidates_complete", Json::boolean(map.occlusion_candidates_complete));
   walls_json.set("max_penetrations", Json::integer(options.penetration_params.max_penetrations));
   walls_json.set("pen_mod", Json::number(static_cast<double>(pen_mod)));
   walls_json.set("dmg_mod", Json::number(static_cast<double>(dmg_mod)));

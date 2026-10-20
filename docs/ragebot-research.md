@@ -58,12 +58,12 @@ References:
   no probability model. Do not cite it as the CS2 combat reference.
   <https://github.com/danielkrupinski/Osiris> (verified: MIT `LICENSE`, and
   `Source/Features/` on `master` has no `Aimbot`.)
-- **The CS2 lineage is `CreateTrace`, not a trace loop.** In CS2 the engine call returns
-  the **entire sorted surface stack** for a ray in one go (`TraceData_t::mod_array`), and
-  `HandleBulletPenetration` is pure arithmetic per stack entry. So a correct CS2 autowall
-  is *one engine call + ≤5 arithmetic steps* — the CS:GO `TraceRay`/`TraceToExit` loop is
-  the wrong shape. The public CS2 releases that do this are the UC "EngineTrace /
-  TraceShape" line (UC 747109 → 608159 → 764290).
+- **Public CS2 `CreateTrace` releases and the shipped shot path are different.** The
+  community "EngineTrace / TraceShape" lineage (UC 747109 → 608159 → 764290) describes
+  a sorted `TraceData_t::mod_array` wrapper. Fresh RE on the current `client.dll` hash
+  shows `FX_FireBullets` instead calls `TraceLineIntervals` and the repeated advance in
+  `FUN_18089ca80`, then processes modulation entries. Do not assume one call returns the
+  actual shot's complete surface stack; see [`re/bullet-trace.md`](re/bullet-trace.md).
 - UC: *Full Penetration / Autowall / Damage calculation* (CS2 structs + code).
   <https://www.unknowncheats.me/forum/counter-strike-2-a/764290-penetration-autowall-damage-calculation.html>
 
@@ -78,8 +78,9 @@ full survey, and note the licences there before reading any code.
 
 We already have the hard parts of a payload-side ray caster:
 
-- `OccluderCell::ray_span(eye, dir)` — the exact ray/solid interval for hulls
-  (half-space clipping) and meshes (triangle BVH). That *is* a ray caster.
+- `OccluderCell::ray_span(eye, dir)` — the ray/solid interval for hulls
+  (half-space clipping) and a triangle-BVH mesh path. Mesh spans currently retain only
+  two triangle crossings and are not yet validated against the engine's interval records.
 - The cached world hulls carry vertices, planes, **triangles and a `MeshBvh`**.
 - `EntityWithEntry`/`entry` distances already give us the nearest-first ordering.
 - `penetration_after_walls()` (engine model) already walks a wall stack with the

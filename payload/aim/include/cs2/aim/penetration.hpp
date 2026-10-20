@@ -66,11 +66,10 @@ struct PenetrationParams {
   int max_penetrations = 4;          // the engine's `penetrate_count` budget
   float max_total_thickness = 90.0F; // FUN_18089ca80's accumulated-thickness cap
   float max_trace_length = 3000.0F;  // HandleBulletPenetration's trace-length cap
-  // Safety valve for the arrangement cost: examine at most this many candidate solids per
-  // hitbox, **nearest-first** (0 = unlimited). The engine's budget is 4 penetrated walls
-  // and ~90 units of crossed thickness, so the walls that decide a shot are the nearest
-  // ones; but a far solid can still be the *first* wall on a ray that misses the nearer
-  // ones, so this is a deliberate cost/accuracy knob, not an exactness-preserving cut.
+  // Temporary arrangement work cap: examine at most this many candidate solids per
+  // hitbox, nearest-first (0 = unlimited). A farther solid can still be the first wall on
+  // some ray, so this is not safe pruning. `occlude_polygon` reports candidate overflow;
+  // the aim solver must fail closed instead of using its partial score.
   // Without it, a position whose cone crosses a dense map exploded into ~15k fragments and
   // ~0.6 s per tick (`docs/ragebot-perf.md` §3.9).
   int max_occluders = 0;
@@ -84,12 +83,21 @@ struct PenetrationParams {
                                             const PenetrationLayer& layer) noexcept
     -> std::optional<float>;
 
-// The whole shot: walk `layers` (they must already be sorted nearest-first) and
-// return the damage that survives to the far side. 0 when a wall stops the bullet.
-// The engine's trace-length cap is applied per wall from the wall's own distance
-// (`PenetrationLayer::entry`), so an unobstructed long-range shot is unaffected.
+// Apply only wall losses to damage arriving at the first layer. Layers must be sorted
+// nearest-first. This helper does not apply free-flight range falloff; use
+// `penetration_damage_at_target` for a complete muzzle-to-target shot.
 [[nodiscard]] auto penetration_after_walls(float damage, const PenetrationParams& params,
                                            std::span<const PenetrationLayer> layers) noexcept
+    -> float;
+
+// Evaluate a complete shot from the muzzle to the target: apply range falloff over each
+// free-flight segment, wall loss at each layer, then the final free-flight segment. `damage`
+// is unscaled weapon damage at the muzzle; the caller applies hitgroup scaling afterward.
+// Armor scaling is not represented by this function.
+[[nodiscard]] auto penetration_damage_at_target(float damage, float range_modifier,
+                                                float target_distance,
+                                                const PenetrationParams& params,
+                                                std::span<const PenetrationLayer> layers) noexcept
     -> float;
 
 }  // namespace cs2::aim
