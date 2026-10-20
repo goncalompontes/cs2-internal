@@ -698,7 +698,7 @@ void test_the_button_bits_are_the_engine_bits() {
   assert(cs2::control::button_bit("walk") == 0);
 }
 
-// --- the steering verdict ------------------------------------------------------
+// --- the steering verdict -----------------------------------------------------
 
 // The verdict is what tells the operator whether the silent encoding can work
 // at all on this server: the engine turns the velocity toward the wish when it
@@ -706,35 +706,69 @@ void test_the_button_bits_are_the_engine_bits() {
 // ignores the sub-tick view angles (`sv_subtick_movement_view_angles 0`).
 void test_steering_verdict() {
   using cs2::control::SteerVerdict;
+  const auto verdict = [](float previous, float now, int side, float request) {
+    return cs2::control::classify_steer(previous, now, side, request);
+  };
   // The velocity turned toward the wish (the side is +1 = counter-clockwise):
   // the rotation was applied.
-  assert(cs2::control::classify_steer(100.0F, 104.0F, 1, 84.0F) == SteerVerdict::followed);
+  assert(verdict(100.0F, 104.0F, 1, 84.0F) == SteerVerdict::followed);
   // The other way round: the velocity turned clockwise on a counter-clockwise
   // wish — as wrong as no turn at all.
-  assert(cs2::control::classify_steer(100.0F, 96.0F, 1, 84.0F) == SteerVerdict::ignored);
+  assert(verdict(100.0F, 96.0F, 1, 84.0F) == SteerVerdict::ignored);
   // The clockwise wish and a clockwise turn: followed.
-  assert(cs2::control::classify_steer(100.0F, 96.0F, -1, 84.0F) == SteerVerdict::followed);
+  assert(verdict(100.0F, 96.0F, -1, 84.0F) == SteerVerdict::followed);
   // The velocity did not move at all: the engine ignored the rotation.
-  assert(cs2::control::classify_steer(100.0F, 100.0F, 1, 84.0F) == SteerVerdict::ignored);
+  assert(verdict(100.0F, 100.0F, 1, 84.0F) == SteerVerdict::ignored);
   // The noise floor: a turn below the threshold is not a turn.
-  assert(cs2::control::classify_steer(100.0F, 100.1F, 1, 84.0F) == SteerVerdict::ignored);
+  assert(verdict(100.0F, 100.1F, 1, 84.0F) == SteerVerdict::ignored);
   // Nothing was asked for: the verdict is unknown, not "ignored".
-  assert(cs2::control::classify_steer(100.0F, 100.0F, 1, 0.0F) == SteerVerdict::unknown);
-  assert(cs2::control::classify_steer(100.0F, 100.0F, 1, 2.0F) == SteerVerdict::unknown);
+  assert(verdict(100.0F, 100.0F, 1, 0.0F) == SteerVerdict::unknown);
+  assert(verdict(100.0F, 100.0F, 1, 2.0F) == SteerVerdict::unknown);
   // The wrap around 180 degrees counts as a turn (the headings are angles):
   // -179 -> 179 is two degrees **clockwise**, 179 -> -179 is two degrees
   // counter-clockwise.
-  assert(cs2::control::classify_steer(-179.0F, 179.0F, 1, 84.0F) == SteerVerdict::ignored);
-  assert(cs2::control::classify_steer(179.0F, -179.0F, 1, 84.0F) == SteerVerdict::followed);
+  assert(verdict(-179.0F, 179.0F, 1, 84.0F) == SteerVerdict::ignored);
+  assert(verdict(179.0F, -179.0F, 1, 84.0F) == SteerVerdict::followed);
   // The thresholds are what the payload uses.
   assert(cs2::control::k_strafe_min_requested_turn_deg == 5.0F);
   assert(cs2::control::k_strafe_min_applied_turn_deg == 0.25F);
+  // The turn measurement is the evidence behind the verdict.
+  assert(nearly(cs2::control::steer_turn(100.0F, 104.0F), 4.0F));
+  assert(nearly(cs2::control::steer_turn(179.0F, -179.0F), 2.0F));
+}
+
+// --- the airtime gain ---------------------------------------------------------
+
+// The gain is the speed gained over one airtime. The bookkeeping is a state
+// machine of its own (`AirtimeGain`), and this is the part that is easy to
+// get wrong: a stale air phase reports a gain for an airtime that never
+// happened.
+void test_airtime_gain() {
+  cs2::control::AirtimeGain gain;
+  assert(!gain.airborne());
+  // The take-off speed, then the landing: the difference is the gain.
+  gain.begin(120.0F);
+  assert(gain.airborne());
+  assert(nearly(gain.takeoff_speed(), 120.0F));
+  assert(nearly(gain.end(205.0F), 85.0F)); // the working encoding: ~+85 u/s
+  assert(!gain.airborne());
+  // A second airtime starts from its own take-off.
+  gain.begin(205.0F);
+  assert(nearly(gain.end(250.0F), 45.0F));
+  // An abandoned airtime reports no gain (the feature stopped acting).
+  gain.begin(250.0F);
+  gain.abandon();
+  assert(!gain.airborne());
+  // The takeoff speed is the one that was recorded, not a stale one.
+  gain.begin(10.0F);
+  assert(nearly(gain.takeoff_speed(), 10.0F));
 }
 
 }  // namespace
 
 auto main() -> int {
-  test_intent_decoding();  test_goal_is_the_camera_forward();
+  test_intent_decoding();
+  test_goal_is_the_camera_forward();
   test_goal_is_the_lateral_keys();
   test_goal_is_the_backward_key();
   test_goal_wraps();
@@ -755,6 +789,7 @@ auto main() -> int {
   test_the_button_names_map_to_the_engine_bits();
   test_the_button_bits_are_the_engine_bits();
   test_steering_verdict();
+  test_airtime_gain();
   std::puts("control-strafe: ok");
   return 0;
 }

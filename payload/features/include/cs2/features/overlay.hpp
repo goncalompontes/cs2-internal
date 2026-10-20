@@ -81,7 +81,8 @@ class Overlay {
   // airtime and whether the engine applied the strafe's basis rotation (the
   // sub-tick view-angle gate — `docs/re/strafing.md` §"The gate").
   using MovementStatusProvider = bool (*)(void* context, char* out, std::size_t size);
-  void set_movement_status_provider(MovementStatusProvider provider, void* context) noexcept {
+  void set_movement_status_provider(MovementStatusProvider provider,
+                                   void* context) noexcept {
     movement_status_provider_ = provider;
     movement_status_context_ = context;
   }

@@ -503,7 +503,7 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
     // The feature is off: there is no airtime to measure and no sample to
     // compare against. The gain is the **last airtime the feature acted in**,
     // so it goes back to zero rather than reporting a stale one.
-    strafe_air_phase_.store(false);
+    airtime_.abandon();
     strafe_vel_yaw_valid_.store(false);
     strafe_gain_.store(0.0F);
     return;
@@ -512,7 +512,7 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   if (mode == static_cast<int>(StrafeMode::off)) {
     strafe_reason_.store(8);  // the settings turned the feature off
     strafe_side_last_.store(0);
-    strafe_air_phase_.store(false);
+    airtime_.abandon();
     strafe_vel_yaw_valid_.store(false);
     strafe_gain_.store(0.0F);
     return;
@@ -523,14 +523,17 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
     // The airtime just ended: the speed the player carried out of it is the
     // feature's **outcome** — the gain the operator sees (the working encoding
     // gains ~+85 u/s per hop; a server that ignores the sub-tick view angles
-    // gains nothing). The velocity is read before the ground slice of this
-    // tick, so it is still the air speed.
-    if (strafe_air_phase_.exchange(false)) {
+    // gains nothing). The velocity is read here, in the hook, before the
+    // engine simulates this command's ground movement — so it is still the
+    // speed the player had in the air.
+    if (airtime_.airborne()) {
       float gx = 0.0F;
       float gy = 0.0F;
       if (velocity(gx, gy)) {
         const float landing_speed = std::sqrt(gx * gx + gy * gy);
-        strafe_gain_.store(landing_speed - strafe_takeoff_speed_.load());
+        strafe_gain_.store(airtime_.end(landing_speed));
+      } else {
+        airtime_.abandon();
       }
     }
     // A new jump starts from a clean sample: the first airborne tick's turn is
@@ -543,6 +546,7 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   if (!velocity(vx, vy)) {
     strafe_reason_.store(2);
     strafe_side_last_.store(0);
+    strafe_vel_yaw_valid_.store(false);  // no sample: the next turn is not comparable
     return;
   }
   const float speed = std::sqrt(vx * vx + vy * vy);
@@ -550,12 +554,13 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   if (speed < k_strafe_min_speed) {
     strafe_reason_.store(2);
     strafe_side_last_.store(0);
+    strafe_vel_yaw_valid_.store(false);  // no sample: the next turn is not comparable
     return;
   }
   strafe_airborne_.store(true);
   // The take-off speed of this airtime: the gain is measured against it.
-  if (!strafe_air_phase_.exchange(true)) {
-    strafe_takeoff_speed_.store(speed);
+  if (!airtime_.airborne()) {
+    airtime_.begin(speed);
   }
 
   auto* bytes_base = static_cast<std::uint8_t*>(base);
@@ -732,9 +737,13 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
     strafe_writes_.fetch_add(1);
     // The wish was written: the next command's turn of the velocity heading is
     // the effect of **this** write, so this is where the sample is taken and
-    // the verdict is made — once per command (see `fresh_command` above).
+    // the verdict is made — once per command (see `fresh_command` above). The
+    // rotation recorded with the sample is the one that was **written**
+    // (`strafe_rot_`, after the gate's clamp), not the one that was asked for:
+    // in the camera-frame analog encoding there is no rotation at all, and the
+    // verdict is then simply unknown — the gate does not apply there.
     if (fresh_command) {
-      strafe_judge_steer(vel_yaw, decision.side, rot);
+      strafe_judge_steer(vel_yaw, decision.side, strafe_rot_.load());
     }
   } else if (strafe_reason_.load() == 0) {
     strafe_reason_.store(5);  // the sub-tick array had no room
@@ -749,10 +758,17 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
 // of that write, and a side that flipped in between is judged against the side
 // that was actually written. With no earlier sample there is nothing to
 // compare (the first airborne tick), so the tick is only recorded.
-void Input::strafe_judge_steer(float vel_yaw, int side, float requested_rotation) noexcept {
+void Input::strafe_judge_steer(float vel_yaw, int side, float written_rotation) noexcept {
   if (strafe_vel_yaw_valid_.load()) {
-    switch (classify_steer(strafe_vel_yaw_last_.load(), vel_yaw, strafe_side_sample_.load(),
-                            requested_rotation)) {
+    const float turn = steer_turn(strafe_vel_yaw_last_.load(), vel_yaw);
+    strafe_turn_.store(turn);
+    // The verdict is made on the rotation the **previous** tick wrote (the one
+    // whose effect this turn measures) and the side it pushed the wish on: the
+    // current tick's request has not been written yet, and the rotation that
+    // was written may have been clamped by the gate's limit.
+    switch (classify_steer(strafe_vel_yaw_last_.load(), vel_yaw,
+                           strafe_side_sample_.load(),
+                           strafe_rot_sample_.load())) {
       case SteerVerdict::followed:
         strafe_steered_ticks_.fetch_add(1);
         strafe_steered_.store(true);
@@ -767,6 +783,7 @@ void Input::strafe_judge_steer(float vel_yaw, int side, float requested_rotation
   }
   strafe_vel_yaw_last_.store(vel_yaw);
   strafe_side_sample_.store(side);
+  strafe_rot_sample_.store(written_rotation);
   strafe_vel_yaw_valid_.store(true);
 }
 

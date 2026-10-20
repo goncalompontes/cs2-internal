@@ -304,9 +304,11 @@ Checked line by line against [`research-strafe.md`](research-strafe.md).
 2. **The `yaw_delta` gate (CLOSED 2026-10-20 — see §"The gate" below):** the rotation
    is applied to the CMoveData angles (silent) yet did not steer the velocity, which is
    what landmine 11 predicts when the `(*vtable+0x150)()` policy is off. On a listen
-   server that policy is the `sv_subtick_movement_view_angles` convar — **the decisive
-   one-command experiment is to set it to `1` on our server and re-run the yaw-path
-   A/B.** Until then the analog path is the right primary.
+   server that policy is the `sv_subtick_movement_view_angles` convar. The one-command
+   experiment has been run: with the policy on the rotation accelerates the player,
+   with it off it does not. **The analog path is not the fallback** — it accelerates
+   nothing in either configuration (measured below), so the default stays on the
+   rotation and the payload *reports* the gate instead of silently doing nothing.
 
 ### The gate (measured 2026-10-20)
 
@@ -315,13 +317,18 @@ Checked line by line against [`research-strafe.md`](research-strafe.md).
 Measured live on a de_dust2 listen server (the `autostrafe` scenario, 3-second
 window, the player hopping with the bhop assist, everything else identical):
 
-| arm | `movement_strafe_subticks` | `sv_subtick_movement_view_angles` | strafe writes | max speed | gain |
+| arm | `movement_strafe_subticks` | `sv_subtick_movement_view_angles` | strafe writes | max speed | window gain |
 |---|---|---|---|---|---|
 | control (the strafe off) | – | 1 | 0 | 105.7 u/s | 75.7 |
 | the rotation encoding | **8** | **0** | 744 | 100.2 u/s | 70.2 |
 | the rotation encoding | **8** | **1** | 748 | **195.8 u/s** | **114.4** |
 | the camera-frame analog | 0 | 0 | 750 | 106.4 u/s | 46.4 |
 | the camera-frame analog | 0 | 1 | 750 | 109.0 u/s | 47.1 |
+
+(The **window gain** is the scenario's `speed_gain`: the spread of the horizontal
+speed over the 3-second window — max minus min. It is *not* the payload's
+`strafe_gain`, which is the gain of one airtime; the two are different
+quantities and the diagnostics table below names them apart.)
 
 Two facts fall out of it, and the second one is the surprise:
 
@@ -593,5 +600,7 @@ stays optional (`strafe(subtick=N)`, default 0).
 - The `|x| < 10` sanitizer's *purpose* (a guard against the community `±450` paste,
   or a NaN/denormal guard) is inferred from the constant; the range it admits (`±1`
   used by the engine) is what matters and is observed.
-- Whether `sv_subtick_movement_view_angles` gates the per-slice angle write is still
-  not asserted (the analog path does not need it).
+- Whether `sv_subtick_movement_view_angles` gates the per-slice angle write is
+  **asserted** (2026-10-20, §"The gate"): with the policy on the rotation
+  accelerates the player, with it off it does not — and the payload now measures
+  the gate at runtime (`strafe_steered` / `strafe_ignored`).

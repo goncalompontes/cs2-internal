@@ -51,8 +51,11 @@ def run(game: Game, *, watch: float = WATCH, min_gain: float = MIN_GAIN,
     try:
         operator_settings = settings.read(game)
     except settings.SettingsError as error:
-        print(f"[autostrafe] cannot read the menu settings: {error}", flush=True)
-        operator_settings = None
+        # A block that could not be read is **not** "the feature is off": the
+        # old reader failed exactly this way ("segment version 13 != 4") and the
+        # scenarios reported themselves as skipped while the payload was
+        # acting. A read failure is an error, not a disabled feature.
+        raise SessionError(f"cannot read the live settings block: {error}") from error
 
     enabled = bool(operator_settings and operator_settings.auto_strafe)
     bhop_enabled = bool(operator_settings and operator_settings.bhop)
@@ -177,11 +180,22 @@ def run(game: Game, *, watch: float = WATCH, min_gain: float = MIN_GAIN,
     # turns, and nothing accelerates — the symptom the operator reported. The
     # payload measures it (`strafe_steered` / `strafe_ignored`), so the report
     # says it outright instead of leaving the operator to guess.
-    if result["strafe_ignored_during_window"] and not result["strafe_steered"]:
+    #
+    # The counters are the signal (one noisy tick flips the last verdict), and
+    # the **camera-frame analog encoding has no rotation at all** — the gate does
+    # not apply there, so no gate verdict is reported for it.
+    followed = int(status.get("strafe_steered_ticks") or 0)
+    ignored = int(result["strafe_ignored_during_window"])
+    judged = followed + ignored
+    result["strafe_judged_ticks"] = judged
+    result["strafe_followed_ticks"] = followed
+    if int(result["strafe_subticks"] or 0) > 0 and judged > 0 and ignored * 2 > judged:
         result["verdict"] += (
-            f" — BUT the server ignored the rotation ({result['strafe_ignored_during_window']}"
-            " ticks): sv_subtick_movement_view_angles is off on this server, so the"
-            " silent encoding cannot steer (docs/re/strafing.md §\"The gate\")"
+            f" — BUT the rotation was not applied ({ignored} of {judged} judged ticks"
+            " did not turn the velocity): the server may be ignoring the sub-tick"
+            " view angles (sv_subtick_movement_view_angles), and the silent"
+            " encoding cannot steer without them"
+            " (docs/re/strafing.md §\"The gate\")"
         )
     elif result["strafe_gain"] != 0.0:
         result["verdict"] += f" (last airtime gained {result['strafe_gain']:+.1f} u/s)"

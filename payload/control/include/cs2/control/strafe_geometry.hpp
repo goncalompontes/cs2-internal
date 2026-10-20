@@ -507,6 +507,51 @@ enum class SteerVerdict {
   return SteerVerdict::followed;
 }
 
+//: The turn of the velocity heading between two samples, in degrees
+//: (counter-clockwise positive). The measurement the verdict is made on — and
+//: the evidence behind it: a **gated** rotation leaves it at zero, an applied
+//: one turns the velocity by a few degrees per tick.
+[[nodiscard]] inline constexpr auto steer_turn(float previous_velocity_yaw,
+                                               float velocity_yaw) noexcept -> float {
+  return normalize_angle(velocity_yaw - previous_velocity_yaw);
+}
+
+// --- The airtime gain ---------------------------------------------------------
+//
+// The auto-strafe's **outcome**: the horizontal speed gained over one airtime.
+// The take-off speed is the speed the player left the ground with; the landing
+// speed is the speed they touched down with — read *before* the ground slice of
+// the landing tick, so it is still the air speed. The difference is what the
+// feature gained (the working encoding: ~+85 u/s per hop).
+//
+// The bookkeeping is a small state machine of its own so it can be **host
+// tested**: the payload's tick path needs the engine, and this is the part
+// that is easy to get wrong — a stale air phase reports a gain for an airtime
+// that never happened.
+class AirtimeGain {
+public:
+  /// The player left the ground at this speed.
+  void begin(float takeoff_speed) noexcept {
+    takeoff_ = takeoff_speed;
+    airborne_ = true;
+  }
+  /// The player touched down at this speed: the gain of the airtime.
+  [[nodiscard]] float end(float landing_speed) noexcept {
+    airborne_ = false;
+    return landing_speed - takeoff_;
+  }
+  /// The airtime was abandoned (the feature stopped acting): there is no gain.
+  void abandon() noexcept { airborne_ = false; }
+  /// Whether an airtime is running.
+  [[nodiscard]] bool airborne() const noexcept { return airborne_; }
+  /// The speed the running airtime started with.
+  [[nodiscard]] float takeoff_speed() const noexcept { return takeoff_; }
+
+private:
+  float takeoff_{0.0F};
+  bool airborne_{false};
+};
+
 // Decode a command's button mask into the view-frame intent: `W` is +1
 // forward, `S` is -1, `D` is +1 to the right and `A` is -1. A key held on both
 // sides cancels (`W`+`S` is no forward intent at all).
