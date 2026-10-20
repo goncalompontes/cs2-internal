@@ -1,13 +1,17 @@
 # The strafe's side-axis sign — the `leftmove` convention
 
-> **Status (2026-10-20): settled from the engine's own code.** The engine's
-> second view-frame basis vector is the player's **LEFT**
-> (`(-sin yaw, +cos yaw)` — the forward vector rotated **+90°**), and the
-> command's side field is `leftmove` — **positive to the LEFT**. This repo's
-> old model had *both* halves mirrored ("the basis is the right vector" and
-> "a positive side axis is the right"), which cancelled in the goal heading —
-> so `goal_for` was right — but did **not** cancel in the analog write: see
-> §4. Neverlose's `+1.0` for `IN_MOVELEFT` is **right**.
+> **Status (2026-10-20): settled from the engine's own code, and the write is
+> fixed (T13).** The engine's second view-frame basis vector is the player's
+> **LEFT** (`(-sin yaw, +cos yaw)` — the forward vector rotated **+90°**), and
+> the command's side field is `leftmove` — **positive to the LEFT**. This
+> repo's old model had *both* halves mirrored ("the basis is the right vector"
+> and "a positive side axis is the right"), which cancelled in the goal
+> heading — so `goal_for` was right — but did **not** cancel in the analog
+> write: see §4.2, which is **now fixed** (the write goes through
+> `engine_side_axis_for_wish()` and the button bits through
+> `engine_move_buttons()`). Neverlose's `+1.0` for `IN_MOVELEFT` is **right**.
+> The same pass found the repo's console button names wrong: CS2's strafe
+> commands are **`+left` / `+right`**, not `+moveleft` / `+moveright` (§4.3).
 >
 > Live build **25947352**, `client.dll` sha256 `659940c1…`, image base
 > `0x180000000`. Every address below is an RVA on that build. The derivation
@@ -142,9 +146,9 @@ the two negations still cancel, only now visibly.
 > the command's side axis (§4.2). Flipping it therefore moves the write, not
 > the goal.
 
-### 4.2 The analog write is mirrored (a real bug, in `input.cpp`)
+### 4.2 The analog write was mirrored (a real bug, in `input.cpp`)
 
-`Input::strafe_tick` writes the camera-frame analog as
+`Input::strafe_tick` wrote the camera-frame analog as
 
 ```cpp
 const float rel = rot * k_deg_to_rad;
@@ -160,37 +164,114 @@ with `basis` the +90° (left) vector, so the wish at `rel` needs
 leftmove = +sin(rel)          (a counter-clockwise wish is a POSITIVE side axis)
 ```
 
-but the payload writes `-sin(rel)` — the mirrored value. Concretely, with the
+but the payload wrote `-sin(rel)` — the mirrored value. Concretely, with the
 camera at `yaw = 0` and a wish 90° counter-clockwise (`rel = +90°`):
 
 | | written | engine's world lateral |
 |---|---|---|
-| payload | `leftmove = -1` | `basis * (-1) = (0, -1)` = the player's **right** |
+| payload (before the fix) | `leftmove = -1` | `basis * (-1) = (0, -1)` = the player's **right** |
 | wanted | `leftmove = +1` | `basis * (+1) = (0, +1)` = the player's **left** |
 
-The payload's *button* bit is right (`IN_MOVELEFT` for a leftward wish) while
-its *value* is wrong, so the two contradict each other; the value is what
+The payload's *button* bit was right (`IN_MOVELEFT` for a leftward wish) while
+its *value* was wrong, so the two contradicted each other; the value is what
 multiplies into the wish, so the analog path (`strafe(subtick=0)`, the
-default) steers the wrong way. The **sub-tick yaw path is unaffected**: it
+default) steered the wrong way. The **sub-tick yaw path is unaffected**: it
 writes `forwardmove = 1, leftmove = 0` and puts the direction in the
 `yaw_delta` steps, which is a basis rotation and not a lateral axis.
 
-**The fix belongs in `payload/control/src/input.cpp`** (owned by another
-agent; not touched here):
+> **Fixed (2026-10-20, T13 — `fix(movement): write the strafe's wish in the
+> engine's side axis`).** The write goes through the helpers, so the sign
+> lives in exactly one place (`k_engine_side_axis_positive_is_left`):
+>
+> ```cpp
+> // the command's `leftmove` — the engine's axis, positive to the LEFT
+> const float left = cs2::control::engine_side_axis_for_wish(rot);
+> ```
+>
+> and the button bits that go with it come from the same convention
+> (`engine_move_buttons()`, in `strafe_geometry.hpp`):
+>
+> ```cpp
+> const std::uint64_t held = cs2::control::engine_move_buttons(forward, left, k_move_epsilon);
+> // a positive side axis -> IN_MOVELEFT, a negative one -> IN_MOVERIGHT
+> ```
+>
+> The host test `control-strafe` pins both halves
+> (`test_the_written_side_axis_carries_the_engine_sign`,
+> `test_the_button_names_map_to_the_engine_bits`): a wish 90° to the player's
+> left must write a **positive** side axis and the `IN_MOVELEFT` bit, and the
+> engine's own wish construction (`forward * fmove + basis * leftmove`) must
+> come out at `yaw + 90°`.
 
-```cpp
-// the command's `leftmove` — the engine's axis, positive to the LEFT
-const float left = cs2::control::engine_side_axis_for_wish(rot);
-...
-if (left > k_move_epsilon)       held |= button::k_moveleft;    // was k_moveright
-else if (left < -k_move_epsilon) held |= button::k_moveright;   // was k_moveleft
-```
+### 4.3 The button names: `left`, not `moveleft`
 
-`engine_side_axis_for_wish()` is the helper that carries the convention, so
-after that change the sign lives in exactly one place
-(`k_engine_side_axis_positive_is_left`).
+The same investigation turned up a second, independent defect: the repo's
+**console** button names do not exist in CS2.
 
-### 4.3 Naming clean-ups the same finding implies
+* The engine's **input actions** are named `left` / `right` (the **strafe**)
+  and `turnleft` / `turnright` (the **look**). `client.dll` registers them —
+  `FUN_1800d0980` registers the action `left` (the string at `0x1c60548`), and
+  the input system's move-vector computation (`FUN_180b8f6e0`, RVA `0xb8f6e0`)
+  reads `value("left") - value("right")` for the lateral axis.
+* The **console command** is the action name with a `+` in front. CS2's own
+  shipped key bindings say so — `game/csgo/cfg/user_keys_default.vcfg`:
+  `"a" -> "+left"`, `"d" -> "+right"`, `"w" -> "+forward"`, `"s" -> "+back"`,
+  `"LEFTARROW" -> "+turnleft"`, `"UPARROW" -> "+turnup"`; and
+  `game/core/cfg/user_keys_default.vcfg` repeats the lateral two.
+* The strings `moveleft` / `moveright` do **not** exist in `client.dll` at all
+  (only `IN_MOVELEFT`, `onmoveleft` and `MoveLeft`), and CS2 has no
+  `+lookup` / `+lookdown` either — the look commands are `+turnup` /
+  `+turndown`.
+
+So the repo's `+moveleft` / `+moveright` were **unknown console commands**: the
+scenario runner's `press("a")` never registered the player's strafe-left, and
+the payload's own name table accepted a name the engine does not know.
+
+The engine's own **button-name table** (`client.dll` build 25947352: the table
+at `0x181b28cf0`, the names at `0x181b28f70`) gives the bits and spells them
+the way CS2 does:
+
+| name | mask | meaning |
+|---|---|---|
+| `IN_ATTACK` | `1 << 0` | |
+| `IN_JUMP` | `1 << 1` | |
+| `IN_DUCK` | `1 << 2` | |
+| `IN_FORWARD` | `1 << 3` | |
+| `IN_BACK` | `1 << 4` | |
+| `IN_USE` | `1 << 5` | |
+| `IN_TURNLEFT` | `1 << 7` | the **look** left (CS2 has no `IN_LEFT`) |
+| `IN_TURNRIGHT` | `1 << 8` | the **look** right (CS2 has no `IN_RIGHT`) |
+| `IN_MOVELEFT` | `1 << 9` | the **strafe** left |
+| `IN_MOVERIGHT` | `1 << 10` | the **strafe** right |
+| `IN_ATTACK2` | `1 << 11` | |
+| `IN_RELOAD` | `1 << 13` | |
+| `IN_SPEED` | `1 << 16` | |
+| `IN_JOYAUTOSPRINT` | `1 << 17` | |
+| `IN_FIRST_MOD_SPECIFIC_BIT` | `1 << 32` | the mod-specific range starts here |
+| `IN_SCORE` | `1 << 33` | |
+| `IN_ZOOM` | `1 << 34` | |
+| `IN_LOOK_AT_WEAPON` | `1 << 35` | |
+
+The strafe bits the payload uses (`IN_MOVELEFT = 1 << 9`,
+`IN_MOVERIGHT = 1 << 10`) are therefore **right**; only the *names* were
+wrong. The fix (T13):
+
+* `strafe_geometry.hpp` renames the bits 7/8 to `k_turnleft` / `k_turnright`
+  (they are `IN_TURNLEFT` / `IN_TURNRIGHT` in CS2, not `IN_LEFT` /
+  `IN_RIGHT`) and owns the **name → bit map**, so the host test can pin it;
+* the name `left` now resolves to `IN_MOVELEFT` (the engine's strafe-left
+  action) and `right` to `IN_MOVERIGHT`; the look actions are `turnleft` /
+  `turnright`;
+* `scripts/scenario/control.py`'s `BUTTONS` table maps `"a" -> "left"` and
+  `"d" -> "right"`, so `press("a")` now issues `+left`.
+
+> **Still open (not this task's scope):** the same table shows that CS2 moved
+> `IN_SCORE` to `1 << 33` and `IN_ZOOM` to `1 << 34`, while the repo still
+> uses `1 << 16` / `1 << 19` for them (`strafe_geometry.hpp`'s `button`
+> namespace). The ragebot's auto-scope (`button::k_zoom`) and anything else
+> that uses those bits should be re-checked against the command's mask.
+
+### 4.4 Naming clean-ups the same finding implies
 
 * `docs/re/strafing.md` called the field `m_flCmdSideMove`; the build's schema
   says **`m_flCmdLeftMove`**.
@@ -227,7 +308,8 @@ If the strafe-left button cannot be held from the console, hold the physical
 strafe-left is named **`left`** — the string at `0x1c60548`; the look actions
 are `turnleft`/`turnright` at `0x1c60458`/`0x1c60468`. `moveleft` does not
 appear anywhere in this build, so the console command for the strafe-left
-button is most likely `+left`, not `+moveleft` — worth checking separately.)
+button is **`+left`**, not `+moveleft` — confirmed by CS2's own shipped
+binds, `game/csgo/cfg/user_keys_default.vcfg`: `"a" -> "+left"`.)
 
 The behavioural twin of the same check, and the one that actually matters for
 the strafe: with the auto-strafe on in the **analog** mode (`subtick=0`) and
@@ -243,6 +325,8 @@ right, the write of §4.2 is still mirrored.
 | 3 | the engine's lateral axis is `value("left") - value("right")` | `0xb8f6e0`; the action names at `0x1c60548`/`0x1c60550` |
 | 4 | the side field is the *left* move | `m_flCmdLeftMove` at `0x1c39998`; `CBaseUserCmdPB.leftmove` (field 6) |
 | 5 | the CMoveData's move axes are at `+0x2c` / `+0x30` | `0x8e47e0` (`SetupMove`) zeroes them |
+| 6 | the button bits: `IN_TURNLEFT` = `1 << 7`, `IN_TURNRIGHT` = `1 << 8`, `IN_MOVELEFT` = `1 << 9`, `IN_MOVERIGHT` = `1 << 10` | the button-name table at `0x181b28cf0`, the names at `0x181b28f70` |
+| 7 | the console command for an action is `+` + the action name (`+left`, `+turnleft`, …); there is no `+moveleft` | CS2's shipped binds, `game/csgo/cfg/user_keys_default.vcfg` |
 
 Companion documents: [`strafing.md`](strafing.md) (the engine model),
 [`research-strafe.md`](research-strafe.md) (the community research, §9.3

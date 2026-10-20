@@ -28,28 +28,6 @@ using namespace cs2::sdk;
 // reordered vtable still resolves.
 constexpr std::size_t k_max_vtable_slots = 96;
 
-struct NamedBit {
-  std::string_view name;
-  std::uint64_t bit;
-};
-
-constexpr NamedBit k_named_bits[] = {
-    {"attack", button::k_attack},     {"mouse1", button::k_attack},
-    {"jump", button::k_jump},         {"space", button::k_jump},
-    {"duck", button::k_duck},         {"crouch", button::k_duck},
-    {"ctrl", button::k_duck},         {"forward", button::k_forward},
-    {"w", button::k_forward},         {"back", button::k_back},
-    {"s", button::k_back},            {"use", button::k_use},
-    {"e", button::k_use},             {"left", button::k_left},
-    {"right", button::k_right},       {"moveleft", button::k_moveleft},
-    {"a", button::k_moveleft},        {"moveright", button::k_moveright},
-    {"d", button::k_moveright},       {"attack2", button::k_attack2},
-    {"mouse2", button::k_attack2},    {"run", button::k_run},
-    {"reload", button::k_reload},     {"r", button::k_reload},
-    {"speed", button::k_speed},       {"shift", button::k_speed},
-    {"walk", button::k_walk},         {"zoom", button::k_zoom},
-};
-
 // The one Input the payload owns, for the static hook detour.
 Input* g_active = nullptr;
 
@@ -208,15 +186,6 @@ Input::~Input() {
   if (g_active == this) {
     g_active = nullptr;
   }
-}
-
-auto button_bit(std::string_view name) noexcept -> std::uint64_t {
-  for (const NamedBit& entry : k_named_bits) {
-    if (entry.name == name) {
-      return entry.bit;
-    }
-  }
-  return 0;
 }
 
 auto Input::backend_name(Backend backend) noexcept -> const char* {
@@ -674,13 +643,17 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
     strafe_rot_.store(total);
   }
 
-  // The camera-frame analog (`leftmove` positive = right, the engine's `right(yaw)
-  // = (sin, -cos)`), snapped to the `sv_quantize_movement_input` valid set so a
-  // rounding server and the client agree. Used only in the `subticks == 0` mode —
-  // the sub-tick mode rotates the basis instead and keeps `(1, 0)`.
+  // The camera-frame analog in the engine's **own** axes: `forwardmove` and
+  // `leftmove` (the command's `leftmove` is positive to the player's LEFT —
+  // `docs/re/strafe-sign.md`). The side axis goes through the engine's helper
+  // so the sign lives in exactly one place
+  // (`k_engine_side_axis_positive_is_left`); it is snapped to the
+  // `sv_quantize_movement_input` valid set so a rounding server and the client
+  // agree. Used only in the `subticks == 0` mode — the sub-tick mode rotates
+  // the basis instead and keeps `(1, 0)`.
   const float rel = rot * k_deg_to_rad;
   const float forward = std::cos(rel);
-  const float left = -std::sin(rel);
+  const float left = cs2::control::engine_side_axis_for_wish(rot);
 
   if (write_strafe_wish(bytes_base, bytes_cmd, forward, left, deltas, steps)) {
     strafe_reason_.store(4);
@@ -814,21 +787,12 @@ auto Input::write_strafe_wish(std::uint8_t* base, std::uint8_t* cmd, float forwa
   }
 
   // The command's analog + both button states (the legacy `cmd + 0x60` mask and
-  // `buttons_pb`, like `apply()`'s explicit move). Positive `leftmove` moves right
-  // (the engine's `right = (sin, -cos)`).
+  // `buttons_pb`, like `apply()`'s explicit move). The button bits follow the
+  // engine's convention — a positive `leftmove` is the player's LEFT, so it
+  // goes with `IN_MOVELEFT` (`docs/re/strafe-sign.md` §4.2).
   constexpr std::uint64_t move_bits =
       button::k_forward | button::k_back | button::k_moveleft | button::k_moveright;
-  std::uint64_t held = 0;
-  if (forward > k_move_epsilon) {
-    held |= button::k_forward;
-  } else if (forward < -k_move_epsilon) {
-    held |= button::k_back;
-  }
-  if (left > k_move_epsilon) {
-    held |= button::k_moveright;
-  } else if (left < -k_move_epsilon) {
-    held |= button::k_moveleft;
-  }
+  const std::uint64_t held = cs2::control::engine_move_buttons(forward, left, k_move_epsilon);
   if ((held & move_bits) == 0) {
     return false;  // nothing to write
   }
@@ -1773,18 +1737,10 @@ void Input::apply(void* cmd) noexcept {
 
       constexpr std::uint64_t move_bits = button::k_forward | button::k_back |
                                           button::k_moveleft | button::k_moveright;
-      std::uint64_t held = *buttons & ~move_bits;
-      if (move[0] > k_move_epsilon) {
-        held |= button::k_forward;
-      } else if (move[0] < -k_move_epsilon) {
-        held |= button::k_back;
-      }
-      if (move[1] > k_move_epsilon) {
-        held |= button::k_moveleft;
-      } else if (move[1] < -k_move_epsilon) {
-        held |= button::k_moveright;
-      }
-      *buttons = held;
+      // The button bits follow the engine's convention — a positive side axis
+      // is the player's LEFT (`cs2::control::engine_move_buttons`).
+      const std::uint64_t held = *buttons & ~move_bits;
+      *buttons = held | cs2::control::engine_move_buttons(move[0], move[1], k_move_epsilon);
 
       const auto buttons_pb =
           *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
@@ -1848,17 +1804,10 @@ void Input::apply(void* cmd) noexcept {
       move[1] = side;
       *reinterpret_cast<std::uint32_t*>(strafe_base + k_base_has_bits_offset) |= k_base_move_bits;
     }
-    std::uint64_t held = *buttons & ~move_bits;
-    if (forward > 0.0F) {
-      held |= button::k_forward;
-    } else if (forward < 0.0F) {
-      held |= button::k_back;
-    }
-    if (side > 0.0F) {
-      held |= button::k_moveleft;
-    } else if (side < 0.0F) {
-      held |= button::k_moveright;
-    }
+    // The button bits follow the engine's convention — a positive side axis is
+    // the player's LEFT (`cs2::control::engine_move_buttons`).
+    const std::uint64_t held =
+        (*buttons & ~move_bits) | cs2::control::engine_move_buttons(forward, side, k_move_epsilon);
     *buttons = held;
     const auto buttons_pb =
         *reinterpret_cast<std::uintptr_t*>(strafe_base + k_base_buttons_pb_offset);

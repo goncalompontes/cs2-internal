@@ -26,7 +26,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <string_view>
 
 #include "cs2/control/strafe_geometry.hpp"
 
@@ -122,7 +121,9 @@ inline constexpr float k_move_epsilon = 0.01F;
 
 // Degrees <-> radians and angle wrapping for the auto-strafe maths live in
 // `strafe_geometry.hpp` (`k_pi`, `normalize_angle`), with the button bits and
-// the strafe's decision maths.
+// the strafe's decision maths. The **button name -> bit map**
+// (`cs2::control::button_bit`) lives there too, so the host test can pin the
+// engine's own names without the engine.
 //: Below this horizontal speed the air-strafe wish angle is meaningless (the
 //: community's own guard is `speed < 5`) — nothing is written.
 inline constexpr float k_strafe_min_speed = 25.0F;
@@ -149,9 +150,6 @@ inline constexpr int k_strafe_max_steps = 16;
 
 // How many `CSubtickMoveStep`s the probe reads back from the last command.
 inline constexpr std::size_t k_probe_steps = 4;
-
-// Resolve a friendly or `in_*` button name to its bit; 0 when unknown.
-[[nodiscard]] std::uint64_t button_bit(std::string_view name) noexcept;
 
 // A read-only sample of a move vector (engine units, `k_move_scale` per axis).
 struct MoveSample {

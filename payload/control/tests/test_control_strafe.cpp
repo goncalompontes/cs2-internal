@@ -396,6 +396,110 @@ void test_the_goal_headings_are_the_players_left_and_right() {
   assert(nearly(d_axis, -1.0F));
 }
 
+// --- the analog write --------------------------------------------------------
+//
+// The **value** the payload writes into the command's side axis is what
+// multiplies into the engine's wish (`AirMove`, RVA `0x8e57b0`:
+// `wish = forward * fmove + basis * leftmove`), so its sign decides which way
+// the player is steered. The engine's side axis is **positive to the LEFT**
+// (`docs/re/strafe-sign.md`), so a wish to the player's left needs a positive
+// value — and the button bit that goes with it is `IN_MOVELEFT`.
+//
+// These are the two lines `Input::strafe_tick` writes (the analog path, the
+// `subticks == 0` mode):
+//
+//   const float forward = std::cos(rot * k_deg_to_rad);
+//   const float left = engine_side_axis_for_wish(rot);
+
+//: The camera-frame analog written for a wish `rot` degrees counter-clockwise
+//: of the view forward.
+struct WrittenAxes {
+  float forward{0.0F};
+  float side{0.0F};
+};
+
+auto written_axes(float rot) -> WrittenAxes {
+  const float rel = rot * cs2::control::k_deg_to_rad;
+  WrittenAxes axes{};
+  axes.forward = std::cos(rel);
+  axes.side = cs2::control::engine_side_axis_for_wish(rot);
+  return axes;
+}
+
+//: The dead band the payload applies to the axes (`k_move_epsilon`).
+constexpr float k_move_epsilon = 0.01F;
+
+void test_the_written_side_axis_carries_the_engine_sign() {
+  // A wish 90 degrees to the player's LEFT: the side axis is **positive**.
+  const WrittenAxes left = written_axes(90.0F);
+  assert(nearly(left.side, 1.0F));
+  // A wish 90 degrees to the right: **negative**.
+  const WrittenAxes right = written_axes(-90.0F);
+  assert(nearly(right.side, -1.0F));
+  // The forward axis is the cosine of the offset (unchanged by the fix).
+  assert(nearly(left.forward, 0.0F));
+  assert(nearly(written_axes(0.0F).forward, 1.0F));
+  assert(nearly(written_axes(0.0F).side, 0.0F));
+  // A half-way wish keeps the sign of the side it leans to.
+  assert(written_axes(45.0F).side > 0.0F);
+  assert(written_axes(-45.0F).side < 0.0F);
+
+  // The button bits agree with the value: a positive side axis is the player's
+  // LEFT, so it goes with `IN_MOVELEFT`; a negative one with `IN_MOVERIGHT`.
+  const std::uint64_t left_bits =
+      cs2::control::engine_move_buttons(left.forward, left.side, k_move_epsilon);
+  assert((left_bits & button::k_moveleft) != 0);
+  assert((left_bits & button::k_moveright) == 0);
+  const std::uint64_t right_bits =
+      cs2::control::engine_move_buttons(right.forward, right.side, k_move_epsilon);
+  assert((right_bits & button::k_moveright) != 0);
+  assert((right_bits & button::k_moveleft) == 0);
+
+  // And the engine's own wish construction agrees: build the wish the way
+  // `AirMove` does — `forward * fmove + basis * leftmove`, with the engine's
+  // second basis vector — and its heading must be the player's LEFT.
+  for (const float view_yaw : {0.0F, 30.0F, -120.0F, 170.0F}) {
+    const auto basis = cs2::control::engine_view_basis(view_yaw);
+    const WrittenAxes axes = written_axes(90.0F);
+    const float x = axes.forward * basis.forward.x + axes.side * basis.side.x;
+    const float y = axes.forward * basis.forward.y + axes.side * basis.side.y;
+    assert(nearly(cs2::control::heading_of(x, y), cs2::control::normalize_angle(view_yaw + 90.0F)));
+  }
+}
+
+// --- the button names --------------------------------------------------------
+//
+// The engine's own input actions are named `left`/`right` (the **strafe**) and
+// `turnleft`/`turnright` (the **look**) — `client.dll` registers them and its
+// own button-name table gives the bits (`docs/re/strafe-sign.md` §6). The
+// payload's name -> bit map has to agree, or the console path presses a
+// command the engine does not know and the mask path sets the wrong bit.
+
+void test_the_button_names_map_to_the_engine_bits() {
+  // The strafe actions.
+  assert(cs2::control::button_bit("left") == button::k_moveleft);
+  assert(cs2::control::button_bit("right") == button::k_moveright);
+  // The look actions — the *turn* bits, which CS2 spells `IN_TURNLEFT` /
+  // `IN_TURNRIGHT` (there is no `IN_LEFT`/`IN_RIGHT`).
+  assert(cs2::control::button_bit("turnleft") == button::k_turnleft);
+  assert(cs2::control::button_bit("turnright") == button::k_turnright);
+  // The bits themselves are the engine's own (`client.dll`'s button-name table
+  // at `0x181b28cf0`).
+  assert(button::k_moveleft == (1ull << 9));    // IN_MOVELEFT
+  assert(button::k_moveright == (1ull << 10));  // IN_MOVERIGHT
+  assert(button::k_turnleft == (1ull << 7));    // IN_TURNLEFT
+  assert(button::k_turnright == (1ull << 8));   // IN_TURNRIGHT
+  // The runner's aliases resolve to the same bits.
+  assert(cs2::control::button_bit("a") == button::k_moveleft);
+  assert(cs2::control::button_bit("d") == button::k_moveright);
+  // "moveleft"/"moveright" are not engine names (CS2's console command is
+  // `+left`), but the payload still accepts them as aliases.
+  assert(cs2::control::button_bit("moveleft") == button::k_moveleft);
+  assert(cs2::control::button_bit("moveright") == button::k_moveright);
+  // An unknown name has no bit.
+  assert(cs2::control::button_bit("no-such-button") == 0);
+}
+
 }  // namespace
 
 auto main() -> int {
@@ -417,6 +521,8 @@ auto main() -> int {
   test_side_axis_convention_is_pinned();
   test_the_goal_matches_the_engine_wish();
   test_the_goal_headings_are_the_players_left_and_right();
+  test_the_written_side_axis_carries_the_engine_sign();
+  test_the_button_names_map_to_the_engine_bits();
   std::puts("control-strafe: ok");
   return 0;
 }
