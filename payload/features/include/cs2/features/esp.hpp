@@ -239,7 +239,7 @@ struct Config {
   struct Menu {
     bool show_hud = true;     // the debug HUD window
     bool open = false;        // written by the layer; the payload may suppress input
-    std::uint8_t key = 0x2E;  // the virtual-key code that opens the menu (Insert)
+    std::uint8_t key = 0x2D;  // the virtual-key code that opens the menu (Insert)
     Color accent{90, 160, 255, 255};
     std::uint8_t transparency = 100;  // the window alpha, 0..100
     std::uint8_t config_op = 0;       // 1 = save, 2 = load, 3 = reset
