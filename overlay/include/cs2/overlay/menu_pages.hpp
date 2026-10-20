@@ -631,6 +631,12 @@ inline void draw_players(wire::Settings& settings) noexcept {
   toggle("Local player", settings.esp_local_player);
   toggle("Spectators", settings.esp_show_spectators);
   toggle("Teammates", settings.esp_show_teammates);
+  // The switches are not independent: "Only enemies" is the master that
+  // hides the local player and the teammates, and the two switches below it
+  // bring them back. The relationship is stated here so a switch that does
+  // not do what its label says is not a surprise.
+  ImGui::TextDisabled("Only enemies hides the local player and the teammates;");
+  ImGui::TextDisabled("Local player and Teammates bring them back.");
 
   ImGui::SeparatorText("Extras");
   toggle("Head box", settings.esp_head_box);
