@@ -1,6 +1,6 @@
 # Research index — ragebot
 
-Three deep-research briefs, written 2026-10-19 by parallel agents, each grounded in
+Four deep-research briefs, written 2026-10-19 by parallel agents, each grounded in
 primary sources and with its own measurements. Start with
 [`../ragebot-research.md`](../ragebot-research.md) (the short orientation brief), then
 whichever of these matches your task.
@@ -11,6 +11,13 @@ whichever of these matches your task.
 | [`geometry-algorithms.md`](geometry-algorithms.md) | Measured benchmarks of our primitives vs Clipper2/CGAL/Boost, BVH libraries, visibility algorithms, the manual-map constraints | You are about to write geometry or pick a library |
 | [`aim-objective-math.md`](aim-objective-math.md) | The probability model, the spread kernel, numerics of the polygon mass, multimodal optimisation, pellets | You are touching the objective search or hitchance |
 | [`aim-solver-design-review.md`](aim-solver-design-review.md) | Combined research + source audit; exactness gaps, cap/doc conflicts, and a bounded ray-query migration | You need a decision before changing the live solver |
+
+Third-party reference material has its own notes:
+
+| Note | Covers | Read it when |
+|---|---|---|
+| [`neverlose-mining.md`](neverlose-mining.md) | The reversed Neverlose CS2 module: movement, chams pass model, schema/ESP, protection — with evidence addresses | You are comparing our design against a shipped CS2 cheat |
+| [`cheat-dump-inventory.md`](cheat-dump-inventory.md) | What other CS2 source leaks and binary dumps are public, what each actually is, authenticity confidence, and the ranked reading order | You are about to spend time on a third-party artifact, or need a reference for chams/ragebot/anti-aim |
 
 [`frontier-prompt.md`](frontier-prompt.md) is a **self-contained prompt** (all the measured
 numbers and constraints inline) for handing the whole problem to a frontier reasoning
