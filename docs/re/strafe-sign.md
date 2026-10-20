@@ -135,6 +135,13 @@ axis (`engine_view_basis()` / `engine_side_axis()`), and the single constant
 **unchanged** — the new code and the old code agree for every input, because
 the two negations still cancel, only now visibly.
 
+> The goal is **invariant** under the convention constant, and that is correct:
+> the heading of the A/D keys is a fact about the world, and both candidate
+> encodings of the engine produce the same world direction. What the constant
+> changes is the **encoding** — i.e. the number the payload has to write into
+> the command's side axis (§4.2). Flipping it therefore moves the write, not
+> the goal.
+
 ### 4.2 The analog write is mirrored (a real bug, in `input.cpp`)
 
 `Input::strafe_tick` writes the camera-frame analog as
