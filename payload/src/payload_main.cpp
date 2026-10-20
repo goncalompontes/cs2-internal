@@ -19,6 +19,7 @@
 #include "cs2/features/overlay.hpp"
 #include "cs2/features/present_hook.hpp"
 #include "cs2/features/settings.hpp"
+#include "cs2/features/thirdperson.hpp"
 #include "cs2/game/log.hpp"
 #include "cs2/overlay/wire.hpp"
 #include "cs2/render/imgui_backend.hpp"
@@ -53,6 +54,9 @@ struct Runtime {
   features::ModelPublisher publisher{overlay};
   features::GamePresentHook game_present{publisher};
   features::PresentHook present{backend, overlay, &menu};
+  // The third-person camera: the engine's own camera, driven by the
+  // operator's parameters.
+  features::ThirdPerson thirdperson;
   control::Service control;
   // The payload's own copy of the settings, so a config **load** has somewhere to
   // land: the menu owns the live block, the file owns the persisted one, and the
@@ -202,6 +206,19 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
       settings.rage_config_token, settings.rage_recoil != 0, settings.rage_stop_speed,
       settings.rage_backtrack != 0);
 
+  // The third-person camera. The engine supports the switch and the distance;
+  // the yaw offset is damped by the engine's smoothing, and the pivot, the
+  // shoulder and the field of view have no engine counterpart (the client has
+  // no shoulder camera and the view setup's FOV field is unconfirmed).
+  runtime->thirdperson.configure({
+      .enabled = settings.movement_thirdperson != 0,
+      .distance = settings.movement_thirdperson_distance,
+      .angle = settings.movement_thirdperson_angle,
+      .pivot_z = settings.movement_thirdperson_pivot_z,
+      .fov = settings.movement_thirdperson_fov,
+      .right_shoulder = settings.movement_thirdperson_side != 0,
+  });
+
   // The menu's one-shot config op (save / load / reset the settings file). The op
   // runs **once per token** — the token bookkeeping lives in the store, so the
   // two callers of this sink (the menu and the publisher) cannot both fire it.
@@ -227,7 +244,17 @@ void on_local_pawn(void* context, std::uintptr_t pawn) noexcept {
 // The per-frame overlay refresh also forwards the full snapshot: the ragebot solve
 // runs there and stashes the silent aim for the per-tick `Input::apply()`.
 void on_snapshot(void* context, const cs2::game::Snapshot& snapshot) noexcept {
-  static_cast<Runtime*>(context)->control.on_snapshot(snapshot);
+  auto* runtime = static_cast<Runtime*>(context);
+  runtime->control.on_snapshot(snapshot);
+  // The third-person camera's per-frame step: the console route, the distance
+  // knob and the view angles the camera's yaw offset is applied to.
+  cs2::game::Angle view{};
+  cs2::game::Vec3 eye{};
+  if (snapshot.local.has_value()) {
+    view = snapshot.local->eye_angles;
+    eye = snapshot.local->eye_origin;
+  }
+  runtime->thirdperson.update(view, eye);
 }
 
 // The overlay HUD asks for the ragebot's one-line status while it is enabled.
@@ -312,6 +339,11 @@ DWORD WINAPI install_thread(void*) {
     cs2::payload::runtime().overlay.set_predicted_origin_provider(
         &on_predicted_origin, &cs2::payload::runtime());
   }
+  // The third-person camera: the game-thread hook (the client's per-frame
+  // camera update) that re-asserts the switch every frame. It is refused on a
+  // client build the offsets were not verified on; the console route then
+  // carries the feature on its own.
+  (void)cs2::payload::runtime().thirdperson.install();
   // Render path (workstream A): the ESP + menu render in-process from the game's
   // D3D11/DXGI Present by default; the external Vulkan layer (the shm publisher +
   // `game_present`) is the fallback for a Vulkan/DXVK stack.
