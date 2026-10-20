@@ -298,23 +298,43 @@ and a `rules` block read from the level's `C_CSGameRules` (`client.dll`
 progress (player count / level / team) has stopped changing, because a level that
 is still connecting reports `team = 0` and looks exactly like team-select.
 
-**Screens** (mutually exclusive; the deduction order is in `screens.deduce`):
+**Screens** (mutually exclusive; the deduction order **is** the `Screen` enum
+order, and it is pinned by a test):
 
 | screen | how it is recognised | what works |
 |---|---|---|
+| `LOADING` | the machine asked for a map and the level is not up by the weak level rule — the payload has no loading flag, so the `map` command's own knowledge is what distinguishes it from the main menu | nothing |
 | `NOT_READY` | `valid=false` — the engine has no readable local state yet (still booting after injection, or a level teardown in flight) | nothing, and **no `exec`**: queued console lines fault inside the engine before its input service is up |
 | `NOT_IN_GAME` | `in_game` false — the main screen (or a level still loading): no rules-proxy entity | nothing (`map <name>` is the transition) |
+| `DISCONNECTED` | a `client_disconnect` event **after** the last `round_start`, while the level is still up (the event is captured without a subscription) | reconnect |
 | `TEAM_SELECT` | level up, `team == 0` | nothing (`jointeam` is the transition) |
 | `SPECTATOR` | `team == 1` | look |
 | `WARMUP` | `rules.warmup` | move/jump/attack (no round structure yet) |
+| `DEAD` | in a team, not alive (`life_state != 0`) | nothing until respawn |
 | `FREEZE` | `rules.freeze` | look, buy |
-| `LIVE` | alive, in a team, not warmup/freeze, no winner | everything |
-| `DEAD` | in a team, not alive (`life_state != 0`; `1` while dying, `2` when dead — the machine keys on `alive`) | nothing until respawn |
-| `ROUND_END` | `rules.round_win_status != 0` (or the newest round event is `round_end`) | buy |
+| `HALF_TIME` | `rules.game_phase == 4` (the client's own phase mapper reads `m_gamePhase` at `+0x84` and sends `"HalfTime"`) | look |
+| `OVERTIME` | `rules.overtime_playing` — **the payload does not send this yet** (`m_nOvertimePlaying`, `client.dll +0x90`); the name is in `screens.PENDING_PAYLOAD_FIELDS` | look |
+| `PAUSED` | `rules.game_paused` — **not sent yet** (`m_bGamePaused`, `client.dll +0x38`) | look |
+| `ROUND_END` | `rules.round_win_status != 0` (or the newest round event is `round_end`) | — |
+| `DEFUSING` | `local.defusing` | look, move |
+| `PLANTED` | `rules.bomb_planted` | look, move, attack, defuse (CT with a defuser) |
+| `BUY_TIME` | the local team's buy window is open in a running round (`t_cant_buy` / `ct_cant_buy`) | everything |
+| `LIVE` | alive, in a team, not warmup/freeze, no winner, the buy window closed | everything |
+
+Three ordering decisions are deliberate: **a dead player outranks the round
+facts** (a dead player ignores every input, and the bomb is still reported as a
+*fact*); **the match phase outranks the round phase** (`m_iRoundWinStatus` is not
+reset between the halves, so the halftime would otherwise hide behind the last
+round's winner); and **the buy window is a screen of its own**, so `LIVE` and
+`ROUND_END` **lost** the `buy` capability — a buy in those rows could never be
+granted. `Machine.ensure(LIVE)` accepts `BUY_TIME` (the window may never close —
+`mp_buytime 9999` in the playground convars), so `ensure_live_round()` still works.
 
 **Capabilities** (`state.can("move")`, `state.require("attack")`,
 `game.require("move")`) are `state`, `look`, `move`, `jump`, `attack`, `reload`,
-`buy`, `teleport`; `buy` additionally needs the buy window from the rules, and
+`buy`, `teleport`, `plant`, `defuse`, `drop`, `inspect`, `switch_weapon`,
+`grenade`, `score`, `reconnect`. `state` and `score` are **read-only** and are
+true in every screen; `buy` additionally needs the buy window from the rules, and
 `why()` returns the reason a capability is blocked (`"blocked: dead does not
 allow move"`).
 
@@ -329,6 +349,27 @@ allow move"`).
 | `FREEZE` → `LIVE` | wait for `m_bFreezePeriod` to clear |
 | `ROUND_END` → `LIVE` | wait for the next `round_start` |
 | `DEAD` → `LIVE` | wait for the respawn, else `mp_restartgame 1` |
+| `NOT_READY` → `TEAM_SELECT` | `map <name>` |
+| `LIVE` → `FREEZE` | `mp_restartgame 1` (used to re-roll into a fresh round) |
+| `DISCONNECTED` → `LOADING` | `reconnect` |
+| `LOADING` → `TEAM_SELECT` | wait for the load to finish |
+| `LIVE` ↔ `BUY_TIME` | `wait_buy_time` / `wait_buy_end` |
+| `LIVE` → `PLANTED` | `wait_bomb_planted` |
+| `PLANTED` → `DEFUSING` | `wait_defuse` |
+| `DEFUSING` → `ROUND_END` | `wait_defused` |
+| `PLANTED` → `LIVE` | `wait_round_start` (the post-plant restart) |
+| `LIVE` → `HALF_TIME` | `wait_halftime` |
+| `HALF_TIME` → `LIVE` | `wait_round_start` |
+| `LIVE` → `OVERTIME` | `wait_overtime` |
+| `OVERTIME` → `LIVE` | `wait_round_start` |
+| `LIVE` → `PAUSED` | `wait_pause` |
+| `PAUSED` → `LIVE` | `resume_match` |
+
+Every action is a guarded `Machine._do_<action>` method: an action that does not
+apply in the current state **never touches the game** (no `exec` at all), and the
+waiting actions never emit a console line. A test asserts that every action in
+the table has a method, and that the transition graph has no orphan screen and no
+dead end.
 
 Scenarios use it as:
 
