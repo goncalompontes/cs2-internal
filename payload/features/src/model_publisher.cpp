@@ -7,10 +7,10 @@
 #include <type_traits>
 #include <variant>
 
-#include "cs2/features/settings.hpp"
-#include "cs2/overlay/wire.hpp"
 #include "cs2/diag/watchdog.hpp"
+#include "cs2/features/settings.hpp"
 #include "cs2/game/log.hpp"
+#include "cs2/overlay/wire.hpp"
 #include "cs2/render/draw_list.hpp"
 #include "cs2/tls/bootstrap.hpp"
 
@@ -39,7 +39,9 @@ void store_color(wire::Draw& out, const render::Color& color) noexcept {
 
 }  // namespace
 
-ModelPublisher::~ModelPublisher() { stop(); }
+ModelPublisher::~ModelPublisher() {
+  stop();
+}
 
 #if defined(_WIN32)
 
@@ -165,8 +167,7 @@ void ModelPublisher::publish(const render::OverlayModel& source, float /*width*/
             copy_string(target.text, sizeof(target.text), command.value);
           } else if constexpr (std::is_same_v<T, render::FilledPoly>) {
             target.kind = DrawKind::filled_poly;
-            const std::size_t room =
-                static_cast<std::size_t>(wire::k_max_vertices) - vertex_cursor;
+            const std::size_t room = static_cast<std::size_t>(wire::k_max_vertices) - vertex_cursor;
             const std::size_t count = (std::min)(command.points.size(), room);
             target.vertex_offset = vertex_cursor;
             target.vertex_count = static_cast<uint32_t>(count);
@@ -198,15 +199,11 @@ void ModelPublisher::publish_settings() noexcept {
   defaults.rage = rage_ ? 1 : 0;
   defaults.rage_key = static_cast<uint8_t>(rage_key_);
   defaults.rage_fire = rage_fire_ ? 1 : 0;
-  const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_relaxed);
-  shared->settings_sequence.store(sequence + 1, std::memory_order_relaxed);  // odd: writing
-  std::memcpy(&shared->settings, &defaults, sizeof(defaults));
-  shared->settings_sequence.store(sequence + 2, std::memory_order_release);  // even: stable
-  settings_sequence_ = sequence + 2;
+  protocol_.publish(*shared, defaults);
 }
 
 // Write a settings block into the shared segment under the seqlock the layer
-// reads it with (ADR-0021): the layer's menu owns the block in the Vulkan render
+// reads it with (ADR-0016): the layer's menu owns the block in the Vulkan render
 // mode, so the payload has to be able to publish a block back (e.g. after a
 // config load) or the layer would keep showing the pre-load state.
 void ModelPublisher::publish_settings_block(const wire::Settings& settings) noexcept {
@@ -215,41 +212,29 @@ void ModelPublisher::publish_settings_block(const wire::Settings& settings) noex
   if (shared == nullptr) {
     return;
   }
-  const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_relaxed);
-  shared->settings_sequence.store(sequence + 1, std::memory_order_relaxed);  // odd: writing
-  std::memcpy(&shared->settings, &settings, sizeof(settings));
-  shared->settings_sequence.store(sequence + 2, std::memory_order_release);  // even: stable
-  settings_sequence_ = sequence + 2;
+  // The protocol writes the block under the seqlock the layer reads it with.
+  // It deliberately does **not** record the sequence it published: the next
+  // `apply_settings` has to see the change and adopt the published block, or
+  // a loaded configuration would never reach the ESP.
+  protocol_.publish(*shared, settings);
 #endif
 }
 
-void ModelPublisher::apply_settings() noexcept {  auto* shared = static_cast<wire::Shared*>(shared_);
+void ModelPublisher::apply_settings() noexcept {
+  auto* shared = static_cast<wire::Shared*>(shared_);
   if (shared == nullptr) {
     return;
   }
-  // Read the block every frame (16 bytes under a seqlock) so the movement features
-  // can be corrected even when nobody writes it — a flag left set out-of-band (a
-  // stale control command) is reverted on the next frame and the menu stays the
-  // single owner. The ESP config only needs the *change* check.
+  // Read the block every frame so the movement features can be corrected even
+  // when nobody writes it — a flag left set out-of-band (a stale control
+  // command) is reverted on the next frame and the menu stays the single
+  // owner. The ESP config is only re-applied when the block **changed**.
   wire::Settings copy{};
-  bool fresh = false;
-  for (int attempt = 0; attempt < 3 && !fresh; ++attempt) {
-    const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_acquire);
-    if ((sequence & 1U) != 0U) {
-      continue;  // mid-write
-    }
-    std::memcpy(&copy, &shared->settings, sizeof(copy));
-    if (shared->settings_sequence.load(std::memory_order_acquire) == sequence) {
-      fresh = true;
-    }
-  }
-  if (!fresh) {
+  const SettingsStatus status = protocol_.adopt(*shared, copy);
+  if (status == SettingsStatus::failed) {
     return;  // raced a write; retry on the next frame
   }
-
-  const std::uint32_t sequence = shared->settings_sequence.load(std::memory_order_acquire);
-  if (sequence != settings_sequence_) {
-    settings_sequence_ = sequence;
+  if (status == SettingsStatus::adopted) {
     overlay_->set_esp_config(from_wire_settings(copy));
   }
 
@@ -280,9 +265,9 @@ auto ModelPublisher::map() noexcept -> bool {
     }
     shm_path = path_buffer;
   }
-  HANDLE file = CreateFileA(shm_path, GENERIC_READ | GENERIC_WRITE,
-                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
-                            FILE_ATTRIBUTE_NORMAL, nullptr);
+  HANDLE file =
+      CreateFileA(shm_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                  nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
     return false;
   }
@@ -302,11 +287,12 @@ auto ModelPublisher::map() noexcept -> bool {
   mapping_ = mapping;
   shared_ = view;
   auto* shared = static_cast<wire::Shared*>(view);
-  if (shared->magic != wire::k_magic || shared->version != wire::k_version) {
+  if (!wire::segment_is_compatible(shared->magic, shared->version)) {
     shared->magic = wire::k_magic;
     shared->version = wire::k_version;
     shared->sequence.store(0, std::memory_order_relaxed);
     shared->settings_sequence.store(0, std::memory_order_relaxed);
+    shared->settings_checksum.store(0, std::memory_order_relaxed);
     shared->screen_width.store(0, std::memory_order_relaxed);
     shared->screen_height.store(0, std::memory_order_relaxed);
   }
@@ -366,9 +352,13 @@ void ModelPublisher::stop() noexcept {
 
 #else
 
-bool ModelPublisher::map() noexcept { return false; }
+bool ModelPublisher::map() noexcept {
+  return false;
+}
 void ModelPublisher::publish_now() noexcept {}
-bool ModelPublisher::start() noexcept { return false; }
+bool ModelPublisher::start() noexcept {
+  return false;
+}
 void ModelPublisher::stop() noexcept {}
 
 #endif

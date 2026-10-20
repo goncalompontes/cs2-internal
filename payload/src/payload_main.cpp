@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -62,6 +63,9 @@ struct Runtime {
   // land: the menu owns the live block, the file owns the persisted one, and the
   // op protocol moves between them.
   features::Config config;
+  // The one-shot config op's bookkeeping: the last token the payload acted on.
+  // It belongs to the runtime, not to a file-scope static (ADR-0010).
+  features::ConfigOpState config_op;
 };
 
 Runtime g_runtime;
@@ -131,8 +135,8 @@ auto split_tokens(const std::string& value) noexcept -> std::vector<std::string>
   std::size_t start = 0;
   while (start <= value.size()) {
     const std::size_t end = value.find(',', start);
-    std::string token = value.substr(start, end == std::string::npos ? std::string::npos
-                                                                    : end - start);
+    std::string token =
+        value.substr(start, end == std::string::npos ? std::string::npos : end - start);
     while (!token.empty() && (token.front() == ' ' || token.front() == '\t')) {
       token.erase(token.begin());
     }
@@ -188,23 +192,37 @@ auto parse_rage_env() noexcept -> RageConfig {
 // the menu is the single owner).
 void on_movement_settings(void* context, const cs2::overlay::wire::Settings& settings) noexcept {
   auto* runtime = static_cast<Runtime*>(context);
-  runtime->control.set_movement_features(settings.auto_strafe != 0, settings.bhop != 0);
+  // Work on a copy: in the in-process path `settings` **is** the menu's live
+  // block, and the write-back below assigns to it — the `const&` in the sink's
+  // contract would be a lie.
+  cs2::overlay::wire::Settings live = settings;
+  runtime->control.set_movement_features(live.auto_strafe != 0, live.bhop != 0);
   // The auto-strafe's own knobs: how the goal heading is derived (0 = off,
   // 1 = the camera's forward/back, 2 = the player's W/A/S/D), whether a held
   // `A`/`D` stands the feature down, the analog's wish speed (0 = keep the
   // current one) and the number of sub-tick `yaw_delta` steps (0 = the
   // camera-frame analog).
   runtime->control.set_strafe_features(
-      settings.movement_strafe_mode, settings.movement_strafe_ignore_keys != 0,
-      settings.movement_strafe_wishspeed, settings.movement_strafe_subticks);
+      live.movement_strafe_mode, live.movement_strafe_ignore_keys != 0,
+      live.movement_strafe_wishspeed, live.movement_strafe_subticks);
   runtime->control.set_rage_features(
-      settings.rage != 0, settings.rage_key, settings.rage_fire != 0, settings.rage_objective,
-      settings.rage_hitbox, settings.rage_fov, settings.rage_min_damage,
-      settings.rage_min_hitchance, settings.rage_autostop, settings.rage_autoscope,
-      settings.rage_autoreload != 0, settings.rage_only_visible != 0, settings.rage_mode,
-      settings.rage_per_weapon != 0, settings.rage_weapon, settings.rage_config_op,
-      settings.rage_config_token, settings.rage_recoil != 0, settings.rage_stop_speed,
-      settings.rage_backtrack != 0);
+      live.rage != 0, live.rage_key, live.rage_fire != 0, live.rage_objective, live.rage_hitbox,
+      live.rage_fov, live.rage_min_damage, live.rage_min_hitchance, live.rage_autostop,
+      live.rage_autoscope, live.rage_autoreload != 0, live.rage_only_visible != 0, live.rage_mode,
+      live.rage_per_weapon != 0, live.rage_weapon, live.rage_config_op, live.rage_config_token,
+      live.rage_recoil != 0, live.rage_stop_speed, live.rage_backtrack != 0);
+
+  // Publish where the settings file lives so the menu can show it (a read-only
+  // display field). The path is only written when it actually changes, so the
+  // publication never disturbs the menu's in-flight edits.
+  if (cs2::features::publish_config_path(live)) {
+    std::memcpy(runtime->menu.settings().menu_config_path, live.menu_config_path,
+                sizeof(live.menu_config_path));
+#if defined(_WIN32)
+    // The Vulkan layer's menu reads the shared segment.
+    runtime->publisher.publish_settings_block(live);
+#endif
+  }
 
   // The third-person camera. The engine supports the switch and the distance;
   // the yaw offset is damped by the engine's smoothing, and the pivot, the
@@ -220,19 +238,27 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
   });
 
   // The menu's one-shot config op (save / load / reset the settings file). The op
-  // runs **once per token** — the token bookkeeping lives in the store, so the
-  // two callers of this sink (the menu and the publisher) cannot both fire it.
+  // runs **once per token** — the token bookkeeping lives in the store's state,
+  // so the two callers of this sink (the menu and the publisher) cannot both
+  // fire it.
   //
-  // A load or a reset changes the configuration, so the result has to reach the
-  // owner of the live block: the in-process menu (`runtime->menu`) and the shared
-  // segment (the Vulkan layer's menu, ADR-0016). Both get the same block.
-  if (cs2::features::apply_pending_op(runtime->config, settings)) {
-    const cs2::overlay::wire::Settings loaded = cs2::features::to_wire_settings(runtime->config);
-    runtime->menu.settings() = loaded;
-    runtime->publisher.publish_settings_block(loaded);
+  // The op runs against the **live** block: the store rebuilds the payload's
+  // configuration from it first, so a save persists the settings the user is
+  // looking at and not the defaults. A load or a reset changes the
+  // configuration, so the result has to reach the owner of the live block: the
+  // in-process menu (`runtime->menu`) and the shared segment (the Vulkan
+  // layer's menu, ADR-0016). Both get the same block. A save changes nothing,
+  // so it does not touch the live block at all.
+  const cs2::features::ConfigOpOutcome outcome =
+      cs2::features::apply_pending_op(runtime->config, live, runtime->config_op);
+  if (outcome.changed) {
+    runtime->menu.settings() = outcome.block;
+    runtime->overlay.set_esp_config(cs2::features::from_wire_settings(outcome.block));
+    runtime->overlay.set_show_hud(outcome.block.show_hud != 0);
+#if defined(_WIN32)
+    runtime->publisher.publish_settings_block(outcome.block);
+#endif
   }
-  // Publish where the settings file lives so the menu can show it (read-only).
-  cs2::features::set_config_path(runtime->config);
 }
 
 // The per-frame overlay refresh forwards the local pawn so the movement features
@@ -314,9 +340,8 @@ DWORD WINAPI install_thread(void*) {
     cs2::payload::runtime().publisher.set_movement_defaults(movement.strafe, movement.bhop);
     cs2::payload::runtime().menu.set_movement_defaults(movement.strafe, movement.bhop);
     const RageConfig rage = parse_rage_env();
-    cs2::game::append_log(std::string("[cs2-payload] rage: enabled=") +
-                          (rage.enabled ? "1" : "0") + " key=" + std::to_string(rage.key) +
-                          " fire=" + (rage.fire ? "1" : "0"));
+    cs2::game::append_log(std::string("[cs2-payload] rage: enabled=") + (rage.enabled ? "1" : "0") +
+                          " key=" + std::to_string(rage.key) + " fire=" + (rage.fire ? "1" : "0"));
     cs2::payload::runtime().control.set_rage_features(
         rage.enabled, rage.key, rage.fire, 1 /*hitchance*/, 0 /*auto*/, 0.0F, 0.0F, 0.0F, 0, 0,
         false, false, 0 /*hold*/, false, "", 0, 0, true /*recoil*/, 0.0F,
@@ -325,19 +350,16 @@ DWORD WINAPI install_thread(void*) {
     cs2::payload::runtime().menu.set_rage_defaults(rage.enabled, rage.key, rage.fire);
     cs2::payload::runtime().publisher.set_settings_sink(&on_movement_settings,
                                                         &cs2::payload::runtime());
-    cs2::payload::runtime().menu.set_settings_sink(&on_movement_settings,
-                                                   &cs2::payload::runtime());
-    cs2::payload::runtime().overlay.set_local_pawn_sink(&on_local_pawn,
-                                                        &cs2::payload::runtime());
+    cs2::payload::runtime().menu.set_settings_sink(&on_movement_settings, &cs2::payload::runtime());
+    cs2::payload::runtime().overlay.set_local_pawn_sink(&on_local_pawn, &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_snapshot_sink(&on_snapshot, &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_rage_status_provider(&on_rage_status,
                                                              &cs2::payload::runtime());
-    cs2::payload::runtime().overlay.set_hitbox_provider(&on_hitboxes,
-                                                        &cs2::payload::runtime());
+    cs2::payload::runtime().overlay.set_hitbox_provider(&on_hitboxes, &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_rage_target_provider(&on_rage_target,
                                                              &cs2::payload::runtime());
-    cs2::payload::runtime().overlay.set_predicted_origin_provider(
-        &on_predicted_origin, &cs2::payload::runtime());
+    cs2::payload::runtime().overlay.set_predicted_origin_provider(&on_predicted_origin,
+                                                                  &cs2::payload::runtime());
   }
   // The third-person camera: the game-thread hook (the client's per-frame
   // camera update) that re-asserts the switch every frame. It is refused on a
@@ -404,13 +426,15 @@ void boot() {
 #endif
 
 #if defined(CS2_PAYLOAD_HAVE_SCHEMAS) && __has_include("schemas/client_dll.hpp")
-  const auto* controller = cs2::sdk::schemas::client_dll::find_class_by_target("CBasePlayerController");
-  const auto local_flag =
-      cs2::sdk::schemas::client_dll::field_offset_by_target("CBasePlayerController",
-                                                            "m_bIsLocalPlayerController");
+  const auto* controller =
+      cs2::sdk::schemas::client_dll::find_class_by_target("CBasePlayerController");
+  const auto local_flag = cs2::sdk::schemas::client_dll::field_offset_by_target(
+      "CBasePlayerController", "m_bIsLocalPlayerController");
   if (controller != nullptr) {
-    std::printf("[cs2-payload] CBasePlayerController size=0x%x fields=%zu m_bIsLocalPlayerController=0x%x\n",
-                controller->size, controller->fields.size(), local_flag);
+    std::printf(
+        "[cs2-payload] CBasePlayerController size=0x%x fields=%zu "
+        "m_bIsLocalPlayerController=0x%x\n",
+        controller->size, controller->fields.size(), local_flag);
   }
 #endif
 

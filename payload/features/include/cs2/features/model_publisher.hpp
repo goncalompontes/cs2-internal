@@ -14,6 +14,7 @@
 #include <atomic>
 
 #include "cs2/features/overlay.hpp"
+#include "cs2/features/settings.hpp"
 
 // The sink receives the menu's shared settings block by reference; the definition is in
 // `model_publisher.cpp` (which includes the full `wire.hpp`).
@@ -48,7 +49,9 @@ class ModelPublisher {
   [[nodiscard]] bool start() noexcept;
   void stop() noexcept;
 
-  [[nodiscard]] bool running() const noexcept { return running_.load(); }
+  [[nodiscard]] bool running() const noexcept {
+    return running_.load();
+  }
 
   // Movement features (`docs/re/subtick.md`): what the payload publishes into the
   // shared settings as **defaults** — the layer's menu can change them afterwards
@@ -74,13 +77,18 @@ class ModelPublisher {
     settings_sink_context_ = context;
   }
 
+#if defined(_WIN32)
   // Write a settings block into the shared segment.
   //
   // The layer's menu owns the block in the Vulkan render mode, so the payload
   // must be able to publish a block back (e.g. after a config load) or the layer
   // would keep showing the pre-load state. Uses the same seqlock the default
   // publication uses, so the layer never reads a half-written block.
+  //
+  // The declaration is guarded like its private siblings: the definition only
+  // exists in the Windows build.
   void publish_settings_block(const cs2::overlay::wire::Settings& settings) noexcept;
+#endif
 
  private:
 #if defined(_WIN32)
@@ -105,7 +113,9 @@ class ModelPublisher {
   void* mapping_ = nullptr;  // HANDLE
   void* shared_ = nullptr;   // wire::Shared*
   void* thread_ = nullptr;   // HANDLE
-  std::uint32_t settings_sequence_ = 0xFFFFFFFFU;
+  // The settings block's publish/adopt protocol (the change latch lives here,
+  // not in a global: ADR-0010).
+  SettingsProtocol protocol_;
 #endif
   std::atomic<bool> running_{false};
 };

@@ -20,8 +20,19 @@ void write_extent(uint32_t width, uint32_t height) noexcept;
 [[nodiscard]] auto read_model(wire::Model& out) noexcept -> bool;
 
 // Menu settings (ADR-0021): the layer's menu writes, the payload reads.
-// Returns false if the segment is not mapped or a write was in progress.
-[[nodiscard]] auto read_settings(wire::Settings& out) noexcept -> bool;
-void write_settings(const wire::Settings& in) noexcept;
+// Returns false if the segment is not mapped, a write was in progress, or the
+// copy was torn (the block has two writers, so it carries a checksum).
+//
+// `sequence` (optional) receives the seqlock sequence the copy was taken at,
+// so the caller can tell whether the block changed since the last read.
+[[nodiscard]] auto read_settings(wire::Settings& out, uint32_t* sequence = nullptr) noexcept
+    -> bool;
+
+// Write the settings block back.
+//
+// `expected_sequence` is the sequence the caller based its edit on: the write
+// is skipped when the segment moved on (the payload published a loaded
+// configuration), so a stale copy cannot revert it.
+void write_settings(const wire::Settings& in, uint32_t expected_sequence) noexcept;
 
 }  // namespace cs2::overlay::transport

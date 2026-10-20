@@ -8,10 +8,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 #include <string_view>
-#include <system_error>
 
+#include "cs2/features/settings.hpp"
 #include "cs2/game/log.hpp"
 
 #if defined(_WIN32)
@@ -27,14 +26,55 @@ constexpr std::string_view k_header =
     "# One setting per line: <section>.<field> = <value>\n"
     "# Booleans are 0/1, colours are r,g,b,a, strings are quoted.\n";
 
-// The last op token the payload acted on.
+// The settings file's text, in a fixed buffer. The file is a few kilobytes;
+// the buffer is fixed so the op path never allocates.
+inline constexpr std::size_t k_max_config_bytes = 16 * 1024;
+
+// A fixed-capacity text buffer.
 //
-// The one-shot protocol is a "the token changed" signal, so the payload has to
-// remember the token it last saw. The state is a file-scope atomic: it is
-// constant-initialised (the payload is manually mapped, so a static with a
-// dynamic initialiser would need the CRT's static-init machinery), and every
-// access is atomic, so the render thread and the settings sink cannot race.
-std::atomic<std::uint32_t> last_op_token{0};
+// The store never allocates: the payload is manually mapped and the sink that
+// calls into the store is `noexcept`, so a `std::bad_alloc` would unwind into
+// a `noexcept` frame and terminate the game. A buffer that overflows is
+// reported (`overflowed`), never silently truncated.
+template <std::size_t Capacity>
+class TextBuffer {
+ public:
+  // Append `text`. False when the buffer is full.
+  auto append(std::string_view text) noexcept -> bool {
+    if (text.size() > Capacity - 1 - length_) {
+      overflow_ = true;
+      return false;
+    }
+    std::memcpy(data_ + length_, text.data(), text.size());
+    length_ += text.size();
+    data_[length_] = '\0';
+    return true;
+  }
+
+  // Append one character. False when the buffer is full.
+  auto append(char character) noexcept -> bool {
+    if (length_ + 1 >= Capacity) {
+      overflow_ = true;
+      return false;
+    }
+    data_[length_++] = character;
+    data_[length_] = '\0';
+    return true;
+  }
+
+  [[nodiscard]] auto text() const noexcept -> std::string_view {
+    return std::string_view(data_, length_);
+  }
+
+  [[nodiscard]] auto overflowed() const noexcept -> bool {
+    return overflow_;
+  }
+
+ private:
+  char data_[Capacity] = {};
+  std::size_t length_ = 0;
+  bool overflow_ = false;
+};
 
 // --- Small text helpers ----------------------------------------------------
 
@@ -67,11 +107,17 @@ auto parse_u32(std::string_view value) -> std::optional<std::uint32_t> {
 }
 
 auto parse_float(std::string_view value) -> std::optional<float> {
-  const std::string buffer{value};
-  char* end = nullptr;
-  const float parsed = std::strtof(buffer.c_str(), &end);
+  // `from_chars` does not take a leading '+' (`strtof` did).
+  if (!value.empty() && value.front() == '+') {
+    value.remove_prefix(1);
+  }
+  float parsed = 0.0F;
+  const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+  if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
+    return std::nullopt;
+  }
   // A non-finite value is corrupt, not a setting: it would poison a slider.
-  if (end == buffer.c_str() || *end != '\0' || !std::isfinite(parsed)) {
+  if (!std::isfinite(parsed)) {
     return std::nullopt;
   }
   return parsed;
@@ -104,99 +150,112 @@ auto parse_color(std::string_view value) -> std::optional<Color> {
         return std::nullopt;
       }
       start = comma + 1;
+    } else if (comma != std::string_view::npos) {
+      // A fifth component: the value is not a colour.
+      return std::nullopt;
     }
   }
   return Color::from_wire(channels);
 }
 
 // A quoted string with backslash escapes, so a path with spaces survives.
-auto parse_string(std::string_view value, std::string& out) -> bool {
+//
+// The text is written straight into the target array: the store does not
+// allocate.
+template <std::size_t N>
+auto parse_string(std::string_view value, std::array<char, N>& out) -> bool {
   if (value.size() < 2 || value.front() != '"' || value.back() != '"') {
     return false;
   }
   const std::string_view body = value.substr(1, value.size() - 2);
-  out.clear();
+  out.fill('\0');
+  std::size_t length = 0;
   for (std::size_t index = 0; index < body.size(); ++index) {
-    const char c = body[index];
+    char c = body[index];
     if (c == '\\' && index + 1 < body.size()) {
-      out += body[++index];
-      continue;
-    }
-    if (c == '"') {
+      c = body[++index];
+    } else if (c == '"') {
       return false;  // an unescaped quote ends the string early
     }
-    out += c;
+    if (length + 1 >= N) {
+      return false;  // the string does not fit
+    }
+    out[length++] = c;
   }
+  out[length] = '\0';
   return true;
 }
 
 // --- Writing ----------------------------------------------------------------
 
-auto append_key(std::string& out, const char* key) -> void {
-  out += key;
-  out += " = ";
+auto append_key(TextBuffer<k_max_config_bytes>& out, const char* key) -> void {
+  out.append(key);
+  out.append(" = ");
 }
 
-auto append_bool(std::string& out, const char* key, bool value) -> void {
+auto append_bool(TextBuffer<k_max_config_bytes>& out, const char* key, bool value) -> void {
   append_key(out, key);
-  out += value ? "1" : "0";
-  out += '\n';
+  out.append(value ? "1" : "0");
+  out.append('\n');
 }
 
-auto append_u8(std::string& out, const char* key, std::uint8_t value) -> void {
+auto append_u8(TextBuffer<k_max_config_bytes>& out, const char* key, std::uint8_t value) -> void {
   append_key(out, key);
-  out += std::to_string(static_cast<unsigned int>(value));
-  out += '\n';
+  out.append(std::to_string(static_cast<unsigned int>(value)));
+  out.append('\n');
 }
 
-auto append_u32(std::string& out, const char* key, std::uint32_t value) -> void {
+auto append_u32(TextBuffer<k_max_config_bytes>& out, const char* key, std::uint32_t value) -> void {
   append_key(out, key);
-  out += std::to_string(value);
-  out += '\n';
+  out.append(std::to_string(value));
+  out.append('\n');
 }
 
-auto append_float(std::string& out, const char* key, float value) -> void {
+auto append_float(TextBuffer<k_max_config_bytes>& out, const char* key, float value) -> void {
   append_key(out, key);
   char buffer[32] = {};
   // %.9g round-trips every float exactly (a float needs 9 significant digits).
   std::snprintf(buffer, sizeof(buffer), "%.9g", static_cast<double>(value));
-  out += buffer;
-  out += '\n';
+  out.append(buffer);
+  out.append('\n');
 }
 
-auto append_color(std::string& out, const char* key, const Color& color) -> void {
+auto append_color(TextBuffer<k_max_config_bytes>& out, const char* key, const Color& color)
+    -> void {
   append_key(out, key);
-  out += std::to_string(static_cast<unsigned int>(color.r));
-  out += ',';
-  out += std::to_string(static_cast<unsigned int>(color.g));
-  out += ',';
-  out += std::to_string(static_cast<unsigned int>(color.b));
-  out += ',';
-  out += std::to_string(static_cast<unsigned int>(color.a));
-  out += '\n';
+  out.append(std::to_string(static_cast<unsigned int>(color.r)));
+  out.append(',');
+  out.append(std::to_string(static_cast<unsigned int>(color.g)));
+  out.append(',');
+  out.append(std::to_string(static_cast<unsigned int>(color.b)));
+  out.append(',');
+  out.append(std::to_string(static_cast<unsigned int>(color.a)));
+  out.append('\n');
 }
 
 template <std::size_t N>
-auto append_string(std::string& out, const char* key, const std::array<char, N>& value) -> void {
+auto append_string(TextBuffer<k_max_config_bytes>& out, const char* key,
+                   const std::array<char, N>& value) -> void {
   append_key(out, key);
-  out += '"';
+  out.append('"');
   for (const char c : value) {
     if (c == '\0') {
       break;
     }
     if (c == '"' || c == '\\') {
-      out += '\\';
+      out.append('\\');
     }
-    out += c;
+    out.append(c);
   }
-  out += '"';
-  out += '\n';
+  out.append('"');
+  out.append('\n');
 }
 
 // The config as the file's text. Every field of the settings block is
 // written; the host test `features-config` proves the round trip.
-auto serialize(const Config& config) -> std::string {
-  std::string out{k_header};
+auto serialize(const Config& config) -> TextBuffer<k_max_config_bytes> {
+  TextBuffer<k_max_config_bytes> out;
+  out.append(k_header);
 
   // --- ESP ---
   append_bool(out, "esp.box", config.esp.box);
@@ -354,12 +413,9 @@ auto assign(Color& target, std::string_view value) -> ParseResult {
 
 template <std::size_t N>
 auto assign(std::array<char, N>& target, std::string_view value) -> ParseResult {
-  std::string text;
-  if (!parse_string(value, text) || text.size() > N - 1) {
+  if (!parse_string(value, target)) {
     return ParseResult::bad_value;
   }
-  target.fill('\0');
-  std::memcpy(target.data(), text.data(), text.size());
   return ParseResult::ok;
 }
 
@@ -681,24 +737,28 @@ auto apply_field(std::string_view section, std::string_view field, std::string_v
 // --- File I/O ---------------------------------------------------------------
 
 #if defined(_WIN32)
-auto read_file(const std::filesystem::path& path, std::string& out) -> bool {
-  HANDLE file = CreateFileW(path.native().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+auto read_file(const char* path, TextBuffer<k_max_config_bytes>& out) -> bool {
+  HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
     return false;
   }
-  char buffer[4096];
+  char chunk[4096];
   DWORD read = 0;
-  while (ReadFile(file, buffer, sizeof(buffer), &read, nullptr) != 0 && read > 0) {
-    out.append(buffer, static_cast<std::size_t>(read));
+  bool ok = true;
+  while (ReadFile(file, chunk, sizeof(chunk), &read, nullptr) != 0 && read > 0) {
+    if (!out.append(std::string_view(chunk, static_cast<std::size_t>(read)))) {
+      ok = false;  // the file does not fit
+      break;
+    }
   }
   CloseHandle(file);
-  return true;
+  return ok;
 }
 
-auto write_file(const std::filesystem::path& path, const std::string& text) -> bool {
-  HANDLE file = CreateFileW(path.native().c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+auto write_file(const char* path, std::string_view text) -> bool {
+  HANDLE file = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
     return false;
   }
@@ -709,22 +769,28 @@ auto write_file(const std::filesystem::path& path, const std::string& text) -> b
   return ok;
 }
 #else
-auto read_file(const std::filesystem::path& path, std::string& out) -> bool {
-  std::FILE* file = std::fopen(path.c_str(), "rb");
+// The POSIX branch only builds the host test (the payload is Windows-only),
+// so the CRT's file API is fine here.
+auto read_file(const char* path, TextBuffer<k_max_config_bytes>& out) -> bool {
+  std::FILE* file = std::fopen(path, "rb");
   if (file == nullptr) {
     return false;
   }
-  char buffer[4096];
+  char chunk[4096];
   std::size_t read = 0;
-  while ((read = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
-    out.append(buffer, read);
+  bool ok = true;
+  while ((read = std::fread(chunk, 1, sizeof(chunk), file)) > 0) {
+    if (!out.append(std::string_view(chunk, read))) {
+      ok = false;
+      break;
+    }
   }
   std::fclose(file);
-  return true;
+  return ok;
 }
 
-auto write_file(const std::filesystem::path& path, const std::string& text) -> bool {
-  std::FILE* file = std::fopen(path.c_str(), "wb");
+auto write_file(const char* path, std::string_view text) -> bool {
+  std::FILE* file = std::fopen(path, "wb");
   if (file == nullptr) {
     return false;
   }
@@ -734,66 +800,124 @@ auto write_file(const std::filesystem::path& path, const std::string& text) -> b
 }
 #endif
 
-// Create the file's directory when it is missing. `create_directories` reports
-// "false" for a directory that already exists, which is not an error.
-auto ensure_parent_directory(const std::filesystem::path& path) -> bool {
-  const auto parent = path.parent_path();
-  if (parent.empty()) {
+// Create the file's directory when it is missing. Creating a directory that
+// already exists is not an error.
+auto create_directory(const char* path) -> bool {
+#if defined(_WIN32)
+  if (CreateDirectoryA(path, nullptr) != 0) {
     return true;
   }
-  std::error_code error;
-  std::filesystem::create_directories(parent, error);
-  return !error;
+  return GetLastError() == ERROR_ALREADY_EXISTS;
+#else
+  return ::mkdir(path, 0775) == 0 || errno == EEXIST;
+#endif
 }
 
-// The settings file's location as text. The narrow form is what the payload
-// publishes in `wire::Settings::menu_config_path`.
-auto default_config_text() -> std::string {
-  if (const char* override_path = std::getenv("CS2_PAYLOAD_CONFIG");
-      override_path != nullptr && override_path[0] != '\0') {
-    return std::string(override_path);
+// Create every directory on the path's way to the file.
+auto ensure_parent_directory(const char* path) -> bool {
+  char buffer[k_max_config_path] = {};
+  const std::size_t length = std::strlen(path);
+  if (length == 0 || length >= sizeof(buffer)) {
+    return false;
   }
-  char path[260] = {};
-  if (cs2::game::data_file_path("cs2-config.cfg", path, sizeof(path))) {
-    return std::string(path);
+  std::memcpy(buffer, path, length + 1);
+  char* separator = std::strrchr(buffer, '/');
+  if (separator == nullptr) {
+    separator = std::strrchr(buffer, '\\');
   }
-  return {};
+  if (separator == nullptr) {
+    return true;  // the file is in the current directory
+  }
+  *separator = '\0';
+  if (buffer[0] == '\0') {
+    return true;  // the file is in the root
+  }
+  for (char* cursor = buffer + 1; *cursor != '\0'; ++cursor) {
+    if (*cursor != '/' && *cursor != '\\') {
+      continue;
+    }
+    *cursor = '\0';
+    (void)create_directory(buffer);
+    *cursor = '/';
+  }
+  (void)create_directory(buffer);
+  return true;
 }
 
 }  // namespace
 
-auto default_config_path() -> std::filesystem::path {
-  const std::string text = default_config_text();
-  if (text.empty()) {
-    return {};
+auto default_config_path(char* out, std::size_t size) noexcept -> std::size_t {
+  if (size == 0) {
+    return 0;
   }
-  return std::filesystem::path(text);
+  out[0] = '\0';
+  const char* override_path = std::getenv("CS2_PAYLOAD_CONFIG");
+  if (override_path != nullptr && override_path[0] != '\0') {
+    const std::size_t length = std::strlen(override_path);
+    if (length >= size || length >= k_max_config_path) {
+      return 0;  // a path that does not fit is refused, never truncated
+    }
+    std::memcpy(out, override_path, length + 1);
+    return length;
+  }
+#if defined(_WIN32)
+  char buffer[k_max_config_path] = {};
+  if (!cs2::game::data_file_path("cs2-config.cfg", buffer, sizeof(buffer))) {
+    return 0;
+  }
+  const std::size_t length = std::strlen(buffer);
+  if (length >= size) {
+    return 0;
+  }
+  std::memcpy(out, buffer, length + 1);
+  return length;
+#else
+  return 0;  // no writable data directory off Windows
+#endif
 }
 
-void set_config_path(Config& config) {
-  const std::string text = default_config_text();
+void set_config_path(Config& config) noexcept {
+  char path[k_max_config_path] = {};
+  const std::size_t length = default_config_path(path, sizeof(path));
   config.menu.config_path.fill('\0');
-  if (text.empty()) {
+  if (length == 0) {
     return;
   }
-  const std::size_t count = (std::min)(text.size(), config.menu.config_path.size() - 1);
-  std::memcpy(config.menu.config_path.data(), text.data(), count);
+  std::memcpy(config.menu.config_path.data(), path, length);
 }
 
-auto load(const std::filesystem::path& path) -> std::optional<Config> {
-  std::string text;
+auto publish_config_path(cs2::overlay::wire::Settings& settings) noexcept -> bool {
+  char path[k_max_config_path] = {};
+  const std::size_t length = default_config_path(path, sizeof(path));
+  if (length == 0) {
+    return false;  // no path to publish
+  }
+  if (std::memcmp(settings.menu_config_path, path, sizeof(settings.menu_config_path)) == 0) {
+    return false;  // the path is already published
+  }
+  std::memset(settings.menu_config_path, 0, sizeof(settings.menu_config_path));
+  std::memcpy(settings.menu_config_path, path, length);
+  return true;
+}
+
+auto load(const char* path) -> std::optional<Config> {
+  TextBuffer<k_max_config_bytes> text;
   if (!read_file(path, text)) {
-    return std::nullopt;  // missing or unreadable: the caller keeps its defaults
+    return std::nullopt;  // missing, unreadable or too large: the caller keeps its defaults
   }
 
   Config config{};  // the defaults; the file overrides what it names
-  std::size_t cursor = 0;
-  while (cursor < text.size()) {
-    const std::size_t newline = text.find('\n', cursor);
-    const std::string_view line = newline == std::string::npos
-                                      ? std::string_view(text).substr(cursor)
-                                      : std::string_view(text).substr(cursor, newline - cursor);
-    cursor = newline == std::string::npos ? text.size() : newline + 1;
+  std::string_view remaining = text.text();
+  // A UTF-8 BOM (what Notepad adds by default) is not part of the first line.
+  if (remaining.starts_with("\xEF\xBB\xBF")) {
+    remaining.remove_prefix(3);
+  }
+  while (!remaining.empty()) {
+    const std::size_t newline = remaining.find('\n');
+    const std::string_view line =
+        newline == std::string_view::npos ? remaining : remaining.substr(0, newline);
+    remaining =
+        newline == std::string_view::npos ? std::string_view{} : remaining.substr(newline + 1);
 
     const std::string_view trimmed = trim(line);
     if (trimmed.empty() || trimmed.front() == '#') {
@@ -819,57 +943,95 @@ auto load(const std::filesystem::path& path) -> std::optional<Config> {
   return config;
 }
 
-auto save(const std::filesystem::path& path, const Config& config) -> bool {
-  if (path.empty()) {
+auto save(const char* path, const Config& config) -> bool {
+  if (path == nullptr || path[0] == '\0') {
     return false;
   }
   if (!ensure_parent_directory(path)) {
     return false;
   }
-  return write_file(path, serialize(config));
+  const TextBuffer<k_max_config_bytes> text = serialize(config);
+  if (text.overflowed()) {
+    return false;  // the configuration does not fit the buffer
+  }
+  return write_file(path, text.text());
 }
 
-auto apply_pending_op(Config& config, const cs2::overlay::wire::Settings& settings) -> bool {
-  const std::uint8_t op = settings.menu_config_op;
+auto apply_pending_op(Config& config, const cs2::overlay::wire::Settings& live,
+                      ConfigOpState& state) noexcept -> ConfigOpOutcome {
+  ConfigOpOutcome outcome;
+  const std::uint8_t op = live.menu_config_op;
   if (op == 0) {
-    return false;
+    return outcome;
   }
   // One click = one op: the menu bumps the token, and the op runs once per
   // token (the same protocol the ragebot's per-weapon profiles use).
-  const std::uint32_t token = settings.menu_config_token;
-  if (last_op_token.exchange(token, std::memory_order_relaxed) == token) {
-    return false;  // this op was already carried out
+  const std::uint32_t token = live.menu_config_token;
+  if (state.last_token.exchange(token, std::memory_order_relaxed) == token) {
+    return outcome;  // this op was already carried out
   }
+  outcome.ran = true;
 
-  const std::filesystem::path path = default_config_path();
+  // The live block is the source of truth: rebuild the configuration from it
+  // before the op runs, so a save persists the settings the user is looking
+  // at and not the defaults the payload happened to start with.
+  // The live block is the source of truth: rebuild the configuration from it
+  // before the op runs, so a save persists the settings the user is looking
+  // at and not the defaults the payload happened to start with.
+  config = from_wire_settings(live);
+  // The path is the payload's, not the file's: the file records where the
+  // configuration really lives.
+  set_config_path(config);
+  const Config before = config;
+
+  char path[k_max_config_path] = {};
+  const std::size_t path_length = default_config_path(path, sizeof(path));
   switch (static_cast<ConfigOp>(op)) {
     case ConfigOp::save: {
-      const bool ok = save(path, config);
+      const bool ok = path_length > 0 && save(path, config);
       cs2::game::append_log(ok ? "[config] saved" : "[config] save failed");
-      return ok;
+      break;
     }
     case ConfigOp::load: {
-      const auto loaded = load(path);
+      const auto loaded = path_length > 0 ? load(path) : std::nullopt;
       if (!loaded.has_value()) {
         cs2::game::append_log("[config] load failed");
-        return false;
+        return outcome;  // the op ran, but the configuration did not change
       }
       config = *loaded;
-      // The path in the file is informational; the live path is the one the
-      // payload is actually using.
-      set_config_path(config);
       cs2::game::append_log("[config] loaded");
-      return true;
+      break;
     }
     case ConfigOp::reset: {
       config = Config{};
       cs2::game::append_log("[config] reset");
-      return true;
+      break;
     }
     case ConfigOp::none:
     default:
-      return false;
+      return outcome;
   }
+
+  // The path in the file is informational; the live path is the one the
+  // payload is actually using.
+  set_config_path(config);
+  outcome.changed = config != before;
+  if (!outcome.changed) {
+    return outcome;
+  }
+
+  // The block the menu has to adopt.
+  outcome.block = to_wire_settings(config);
+  // The op/token fields and the menu's open state are **protocol state**, not
+  // configuration: the menu owns them. A write-back that carried the file's
+  // values would re-trigger the op (the file's token is an old one) and drop
+  // a ragebot op the menu set in the same frame.
+  outcome.block.menu_open = live.menu_open;
+  outcome.block.menu_config_op = live.menu_config_op;
+  outcome.block.menu_config_token = live.menu_config_token;
+  outcome.block.rage_config_op = live.rage_config_op;
+  outcome.block.rage_config_token = live.rage_config_token;
+  return outcome;
 }
 
 }  // namespace cs2::features

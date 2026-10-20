@@ -241,10 +241,12 @@ struct Config {
     bool open = false;        // written by the layer; the payload may suppress input
     std::uint8_t key = 0x2E;  // the virtual-key code that opens the menu (Insert)
     Color accent{90, 160, 255, 255};
-    std::uint8_t transparency = 100;      // the window alpha, 0..100
-    std::uint8_t config_op = 0;           // 1 = save, 2 = load, 3 = reset
-    std::uint32_t config_token = 0;       // bumped by the menu to signal the op
-    std::array<char, 128> config_path{};  // the config file's path (read-only)
+    std::uint8_t transparency = 100;  // the window alpha, 0..100
+    std::uint8_t config_op = 0;       // 1 = save, 2 = load, 3 = reset
+    std::uint32_t config_token = 0;   // bumped by the menu to signal the op
+    // The config file's path (read-only). `MAX_PATH` bytes, the same width as
+    // the wire field, so the path the menu shows is the path the payload uses.
+    std::array<char, 260> config_path{};
 
     [[nodiscard]] auto operator==(const Menu&) const noexcept -> bool = default;
   } menu;
@@ -252,17 +254,10 @@ struct Config {
   [[nodiscard]] auto operator==(const Config&) const noexcept -> bool = default;
 };
 
-// The flat `EspConfig` was replaced by the sectioned `Config` above. The alias
-// keeps the files that still name `EspConfig` compiling
-// (`cs2/features/overlay.hpp`, outside this change's ownership); new code
-// should spell `Config`.
-using EspConfig = Config;
-
 // Copy a configuration colour into the render module's colour.
 [[nodiscard]] constexpr auto to_render(const Color& color) noexcept -> render::Color {
   return render::Color{color.r, color.g, color.b, color.a};
 }
-
 // Per-build counters, for diagnostics/logging (never used for rendering).
 struct EspStats {
   int players = 0;

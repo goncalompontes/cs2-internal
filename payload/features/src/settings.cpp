@@ -274,4 +274,27 @@ auto default_wire_settings() -> cs2::overlay::wire::Settings {
   return cs2::overlay::wire::default_settings();
 }
 
+void SettingsProtocol::publish(cs2::overlay::wire::Shared& shared,
+                               const cs2::overlay::wire::Settings& settings) noexcept {
+  cs2::overlay::wire::write_settings(shared, settings);
+  // The latch is deliberately **not** updated: the reader has to notice the
+  // published block. A publisher that recorded the sequence it had just
+  // written made the next read report "no change", and the published block
+  // (a loaded configuration) never reached the ESP.
+}
+
+auto SettingsProtocol::adopt(cs2::overlay::wire::Shared& shared,
+                             cs2::overlay::wire::Settings& out) noexcept -> SettingsStatus {
+  std::uint32_t sequence = 0;
+  if (!cs2::overlay::wire::read_settings(shared, out, &sequence)) {
+    return SettingsStatus::failed;  // a torn read; the caller keeps its copy
+  }
+  if (adopted_ && sequence == adopted_sequence_) {
+    return SettingsStatus::unchanged;
+  }
+  adopted_ = true;
+  adopted_sequence_ = sequence;
+  return SettingsStatus::adopted;
+}
+
 }  // namespace cs2::features
