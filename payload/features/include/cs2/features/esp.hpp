@@ -165,10 +165,17 @@ struct Config {
   struct Movement {
     bool auto_strafe = false;
     bool bhop = false;
-    StrafeMode strafe_mode = StrafeMode::camera_relative;
+    // Directional by default: the travel heading comes from the held W/A/S/D.
+    // `camera_relative` is the pre-T3 behaviour (the goal is the camera's
+    // forward/back and a held A/D stands the feature down).
+    StrafeMode strafe_mode = StrafeMode::directional;
     bool strafe_ignore_keys = false;  // true = A/D stands down
     float strafe_wishspeed = 0.0F;    // 0 = the game's own wish speed
-    std::uint8_t strafe_subticks = 0;
+    // 8 sub-tick slices is the live-validated setting (+85.1 median / +104.9
+    // max u/s per hop, `docs/handoff.md`); 0 is the camera-frame analog, which
+    // measures as "nearly flat" because the {-1,0,1} snap loses the exact
+    // perpendicular angle.
+    std::uint8_t strafe_subticks = 8;
     bool thirdperson = false;
     float thirdperson_distance = 64.0F;
     float thirdperson_angle = 0.0F;

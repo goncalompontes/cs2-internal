@@ -319,10 +319,10 @@ static_assert(std::is_trivially_copyable_v<Settings>,
   // --- Movement ---
   settings.auto_strafe = 0;
   settings.bhop = 0;
-  settings.movement_strafe_mode = 1;  // StrafeMode::camera_relative
+  settings.movement_strafe_mode = 2;  // StrafeMode::directional (the WASD heading)
   settings.movement_strafe_ignore_keys = 0;
   settings.movement_strafe_wishspeed = 0.0F;
-  settings.movement_strafe_subticks = 0;
+  settings.movement_strafe_subticks = 8;  // the live-validated slice count
   settings.movement_thirdperson = 0;
   settings.movement_thirdperson_distance = 64.0F;
   settings.movement_thirdperson_angle = 0.0F;
