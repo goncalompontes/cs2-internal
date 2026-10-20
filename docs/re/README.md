@@ -53,6 +53,32 @@ REA, headless). Findings are recorded per subsystem.
 Everything below is the practical path that works on this host. Read it before
 starting a RE session: it saves the trial-and-error that produced it.
 
+## 0.5 The Neverlose reversal (a different binary, a different machine)
+
+The Neverlose CS2 module was reversed on a **Linux** box
+(`pontes@100.104.244.127`, ssh alias `laptop`, over Tailscale SSH — a one-time
+browser check is required the first time). The artifacts were copied to **this**
+machine:
+
+| What | Local path | Size |
+|---|---|---|
+| the notes and the reconstructions | `C:\Users\gpmpo\nea\rea-work\` (`*.md`, `recon_*.cpp`) | ~250 KB |
+| the raw decompilation + the function index | `C:\Users\gpmpo\nea\rea-work\all\` | 47 MB |
+| **the Ghidra project** (the full analysis, 277 patches) | `C:\Users\gpmpo\nea\rea-work\gproj3\myproj3.gpr` + `myproj3.rep` | 283 MB |
+| the deobfuscated dumps | `C:\Users\gpmpo\nea\rea-work\ghout_deobf\`, `ghout\` | 38 MB |
+| **the reconstructed loadable PE** | `C:\Users\gpmpo\nea\rea-work\neverlose_seeded3.exe` (85 MB, valid MZ, sha256 `21efa969…`) | 83 MB |
+| the PE's imports / export seeds | `imports.txt`, `seeds.txt` | 0.5 MB |
+
+The **reconstructed PE is the important one**: it is a valid PE (imports from
+`imports.txt`, 57 076 export seeds), so REA/Ghidra can import it **here** and
+the analysis no longer has to live on the Linux box. The raw memory image is in
+this repo at `re/cs2_212C3300000/`.
+
+**Note the difference of purpose:** this is a *third-party* binary, reversed for
+**technique comparison** — not a target of ours. The report is
+[`docs/research/neverlose-mining.md`](../research/neverlose-mining.md). Nothing
+from it is copied into this repo: it is read, understood and described.
+
 ## 1. Tooling
 
 | What | Where |
