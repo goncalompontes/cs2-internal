@@ -27,9 +27,14 @@
 | **T3** | Directional autostrafe: the WASD travel heading, the side dead-zone with hysteresis, the legacy mode, a pure host-testable geometry module | `payload/control/*` | pending |
 | **T4** | ESP expansion: box styles, head box, skeleton, tracers, off-screen arrows, distance/scaling/filters, radar, sound ESP, grenade/C4/dropped-weapon ESP, per-element colours, **and the `filled_poly` rendering fix** | `payload/features/src/esp*`, `payload/render/*` | pending |
 | **T5** | Third person: force the camera via the `CViewRender` view struct | `payload/features/src/thirdperson.cpp` (new), `payload/game/*` | blocked on the RE |
-| **T6** | True 3D chams: a scene/material hook | `payload/features/src/chams.cpp` (new), `payload/game/*` | blocked on the RE |
+| **T6** | True 3D chams: a scene/material hook | `payload/features/src/chams.cpp` (new), `payload/game/*` | **done** |
 | **T7** | Neverlose mining (item 6) | — | blocked on the machine |
-| **T8** | The remaining clang-tidy sweep groups + the manual refactors | repo-wide | to run at the end of the wave |
+| **T8** | The remaining clang-tidy sweep groups + the manual refactors | repo-wide | running |
+| **T11** | The **triggerbot** (item 5): the safe half of the aim - reuses `aim::solve`, never writes a view angle, gated behind a cheap pre-check so the solve is not per-tick | `payload/control/{include,src}/trigger.*` | **done** |
+| **T12** | The chams' **colour**: the material parameter setter (`CMaterialSystem2::SetMaterialVectorParam`, vtable slot 23) | `payload/game/*material*` | **done** |
+| **T13** | The strafe's **mirrored side-axis write** - the engine's axis is `m_flCmdLeftMove` (positive = LEFT) and the payload wrote the opposite sign | `payload/control/src/input.cpp` | **done** |
+| **T14** | The **IN_* button bits**: the engine's own table (and the console commands' masks) say `k_score`/`k_speed`/`k_zoom` were wrong | `strafe_geometry.hpp`, `scripts/scenario/control.py` | **done** |
+| **T15** | The residual **mypy** errors - the gate now runs strict with **no overrides** | `scripts/scenario/**` | **done** |
 | **T9** | The ESP's out-of-module data providers: the **sound** provider (the `player_footstep` / `player_sound` events are captured but *not* in the default subscription set, and the `userid` argument is a player *slot*, so the position must be resolved from the snapshot) and the **visibility** provider (cached, low-rate, reusing the ragebot's existing occlusion machinery — never a per-player-per-frame query) | `payload/control/**`, `payload/src/payload_main.cpp` | in progress |
 
 ### 1.1 The second workstream: the scenario / control API
