@@ -261,6 +261,21 @@ control_strafe_test = executable('control_strafe_test',
 )
 test('control-strafe', control_strafe_test)
 
+# The input backend's **button gate** and the ragebot's auto-stop counter-wish
+# (both pure functions in `cs2/control/strafe_geometry.hpp`). The gate is what
+# decides whether a feature's button reaches the command: the triggerbot used
+# to go through the control channel's backend-gated mask, so in the default
+# `console` backend it decided to fire and the gun stayed silent.
+control_input_test = executable('control_input_test',
+  files(
+    'payload/control/tests/test_control_input.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+  ],
+)
+test('control-input', control_input_test)
+
 # The triggerbot's decision maths (the angle gate, the hitchance gate, the head
 # preference, the reaction delay and the "already firing" latch) — a pure
 # header, so the test compiles the header alone.

@@ -202,6 +202,14 @@ void Input::release(std::uint64_t bits) noexcept {
   set_mask_.fetch_and(~bits);
 }
 
+void Input::press_feature(std::uint64_t bits) noexcept {
+  feature_mask_.fetch_or(bits);
+}
+
+void Input::release_feature(std::uint64_t bits) noexcept {
+  feature_mask_.fetch_and(~bits);
+}
+
 void Input::reset_buttons() noexcept {
   set_mask_.store(0);
   clear_mask_.store(0);
@@ -1673,13 +1681,22 @@ void Input::apply(void* cmd) noexcept {
   // The **control commands** (`press`/`move`/`look`) are a backend choice: in the
   // `console` backend the runner drives the engine's own `+button`/`setang`
   // commands through `exec`, so the command must be left untouched here. The
-  // **payload features** — the `bhop` jump assist and the auto-`strafe` — are
-  // owned by the overlay menu (`wire::Settings`, ADR-0021) and have no console
-  // equivalent, so they must act regardless of the backend. Gating *them* on
-  // `usercmd` is why enabling them in the menu did nothing (the menu cannot select
-  // the backend): measured live 2026-10-15, `strafe`/`bhop` flags true but
+  // **payload features** — the `bhop` jump assist, the auto-`strafe` and the
+  // triggerbot's fire — are owned by the overlay menu (`wire::Settings`,
+  // ADR-0021) and have no console equivalent, so they must act regardless of
+  // the backend. Gating *them* on `usercmd` is why enabling them in the menu did
+  // nothing (the menu cannot select the backend): measured live 2026-10-15,
+  // `strafe`/`bhop` flags true but
   // `writes = move_writes = strafe_writes = 0` until `input(via="usercmd")`.
-  const bool control = backend_ == Backend::usercmd;
+  //
+  // The gate itself is `cs2::control::button_reaches_command`, a pure function
+  // the host test pins: the triggerbot's press used to travel through the
+  // control channel's mask, so in the default `console` backend it decided to
+  // fire, counted the shot and answered `{"firing": true}` while the gun
+  // stayed silent.
+  const bool usercmd_backend = backend_ == Backend::usercmd;
+  const bool control = cs2::control::button_reaches_command(
+      cs2::control::ButtonPath::control_command, usercmd_backend);
   auto* bytes = static_cast<std::uint8_t*>(cmd);
 
   // 1. Legacy button mask (`CInButtonState`). The bhop assist runs after the mask
@@ -1687,19 +1704,19 @@ void Input::apply(void* cmd) noexcept {
   //    state and only writes the sub-tick table.
   auto* buttons = reinterpret_cast<std::uint64_t*>(bytes + k_cmd_buttons_offset);
   const std::uint64_t current = *buttons;
-  std::uint64_t value =
-      control ? (current | set_mask_.load()) & ~clear_mask_.load() : current;
-  // The ragebot's attack is a **persistent** press while a solve is active — a
-  // payload feature (like the movement features) that must hold on *every*
-  // command the engine simulates, not just the command `rage_tick` happens to
-  // see. Verified subtlety: pressing attack only on the command whose history we
-  // wrote that tick let a shot be released on a command the silent write had not
-  // reached, so it followed the camera (the auto-fire timing bug). A persistent
-  // press is exactly why manual `press("attack")` always hit.
+  // The features' buttons: the triggerbot's own hold, plus the ragebot's
+  // assists. The ragebot's attack is a **persistent** press while a solve is
+  // active — a payload feature (like the movement features) that must hold on
+  // *every* command the engine simulates, not just the command `rage_tick`
+  // happens to see. Verified subtlety: pressing attack only on the command whose
+  // history we wrote that tick let a shot be released on a command the silent
+  // write had not reached, so it followed the camera (the auto-fire timing
+  // bug). A persistent press is exactly why manual `press("attack")` always hit.
   const bool rage_solved = rage_active_.load();
   const bool rage_firing = rage_solved && rage_fire_.load();
+  std::uint64_t feature_bits = feature_mask_.load();
   if (rage_firing) {
-    value |= button::k_attack;
+    feature_bits |= button::k_attack;
   }
   // Auto-scope / auto-reload (common ragebot assists, `docs/ragebot.md`): hold zoom
   // and/or reload while a solve is active. The engine ignores zoom on a weapon that
@@ -1708,11 +1725,13 @@ void Input::apply(void* cmd) noexcept {
   // engine's own zoom bit (`1 << 34`) and no client action produces it, so it
   // only states the scope the attack2 press has already asked for.
   if (rage_solved && rage_scope_.load()) {
-    value |= button::k_attack2 | button::k_zoom;
+    feature_bits |= button::k_attack2 | button::k_zoom;
   }
   if (rage_solved && rage_reload_.load()) {
-    value |= button::k_reload;
+    feature_bits |= button::k_reload;
   }
+  const std::uint64_t value = cs2::control::compose_button_mask(
+      current, set_mask_.load(), clear_mask_.load(), feature_bits, usercmd_backend);
   if (value != current) {
     *buttons = value;
     writes_.fetch_add(1);
@@ -1798,13 +1817,23 @@ void Input::apply(void* cmd) noexcept {
     }
     const bool brake = limit > 0.0F && speed > limit;
     // The move axes: the counter-wish when braking, else zero (hold still).
+    //
+    // The counter-wish is the direction that opposes the player's velocity,
+    // expressed in the aim's frame: `rel` is its bearing from the aim,
+    // counter-clockwise positive. It goes through `cs2::control::counter_wish_for`,
+    // so the side axis carries the engine's convention (positive to the player's
+    // **left**) and the forward axis drops to zero when the wish is
+    // perpendicular — a counter-strafe wants lateral only, and the sign of
+    // `cos(90 degrees)` (`-4.37e-8` in float) would otherwise push the player
+    // backwards.
     float forward = 0.0F;
     float side = 0.0F;
     if (brake) {
-      const float aim_yaw = rage_yaw_.load() * k_deg_to_rad;
-      const float rel = std::atan2(vy, vx) + k_pi - aim_yaw;
-      forward = std::cos(rel) >= 0.0F ? 1.0F : -1.0F;
-      side = -std::sin(rel) >= 0.0F ? 1.0F : -1.0F;
+      const float vel_yaw = std::atan2(vy, vx) * 180.0F / k_pi;
+      const float rel = vel_yaw + 180.0F - rage_yaw_.load();
+      const cs2::control::CounterWish wish = cs2::control::counter_wish_for(rel);
+      forward = wish.forward;
+      side = wish.side;
     }
 
     if (writable(strafe_base, k_base_move_offset + 12)) {

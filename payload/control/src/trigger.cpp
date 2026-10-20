@@ -184,7 +184,7 @@ void Trigger::publish(const TriggerDecision& decision) noexcept {
 
 void Trigger::release(Input& input) noexcept {
   if (pressed_) {
-    input.release(button::k_attack);
+    input.release_feature(button::k_attack);
     pressed_ = false;
   }
   latch_.armed = false;
@@ -312,13 +312,20 @@ void Trigger::tick(const game::Snapshot& snapshot, Input& input, std::uint64_t n
   // Balanced: the shot is pressed when the decision starts it and released when
   // it stops. The trigger never writes a view angle — only the command's button
   // mask.
+  //
+  // The press goes through the **feature** path (`press_feature`), not the
+  // control channel's: a feature's button reaches the command in every
+  // backend, while the control channel's `press` is applied only in the
+  // `usercmd` backend. The trigger used to press through the control channel's
+  // mask, so in the default `console` backend it decided to fire, counted the
+  // shot and answered `{"firing": true}` — and the gun never fired.
   const bool want = config.fire && decision.hold;
   if (want && !pressed_) {
-    input.press(button::k_attack);
+    input.press_feature(button::k_attack);
     pressed_ = true;
     shots_.fetch_add(1, std::memory_order_relaxed);
   } else if (!want && pressed_) {
-    input.release(button::k_attack);
+    input.release_feature(button::k_attack);
     pressed_ = false;
   }
 }
