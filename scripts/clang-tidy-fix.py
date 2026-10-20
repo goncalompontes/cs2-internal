@@ -123,7 +123,12 @@ GROUPS: dict[str, list[str]] = {
     # --checks only if you review every hunk.
     "modernize-extra": [
         "modernize-use-scoped-lock",
-        "modernize-use-ranges",
+        # modernize-use-ranges is EXCLUDED: its fix rewrites
+        # `erase(std::remove_if(b, e, p), e)` into
+        # `erase(std::ranges::remove_if(b, p))`, but ranges::remove_if returns a
+        # subrange, not an iterator, so the result does not compile. The intent
+        # is right and the correct form is `std::erase_if(b, p)` (C++20) - apply
+        # it by hand where it is wanted. See docs/style-guide.md §7.
         "modernize-use-designated-initializers",
         "modernize-macro-to-enum",
         "modernize-use-constraints",

@@ -240,6 +240,12 @@ python scripts/clang-tidy-fix.py --apply --format       # + whole-file format
      there — the attribute must precede the decl-specifier-seq
      (`[[nodiscard]] static auto f(...)`). The result does not compile, so the
      check is excluded from the `readability` group.
+   - `modernize-use-ranges`: its fix rewrites
+     `erase(std::remove_if(b, e, p), e)` into
+     `erase(std::ranges::remove_if(b, p))`, but `ranges::remove_if` returns a
+     *subrange*, not an iterator, so the result does not compile. The intent is
+     right and the correct form is `std::erase_if(b, p)` (C++20) — apply it by
+     hand where it is wanted. Excluded from the `modernize-extra` group.
 5. **Verify loop** after applying any group:
 
    ```sh
