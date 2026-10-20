@@ -161,7 +161,7 @@ auto parse_rage_env() noexcept -> RageConfig {
       config.enabled = true;
     } else if (token == "fire") {
       config.fire = true;
-    } else if (token.rfind("key=", 0) == 0) {
+    } else if (token.starts_with("key=")) {
       config.key = std::atoi(token.c_str() + 4);
     } else {
       const int key = std::atoi(token.c_str());

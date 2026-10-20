@@ -1248,7 +1248,7 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
         }
       }
       if (!is_player && exclude != nullptr) {
-        const std::uint16_t index = static_cast<std::uint16_t>(handle & 0x7fffU);
+        const auto index = static_cast<std::uint16_t>(handle & 0x7fffU);
         for (int e = 0; e < exclude_count; ++e) {
           if (exclude[e] == index) {
             is_player = true;
@@ -1444,7 +1444,7 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
     if (!ok || count <= 0 || vector.data == nullptr) {
       return;
     }
-    const std::uintptr_t data = reinterpret_cast<std::uintptr_t>(vector.data);
+    const auto data = reinterpret_cast<std::uintptr_t>(vector.data);
     walk_records(data, count, from, lo, hi, result.hulls, stats, shapes, type_counts, collect,
                  entity_blocks, exclude, exclude_count, targets, target_count);
   };

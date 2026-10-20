@@ -96,7 +96,7 @@ auto Channel::write_line(std::string_view bytes) noexcept -> bool {
   const char* data = payload.data();
   std::size_t remaining = payload.size();
   while (remaining > 0) {
-    const DWORD chunk = static_cast<DWORD>(remaining > k_pipe_buffer ? k_pipe_buffer : remaining);
+    const auto chunk = static_cast<DWORD>(remaining > k_pipe_buffer ? k_pipe_buffer : remaining);
     DWORD written = 0;
     if (WriteFile(static_cast<HANDLE>(handle_), data, chunk, &written, nullptr) == FALSE) {
       return false;

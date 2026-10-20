@@ -557,7 +557,7 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   };
   const float accel_tick = wishspeed * k_strafe_airaccelerate * k_tick_interval;
 
-  const float vel_yaw = static_cast<float>(std::atan2(vy, vx) * 180.0 / k_pi);
+  const auto vel_yaw = static_cast<float>(std::atan2(vy, vx) * 180.0 / k_pi);
   const float delta = normalize_angle(goal - vel_yaw);
   const float side = delta >= 0.0F ? 1.0F : -1.0F;
   const float theta = std::clamp(theta_for(speed, accel_tick), 1.0F, 90.0F);
@@ -586,7 +586,7 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
       if (s < k_strafe_min_speed) {
         break;
       }
-      const float slice_vel = static_cast<float>(std::atan2(sy, sx) * 180.0 / k_pi);
+      const auto slice_vel = static_cast<float>(std::atan2(sy, sx) * 180.0 / k_pi);
       const float slice_theta = std::clamp(theta_for(s, accel_slice), 1.0F, 90.0F);
       const float wish = normalize_angle(slice_vel + side * slice_theta);
       deltas[count++] = normalize_angle(wish - basis);

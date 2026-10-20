@@ -166,7 +166,7 @@ auto occlude_polygon(const Vec3& eye, const Basis& basis, const Polygon& silhoue
   for (const auto& entry : ranked) {
     candidates.push_back(entry.second);
     if (!used.empty()) {
-      const std::size_t index = static_cast<std::size_t>(entry.second - occlusion.data());
+      const auto index = static_cast<std::size_t>(entry.second - occlusion.data());
       if (index < used.size()) {
         used[index] = 1;
       }

@@ -225,7 +225,7 @@ auto StateReader::read_player(int index, std::uintptr_t controller) const -> Pla
 
   // Recoil punch: `m_pAimPunchServices -> m_predictableBaseAngle` (QAngle, degrees).
   {
-    const std::uintptr_t punch = read_or<std::uintptr_t>(pawn + o.aim_punch_services, 0);
+    const auto punch = read_or<std::uintptr_t>(pawn + o.aim_punch_services, 0);
     if (punch != 0) {
       float angles[3] = {0.0F, 0.0F, 0.0F};
       if (read(punch + 0x50, angles)) {

@@ -79,7 +79,7 @@ void log_frame_chain(const CONTEXT* context) noexcept {
     return;
   }
   const auto stack = static_cast<std::uintptr_t>(context->Rsp);
-  std::uintptr_t frame = static_cast<std::uintptr_t>(context->Rbp);
+  auto frame = static_cast<std::uintptr_t>(context->Rbp);
   const std::uintptr_t limit = stack + 0x40000;
   int emitted = 0;
   while (emitted < 24 && frame >= stack && frame < limit && (frame & 7) == 0) {

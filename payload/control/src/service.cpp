@@ -386,7 +386,7 @@ void Service::do_events(const Json& args, Json& out) noexcept {
       }
     }
   }
-  std::int64_t limit = static_cast<std::int64_t>(EventRing::k_capacity);
+  auto limit = static_cast<std::int64_t>(EventRing::k_capacity);
   if (const Json* arg = args.find("limit"); arg != nullptr && arg->is_number()) {
     limit = arg->as_int();
   }
@@ -966,7 +966,7 @@ auto Service::effective_rage_tuning(const char* active_weapon) noexcept -> RageT
       return false;
     }
   }
-  return name.rfind("weapon_", 0) == 0;
+  return name.starts_with("weapon_");
 }
 
 // The entity index whose hitbox is angularly closest to `direction` — the target the
@@ -2428,7 +2428,7 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   // solids behind or beside the enemies that the enumeration box merely enclosed.
   Json occluder_polys = Json::array();
   for (const aim::OccluderCell* used : map.used_occluders) {
-    const std::size_t index = static_cast<std::size_t>(used - options.occlusion.data());
+    const auto index = static_cast<std::size_t>(used - options.occlusion.data());
     if (index >= occluder_polygons.size()) {
       continue;
     }
@@ -2573,7 +2573,7 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   // or a pointer (a sane 0.2-1.0 float vs a denormal/pointer).
   walls_json.set("material_token", Json::string(hex(walls_stats.material_token)));
   {
-    const std::uint32_t low = static_cast<std::uint32_t>(walls_stats.material_token);
+    const auto low = static_cast<std::uint32_t>(walls_stats.material_token);
     float as_float = 0.0F;
     std::memcpy(&as_float, &low, sizeof(as_float));
     walls_json.set("material_float", Json::number(static_cast<double>(as_float)));
