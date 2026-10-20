@@ -4,11 +4,24 @@ Each scenario is a ``run(game, **kwargs) -> dict`` callable. The runner imports
 this package and looks up the function by name.
 """
 
+from __future__ import annotations
+
+from typing import Any, Callable
+
 from . import (autostrafe, bhop, bot_match, game_events, join_bot_match, move_and_aim,
                move_to, movement_probe, screens, status, strafe_probe, subtick_aim,
                subtick_move, subtick_shot, usercmd_move, aim_probe, aim_shot, rage, heatmap)
 
-SCENARIOS = {
+#: The shape of a built-in scenario: ``run(game, **kwargs) -> dict``.
+#:
+#: Every scenario takes the session and its own keyword arguments, and the
+#: runner hands the keyword arguments over as a mapping — so the table's value
+#: type is "a callable of any signature that answers with a result mapping".
+#: Spelling it out per scenario would mean one type per scenario and a table
+#: that no longer holds them all.
+Scenario = Callable[..., dict[str, Any]]
+
+SCENARIOS: dict[str, Scenario] = {
     "join-bot-match": join_bot_match.run,
     "bot-match": bot_match.run,
     "move-and-aim": move_and_aim.run,
@@ -30,4 +43,4 @@ SCENARIOS = {
     "heatmap": heatmap.run,
 }
 
-__all__ = ["SCENARIOS"]
+__all__ = ["SCENARIOS", "Scenario"]

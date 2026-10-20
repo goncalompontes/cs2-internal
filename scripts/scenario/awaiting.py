@@ -32,6 +32,7 @@ from typing import Any, Sequence
 
 from . import screens
 from .control import ControlError
+from .protocol import InputBackend
 from .session import Game, SessionError
 
 DEFAULT_MAP = "de_dust2"
@@ -73,13 +74,20 @@ def ensure(game: Game, target: screens.Screen, *, map_name: str = DEFAULT_MAP,
 
 # --- state readers --------------------------------------------------------
 def local(game: Game) -> dict[str, Any]:
-    """The local player snapshot (empty dict when there is none)."""
-    return game.state().get("local") or {}
+    """The local player snapshot (empty dict when there is none).
+
+    The wire block is a :class:`~.protocol.PlayerSnapshotDict`; it is handed
+    out here as a plain mapping, because the helpers read it key by key and
+    the empty case has to stay an empty mapping.
+    """
+    player = game.state().get("local")
+    return dict(player) if player else {}
 
 
 def origin(game: Game) -> dict[str, float] | None:
     """The local player's world origin, or ``None``."""
-    return local(game).get("origin")
+    spot: dict[str, float] | None = local(game).get("origin")
+    return spot
 
 
 def on_ground(game: Game) -> bool:
@@ -196,6 +204,7 @@ def ensure_map(game: Game, map_name: str = DEFAULT_MAP, timeout: float = 180.0,
     if in_real_map(game):
         return
     machine = screens.Machine(game, map_name=map_name)
+    state_: screens.GameState | None = None
     try:
         state_ = machine.ensure(screens.Screen.TEAM_SELECT, timeout=timeout,
                                 load_budget=load_budget)
@@ -360,7 +369,7 @@ def ensure_bot_match(
 
     teams: dict[int, int] = {}
     for player in game.players():
-        team = player.get("team")
+        team = player["team"]
         teams[team] = teams.get(team, 0) + 1
     local_player = local(game)
     observation = screens.observe(game, events=4)
@@ -386,8 +395,10 @@ def round_state(game: Game, *, events: int = 8) -> dict[str, Any]:
     ``round_end``).
     """
     snapshot = game.state()
-    local = snapshot.get("local") or {}
-    names = [e.get("name") for e in game.events(limit=events).get("events", [])]
+    player = snapshot.get("local")
+    local: dict[str, Any] = dict(player) if player else {}
+    names: list[str | None] = [e.get("name")
+                               for e in game.events(limit=events).get("events", [])]
     observation = screens.deduce(snapshot, names)
     blocked = {
         str(cap): reason
@@ -568,7 +579,7 @@ def pick_clear_heading(game: Game, *, headings: int = 8, hold: float = 0.5,
 
 
 def measure_move(game: Game, *, key: str = "w", hold: float = 1.0,
-                 via: str | None = None, yaw: float | None = None,
+                 via: InputBackend | None = None, yaw: float | None = None,
                  pitch: float | None = 0.0) -> dict[str, Any]:
     """Hold ``key`` for ``hold`` seconds and return the horizontal displacement.
 

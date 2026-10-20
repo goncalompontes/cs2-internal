@@ -37,6 +37,7 @@ from typing import (
     Protocol,
     Required,
     TypedDict,
+    TypeGuard,
     Union,
     Unpack,
     cast,
@@ -213,7 +214,14 @@ class PlayerSnapshotDict(TypedDict):
 
 
 class RulesSnapshotDict(TypedDict):
-    """The round rules (``to_json(const game::RulesSnapshot&)``)."""
+    """The round rules (``to_json(const game::RulesSnapshot&)``).
+
+    The last two fields are the **pending** ones: the client knows their
+    names and reads them, but the payload does not send them yet (see
+    ``screens.PENDING_PAYLOAD_FIELDS``). They are optional for the same
+    reason ``PingResult.protocol`` is: a payload that predates a field omits
+    it, and the client must cope with both builds.
+    """
 
     loaded: bool
     match_started: bool
@@ -236,6 +244,10 @@ class RulesSnapshotDict(TypedDict):
     game_start_time: float
     warmup_period_start: float
     time_until_next_phase: float
+    #: ``C_CSGameRules::m_nOvertimePlaying`` — **not sent by the payload yet**.
+    overtime_playing: NotRequired[int]
+    #: ``CGameRules::m_bGamePaused`` — **not sent by the payload yet**.
+    game_paused: NotRequired[bool]
 
 
 class LevelSnapshotDict(TypedDict):
@@ -866,8 +878,13 @@ def _hints(shape: type) -> dict[str, Any]:
     return cached
 
 
-def _is_shape(hint: object) -> bool:
-    """Whether a hint is a ``TypedDict`` (the shape of one wire object)."""
+def _is_shape(hint: object) -> TypeGuard[type]:
+    """Whether a hint is a ``TypedDict`` (the shape of one wire object).
+
+    The guard narrows the hint to a **class**, which is what the shape
+    walkers below need: they read the class attributes (``__required_keys__``,
+    the resolved annotations) that only a class has.
+    """
     return isinstance(hint, type) and hasattr(hint, "__required_keys__")
 
 
@@ -879,7 +896,10 @@ def _required_keys(shape: type) -> set[str]:
     only as a string, so the runtime cannot see it — the resolved annotations
     are consulted as well and win.
     """
-    required = set(shape.__required_keys__)
+    # ``__required_keys__`` is a class attribute of every ``TypedDict``, but it
+    # is not declared on ``type`` — so it is read reflectively.
+    declared: frozenset[str] = getattr(shape, "__required_keys__", frozenset())
+    required = set(declared)
     for key, hint in _hints(shape).items():
         origin = get_origin(hint)
         if origin is NotRequired:

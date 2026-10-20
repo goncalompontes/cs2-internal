@@ -29,6 +29,7 @@ import json
 import os
 import sys
 import traceback
+from io import TextIOWrapper
 from pathlib import Path
 from typing import Any, Mapping, TextIO
 
@@ -278,7 +279,14 @@ def _protocol_stream() -> tuple[TextIO, bool]:
 
 
 def _reconfigure(stream: TextIO) -> None:
-    """Read the protocol as UTF-8 (the console's own code page is not UTF-8)."""
+    """Read the protocol as UTF-8 (the console's own code page is not UTF-8).
+
+    Only a real text stream can be reconfigured (``TextIOWrapper.reconfigure``
+    is not on the ``TextIO`` interface), so anything else — a pipe, a test
+    double — is left alone.
+    """
+    if not isinstance(stream, TextIOWrapper):
+        return
     try:
         stream.reconfigure(encoding="utf-8", errors="replace")
     except (AttributeError, ValueError):  # pragma: no cover

@@ -33,7 +33,8 @@ def run(game: Game, *, yaw_offset: float = YAW_OFFSET,
         raise SessionError(f"usercmd backend not hooked: {status}")
     awaiting.require(game, "look")  # the machine: can view angles be written here?
 
-    camera = (game.local() or {}).get("eye_angles")
+    local = game.local()
+    camera = local["eye_angles"] if local else None
     if camera is None:
         raise SessionError("no local player")
     target_yaw = camera["yaw"] + yaw_offset
@@ -44,7 +45,8 @@ def run(game: Game, *, yaw_offset: float = YAW_OFFSET,
     if after.get("angle_writes", 0) < MIN_ANGLE_WRITES:
         raise SessionError(f"sub-tick view angles not written: {after}")
 
-    moved = (game.local() or {}).get("eye_angles")
+    local = game.local()
+    moved = local["eye_angles"] if local else None
     if moved is None or abs(moved["yaw"] - camera["yaw"]) > CAMERA_TOLERANCE:
         raise SessionError(f"angle write was not silent: camera {camera} -> {moved}")
 

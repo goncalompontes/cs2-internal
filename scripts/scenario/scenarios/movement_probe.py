@@ -33,6 +33,7 @@ from typing import Any
 
 from .. import awaiting
 from ..control import ControlError
+from ..protocol import InputStatus
 from ..session import Game, SessionError
 
 YAW = 90.0  # +forward is along world +X (Source convention)
@@ -62,12 +63,13 @@ ENGINE_HOLD = 0.6
 # the same offset *reads* denormals (`entry_move` below) — the layout does not hold
 # for this build. Re-derive it before enabling (`docs/re/subtick.md` §"Actionable
 # seams").
-VARIANTS: tuple[tuple[str, dict[str, float | bool]], ...] = (
-    ("plain-1", {"forward": ENGINE_FORWARD}),
-    ("plain-half", {"forward": 0.5}),
-    ("quantize-1", {"forward": ENGINE_FORWARD, "quantize": True}),
-    ("quantize+step-1", {"forward": ENGINE_FORWARD, "quantize": True, "step": True}),
-    ("quantize+step-half", {"forward": 0.5, "quantize": True, "step": True}),
+#: Each variant: its label, the analog speed it asks for, and the write flags.
+VARIANTS: tuple[tuple[str, float, dict[str, bool]], ...] = (
+    ("plain-1", ENGINE_FORWARD, {}),
+    ("plain-half", 0.5, {}),
+    ("quantize-1", ENGINE_FORWARD, {"quantize": True}),
+    ("quantize+step-1", ENGINE_FORWARD, {"quantize": True, "step": True}),
+    ("quantize+step-half", 0.5, {"quantize": True, "step": True}),
 )
 
 # Reported from the payload's `input` diagnostics for each probe.
@@ -78,7 +80,8 @@ DIAGNOSTIC_KEYS = (
 )
 
 
-def _diagnostics(status: dict[str, Any]) -> dict[str, Any]:
+def _diagnostics(status: InputStatus) -> dict[str, Any]:
+    """The payload's own input diagnostics, read off the status block."""
     return {key: status.get(key) for key in DIAGNOSTIC_KEYS}
 
 
@@ -217,8 +220,11 @@ def run(game: Game, *, hold: float = HOLD_SECONDS, map_name: str = "de_dust2",
     # `ensure_live_round` (which returns immediately when the round is already
     # live, preserving the operator's placement) and every check below teleports
     # back to it, so a walk can never be blocked by the previous walk.
+    home: dict[str, float] | None
     if x is not None and y is not None:
-        home = {"x": float(x), "y": float(y), "z": z}
+        home = {"x": float(x), "y": float(y)}
+        if z is not None:
+            home["z"] = z
         awaiting.recenter(game, home)
     else:
         home = awaiting.origin(game)
@@ -263,9 +269,9 @@ def run(game: Game, *, hold: float = HOLD_SECONDS, map_name: str = "de_dust2",
             baseline = _measure_console(game, hold=hold, origin_point=home)
             print(f"[movement-probe] console baseline from {home}: "
                   f"{baseline['moved_units']:.0f} units", flush=True)
-            for label, kwargs in VARIANTS:
-                variants[label] = _measure(game, hold=hold, origin_point=home,
-                                           **kwargs)
+            for label, forward, flags in VARIANTS:
+                variants[label] = _measure(game, hold=hold, forward=forward,
+                                           origin_point=home, **flags)
         finally:
             game.move(clear=True)
 

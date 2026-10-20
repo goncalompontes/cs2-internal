@@ -23,17 +23,18 @@ import time
 from typing import Any
 
 from .. import awaiting
+from ..protocol import PlayerSnapshotDict
 from ..session import Game, SessionError
 
 HOLD_SECONDS = 1.2
 CAMERA_TOLERANCE = 2.0
 
 
-def _closest_enemy(game: Game, local: dict[str, Any]) -> dict[str, Any] | None:
+def _closest_enemy(game: Game, local: dict[str, Any]) -> PlayerSnapshotDict | None:
     eye = local.get("eye_origin")
     if eye is None:
         return None
-    best = None
+    best: PlayerSnapshotDict | None = None
     best_d = math.inf
     for player in game.players():
         if player.get("is_local") or not player.get("alive"):
@@ -60,7 +61,7 @@ def run(game: Game, *, hold: float = HOLD_SECONDS, map_name: str = "de_dust2",
         game.exec("bot_stop 1")
         game.exec("weapon_accuracy_nospread 1")
 
-        local = game.local() or {}
+        local = awaiting.local(game)
         if _closest_enemy(game, local) is None:
             game.exec("bot_add_t" if local.get("team") == 3 else "bot_add_ct")
             if not game.wait_for(players_gte=2, timeout=25.0).get("matched"):
@@ -79,7 +80,7 @@ def run(game: Game, *, hold: float = HOLD_SECONDS, map_name: str = "de_dust2",
         raise SessionError(f"usercmd backend not hooked: {status}")
     awaiting.require(game, "attack")
 
-    local = game.local() or {}
+    local = awaiting.local(game)
     target = _closest_enemy(game, local)
     if target is None:
         raise SessionError(f"no enemy bot to shoot at: {local}")
@@ -93,12 +94,12 @@ def run(game: Game, *, hold: float = HOLD_SECONDS, map_name: str = "de_dust2",
 
     # Let the render-thread solve + per-tick write run.
     time.sleep(hold)
-    status = game.rage()
+    rage_status = game.rage()
     # Stop before reading health, so no further shots land during the checks.
     game.rage(force=False, on=False)
     time.sleep(0.2)
 
-    camera_after = (game.local() or {}).get("eye_angles")
+    camera_after = awaiting.local(game).get("eye_angles")
     health_after = next(
         (p.get("health") for p in game.players() if p.get("name") == target.get("name")), None)
 
@@ -106,16 +107,16 @@ def run(game: Game, *, hold: float = HOLD_SECONDS, map_name: str = "de_dust2",
         game.exec("bot_stop 0")
 
     diagnostics = {
-        "rage": status,
+        "rage": rage_status,
         "health": [health_before, health_after],
         "camera_before": camera_before,
         "camera_after": camera_after,
         "target": target.get("name"),
     }
 
-    solves = int(status.get("solves", 0)) if isinstance(status, dict) else 0
-    writes = int(status.get("writes", 0)) if isinstance(status, dict) else 0
-    shots = int(status.get("shots", 0)) if isinstance(status, dict) else 0
+    solves = int(rage_status.get("solves", 0))
+    writes = int(rage_status.get("writes", 0))
+    shots = int(rage_status.get("shots", 0))
     if solves == 0:
         raise SessionError(f"ragebot never solved: {diagnostics}")
     if writes == 0:
@@ -131,7 +132,7 @@ def run(game: Game, *, hold: float = HOLD_SECONDS, map_name: str = "de_dust2",
         raise SessionError(f"ragebot aim was not silent: {camera_before} -> {camera_after}")
 
     return {
-        "rage": status,
+        "rage": rage_status,
         "hit": True,
         "target": target.get("name"),
         "target_health": [health_before, health_after],

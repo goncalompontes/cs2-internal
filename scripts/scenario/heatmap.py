@@ -23,7 +23,7 @@ import math
 import pathlib
 import struct
 import zlib
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 # A compact 5-stop heat gradient (dark blue -> cyan -> green -> yellow -> red).
 _STOPS: list[tuple[float, tuple[int, int, int]]] = [
@@ -98,7 +98,7 @@ def _attenuation_color(fraction: float) -> tuple[int, int, int]:
             int(cold[2] + (warm[2] - cold[2]) * (1.0 - t)))
 
 
-def _extent(payload: dict[str, Any]) -> float:
+def _extent(payload: Mapping[str, Any]) -> float:
     extent = float(payload.get("extent", 0.0) or 0.0)
     if extent > 0.0:
         return extent
@@ -171,7 +171,7 @@ def _line(image: Image, x0: float, y0: float, x1: float, y1: float,
         image.blend(int(round(x0 + (x1 - x0) * f)), int(round(y0 + (y1 - y0) * f)), color, alpha)
 
 
-def render(payload: dict[str, Any], path: pathlib.Path, *, size: int = 800,
+def render(payload: Mapping[str, Any], path: pathlib.Path, *, size: int = 800,
            mode: str = "damage", outlines: bool = True, fit: bool = False,
            focus: int | None = None, occluders: bool = False,
            background: tuple[int, int, int] = (8, 10, 14)) -> dict[str, Any]:
@@ -187,6 +187,9 @@ def render(payload: dict[str, Any], path: pathlib.Path, *, size: int = 800,
     readable) instead of the whole chart square; ``focus`` restricts that box to one
     player's cells (and its record trail). ``occluders`` overlays the world solids on
     a damage/record render. Returns a stats dict.
+
+    The payload is read, never written, so a mapping is enough — the wire-typed
+    :class:`~scenario.protocol.HeatmapResult` is one.
     """
     extent = _extent(payload)
     cells = payload.get("cells", [])
@@ -240,19 +243,19 @@ def render(payload: dict[str, Any], path: pathlib.Path, *, size: int = 800,
         lo, hi = min(present), max(present)
         span = (hi - lo) or 1.0
         for y in range(size):
-            base = y * size
+            row = y * size
             for x in range(size):
-                b = buffer[base + x]
+                sample = buffer[row + x]
                 if mode == "record":
-                    if b >= 1.0e8:
+                    if sample >= 1.0e8:
                         continue
-                    t = (b - lo) / span
+                    t = (sample - lo) / span
                 else:
-                    if b < 0.0:
+                    if sample < 0.0:
                         continue
-                    t = (b - lo) / span
+                    t = (sample - lo) / span
                 color = _color(t)
-                i = (base + x) * 3
+                i = (row + x) * 3
                 image.rgb[i] = color[0]
                 image.rgb[i + 1] = color[1]
                 image.rgb[i + 2] = color[2]
@@ -265,9 +268,10 @@ def render(payload: dict[str, Any], path: pathlib.Path, *, size: int = 800,
         for poly in [[to_px(u, v) for u, v in p] for p in occluder_polys]:
             _fill_poly_color(image, poly, (206, 118, 52), fill_alpha)
             for i in range(len(poly)):
-                a = poly[i]
-                b = poly[(i + 1) % len(poly)]
-                _line(image, a[0], a[1], b[0], b[1], (250, 170, 90), line_alpha)
+                start = poly[i]
+                end = poly[(i + 1) % len(poly)]
+                _line(image, start[0], start[1], end[0], end[1],
+                      (250, 170, 90), line_alpha)
 
     if not present and mode != "occluders":
         image.write_png(path)
@@ -280,9 +284,9 @@ def render(payload: dict[str, Any], path: pathlib.Path, *, size: int = 800,
             if penetration:
                 # The attenuation the walls applied to this cell: the damage that
                 # survived over the damage it would have dealt unobstructed.
-                base = float(cell.get("base_value") or 0.0)
-                value = float(cell.get("value") or 0.0)
-                fraction = value / base if base > 0.0 else 1.0
+                base_value = float(cell.get("base_value") or 0.0)
+                cell_value = float(cell.get("value") or 0.0)
+                fraction = cell_value / base_value if base_value > 0.0 else 1.0
                 color = _attenuation_color(fraction)
                 alpha = 0.55
             else:
@@ -290,9 +294,9 @@ def render(payload: dict[str, Any], path: pathlib.Path, *, size: int = 800,
                 color = (210, 90, 90) if is_record else (215, 215, 225)
                 alpha = 0.16 if is_record else 0.22
             for i in range(len(poly)):
-                a = poly[i]
-                b = poly[(i + 1) % len(poly)]
-                _line(image, a[0], a[1], b[0], b[1], color, alpha)
+                start = poly[i]
+                end = poly[(i + 1) % len(poly)]
+                _line(image, start[0], start[1], end[0], end[1], color, alpha)
 
     # A crosshair at the view centre (the camera's forward / aim centre).
     cx, cy = to_px(centre_u, centre_v)

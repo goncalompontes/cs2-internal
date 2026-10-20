@@ -62,7 +62,8 @@ def run(game: Game, *, map_name: str = "de_dust2", bots: int = 2,
     local = game.local()
     teams: dict[int, int] = {}
     for player in players:
-        teams[player.get("team")] = teams.get(player.get("team"), 0) + 1
+        team = player["team"]
+        teams[team] = teams.get(team, 0) + 1
     return {
         "map": map_name,
         "players": len(players),
