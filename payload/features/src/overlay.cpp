@@ -75,10 +75,12 @@ auto convex_hull(std::vector<game::Vec2> points) -> std::vector<game::Vec2> {
   if (points.size() < 3) {
     return points;
   }
-  std::sort(points.begin(), points.end(), [](const game::Vec2& a, const game::Vec2& b) noexcept {
-    return a.x < b.x || (a.x == b.x && a.y < b.y);
-  });
-  const auto turn = [](const game::Vec2& o, const game::Vec2& a, const game::Vec2& b) noexcept {
+  std::sort(points.begin(), points.end(),
+            [](const game::Vec2& a, const game::Vec2& b) noexcept -> bool {
+              return a.x < b.x || (a.x == b.x && a.y < b.y);
+            });
+  const auto turn = [](const game::Vec2& o, const game::Vec2& a,
+                       const game::Vec2& b) noexcept -> float {
     return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
   };
   std::vector<game::Vec2> hull(points.size() * 2);
@@ -247,7 +249,7 @@ void capsule_rings(const game::Vec3& a, const game::Vec3& b, float radius,
   const game::Vec3 u = game::normalized(game::cross(n, reference));
   const game::Vec3 v = game::cross(n, u);
   const auto make_ring = [&](const game::Vec3& center, float ring_radius,
-                             const game::Vec3& sphere) {
+                             const game::Vec3& sphere) -> std::vector<CapsuleSample> {
     std::vector<CapsuleSample> points;
     points.reserve(k_wire_segments);
     for (int i = 0; i < k_wire_segments; ++i) {
@@ -286,7 +288,7 @@ void draw_capsule_wire(render::DrawList& out, const game::Matrix4x4& view, float
   std::vector<std::vector<CapsuleSample>> rings;
   capsule_rings(capsule.a, capsule.b, capsule.radius, rings);
 
-  const auto emit = [&](const CapsuleSample& p, const CapsuleSample& q) {
+  const auto emit = [&](const CapsuleSample& p, const CapsuleSample& q) -> void {
     const auto pa = view.project(p.position, width, height);
     const auto pb = view.project(q.position, width, height);
     if (!pa.has_value() || !pb.has_value()) {
@@ -295,7 +297,7 @@ void draw_capsule_wire(render::DrawList& out, const game::Matrix4x4& view, float
     const float facing =
         game::dot(p.normal, p.position - eye) + game::dot(q.normal, q.position - eye);
     const float scale = facing > 0.0F ? 0.45F : 1.0F;  // back-facing edges dimmed
-    const auto channel = [scale](std::uint8_t base) {
+    const auto channel = [scale](std::uint8_t base) -> std::uint8_t {
       return static_cast<std::uint8_t>(static_cast<float>(base) * scale);
     };
     out.line(pa->x, pa->y, pb->x, pb->y,

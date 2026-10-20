@@ -6,13 +6,13 @@
 namespace cs2::aim {
 namespace {
 
-std::uint32_t rotl32(std::uint32_t value, int count) {
+auto rotl32(std::uint32_t value, int count) -> std::uint32_t {
   return (value << count) | (value >> (32 - count));
 }
 
 // MD5 (RFC 1321) of a single <= 55-byte block; returns the first digest dword (LE).
 // `MD5_PseudoRandom` only ever hashes 4 bytes, so a one-block implementation is exact.
-std::uint32_t md5_first_dword(const std::uint8_t* data, std::size_t length) {
+auto md5_first_dword(const std::uint8_t* data, std::size_t length) -> std::uint32_t {
   static constexpr std::uint32_t k_k[64] = {
       0xd76aa478U, 0xe8c7b756U, 0x242070dbU, 0xc1bdceeeU, 0xf57c0fafU, 0x4787c62aU, 0xa8304613U,
       0xfd469501U, 0x698098d8U, 0x8b44f7afU, 0xffff5bb1U, 0x895cd7beU, 0x6b901122U, 0xfd987193U,

@@ -173,13 +173,13 @@ auto convex_hull(std::span<const Vec2> points) -> Polygon {
   }
 
   std::vector<Vec2> sorted(points.begin(), points.end());
-  std::sort(sorted.begin(), sorted.end(), [](const Vec2& a, const Vec2& b) noexcept {
+  std::sort(sorted.begin(), sorted.end(), [](const Vec2& a, const Vec2& b) noexcept -> bool {
     return a.x < b.x || (a.x == b.x && a.y < b.y);
   });
 
   std::vector<Vec2> hull(sorted.size() * 2);
   std::size_t k = 0;
-  const auto turn = [](const Vec2& o, const Vec2& a, const Vec2& b) noexcept {
+  const auto turn = [](const Vec2& o, const Vec2& a, const Vec2& b) noexcept -> float {
     return game::cross(a - o, b - o);
   };
 

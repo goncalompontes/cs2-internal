@@ -367,7 +367,7 @@ void Service::do_events(const Json& args, Json& out) noexcept {
   // define is rejected), so a typo is visible rather than a silent no-op.
   Json accepted = Json::array();
   Json rejected = Json::array();
-  const auto handle_subscribe = [&](std::string_view name) {
+  const auto handle_subscribe = [&](std::string_view name) -> void {
     const std::int32_t code = events_.subscribe(name);
     if (code == EventLog::k_subscribe_already || code >= 0) {
       accepted.push_back(Json::string(std::string(name)));
@@ -498,7 +498,7 @@ void Service::do_wait_for(const Json& args, Json& out) noexcept {
 }
 
 auto Service::input_status() noexcept -> Json {
-  const auto hex = [](std::uint64_t value) {
+  const auto hex = [](std::uint64_t value) -> std::string {
     char buffer[24];
     std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(value));
     return std::string(buffer);
@@ -596,7 +596,7 @@ auto Service::input_status() noexcept -> Json {
   // Decoded movement probes (`docs/re/subtick.md` §"Actionable seams"): what the
   // engine's own input put on the command, the raw axes and the input entry the
   // raw axes are derived from, plus the command's own sub-tick steps.
-  const auto move_json = [](const MoveSample& sample) {
+  const auto move_json = [](const MoveSample& sample) -> Json {
     Json out = Json::object();
     out.set("valid", Json::boolean(sample.valid));
     out.set("forward", Json::number(sample.forward));
@@ -1414,7 +1414,7 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
       in_view.emplace_back(player.distance, player.index);
     }
     std::sort(in_view.begin(), in_view.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
+              [](const auto& a, const auto& b) -> auto { return a.first < b.first; });
     for (const auto& entry : in_view) {
       if (candidates.size() >= k_max_candidates) {
         break;
@@ -1524,7 +1524,7 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
 
   // The hitbox filter (`rage_hitbox`): 1 = head only, 2 = body only.
   if (const int mode = tuning.hitbox; mode != 0) {
-    std::erase_if(solve_input->hitboxes, [mode](const aim::Hitbox& hitbox) {
+    std::erase_if(solve_input->hitboxes, [mode](const aim::Hitbox& hitbox) -> bool {
       const bool head = hitbox.group == 1;
       return mode == 1 ? !head : head;
     });
@@ -1637,8 +1637,9 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     input_.clear_rage_aim_keep_aux();
     return;
   }
-  std::erase_if(solve_input->hitboxes,
-                [best_target](const aim::Hitbox& hitbox) { return hitbox.target != best_target; });
+  std::erase_if(solve_input->hitboxes, [best_target](const aim::Hitbox& hitbox) -> bool {
+    return hitbox.target != best_target;
+  });
   if (solve_input->hitboxes.empty()) {
     input_.clear_rage_aim_keep_aux();
     return;
@@ -1769,11 +1770,12 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // trace in the payload log (the `rage` command reports the same numbers).
   const std::uint64_t perf_frames = perf_.frames.load(std::memory_order_relaxed);
   if (perf_frames != 0 && perf_frames % 256 == 0) {
-    const auto avg = [perf_frames](const std::atomic<std::uint64_t>& acc) {
+    const auto avg = [perf_frames](const std::atomic<std::uint64_t>& acc) -> unsigned long long {
       return static_cast<unsigned long long>(acc.load(std::memory_order_relaxed) / perf_frames);
     };
     const std::uint64_t perf_snapshots = perf_.snapshot_frames.load(std::memory_order_relaxed);
-    const auto avg_snap = [perf_snapshots](const std::atomic<std::uint64_t>& acc) {
+    const auto avg_snap =
+        [perf_snapshots](const std::atomic<std::uint64_t>& acc) -> unsigned long long {
       return static_cast<unsigned long long>(
           perf_snapshots != 0 ? acc.load(std::memory_order_relaxed) / perf_snapshots : 0);
     };
@@ -2335,7 +2337,7 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
 
   // The penetration model (docs/re/penetration.md): `pen` = "simple" keeps the
   // first-pass approximation, "engine" applies the engine's real per-surface loss.
-  const bool engine_pen = [&]() {
+  const bool engine_pen = [&]() -> bool {
     const Json* value = args.find("pen");
     return value != nullptr && value->is_string() && value->as_string() == "engine";
   }();

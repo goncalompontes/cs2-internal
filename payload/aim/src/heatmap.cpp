@@ -97,7 +97,7 @@ auto build_heatmap(const Vec3& eye, const Basis& basis, float extent,
       cell.polygon = clip_half_plane(cell.polygon, occluder.normal, occluder.offset);
     }
   }
-  std::erase_if(map.cells, [](const HeatCell& cell) { return cell.polygon.empty(); });
+  std::erase_if(map.cells, [](const HeatCell& cell) -> bool { return cell.polygon.empty(); });
 
   // Report only the solids that are actually between the eye and a target.
   for (std::size_t i = 0; i < used.size(); ++i) {

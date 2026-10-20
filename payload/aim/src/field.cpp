@@ -266,12 +266,13 @@ template <typename Evaluate>
     order[i] = i;
   }
   const std::size_t top = std::min<std::size_t>(cells.size(), 4);
-  std::partial_sort(order.begin(), order.begin() + top, order.end(),
-                    [&](std::size_t a, std::size_t b) { return cells[a].value > cells[b].value; });
+  std::partial_sort(
+      order.begin(), order.begin() + top, order.end(),
+      [&](std::size_t a, std::size_t b) -> auto { return cells[a].value > cells[b].value; });
 
   Vec2 best{};
   double best_value = -1.0;
-  const auto consider = [&](const Vec2& candidate) {
+  const auto consider = [&](const Vec2& candidate) -> auto {
     const double value = evaluate(candidate);
     if (value > best_value) {
       best_value = value;
@@ -358,7 +359,7 @@ void DamageField::clip(const Vec2& normal, float offset) {
   for (Cell& cell : cells) {
     cell.polygon = clip_half_plane(cell.polygon, normal, offset);
   }
-  std::erase_if(cells, [](const Cell& cell) { return cell.polygon.empty(); });
+  std::erase_if(cells, [](const Cell& cell) -> bool { return cell.polygon.empty(); });
   grid_.cell_count = 0;  // the index is stale
 }
 
@@ -405,11 +406,11 @@ void DamageField::build_index() const {
   grid.nx = nx;
   grid.ny = ny;
 
-  const auto bucket_x = [&](float x) {
+  const auto bucket_x = [&](float x) -> int {
     const int index = static_cast<int>((x - mn.x) / cell_w);
     return std::clamp(index, 0, nx - 1);
   };
-  const auto bucket_y = [&](float y) {
+  const auto bucket_y = [&](float y) -> int {
     const int index = static_cast<int>((y - mn.y) / cell_h);
     return std::clamp(index, 0, ny - 1);
   };
@@ -601,7 +602,7 @@ auto DamageField::argmax_hit_probability(float sigma, int grid) const -> Vec2 {
   if (sigma <= k_epsilon) {
     return argmax_damage();
   }
-  return mass_ascent(cells, sigma, false, [&](const Vec2& aim) {
+  return mass_ascent(cells, sigma, false, [&](const Vec2& aim) -> double {
     return static_cast<double>(hit_probability(aim, sigma));
   });
 }
@@ -775,7 +776,7 @@ auto DamageField::argmax_expected(float sigma, int grid) const -> Vec2 {
   }
   // The pose kernel is isotropic in world angles; on the chart its yaw spread is
   // `sigma * yaw_scale(pitch)` (the same metric as `hit_probability`).
-  return mass_ascent(cells, sigma, true, [&](const Vec2& aim) {
+  return mass_ascent(cells, sigma, true, [&](const Vec2& aim) -> double {
     return static_cast<double>(expected_exact(aim, sigma * yaw_scale(aim.y), sigma));
   });
 }

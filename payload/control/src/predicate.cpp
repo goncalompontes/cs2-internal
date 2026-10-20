@@ -19,7 +19,7 @@ namespace {
 [[nodiscard]] auto alive_count(const game::Snapshot& snapshot) noexcept -> std::int64_t {
   return static_cast<std::int64_t>(
       std::count_if(snapshot.players.begin(), snapshot.players.end(),
-                    [](const game::PlayerSnapshot& player) { return player.alive; }));
+                    [](const game::PlayerSnapshot& player) -> bool { return player.alive; }));
 }
 
 [[nodiscard]] auto team_from_json(const Json& value) noexcept -> int {
@@ -133,10 +133,10 @@ auto Predicate::matches(const game::Snapshot& snapshot) const noexcept -> bool {
       return local_playable(snapshot) == expected_;
     case Kind::all:
       return std::all_of(children_.begin(), children_.end(),
-                         [&](const Predicate& child) { return child.matches(snapshot); });
+                         [&](const Predicate& child) -> bool { return child.matches(snapshot); });
     case Kind::any:
       return std::any_of(children_.begin(), children_.end(),
-                         [&](const Predicate& child) { return child.matches(snapshot); });
+                         [&](const Predicate& child) -> bool { return child.matches(snapshot); });
     case Kind::negated:
       return children_.empty() || !children_.front().matches(snapshot);
   }

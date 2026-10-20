@@ -72,7 +72,9 @@ struct Fragment {
     layers.push_back(layer);
   }
   std::sort(layers.begin(), layers.end(),
-            [](const PenetrationLayer& a, const PenetrationLayer& b) { return a.entry < b.entry; });
+            [](const PenetrationLayer& a, const PenetrationLayer& b) -> bool {
+              return a.entry < b.entry;
+            });
   return layers;
 }
 
@@ -151,7 +153,7 @@ auto occlude_polygon(const Vec3& eye, const Basis& basis, const Polygon& silhoue
     ranked.emplace_back(lower, &occluder);
   }
   std::sort(ranked.begin(), ranked.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
+            [](const auto& a, const auto& b) -> auto { return a.first < b.first; });
 
   // Temporary work cap (`PenetrationParams::max_occluders`): keep the nearest solids only.
   // This is not safe pruning, so report overflow; the aim solver fails closed rather than

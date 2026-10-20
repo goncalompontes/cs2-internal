@@ -84,7 +84,7 @@ auto main() -> int {
     constexpr float sigma = 0.12F;
     DamageField pitched;
     pitched.add(square(-0.04F, pitch - 0.01F, 0.04F, pitch + 0.01F), 100.0F);
-    const auto objective = [&](float aim_pitch) {
+    const auto objective = [&](float aim_pitch) -> float {
       return pitched.expected_exact(Vec2{0.0F, aim_pitch}, sigma * cs2::aim::yaw_scale(aim_pitch),
                                     sigma);
     };
@@ -175,8 +175,9 @@ auto main() -> int {
     f.add(square(-0.04F, -0.03F, 0.02F, 0.03F), 100.0F);
     f.add(square(0.03F, -0.02F, 0.05F, 0.02F), 60.0F);
     const float sigma = 0.02F;
-    const auto phi = [](double x) { return 0.5 * std::erfc(-x * 0.7071067811865476); };
-    const auto closed = [&](double x0, double y0, double x1, double y1, cs2::aim::Vec2 a) {
+    const auto phi = [](double x) -> double { return 0.5 * std::erfc(-x * 0.7071067811865476); };
+    const auto closed = [&](double x0, double y0, double x1, double y1,
+                            cs2::aim::Vec2 a) -> double {
       return (phi((x1 - a.x) / sigma) - phi((x0 - a.x) / sigma)) *
              (phi((y1 - a.y) / sigma) - phi((y0 - a.y) / sigma));
     };
@@ -222,7 +223,7 @@ auto main() -> int {
     // "works level, stops working up/down" symptom.
     using cs2::aim::Basis;
     using cs2::aim::Vec3;
-    const auto probability = [](float pitch) {
+    const auto probability = [](float pitch) -> float {
       constexpr float k_dist = 20.0F;
       constexpr float k_radius = 1.0F;
       const Vec3 centre{k_dist * std::cos(pitch), 0.0F, k_dist * std::sin(pitch)};
@@ -247,7 +248,7 @@ auto main() -> int {
     f.add(square(0.05F, 0.05F, 0.20F, 0.20F), 90.0F);  // overlaps the first
     f.add(square(-0.30F, -0.30F, -0.20F, -0.20F), 10.0F);
     f.add(square(0.50F, -0.60F, 0.90F, -0.10F), 70.0F);  // large: may land in `large`
-    const auto linear = [&](const Vec2& p) {
+    const auto linear = [&](const Vec2& p) -> float {
       float best = 0.0F;
       for (const auto& cell : f.cells) {
         if (cs2::aim::polygon_contains(cell.polygon, p)) {

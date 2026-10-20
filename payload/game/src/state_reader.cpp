@@ -284,7 +284,7 @@ auto StateReader::read_rules() const -> RulesSnapshot {
     return rules;
   }
   rules.loaded = true;
-  const auto flag = [base](std::uint32_t offset) {
+  const auto flag = [base](std::uint32_t offset) -> bool {
     return read_or<std::uint8_t>(base + offset, 0) != 0;
   };
   rules.has_match_started = flag(o.rules_has_match_started);

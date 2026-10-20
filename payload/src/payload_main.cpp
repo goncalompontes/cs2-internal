@@ -202,24 +202,24 @@ void on_snapshot(void* context, const cs2::game::Snapshot& snapshot) noexcept {
 }
 
 // The overlay HUD asks for the ragebot's one-line status while it is enabled.
-bool on_rage_status(void* context, char* out, std::size_t size) noexcept {
+auto on_rage_status(void* context, char* out, std::size_t size) noexcept -> bool {
   return static_cast<Runtime*>(context)->control.rage_status(out, size);
 }
 
 // The overlay's hitbox visualiser asks the payload for a pawn's real studio
 // hitbox capsules (`docs/re/aim.md`).
-int on_hitboxes(void* context, std::uintptr_t pawn, cs2::game::HitboxCapsule* out,
-                int max) noexcept {
+auto on_hitboxes(void* context, std::uintptr_t pawn, cs2::game::HitboxCapsule* out,
+                 int max) noexcept -> int {
   return static_cast<Runtime*>(context)->control.read_hitboxes(pawn, out, max);
 }
 
 // The overlay highlights the ragebot's current target.
-int on_rage_target(void* context) noexcept {
+auto on_rage_target(void* context) noexcept -> int {
   return static_cast<Runtime*>(context)->control.rage_target_index();
 }
 
 // The overlay asks for the bhop prediction's position to draw the demo box.
-bool on_predicted_origin(void* context, float out[3]) noexcept {
+auto on_predicted_origin(void* context, float out[3]) noexcept -> bool {
   return static_cast<Runtime*>(context)->control.predicted_origin(out);
 }
 

@@ -115,7 +115,7 @@ using HalfPlane = ConvexClipEdge;
   float entry = 1.0e30F;
   float exit = -1.0e30F;
   bool hit = false;
-  const auto consider = [&](const std::optional<RaySpan>& span) {
+  const auto consider = [&](const std::optional<RaySpan>& span) -> void {
     if (span.has_value()) {
       entry = std::min(entry, span->entry);
       exit = std::max(exit, span->exit);
@@ -291,12 +291,12 @@ constexpr std::uint32_t k_mesh_leaf = 8;  // triangles per BVH leaf
                        ? 0
                        : (extent[1] >= extent[2] ? 1 : 2);
   const std::uint32_t mid = lo + (hi - lo) / 2;
-  const auto key = [&](std::uint32_t tri) {
+  const auto key = [&](std::uint32_t tri) -> float {
     const Vec3 c = mesh_centroid(tmin[tri], tmax[tri]);
     return axis == 0 ? c.x : (axis == 1 ? c.y : c.z);
   };
   std::nth_element(bvh.order.begin() + lo, bvh.order.begin() + mid, bvh.order.begin() + hi,
-                   [&](std::uint32_t a, std::uint32_t b) { return key(a) < key(b); });
+                   [&](std::uint32_t a, std::uint32_t b) -> bool { return key(a) < key(b); });
   build_mesh_node(bvh, tmin, tmax, lo, mid);  // the left child is `index + 1`
   const std::uint32_t right = build_mesh_node(bvh, tmin, tmax, mid, hi);
   bvh.nodes[index].count = 0;

@@ -162,7 +162,7 @@ auto main() -> int {
 
   // --- a real world solid (`OccluderCell`) attenuates / blocks ---------------
   {
-    auto wall = [&](float surface) {
+    auto wall = [&](float surface) -> std::optional<cs2::aim::OccluderCell> {
       return cs2::aim::project_occluder(Vec3{}, basis, box_vertices(10.0F, 0.0F, 0.0F, 0.25F, 2.0F, 2.0F),
                                         box_planes(10.0F, 0.0F, 0.0F, 0.25F, 2.0F, 2.0F), surface);
     };

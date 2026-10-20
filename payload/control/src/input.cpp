@@ -103,7 +103,7 @@ auto velocity_offset() noexcept -> std::uint32_t {
 // agrees.
 auto resolve_axes(float forward, float side, float up, bool quantize, float out[3]) noexcept
     -> void {
-  const auto axis = [quantize](float value) {
+  const auto axis = [quantize](float value) -> float {
     const float clamped = std::clamp(value, -k_move_scale, k_move_scale);
     return quantize ? valid_set(clamped) : clamped;
   };
@@ -866,7 +866,7 @@ auto Input::simulate_landing(void* cmd, int ticks, int& landed_tick, float& land
     // Only trust the slots if every resolved pointer is inside client.dll — a
     // reordered vtable must not turn into a call into garbage.
     const cs2::game::ModuleInfo module = cs2::game::find_module("client.dll");
-    const auto in_module = [&module](void* pointer) {
+    const auto in_module = [&module](void* pointer) -> bool {
       return module.valid() && pointer != nullptr &&
              module.contains(reinterpret_cast<std::uintptr_t>(pointer));
     };

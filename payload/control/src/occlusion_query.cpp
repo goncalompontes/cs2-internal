@@ -653,10 +653,11 @@ auto emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_i
       return c * (1.0F / 3.0F);
     };
     const auto pivot_pos = static_cast<std::ptrdiff_t>((range.begin + range.end) / 2);
-    std::nth_element(tris.begin() + range.begin, tris.begin() + pivot_pos, tris.begin() + range.end,
-                     [&centroid](const std::array<Vec3, 3>& a, const std::array<Vec3, 3>& b) {
-                       return centroid(a) < centroid(b);
-                     });
+    std::nth_element(
+        tris.begin() + range.begin, tris.begin() + pivot_pos, tris.begin() + range.end,
+        [&centroid](const std::array<Vec3, 3>& a, const std::array<Vec3, 3>& b) -> bool {
+          return centroid(a) < centroid(b);
+        });
     const int pivot_index = static_cast<int>(pivot_pos);
     if (pivot_index <= range.begin || pivot_index >= range.end) {
       complete = false;
@@ -1415,7 +1416,7 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
   int shapes = 0;
   int* type_counts = stats->type_counts;
 
-  auto do_query = [&](const Vec3& lo, const Vec3& hi, bool collect) {
+  auto do_query = [&](const Vec3& lo, const Vec3& hi, bool collect) -> void {
     ResultVector vector;
     vector.data = g_record_buffer;
     vector.capacity = k_max_records;

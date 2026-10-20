@@ -17,10 +17,9 @@ void RecordRing::push(Record record) {
 
 void RecordRing::trim(std::int32_t oldest_tick) {
   // Records are appended in tick order, so the stale ones are a prefix.
-  const auto stale = std::find_if(records_.begin(), records_.end(),
-                                  [oldest_tick](const Record& record) noexcept {
-                                    return record.tick >= oldest_tick;
-                                  });
+  const auto stale = std::find_if(
+      records_.begin(), records_.end(),
+      [oldest_tick](const Record& record) noexcept -> bool { return record.tick >= oldest_tick; });
   records_.erase(records_.begin(), stale);
 }
 
@@ -66,7 +65,8 @@ void RecordStore::retain(const std::vector<std::uintptr_t>& pawns) {
     return;
   }
   const std::unordered_set<std::uintptr_t> keep(pawns.begin(), pawns.end());
-  std::erase_if(rings_, [&keep](const auto& entry) { return keep.count(entry.first) == 0U; });
+  std::erase_if(rings_,
+                [&keep](const auto& entry) -> auto { return keep.count(entry.first) == 0U; });
 }
 
 void RecordStore::clear() noexcept {

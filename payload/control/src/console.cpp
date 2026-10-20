@@ -36,7 +36,7 @@ void Console::refresh() noexcept {
   input_service_ = reinterpret_cast<void*>(base + input_service->rva);
 }
 
-bool Console::exec(std::string_view line) noexcept {
+auto Console::exec(std::string_view line) noexcept -> bool {
   if (add_text_ == nullptr || input_service_ == nullptr) {
     return false;
   }

@@ -64,13 +64,13 @@ auto AabbBvh::build_node(int lo, int hi) -> int {
   const float extent[3] = {cmax.x - cmin.x, cmax.y - cmin.y, cmax.z - cmin.z};
   const int axis =
       extent[0] >= extent[1] && extent[0] >= extent[2] ? 0 : (extent[1] >= extent[2] ? 1 : 2);
-  const auto key = [&](int box) {
+  const auto key = [&](int box) -> float {
     const Vec3 c = box_centroid(boxes_[box]);
     return axis == 0 ? c.x : (axis == 1 ? c.y : c.z);
   };
   const int mid = lo + (hi - lo) / 2;
   std::nth_element(order_.begin() + lo, order_.begin() + mid, order_.begin() + hi,
-                   [&](int a, int b) { return key(a) < key(b); });
+                   [&](int a, int b) -> bool { return key(a) < key(b); });
 
   build_node(lo, mid);  // the left child is `index + 1`
   const int right = build_node(mid, hi);
@@ -218,7 +218,7 @@ void AabbBvh::query_pyramid(const Vec3& eye, const Aabb& box, std::vector<int>& 
     return;  // a degenerate hull: fall back to nothing (the caller keeps the box query)
   }
 
-  const auto inside = [&](const Aabb& bounds) {
+  const auto inside = [&](const Aabb& bounds) -> bool {
     return !outside_any_plane(planes, plane_count, bounds);
   };
 
