@@ -561,6 +561,11 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   // The take-off speed of this airtime: the gain is measured against it.
   if (!airtime_.airborne()) {
     airtime_.begin(speed);
+    // The counters describe **this** airtime: a later phase (a fall down a
+    // wall, where the wish cannot turn the velocity) must not poison the
+    // verdict of the airtime that worked.
+    strafe_steered_ticks_.store(0);
+    strafe_ignored_.store(0);
   }
 
   auto* bytes_base = static_cast<std::uint8_t*>(base);

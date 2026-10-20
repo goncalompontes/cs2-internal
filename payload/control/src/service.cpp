@@ -2206,7 +2206,9 @@ auto Service::movement_status(char* out, std::size_t size) const noexcept -> boo
   // applied the rotation ("yes"), it ignored it ("no (ignored)"), or nothing
   // has been judged yet ("?" — the player has not been airborne). The verdict
   // is the **ratio** of the counters, not the last judged tick: one noisy tick
-  // (a wall, a landing) flips the last verdict, and the counters do not.
+  // (a wall, a landing) flips the last verdict, and the counters do not. The
+  // counters cover the **current airtime** — a later phase (a fall down a
+  // wall) must not poison the verdict of the airtime that worked.
   const std::uint64_t followed = input_.strafe_steered_ticks();
   const std::uint64_t ignored = input_.strafe_ignored();
   const std::uint64_t judged = followed + ignored;

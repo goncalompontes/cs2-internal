@@ -185,10 +185,11 @@ def run(game: Game, *, watch: float = WATCH, min_gain: float = MIN_GAIN,
     # the **camera-frame analog encoding has no rotation at all** — the gate does
     # not apply there, so no gate verdict is reported for it.
     followed = int(status.get("strafe_steered_ticks") or 0)
-    ignored = int(result["strafe_ignored_during_window"])
+    ignored = int(status.get("strafe_ignored") or 0)
     judged = followed + ignored
     result["strafe_judged_ticks"] = judged
     result["strafe_followed_ticks"] = followed
+    result["strafe_ignored_ticks"] = ignored
     if int(result["strafe_subticks"] or 0) > 0 and judged > 0 and ignored * 2 > judged:
         result["verdict"] += (
             f" — BUT the rotation was not applied ({ignored} of {judged} judged ticks"
