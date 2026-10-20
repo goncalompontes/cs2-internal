@@ -216,6 +216,87 @@ void test_optimal_theta() {
   }
 }
 
+// --- the engine's side-axis convention ---------------------------------------
+//
+// The convention is recorded in exactly one place —
+// `cs2::control::k_engine_side_axis_positive_is_left` — and derived from the
+// engine's own code (see `docs/re/strafe-sign.md`). These tests pin it, so a
+// change to the constant is a deliberate edit that shows up as a failing
+// assertion instead of a silent 180-degree flip in the strafe.
+
+void test_side_axis_convention_is_pinned() {
+  // The engine's command field is `leftmove` (the movement services' schema
+  // calls it `m_flCmdLeftMove`), so a positive side axis is the player's LEFT.
+  // A failure here names the constant, so it says which way moved.
+  assert(cs2::control::k_engine_side_axis_positive_is_left);
+  // ... which means a rightward lateral quantity is a NEGATIVE engine side
+  // axis.
+  assert(nearly(cs2::control::engine_side_axis(1.0F), -1.0F));
+
+  // The engine's second view-frame basis vector is the forward vector rotated
+  // +90 degrees — the player's left, NOT the right.
+  const auto basis = cs2::control::engine_view_basis(k_view_yaw);
+  const float yaw = k_view_yaw * cs2::control::k_deg_to_rad;
+  assert(nearly(basis.forward.x, std::cos(yaw)));
+  assert(nearly(basis.forward.y, std::sin(yaw)));
+  assert(nearly(basis.side.x, -std::sin(yaw)));
+  assert(nearly(basis.side.y, std::cos(yaw)));
+  // ... and it is 90 degrees counter-clockwise of the forward vector.
+  assert(nearly(cs2::control::heading_of(basis.side.x, basis.side.y),
+                k_view_yaw + 90.0F));
+
+  // A lateral quantity that is positive to the player's right is a **negative**
+  // engine side axis, and the other way round.
+  assert(nearly(cs2::control::engine_side_axis(1.0F), -1.0F));
+  assert(nearly(cs2::control::engine_side_axis(-1.0F), 1.0F));
+  assert(nearly(cs2::control::engine_side_axis(0.0F), 0.0F));
+
+  // A wish 90 degrees counter-clockwise of the view forward (to the player's
+  // left) needs a **positive** side axis; 90 degrees clockwise needs a
+  // negative one.
+  assert(nearly(cs2::control::engine_side_axis_for_wish(90.0F), 1.0F));
+  assert(nearly(cs2::control::engine_side_axis_for_wish(-90.0F), -1.0F));
+  assert(nearly(cs2::control::engine_side_axis_for_wish(0.0F), 0.0F));
+  assert(nearly(cs2::control::engine_side_axis_for_wish(30.0F), 0.5F));
+}
+
+void test_the_goal_matches_the_engine_wish() {
+  // The goal heading and the engine's own wish construction must agree: build
+  // the wish the way `AirMove` does — `forward * fmove + basis * leftmove` —
+  // and its heading must be the goal.
+  for (const float view_yaw : {0.0F, 30.0F, 90.0F, 170.0F, -120.0F}) {
+    for (const std::uint64_t buttons :
+         {button::k_forward, button::k_moveright, button::k_moveleft,
+          button::k_forward | button::k_moveright,
+          button::k_forward | button::k_moveleft}) {
+      const auto intent = cs2::control::intent_from_buttons(buttons);
+      const auto basis = cs2::control::engine_view_basis(view_yaw);
+      const float side = cs2::control::engine_side_axis(intent.right);
+      const float x = intent.forward * basis.forward.x + side * basis.side.x;
+      const float y = intent.forward * basis.forward.y + side * basis.side.y;
+      const float wish = cs2::control::heading_of(x, y);
+      const float goal = cs2::control::goal_for(intent, view_yaw);
+      assert(nearly(wish, goal));
+    }
+  }
+}
+
+void test_the_goal_headings_are_the_players_left_and_right() {
+  // The world headings the A/D keys ask for, read straight off the engine's
+  // basis: `A` is 90 degrees to the player's left (yaw + 90), `D` 90 degrees
+  // to the right (yaw - 90). These are the facts the strafe is built on.
+  assert(nearly(goal_of(button::k_moveleft, k_view_yaw), k_view_yaw + 90.0F));
+  assert(nearly(goal_of(button::k_moveright, k_view_yaw), k_view_yaw - 90.0F));
+  // And the engine's side axis for those two: `A` is positive (left), `D` is
+  // negative.
+  const auto a_axis = cs2::control::engine_side_axis(
+      cs2::control::intent_from_buttons(button::k_moveleft).right);
+  const auto d_axis = cs2::control::engine_side_axis(
+      cs2::control::intent_from_buttons(button::k_moveright).right);
+  assert(nearly(a_axis, 1.0F));
+  assert(nearly(d_axis, -1.0F));
+}
+
 }  // namespace
 
 auto main() -> int {
@@ -231,6 +312,9 @@ auto main() -> int {
   test_side_is_stable_across_ticks();
   test_wish_is_perpendicular_to_the_velocity();
   test_optimal_theta();
+  test_side_axis_convention_is_pinned();
+  test_the_goal_matches_the_engine_wish();
+  test_the_goal_headings_are_the_players_left_and_right();
   std::puts("control-strafe: ok");
   return 0;
 }

@@ -12,9 +12,11 @@
 // formula, the dead zone and the optimum without a game.
 //
 // The engine conventions encoded here (`docs/re/strafing.md`):
-//   * `forward(yaw) = (cos yaw, sin yaw)` and `right(yaw) = (sin yaw, -cos yaw)`,
-//     so the right vector's world heading is `yaw - 90` and `leftmove` is
-//     positive to the **right**;
+//   * `forward(yaw) = (cos yaw, sin yaw)`; the engine's **second** view-frame
+//     basis vector is `(-sin yaw, +cos yaw)` — the forward vector rotated
+//     **+90 degrees**, i.e. the player's **left**;
+//   * the engine's side axis (the command's `leftmove` field) is positive to
+//     the player's **left** — see the convention constant below;
 //   * the wish is pushed **perpendicular** to the velocity (at the
 //     `AirAccelerate` optimum `theta*`), so the velocity curves toward the goal
 //     and re-perpendicularises every tick instead of decaying.
@@ -82,6 +84,85 @@ inline constexpr float k_strafe_min_theta_deg = 1.0F;
 //: The largest wish angle: a purely perpendicular push.
 inline constexpr float k_strafe_max_theta_deg = 90.0F;
 
+// --- The engine's side-axis convention ----------------------------------------
+//
+// **This is the one place the convention is recorded.** Every use of the
+// side-axis sign in this module goes through it, so a change is a deliberate
+// edit to this constant — and the host test fails when it moves.
+//
+// What the engine actually does (established from the engine's own code on the
+// live build 25947352, `client.dll` sha256 `659940c1…`, image base
+// `0x180000000`; the full derivation with the addresses is in
+// `docs/re/strafe-sign.md`):
+//
+//   * the view-frame basis function (`AngleVectors`, RVA `0x173cb90`, an
+//     identical copy at `0x1742af0`) returns the forward vector
+//     `(cos yaw, sin yaw)` and a **second** vector
+//     `(-sin yaw, +cos yaw)` — the forward vector rotated **+90 degrees**;
+//   * `AirMove` (RVA `0x8e57b0`) builds the wish as
+//     `wish = forward * movedata[0x2c] + basis * movedata[0x30]`, i.e. the
+//     side axis is multiplied by that **second** vector;
+//   * the side field is the command's `leftmove` (the movement services' schema
+//     calls it `m_flCmdLeftMove`), and the engine's own input forms the lateral
+//     axis as `value("left") - value("right")` (RVA `0xb8f6e0`), so a
+//     **positive** side axis is the player's **left**.
+//
+// The two halves are coupled: a side axis that is positive to the left can
+// only be multiplied by the +90-degree (left) vector, or the engine's own `A`
+// key would strafe right.
+//
+// `true` is the established convention. Flip it **only** if a live check
+// contradicts the derivation (the check is in `docs/re/strafe-sign.md`), and
+// flip it here *and* in the payload's analog write together — the two are the
+// same fact seen from the two ends.
+inline constexpr bool k_engine_side_axis_positive_is_left = true;
+
+//: A 2-D world vector.
+struct Vec2 {
+  float x{0.0F};
+  float y{0.0F};
+};
+
+//: The engine's view-frame basis for a camera yaw: the forward vector and the
+//: engine's **second** basis output (the forward vector rotated +90 degrees,
+//: i.e. the player's left).
+struct ViewBasis {
+  Vec2 forward{};
+  Vec2 side{};
+};
+
+//: The engine's view-frame basis for a camera yaw.
+[[nodiscard]] inline auto engine_view_basis(float view_yaw) noexcept -> ViewBasis {
+  const float yaw = view_yaw * k_deg_to_rad;
+  ViewBasis basis{};
+  basis.forward = Vec2{std::cos(yaw), std::sin(yaw)};
+  // The engine's second basis output is the forward vector rotated +90 degrees
+  // (the player's left) — or -90 degrees (the player's right) if the side axis
+  // were positive to the right. The two are the same fact.
+  const float sign = k_engine_side_axis_positive_is_left ? 1.0F : -1.0F;
+  basis.side = Vec2{-sign * std::sin(yaw), sign * std::cos(yaw)};
+  return basis;
+}
+
+//: The engine's **side axis** value for a lateral quantity that is positive to
+//: the player's right. The engine's field is `leftmove` — positive to the left
+//: — so the sign is inverted.
+[[nodiscard]] inline auto engine_side_axis(float right) noexcept -> float {
+  return k_engine_side_axis_positive_is_left ? -right : right;
+}
+
+//: The engine's side-axis value for a wish that sits `rel_deg` degrees
+//: **counter-clockwise** of the view forward. The engine multiplies the side
+//: axis by the +90-degree (left) basis vector, so a counter-clockwise wish
+//: needs a **positive** side axis.
+[[nodiscard]] inline auto engine_side_axis_for_wish(float rel_deg) noexcept -> float {
+  const float rel = rel_deg * k_deg_to_rad;
+  // The wish's lateral component, expressed the way `StrafeIntent::right` is
+  // (positive to the player's right): the engine's basis is the left vector, so
+  // a counter-clockwise wish is a *negative* right.
+  return engine_side_axis(-std::sin(rel));
+}
+
 // --- The decision ------------------------------------------------------------
 
 // How the auto-strafe derives its goal heading. The numbering is the wire's
@@ -96,6 +177,10 @@ enum class StrafeMode : std::uint8_t {
 // forward/back axis (+1 = `W`, -1 = `S`) and `right` the left/right axis
 // (+1 = `D`, -1 = `A`). Both are 0 when the key is not held, so an empty
 // intent means "no movement key" — the strafe then follows the camera.
+//
+// `right` is **our** convention (positive to the player's right); the engine's
+// side axis has the opposite sign. `engine_side_axis()` converts between the
+// two — never negate the lateral component by hand.
 struct StrafeIntent {
   float forward{0.0F};
   float right{0.0F};
@@ -153,21 +238,23 @@ struct StrafePlan {
 
 // The travel heading the intent asks for, in the world frame (degrees).
 //
-//   `intent_world = forward(view_yaw) * f + right(view_yaw) * l`
+//   `intent_world = forward(view_yaw) * f + basis(view_yaw) * leftmove`
 //
-// which turns `W` into the camera's forward, `S` into 180 degrees behind it,
+// where `basis` is the engine's **second** view-frame basis vector and
+// `leftmove` is the engine's side axis for our intent — so the heading is
+// built the way the engine builds the wish, not by assuming a sign.
+//
+// That turns `W` into the camera's forward, `S` into 180 degrees behind it,
 // `D` into 90 degrees to the right, `A` into 90 degrees to the left and
 // `W`+`D` into 45 degrees to the right. An empty intent (no movement key)
 // falls back to the camera's forward — the strafe still acts and follows the
 // camera, as it always did.
 [[nodiscard]] inline auto goal_for(const StrafeIntent& intent, float view_yaw) noexcept -> float {
-  const float yaw = view_yaw * k_deg_to_rad;
-  const float forward_x = std::cos(yaw);
-  const float forward_y = std::sin(yaw);
-  const float right_x = std::sin(yaw);
-  const float right_y = -std::cos(yaw);
-  const float x = intent.forward * forward_x + intent.right * right_x;
-  const float y = intent.forward * forward_y + intent.right * right_y;
+  const ViewBasis basis = engine_view_basis(view_yaw);
+  // The engine's side axis for an intent that is positive to the right.
+  const float side = engine_side_axis(intent.right);
+  const float x = intent.forward * basis.forward.x + side * basis.side.x;
+  const float y = intent.forward * basis.forward.y + side * basis.side.y;
   if (x == 0.0F && y == 0.0F) {
     return normalize_angle(view_yaw);
   }
