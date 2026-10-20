@@ -312,21 +312,23 @@ order, and it is pinned by a test):
 | `DISCONNECTED` | a `client_disconnect` event **after** the last `round_start`, while the level is still up (the event is captured without a subscription) | reconnect |
 | `TEAM_SELECT` | level up, `team == 0` | nothing (`jointeam` is the transition) |
 | `SPECTATOR` | `team == 1` | look |
-| `WARMUP` | `rules.warmup` | move/jump/attack (no round structure yet) |
 | `DEAD` | in a team, not alive (`life_state != 0`) | nothing until respawn |
+| `WARMUP` | `rules.warmup` | move/jump/attack (no round structure yet) |
 | `FREEZE` | `rules.freeze` | look, buy |
 | `HALF_TIME` | `rules.game_phase == 4` (the client's own phase mapper reads `m_gamePhase` at `+0x84` and sends `"HalfTime"`) | look |
 | `OVERTIME` | `rules.overtime_playing` — **the payload does not send this yet** (`m_nOvertimePlaying`, `client.dll +0x90`); the name is in `screens.PENDING_PAYLOAD_FIELDS` | look |
 | `PAUSED` | `rules.game_paused` — **not sent yet** (`m_bGamePaused`, `client.dll +0x38`) | look |
 | `ROUND_END` | `rules.round_win_status != 0` (or the newest round event is `round_end`) | — |
-| `DEFUSING` | `local.defusing` | look, move |
+| `DEFUSING` | `local.defusing` | look (a defusing player is pinned to the bomb: dropping the weapon or switching away cancels the defuse) |
 | `PLANTED` | `rules.bomb_planted` | look, move, attack, defuse (CT with a defuser) |
 | `BUY_TIME` | the local team's buy window is open in a running round (`t_cant_buy` / `ct_cant_buy`) | everything |
 | `LIVE` | alive, in a team, not warmup/freeze, no winner, the buy window closed | everything |
 
 Three ordering decisions are deliberate: **a dead player outranks the round
 facts** (a dead player ignores every input, and the bomb is still reported as a
-*fact*); **the match phase outranks the round phase** (`m_iRoundWinStatus` is not
+*fact*; the same rule puts `DEAD` **before** `WARMUP` — a dead player in the
+warmup is *dead*, not "may move and attack"); **the match phase outranks the
+round phase** (`m_iRoundWinStatus` is not
 reset between the halves, so the halftime would otherwise hide behind the last
 round's winner); and **the buy window is a screen of its own**, so `LIVE` and
 `ROUND_END` **lost** the `buy` capability — a buy in those rows could never be
@@ -610,12 +612,17 @@ were **strings**, now superseded above.
   the host test can cover them without the Windows-only `Service`.
 - The **settings name table**: `overlay/include/cs2/overlay/settings_table.hpp`
   is **generated** by `scripts/gen-settings-table.py` from
-  `overlay/include/cs2/overlay/wire.hpp` (the `Settings` struct). The Meson
-  build regenerates it on every build (`build_always_stale`) and the
-  `settings-table` test fails when the file on disk differs from a fresh
-  generation; the generator itself fails loudly (non-zero exit) on a parse
-  error rather than emitting an empty table. The table is the reason the
-  `settings` command can address all 87 fields by name.
+  `overlay/include/cs2/overlay/wire.hpp` (the `Settings` struct). The table is
+  **checked in** and both builds **verify** it: the Meson targets run the
+  generator in `--check` mode and fail when the file on disk differs from a
+  fresh generation (the build does not rewrite the file, so the file the test
+  compares against is the checked-in one). The generator itself fails loudly
+  (non-zero exit) on a parse error rather than emitting an empty table, and
+  the generator's own unit test (`scripts/scenario/tests/test_settings_table.py`,
+  the `scenario-settings-table` Meson test) drives it against a **copy** in a
+  temporary directory — so it fails even in a run that regenerates the file
+  first. The table is the reason the `settings` command can address all 87
+  fields by name.
 - `scripts/scenario/`: `session.py` (kill stale `cs2.exe` → run the `CS2Launch`
   task → wait for `client.dll` → inject `build-payload/payload.dll` →
   connect → teardown), `control.py` (pipe client + typed helpers),
@@ -776,7 +783,10 @@ correct itself; an unknown tool is a protocol error (`-32602`).
 `cs2_launch` and `cs2_inject` are the only tools that change the game. They
 say so in their description and need `confirm: true`; the launch goes through
 the **`CS2Launch` scheduled task** (the agent runs in session 0 without a GPU,
-so `cs2.exe` would die there) and nothing is ever killed.
+so `cs2.exe` would die there) and nothing is ever killed. `cs2_exec` is the
+escape hatch for the console, and the commands that would end the game
+(`quit`, `exit`) are **refused** there — the engine's `quit` is a console
+command, so without the gate the promise would have a hole in it.
 
 ### The schemas are generated, not written
 
@@ -786,12 +796,30 @@ argument shapes in `tools.py` are built from the library's own aliases
 `Screen` enum), and `schema.py` projects them onto JSON Schema — a `TypedDict`
 becomes an object with `required` and `additionalProperties: false`, a
 `Literal` becomes an `enum`, the `Screen` enum becomes an enum of its
-kebab-case names, `X | None` becomes `anyOf: [X, null]`.
+kebab-case names, `X | None` becomes `anyOf: [X, null]`, and a union of two
+`Literal`s becomes **one** `enum` (the button names are a single closed set,
+not a choice between two lists).
 
 The projection is **also the validator**: the server checks the arguments
 against the very schema it advertised, so a bad argument is refused *before*
 the request reaches the game. An annotation the bridge cannot express falls
 back to "any" and is **reported** (never a wrong schema).
+
+Two of the generated schemas are worth naming, because they are the ones that
+used to lie:
+
+* **`cs2_press` / `cs2_release`** advertise the button names as a closed
+  `enum` — the runner's aliases (`w`, `space`, `mouse1`, ...) and the
+  engine's own actions (`forward`, `jump`, ...) plus the four mask-only names
+  (`moveleft`, `moveright`, `speed`, `zoom`), which need `via="usercmd"`.
+  A typo (`"spcae"`) is refused at the boundary; it must not reach the game
+  as the console command `+spcae`, which the engine answers with an error
+  nobody sees (a silent no-op). The console path refuses a name the engine
+  has no action for as well.
+* **`cs2_settings_set`** accepts a **boolean** for a flag (`{"esp_box":
+  true}`): the payload's `write_field` reads `true`/`false` as 1/0, so a
+  schema without a boolean could not express "switch this off" the way the
+  wire format documents it.
 
 ### The connection
 
@@ -801,6 +829,27 @@ payload's pipe takes one client at a time), **bounded** (a connect attempt
 gives up after a few seconds) and **self-healing** (a dropped pipe is detected
 and the next call reconnects — the `Control` class has no reconnect of its
 own, so the retry lives in the MCP layer).
+
+### The deadlines
+
+The server reads **one request at a time**, so a tool call that never returns
+blocks every later request — and the payload answers a command *inline* on its
+one service thread (`Service::handle` in `payload/control/src/service.cpp`),
+so a wedged payload, a slow `do_heatmap` or a payload that died mid-request
+are all real possibilities. Two deadlines bound them:
+
+| deadline | where | default | what it covers |
+|---|---|---|---|
+| the **wire deadline** | `Control.request` (`scripts/scenario/control.py`) | 30 s (`CS2_CONTROL_REQUEST_TIMEOUT`) | one command's answer. The pipe's read is blocking, so the read runs in a worker thread and the caller waits with a deadline |
+| the **call deadline** | `Session.call` / `Session.run` (`scripts/scenario/mcp/session.py`) | 300 s (`CS2_CONTROL_CALL_TIMEOUT`) | one tool call (the outer bound; `cs2_ensure` may legitimately wait for the game) |
+
+A request that runs out of time raises `ControlTimeout` ("the payload did not
+answer within 30.0s") **and releases the channel**: the pending read is
+cancelled (`CancelIoEx` on the pipe's handle) and the pipe is closed, so the
+next call *reconnects* instead of waiting on a handle nobody will ever answer.
+The call deadline does the same and reports "the tool call did not finish
+within Ns". Neither is a hang: the tool answers with an error and the server
+keeps serving.
 
 When the game is not running the tool answers with an actionable message, not
 a hang and not a traceback:

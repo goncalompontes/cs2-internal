@@ -30,8 +30,9 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import unittest
-from typing import Any, Literal, Mapping, NotRequired, Required, TypedDict, cast
+from typing import Any, Literal, Mapping, NotRequired, Required, TypedDict, cast, get_args
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
@@ -181,9 +182,21 @@ class SchemaBridgeTest(unittest.TestCase):
         schema = schema_bridge.schema_for(protocol.WaitExpr, problems=problems)
         self.assertEqual(schema["properties"]["in_map"], {"type": "boolean"})
         # The nesting is bounded: at the deepest level the shape is "an object".
-        self.assertEqual(schema["properties"]["not"]["properties"]["not"]["type"],
-                         "object")
+        deepest = schema
+        for _ in range(schema_bridge.MAX_EXPANSION_DEPTH):
+            deepest = deepest["properties"]["not"]
+        self.assertEqual(deepest["type"], "object")
         self.assertTrue(any("recursive" in problem for problem in problems))
+
+    def test_the_predicate_keys_are_checked_four_levels_deep(self) -> None:
+        """A bogus key is refused at the boundary, not only by the payload."""
+        schema = schema_bridge.schema_for(protocol.WaitExpr)
+        nested = schema
+        for _ in range(3):
+            nested = nested["properties"]["not"]
+        errors = schema_bridge.validate_arguments(nested, {"nonsense": True})
+        self.assertTrue(errors)
+        self.assertIn("unknown argument", errors[0])
 
 
 # --- the validator ---------------------------------------------------------
@@ -268,6 +281,51 @@ class ToolCatalogueTest(unittest.TestCase):
         tool = next(t for t in mcp_tools.TOOLS if t.name == "cs2_run_scenario")
         self.assertEqual(tool.input_schema()["properties"]["name"]["enum"],
                          sorted(SCENARIOS))
+
+    def test_the_button_key_is_a_closed_enum(self) -> None:
+        """The advertised button names must actually *constrain* the argument.
+
+        The key used to be ``ButtonName | str``: the union collapsed into a
+        free-text branch, so the schema accepted **any** string and a typo
+        (``"spcae"``) reached the game as the console command ``+spcae`` — a
+        command the engine answers with an error nobody sees.
+        """
+        from scenario.control import BUTTONS
+        from scenario.protocol import ButtonName, UsercmdButtonName
+
+        for name in ("cs2_press", "cs2_release"):
+            tool = next(t for t in mcp_tools.TOOLS if t.name == name)
+            key = tool.input_schema()["properties"]["key"]
+            with self.subTest(tool=name):
+                self.assertEqual(set(key), {"enum"})
+                allowed = set(key["enum"])
+                self.assertEqual(allowed, set(get_args(ButtonName))
+                                 | set(get_args(UsercmdButtonName)))
+                # Every alias the runner documents is in the enum.
+                for alias in BUTTONS:
+                    self.assertIn(alias, allowed)
+
+    def test_a_bogus_button_name_is_refused_at_the_boundary(self) -> None:
+        tool = next(t for t in mcp_tools.TOOLS if t.name == "cs2_press")
+        schema = tool.input_schema()
+        errors = schema_bridge.validate_arguments(schema, {"key": "spcae"})
+        self.assertTrue(errors)
+        self.assertIn("not one of", errors[0])
+        self.assertEqual(schema_bridge.validate_arguments(schema, {"key": "space"}), [])
+
+    def test_a_settings_value_may_be_a_bool(self) -> None:
+        """The payload's ``write_field`` accepts ``true``/``false`` for a flag."""
+        tool = next(t for t in mcp_tools.TOOLS if t.name == "cs2_settings_set")
+        schema = tool.input_schema()
+        self.assertEqual(
+            schema_bridge.validate_arguments(schema, {"values": {"esp_box": True}}), [])
+        self.assertEqual(
+            schema_bridge.validate_arguments(schema, {"values": {"esp_box": 1}}), [])
+        self.assertEqual(
+            schema_bridge.validate_arguments(schema,
+                                            {"values": {"esp_box": [1, 2, 3, 4]}}), [])
+        self.assertTrue(schema_bridge.validate_arguments(
+            schema, {"values": {"esp_box": {"nope": 1}}}))
 
     def test_the_destructive_tools_need_a_confirmation(self) -> None:
         for name in ("cs2_launch", "cs2_inject"):
@@ -478,9 +536,38 @@ class ServerDispatchTest(unittest.TestCase):
         response = self.server.handle(["not", "an", "object"])
         self.assertEqual(_answer(response)["error"]["code"], mcp_server.INVALID_REQUEST)
 
+    def test_a_request_without_the_version_is_refused(self) -> None:
+        """The envelope's version is part of the contract."""
+        response = self.server.handle({"id": 1, "method": "initialize"})
+        self.assertEqual(_answer(response)["error"]["code"], mcp_server.INVALID_REQUEST)
+
+    def test_a_request_with_the_wrong_version_is_refused(self) -> None:
+        response = self.server.handle({"jsonrpc": "1.0", "id": 1, "method": "initialize"})
+        self.assertEqual(_answer(response)["error"]["code"], mcp_server.INVALID_REQUEST)
+
+    def test_a_null_id_is_a_request_and_not_a_notification(self) -> None:
+        """``"id": null`` is still an id: the message has to be answered."""
+        response = self.server.handle({"jsonrpc": "2.0", "id": None, "method": "ping"})
+        self.assertIsNotNone(response)
+        self.assertEqual(_answer(response)["id"], None)
+
     def test_a_notification_is_never_answered(self) -> None:
         self.assertIsNone(self.server.handle(
             {"jsonrpc": "2.0", "method": "notifications/initialized"}))
+
+    def test_a_notification_without_a_version_is_not_answered(self) -> None:
+        """A notification is never answered — not even with an error."""
+        self.assertIsNone(self.server.handle({"method": "notifications/initialized"}))
+
+    def test_a_tool_call_before_the_handshake_is_refused(self) -> None:
+        """The client must say hello before it drives the game."""
+        response = self.server.handle({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "cs2_ping", "arguments": {}},
+        })
+        error = _answer(response)["error"]
+        self.assertEqual(error["code"], mcp_server.INVALID_REQUEST)
+        self.assertIn("initialize", error["message"])
 
     def test_the_tool_list_carries_the_schemas(self) -> None:
         response = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
@@ -490,6 +577,7 @@ class ServerDispatchTest(unittest.TestCase):
             self.assertEqual(tool["inputSchema"]["type"], "object")
 
     def test_an_unknown_tool_is_a_protocol_error(self) -> None:
+        self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         response = self.server.handle({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "cs2_nope", "arguments": {}},
@@ -497,6 +585,7 @@ class ServerDispatchTest(unittest.TestCase):
         self.assertEqual(_answer(response)["error"]["code"], mcp_server.INVALID_PARAMS)
 
     def test_wrong_arguments_are_a_tool_error(self) -> None:
+        self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         response = self.server.handle({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "cs2_exec", "arguments": {"line": 5}},
@@ -508,6 +597,7 @@ class ServerDispatchTest(unittest.TestCase):
     def test_a_tool_that_raises_is_a_tool_error(self) -> None:
         # The game is not running: that is an expected failure, so the agent
         # gets the message and no traceback.
+        self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         with contextlib.redirect_stderr(io.StringIO()) as diagnostics:
             response = self.server.handle({
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -519,18 +609,51 @@ class ServerDispatchTest(unittest.TestCase):
         self.assertNotIn("Traceback", result["content"][0]["text"])
         self.assertNotIn("Traceback", diagnostics.getvalue())
 
+    def test_the_exec_tool_refuses_a_command_that_ends_the_game(self) -> None:
+        """``quit`` is a console command: the server never kills the game."""
+        self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        for line in ("quit", "quit; sv_cheats 1", "exit"):
+            with self.subTest(line=line):
+                response = self.server.handle({
+                    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "cs2_exec", "arguments": {"line": line}},
+                })
+                result = _answer(response)["result"]
+                self.assertTrue(result["isError"])
+                self.assertIn("never kills the game", result["content"][0]["text"])
+
+    def test_a_client_that_vanished_does_not_crash_the_server(self) -> None:
+        """The pipe to the client is gone: the server stops, it does not die.
+
+        The write of the answer fails with ``BrokenPipeError``; without the
+        catch the server would exit with a traceback — and the traceback
+        would be on the *protocol* channel's stderr, next to the frames.
+        """
+        class BrokenStream(io.StringIO):
+            def write(self, text: str) -> int:
+                raise BrokenPipeError(32, "The pipe has been ended")
+
+        source = io.StringIO(
+            '{"jsonrpc": "2.0", "id": 1, "method": "initialize"}\n')
+        with contextlib.redirect_stderr(io.StringIO()) as diagnostics:
+            self.assertEqual(mcp_server.serve(BrokenStream(), source), 0)
+        self.assertNotIn("Traceback", diagnostics.getvalue())
+
 
 # --- the server, over a pipe ----------------------------------------------
 class ServerProcess:
     """The server as a subprocess, spoken to over its pipes."""
 
-    def __init__(self, cwd: str | None = None) -> None:
+    def __init__(self, cwd: str | None = None,
+                 environment: Mapping[str, str] | None = None) -> None:
         self.process: subprocess.Popen[bytes] | None = None
         self.messages: queue.Queue[dict[str, Any]] = queue.Queue()
         #: The lines of stdout that were **not** protocol messages.
         self.bad_lines: list[str] = []
         self.stderr_lines: list[str] = []
         self.cwd = cwd
+        #: The extra environment (the pipe, the deadlines).
+        self.environment = dict(environment or {})
 
     def __enter__(self) -> "ServerProcess":
         environment = dict(os.environ)
@@ -538,6 +661,7 @@ class ServerProcess:
         # a short timeout so the test does not wait for the default.
         environment["CS2_CONTROL_PIPE"] = MISSING_PIPE
         environment["CS2_CONTROL_CONNECT_TIMEOUT"] = "0.5"
+        environment.update(self.environment)
         self.process = subprocess.Popen(
             [sys.executable, str(SERVER)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -730,6 +854,144 @@ class ServerOverPipeTest(unittest.TestCase):
             with ServerProcess(cwd=directory) as server:
                 response = server.request("initialize", {"protocolVersion": "2025-11-25"})
         self.assertIn("result", response)
+
+
+# --- a payload that never answers -----------------------------------------
+# The failure the deadline exists for: the pipe is there, the request
+# arrives, and the answer never comes.  The fake payload is a **real**
+# Win32 named pipe (the client's whole surface is the pipe), so the test
+# covers the blocking read and the release of the channel — not a mock of it.
+PIPE_ACCESS_DUPLEX = 0x00000003
+PIPE_TYPE_BYTE = 0x00000000
+PIPE_READMODE_BYTE = 0x00000000
+PIPE_WAIT = 0x00000000
+PIPE_UNLIMITED_INSTANCES = 255
+ERROR_PIPE_CONNECTED = 535
+INVALID_HANDLE_VALUE = -1
+
+
+class SilentPayload:
+    """A named pipe that accepts a client and never answers it.
+
+    Every client gets a fresh instance (the pipe is created again after a
+    client hangs up), so a client that gave the channel up can reconnect —
+    which is exactly what the deadline has to make possible.
+    """
+
+    def __init__(self) -> None:
+        self.name = (rf"\\.\pipe\cs2-internal-control-silent-{os.getpid()}"
+                     f"-{threading.get_ident()}")
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, name="silent-payload",
+                                        daemon=True)
+
+    def __enter__(self) -> "SilentPayload":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+
+    def _serve(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateNamedPipeW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+            wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID]
+        kernel32.CreateNamedPipeW.restype = wintypes.HANDLE
+        kernel32.ConnectNamedPipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+        kernel32.ConnectNamedPipe.restype = wintypes.BOOL
+        kernel32.ReadFile.argtypes = [wintypes.HANDLE, wintypes.LPVOID,
+                                      wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                                      wintypes.LPVOID]
+        kernel32.ReadFile.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
+
+        while not self._stop.is_set():
+            handle = kernel32.CreateNamedPipeW(
+                self.name, PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, None)
+            if handle == INVALID_HANDLE_VALUE:
+                return
+            # The **same** instance serves every client, exactly like the
+            # payload's channel (`Channel::accept` / `Channel::disconnect`):
+            # a client that hangs up is disconnected and the instance waits
+            # for the next one.
+            while not self._stop.is_set():
+                connected = kernel32.ConnectNamedPipe(handle, None)
+                if (not connected
+                        and ctypes.get_last_error() != ERROR_PIPE_CONNECTED):
+                    kernel32.CloseHandle(handle)
+                    return
+                # Read the request (so the client's write completes) and
+                # **never answer**: this is the payload that wedges its client.
+                while not self._stop.is_set():
+                    buffer = ctypes.create_string_buffer(4096)
+                    read = wintypes.DWORD(0)
+                    ok = kernel32.ReadFile(handle, buffer, 4096,
+                                           ctypes.byref(read), None)
+                    if not ok or read.value == 0:
+                        break  # the client hung up
+                kernel32.DisconnectNamedPipe(handle)
+
+
+@unittest.skipUnless(os.name == "nt", "the named pipe is a Windows thing")
+class SilentPayloadTest(unittest.TestCase):
+    """A payload that never answers must not wedge the server.
+
+    The server reads one request at a time, so a tool call that never
+    returns blocks every later request — and the payload answers a command
+    *inline* on its one service thread, so this is a real possibility, not a
+    theoretical one.
+    """
+
+    def test_the_call_times_out_and_the_server_keeps_serving(self) -> None:
+        with SilentPayload() as payload:
+            environment = {
+                "CS2_CONTROL_PIPE": payload.name,
+                "CS2_CONTROL_CONNECT_TIMEOUT": "5",
+                "CS2_CONTROL_REQUEST_TIMEOUT": "2",
+            }
+            with ServerProcess(environment=environment) as server:
+                server.request("initialize", {"protocolVersion": "2025-11-25"})
+                started = time.monotonic()
+                response = server.request("tools/call", {
+                    "name": "cs2_ping", "arguments": {},
+                }, request_id=2)
+                elapsed = time.monotonic() - started
+                # The call must **fail** (with the timeout), not hang.
+                self.assertLess(elapsed, 30.0)
+                result = response["result"]
+                self.assertTrue(result["isError"])
+                self.assertIn("did not answer", result["content"][0]["text"])
+                # The server is still alive: the next request is answered.
+                following = server.request("tools/list", request_id=3)
+                self.assertIn("tools", following["result"])
+
+    def test_the_next_call_reconnects_after_the_timeout(self) -> None:
+        """The channel was released, so the next call may connect again."""
+        with SilentPayload() as payload:
+            environment = {
+                "CS2_CONTROL_PIPE": payload.name,
+                "CS2_CONTROL_CONNECT_TIMEOUT": "5",
+                "CS2_CONTROL_REQUEST_TIMEOUT": "2",
+            }
+            with ServerProcess(environment=environment) as server:
+                server.request("initialize", {"protocolVersion": "2025-11-25"})
+                server.request("tools/call", {"name": "cs2_ping", "arguments": {}},
+                               request_id=2)
+                # The second call connects again and times out again — it is
+                # *not* "the game is not running" (the pipe is there).
+                response = server.request("tools/call", {
+                    "name": "cs2_ping", "arguments": {},
+                }, request_id=3)
+                text = response["result"]["content"][0]["text"]
+                self.assertIn("did not answer", text)
+                self.assertNotIn("the game is not running", text)
 
 
 # --- the real MCP client ---------------------------------------------------

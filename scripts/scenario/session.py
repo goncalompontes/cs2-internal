@@ -15,7 +15,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 
 from .control import DEFAULT_PIPE, Control, ControlError
 from .protocol import (
@@ -33,6 +33,7 @@ from .protocol import (
     PressResult,
     RageResult,
     ReleaseResult,
+    SettingsValue,
     StateSnapshotDict,
     WaitResult,
 )
@@ -178,8 +179,11 @@ class Game:
     is not a ``dict[str, Any]`` to a type checker.
 
     The class satisfies the ``ControlTransport`` protocol of :mod:`.protocol`
-    (the channel the state machine and the readiness layer program against);
-    ``tests/test_state_machine.py`` pins that with a runtime check.
+    (the channel the state machine and the readiness layer program against).
+    A runtime ``isinstance`` check only proves that the *attributes* are there,
+    so the real check is **static**: ``tests/test_protocol.py`` assigns a
+    ``Game`` to a ``ControlTransport``-typed variable, and the mypy gate
+    (``scripts/typecheck.py``) compares the two signatures.
     """
 
     def __init__(self, control: Control) -> None:
@@ -199,7 +203,7 @@ class Game:
         return self.control.exec(line)
 
     def wait_for(self, *, timeout: float = 30.0, event: str | None = None,
-                 event_args: dict[str, Any] | None = None,
+                 event_args: Mapping[str, Any] | None = None,
                  **predicates: Any) -> WaitResult:
         return self.control.wait_for(timeout=timeout, event=event, event_args=event_args,
                                      **predicates)
@@ -235,11 +239,12 @@ class Game:
         return self.control.strafe(on, wishspeed=wishspeed, subtick=subtick)
 
     def look(self, *, yaw: float | None = None, pitch: float | None = None,
-             roll: float | None = None, via: InputBackend | None = None,
-             command: bool = False, raw: bool = False,
-             step_yaw: float | None = None) -> LookResult:
-        return self.control.look(yaw=yaw, pitch=pitch, roll=roll, via=via,
-                                 command=command, raw=raw, step_yaw=step_yaw)
+             roll: float | None = None, timeout: float = 5.0,
+             via: InputBackend | None = None, command: bool = False,
+             raw: bool = False, step_yaw: float | None = None) -> LookResult:
+        return self.control.look(yaw=yaw, pitch=pitch, roll=roll, timeout=timeout,
+                                  via=via, command=command, raw=raw,
+                                  step_yaw=step_yaw)
 
     def aim(self, **kwargs: Any) -> AimResult:
         """Ragebot diagnostic solve (``docs/ragebot.md``)."""
@@ -269,6 +274,14 @@ class Game:
 
     def teleport(self, x: float, y: float, z: float | None = None) -> ExecResult:
         return self.control.teleport(x, y, z)
+
+    def settings_get(self, fields: Sequence[str] | None = None) -> dict[str, Any]:
+        """Read the feature settings block (the flat wire names)."""
+        return self.control.settings_get(fields)
+
+    def settings_set(self, values: Mapping[str, SettingsValue]) -> dict[str, Any]:
+        """Write the feature settings block (a flag takes a bool or a number)."""
+        return self.control.settings_set(values)
 
     def players(self) -> list[PlayerSnapshotDict]:
         """The snapshot's player blocks (the wire shape, not a plain dict)."""

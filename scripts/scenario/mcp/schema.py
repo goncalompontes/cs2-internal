@@ -56,7 +56,12 @@ __all__ = [
 #: How deep a *recursive* shape is expanded before the bridge gives up and
 #: says "an object".  The predicate expression of ``wait_for`` is the only
 #: recursive shape in the tool surface.
-MAX_EXPANSION_DEPTH = 3
+#:
+#: The payload's own predicate parser has no depth limit
+#: (``payload/control/src/predicate.cpp`` recurses as deep as the expression
+#: goes), so every level the bridge expands is a level whose keys are checked
+#: at the boundary instead of being refused by the payload.
+MAX_EXPANSION_DEPTH = 4
 
 #: The resolved annotations of every ``TypedDict`` the bridge has walked.  The
 #: resolution is slow (it evaluates every annotation) and the schemas are built
@@ -164,6 +169,19 @@ def schema_for_hint(hint: object, path: str = "", problems: list[str] | None = N
                      else {"anyOf": [schema_for_hint(arg, path, problems, depth)
                                     for arg in rest]})
             return {"anyOf": [inner, {"type": "null"}]}
+        if all(get_origin(arg) is Literal for arg in args):
+            # A union of closed sets is one closed set: `ButtonName |
+            # UsercmdButtonName` is the list of every button name, not a
+            # choice between two lists.  Merging them keeps the advertised
+            # schema an **enum** (a client reads it as one) instead of an
+            # `anyOf` of two enums — and an `anyOf` with a free-text branch
+            # would accept any string, which is the opposite of the point.
+            values: list[Any] = []
+            for arg in args:
+                for value in get_args(arg):
+                    if value not in values:
+                        values.append(value)
+            return {"enum": values}
         return {"anyOf": [schema_for_hint(arg, path, problems, depth) for arg in args]}
 
     if origin in (list, set, frozenset, tuple):

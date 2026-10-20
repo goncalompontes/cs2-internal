@@ -134,7 +134,7 @@ class Server:
         self.tools = {tool.name: tool for tool in TOOLS}
         #: The schema fallbacks the bridge reported (for the diagnostics).
         self.problems: list[str] = []
-        #: Whether the client finished the handshake.
+        #: Whether the client finished the handshake (an ``initialize``).
         self.initialized = False
 
     # --- the methods ------------------------------------------------------
@@ -206,21 +206,44 @@ class Server:
             return _error(message.get("id"), INVALID_PARAMS,
                           "'params' must be an object")
 
-        # A notification is never answered — not even with an error.
-        if "id" not in message or message.get("id") is None:
+        # A notification is never answered — not even with an error.  It is a
+        # message **without** an id; an id that is present (even ``null``) is
+        # a request and has to be answered.
+        if "id" not in message:
             if method == "notifications/initialized":
                 self.initialized = True
             return None
 
+        version = message.get("jsonrpc")
+        if version != "2.0":
+            # The envelope's version is checked: a client that speaks another
+            # dialect gets told, instead of being answered in a dialect it
+            # does not understand.
+            return _error(message.get("id"), INVALID_REQUEST,
+                          f"'jsonrpc' must be '2.0' (got {version!r})")
+
         request_id = message.get("id")
+        if not isinstance(request_id, (str, int)) or isinstance(request_id, bool):
+            return _error(None, INVALID_REQUEST,
+                          "a request id must be a string or a number")
         try:
             if method == "initialize":
+                # The handshake is done when the request is answered: the
+                # `notifications/initialized` that follows only confirms it.
+                self.initialized = True
                 return _result(request_id, self.initialize(params))
             if method == "ping":
                 return _result(request_id, {})
             if method == "tools/list":
                 return _result(request_id, self.list_tools())
             if method == "tools/call":
+                if not self.initialized:
+                    # The handshake is not optional: a tool call drives the
+                    # game, and a client that never said hello may not know
+                    # what it is talking to.
+                    raise RpcError(INVALID_REQUEST,
+                                   "the client must call initialize before it "
+                                   "can call a tool")
                 return _result(request_id, self.call_tool(params))
             if method == "resources/list":
                 return _result(request_id, {"resources": []})
@@ -251,7 +274,12 @@ def serve(stream: TextIO, source: TextIO, server: Server | None = None) -> int:
             continue
         response = server.handle(message)
         if response is not None:
-            _write(stream, response)
+            try:
+                _write(stream, response)
+            except (BrokenPipeError, OSError):
+                # The client is gone (it closed the pipe): there is nobody
+                # left to answer, and a traceback would be noise.
+                break
     return 0
 
 

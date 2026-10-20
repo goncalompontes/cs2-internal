@@ -84,6 +84,7 @@ __all__ = [
     "RageResult",
     "ReleaseResult",
     "RulesSnapshotDict",
+    "SettingsValue",
     "StateSnapshotDict",
     "StepProbeDict",
     "StrafeResult",
@@ -160,6 +161,12 @@ CONSOLE_BUTTONS: frozenset[str] = frozenset({
 #: actions and the runner's friendly aliases, which the ``BUTTONS`` table maps
 #: onto those actions. Every name here is expressible as a console command.
 #:
+#: The set is deliberately the *union* of two families, because the console
+#: path accepts both: the runner's aliases (``w``, ``space``, ``mouse1``, ...)
+#: and the engine's own action names (``forward``, ``jump``, ``turnup``, ...).
+#: The usercmd-only names are **not** here — they have no console command (see
+#: :data:`UsercmdButtonName`).
+#:
 #: ``turnup`` / ``turndown`` are the engine's **console** commands the runner's
 #: ``BUTTONS`` table maps ``up`` / ``down`` to (the console path drives
 #: ``+turnup`` / ``+turndown`` — CS2 has no ``+lookup`` / ``+lookdown`` — and
@@ -187,6 +194,19 @@ ButtonName = Literal[
 #: ``via="usercmd"``; the console path rejects them instead of issuing an
 #: unknown console command.
 UsercmdButtonName = Literal["moveleft", "moveright", "speed", "zoom"]
+
+#: The value kinds the ``settings`` command accepts (``Service::do_settings``
+#: → ``write_field`` in ``payload/control/src/settings_access.cpp``):
+#:
+#: * a **flag** takes a *bool* (``true`` / ``false``) **or** a number;
+#: * a number field takes a number;
+#: * a colour takes an array of numbers (one per channel);
+#: * a text takes a string.
+#:
+#: The bool is not decoration: the payload's ``write_field`` reads a flag's
+#: ``true``/``false`` as 1/0, so a client that may only send numbers cannot
+#: express "switch this off" in the way the wire format documents it.
+SettingsValue = bool | int | float | list[int] | str
 
 
 # --- the snapshot (payload/control/src/snapshot_json.cpp) --------------------
@@ -811,7 +831,7 @@ class HeatmapResult(TypedDict, total=False):
 
 
 # --- the `wait_for` predicate DSL -------------------------------------------
-# The server's grammar is 12 kinds (``payload/control/src/predicate.cpp``):
+# The server's grammar is 11 kinds (``payload/control/src/predicate.cpp``):
 # ``in_map``, ``local_alive``, ``on_ground``, ``playable`` (bool);
 # ``players_gte``, ``alive_gte``, ``local_hp_gte`` (int); ``team`` (a team name
 # or number); ``all`` / ``any`` (a list of predicates); ``not`` (a predicate).

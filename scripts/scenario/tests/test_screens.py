@@ -22,6 +22,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 from scenario import screens  # noqa: E402
 from scenario.protocol import StateSnapshotDict, validate_snapshot  # noqa: E402
 from scenario.screens import Can, Screen  # noqa: E402
+from scenario.session import SessionError  # noqa: E402
 
 
 def player(**overrides: Any) -> dict[str, Any]:
@@ -390,8 +391,28 @@ class TestDecisionOrder(unittest.TestCase):
         self.assertEqual(
             [str(screen) for screen in Screen],
             ["loading", "not-ready", "not-in-game", "disconnected", "team-select",
-             "spectator", "warmup", "dead", "freeze", "half-time", "overtime",
+             "spectator", "dead", "warmup", "freeze", "half-time", "overtime",
              "paused", "round-end", "defusing", "planted", "buy-time", "live"])
+
+    def test_a_dead_player_beats_the_warmup(self) -> None:
+        """DEAD (the player fact) outranks WARMUP (the round fact).
+
+        A dead player ignores every input, so "the warmup is running" is not
+        what a scenario needs to know first: the warmup row allows movement
+        and shooting, and a dead player must not be told that it may move.
+        """
+        raw = snapshot(local={"alive": False, "life_state": 2},
+                       rules={"warmup": True, "match_started": False})
+        state = screens.deduce(raw)
+        self.assertIs(state.screen, Screen.DEAD)
+        self.assertFalse(state.can(Can.MOVE))
+        self.assertFalse(state.can(Can.ATTACK))
+
+    def test_a_living_player_in_the_warmup_is_in_the_warmup(self) -> None:
+        """The other half of the rule: alive in the warmup is the warmup."""
+        raw = snapshot(local={"alive": True, "life_state": 0},
+                       rules={"warmup": True, "match_started": False})
+        self.assertIs(screens.deduce(raw).screen, Screen.WARMUP)
 
     def test_a_dead_player_beats_the_planted_bomb(self) -> None:
         """DEAD (the player fact) outranks PLANTED (the round fact).
@@ -462,6 +483,22 @@ class TestCapabilities(unittest.TestCase):
         freeze = deduce(Screen.FREEZE)
         self.assertFalse(freeze.can(Can.MOVE))
         self.assertIn("freeze", freeze.why(Can.MOVE))
+
+    def test_an_unknown_capability_is_a_session_error(self) -> None:
+        """A typo in a capability name is the caller's mistake, not a crash.
+
+        The raw ``ValueError`` of the enum's constructor said nothing about
+        the screen or the reason, and it escaped ``can`` / ``why`` /
+        ``require`` as something the caller cannot act on.
+        """
+        state = deduce(Screen.LIVE)
+        for call in (state.can, state.why, state.require):
+            with self.subTest(call=call.__name__):
+                with self.assertRaises(SessionError) as raised:
+                    call("nonsense")
+                message = str(raised.exception)
+                self.assertIn("nonsense", message)
+                self.assertIn("move", message)  # what *is* on offer
 
     def test_buy_needs_the_window(self) -> None:
         """The buy window gates the capability (and is a screen of its own)."""
