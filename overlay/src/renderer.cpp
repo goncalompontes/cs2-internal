@@ -132,7 +132,8 @@ void check(VkResult result, const char* what) noexcept {
 
 auto load_functions(PFN_vkGetDeviceProcAddr gdpa, VkDevice device) -> Functions {
   Functions fn;
-  fn.get_swapchain_images = load<PFN_vkGetSwapchainImagesKHR>(gdpa, device, "vkGetSwapchainImagesKHR");
+  fn.get_swapchain_images =
+      load<PFN_vkGetSwapchainImagesKHR>(gdpa, device, "vkGetSwapchainImagesKHR");
   fn.create_image_view = load<PFN_vkCreateImageView>(gdpa, device, "vkCreateImageView");
   fn.destroy_image_view = load<PFN_vkDestroyImageView>(gdpa, device, "vkDestroyImageView");
   fn.create_render_pass = load<PFN_vkCreateRenderPass>(gdpa, device, "vkCreateRenderPass");
@@ -256,7 +257,8 @@ auto ensure_swapchain(Device& device, VkSwapchainKHR swapchain) -> SwapchainData
   }
 
   uint32_t image_count = 0;
-  check(fn.get_swapchain_images(vk_device, swapchain, &image_count, nullptr), "vkGetSwapchainImagesKHR");
+  check(fn.get_swapchain_images(vk_device, swapchain, &image_count, nullptr),
+        "vkGetSwapchainImagesKHR");
   if (image_count == 0) {
     return nullptr;
   }
@@ -372,12 +374,12 @@ auto ensure_imgui(Device& device, VkQueue queue, uint32_t queue_family, VkRender
   ImGui::GetIO().Fonts->AddFontDefault(&font_config);
   harden_font_atlas_alpha();
 
-  std::fprintf(stderr,
-               "[cs2-overlay] imgui init instance=%p physdev=%p device=%p queue=%p family=%u pass=%p\n",
-               static_cast<void*>(device.context.instance),
-               static_cast<void*>(device.context.physical_device),
-               static_cast<void*>(device.context.device), static_cast<void*>(queue), queue_family,
-               static_cast<void*>(pass));
+  std::fprintf(
+      stderr,
+      "[cs2-overlay] imgui init instance=%p physdev=%p device=%p queue=%p family=%u pass=%p\n",
+      static_cast<void*>(device.context.instance),
+      static_cast<void*>(device.context.physical_device), static_cast<void*>(device.context.device),
+      static_cast<void*>(queue), queue_family, static_cast<void*>(pass));
 
   device.loader = LoaderContext{.instance = device.context.instance,
                                 .device = device.context.device,
@@ -427,8 +429,8 @@ void image_barrier(const Functions& fn, VkCommandBuffer command_buffer, VkImage 
                               .baseArrayLayer = 0,
                               .layerCount = 1};
   fn.cmd_pipeline_barrier(command_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1,
-                          &barrier);
+                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr,
+                          1, &barrier);
 }
 
 // The defaults for a fresh shared segment. The shared `wire::default_settings()`
@@ -469,8 +471,7 @@ void draw_overlay_model(const wire::Model& model, const wire::Settings& settings
         std::vector<ImVec2> points;
         points.reserve(count);
         for (uint32_t v = 0; v < count; ++v) {
-          points.emplace_back(model.vertices[(first + v) * 2],
-                              model.vertices[(first + v) * 2 + 1]);
+          points.emplace_back(model.vertices[(first + v) * 2], model.vertices[(first + v) * 2 + 1]);
         }
         draw->AddConvexPolyFilled(points.data(), static_cast<int>(count), color);
         break;
@@ -496,10 +497,10 @@ void draw_overlay_model(const wire::Model& model, const wire::Settings& settings
               if (dx == 0 && dy == 0) {
                 continue;
               }
-              draw->AddText(font, size,
-                            ImVec2(position.x + static_cast<float>(dx),
-                                   position.y + static_cast<float>(dy)),
-                            black, command.text);
+              draw->AddText(
+                  font, size,
+                  ImVec2(position.x + static_cast<float>(dx), position.y + static_cast<float>(dy)),
+                  black, command.text);
             }
           }
         } else if (command.shadow != 0) {
@@ -607,7 +608,8 @@ auto present(VkDevice vk_device, VkQueue queue, uint32_t queue_family,
     return VK_NULL_HANDLE;
   }
   const VkSwapchainKHR swapchain_handle = present_info->pSwapchains[0];
-  const uint32_t image_index = present_info->pImageIndices != nullptr ? present_info->pImageIndices[0] : 0;
+  const uint32_t image_index =
+      present_info->pImageIndices != nullptr ? present_info->pImageIndices[0] : 0;
 
   const std::scoped_lock lock(g_lock);
   const auto it = g_devices.find(vk_device);
@@ -650,8 +652,8 @@ auto present(VkDevice vk_device, VkQueue queue, uint32_t queue_family,
   begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   fn.begin_command_buffer(command_buffer, &begin_info);
 
-  image_barrier(fn, command_buffer, swapchain->images[image_index],
-                VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, queue_family);
+  image_barrier(fn, command_buffer, swapchain->images[image_index], VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, queue_family);
 
   transport::write_extent(swapchain->extent.width, swapchain->extent.height);
 
@@ -669,19 +671,27 @@ auto present(VkDevice vk_device, VkQueue queue, uint32_t queue_family,
 
   // Menu settings: the payload publishes the defaults with the segment, the
   // menu edits them here, and any change is written back for the payload's ESP.
+  //
+  // The block is re-read whenever it **changes**, so a block the payload
+  // published (a loaded configuration) is adopted instead of being overwritten
+  // by the layer's stale copy. The sequence is the change marker: the
+  // transport reports the one the copy was taken at.
   static wire::Settings settings = default_ui_settings();
+  static uint32_t settings_sequence = 0;
   static bool settings_loaded = false;
-  if (!settings_loaded) {
-    wire::Settings published{};
-    if (transport::read_settings(published)) {
+  wire::Settings published{};
+  uint32_t published_sequence = 0;
+  if (transport::read_settings(published, &published_sequence)) {
+    if (!settings_loaded || published_sequence != settings_sequence) {
       settings = published;
+      settings_sequence = published_sequence;
       settings_loaded = true;
     }
   }
   const wire::Settings before_menu = settings;
   menu::frame(settings, model.in_game != 0);
-  if (std::memcmp(&before_menu, &settings, sizeof(settings)) != 0) {
-    transport::write_settings(settings);
+  if (settings_loaded && std::memcmp(&before_menu, &settings, sizeof(settings)) != 0) {
+    transport::write_settings(settings, settings_sequence);
   }
 
   draw_overlay_model(model, settings);
@@ -706,7 +716,8 @@ auto present(VkDevice vk_device, VkQueue queue, uint32_t queue_family,
   fn.cmd_end_render_pass(command_buffer);
 
   image_barrier(fn, command_buffer, swapchain->images[image_index],
-                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, queue_family);
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                queue_family);
 
   fn.end_command_buffer(command_buffer);
 

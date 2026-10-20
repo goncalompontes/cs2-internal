@@ -442,6 +442,45 @@ auto test_segment_version() -> void {
   assert(!segment_is_compatible(0x12345678U, k_version));
 }
 
+// A block published back has to be adopted by the next read.
+//
+// The regression: the publisher recorded the sequence it had just written, so
+// the next read reported "no change" and the published block — the loaded
+// configuration — never reached the ESP.
+auto test_published_block_is_adopted() -> void {
+  using cs2::features::SettingsProtocol;
+  using cs2::features::SettingsStatus;
+
+  // The segment is 3 MB, so it lives in the static storage, not on the stack.
+  static cs2::overlay::wire::Shared shared{};
+  shared.magic = cs2::overlay::wire::k_magic;
+  shared.version = cs2::overlay::wire::k_version;
+
+  SettingsProtocol protocol;
+  Settings copy{};
+
+  // The layer's menu writes the block.
+  Settings menu_block = cs2::overlay::wire::default_settings();
+  menu_block.esp_skeleton = 1;
+  cs2::overlay::wire::write_settings(shared, menu_block);
+  assert(protocol.adopt(shared, copy) == SettingsStatus::adopted);
+  assert(copy.esp_skeleton == 1);
+
+  // The payload publishes a loaded configuration back into the segment.
+  Settings loaded = cs2::overlay::wire::default_settings();
+  loaded.esp_max_box_scale = 1.75F;
+  protocol.publish(shared, loaded);
+
+  // The next read has to notice the change and adopt the published block: that
+  // is the only path from the published block to the ESP's configuration.
+  assert(protocol.adopt(shared, copy) == SettingsStatus::adopted);
+  assert(copy.esp_max_box_scale == 1.75F);
+  assert(cs2::features::from_wire_settings(copy).esp.max_box_scale == 1.75F);
+
+  // A frame that reads the same block again does not re-apply it.
+  assert(protocol.adopt(shared, copy) == SettingsStatus::unchanged);
+}
+
 // The one-shot op protocol: the menu sets the op and bumps the token, and the
 // payload carries the op out once per token.
 auto test_op_protocol() -> void {
@@ -503,6 +542,7 @@ auto main() -> int {
   test_settings_checksum();
   test_torn_read_is_detected();
   test_segment_version();
+  test_published_block_is_adopted();
   test_op_protocol();
   std::puts("features-config: ok");
   return 0;

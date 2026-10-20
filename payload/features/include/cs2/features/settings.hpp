@@ -50,6 +50,11 @@ enum class SettingsStatus : std::uint8_t {
 // The latch is what makes "the block changed" detectable: a reader adopts the
 // block only when the sequence moved since the last adoption, so a frame that
 // reads the same block does not re-apply the configuration.
+//
+// **A publish must not touch the latch.** The whole point of publishing a
+// block is that the reader has to notice it: a publisher that recorded the
+// sequence it had just written made the next read report "no change", and the
+// published block was never applied.
 class SettingsProtocol {
  public:
   // Publish `settings` into `shared` (under the seqlock, with the checksum).

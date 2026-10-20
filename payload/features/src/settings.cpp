@@ -277,10 +277,10 @@ auto default_wire_settings() -> cs2::overlay::wire::Settings {
 void SettingsProtocol::publish(cs2::overlay::wire::Shared& shared,
                                const cs2::overlay::wire::Settings& settings) noexcept {
   cs2::overlay::wire::write_settings(shared, settings);
-  // The publisher knows what it wrote, so the latch records the sequence it
-  // published: the reader already has that block.
-  adopted_ = true;
-  adopted_sequence_ = shared.settings_sequence.load(std::memory_order_relaxed);
+  // The latch is deliberately **not** updated: the reader has to notice the
+  // published block. A publisher that recorded the sequence it had just
+  // written made the next read report "no change", and the published block
+  // (a loaded configuration) never reached the ESP.
 }
 
 auto SettingsProtocol::adopt(cs2::overlay::wire::Shared& shared,

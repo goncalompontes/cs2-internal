@@ -198,7 +198,7 @@ auto read_model(wire::Model& out) noexcept -> bool {
   return first == second;
 }
 
-auto read_settings(wire::Settings& out) noexcept -> bool {
+auto read_settings(wire::Settings& out, uint32_t* sequence) noexcept -> bool {
   const std::scoped_lock lock(g_lock);
   if (g_shared == nullptr && !ensure_mapped()) {
     return false;
@@ -206,12 +206,18 @@ auto read_settings(wire::Settings& out) noexcept -> bool {
   // The block has two writers (this layer's menu and the payload, which
   // publishes a loaded configuration back), so the copy is verified with the
   // block's own checksum: a torn read is rejected instead of being believed.
-  return wire::read_settings(*g_shared, out);
+  return wire::read_settings(*g_shared, out, sequence);
 }
 
-void write_settings(const wire::Settings& in) noexcept {
+void write_settings(const wire::Settings& in, uint32_t expected_sequence) noexcept {
   const std::scoped_lock lock(g_lock);
   if (g_shared == nullptr && !ensure_mapped()) {
+    return;
+  }
+  // Another writer has to win: if the payload published a block after this
+  // frame's read, writing the layer's stale copy over it would revert the
+  // load. The layer re-reads the block on the next frame instead.
+  if (g_shared->settings_sequence.load(std::memory_order_acquire) != expected_sequence) {
     return;
   }
   wire::write_settings(*g_shared, in);
