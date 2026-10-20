@@ -85,6 +85,14 @@ struct ConfigOpOutcome {
 // the path cannot be resolved.
 void set_config_path(Config& config) noexcept;
 
+// Copy the settings file's path into a settings block.
+//
+// The path is a read-only display field: the payload owns it and publishes it,
+// so the menu can show where the file lives. It is only written when it
+// actually changes, so publishing it never disturbs the menu's in-flight
+// edits. Returns true when the block changed.
+[[nodiscard]] auto publish_config_path(cs2::overlay::wire::Settings& settings) noexcept -> bool;
+
 // Load the settings from `path`.
 //
 // `std::nullopt` when the file is missing or corrupt — the caller keeps its

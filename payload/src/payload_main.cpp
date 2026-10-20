@@ -200,6 +200,18 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
       live.rage_per_weapon != 0, live.rage_weapon, live.rage_config_op, live.rage_config_token,
       live.rage_recoil != 0, live.rage_stop_speed, live.rage_backtrack != 0);
 
+  // Publish where the settings file lives so the menu can show it (a read-only
+  // display field). The path is only written when it actually changes, so the
+  // publication never disturbs the menu's in-flight edits.
+  if (cs2::features::publish_config_path(live)) {
+    std::memcpy(runtime->menu.settings().menu_config_path, live.menu_config_path,
+                sizeof(live.menu_config_path));
+#if defined(_WIN32)
+    // The Vulkan layer's menu reads the shared segment.
+    runtime->publisher.publish_settings_block(live);
+#endif
+  }
+
   // The menu's one-shot config op (save / load / reset the settings file). The op
   // runs **once per token** — the token bookkeeping lives in the store's state,
   // so the two callers of this sink (the menu and the publisher) cannot both

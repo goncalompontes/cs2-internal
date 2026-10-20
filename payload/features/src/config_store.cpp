@@ -886,6 +886,20 @@ void set_config_path(Config& config) noexcept {
   std::memcpy(config.menu.config_path.data(), path, length);
 }
 
+auto publish_config_path(cs2::overlay::wire::Settings& settings) noexcept -> bool {
+  char path[k_max_config_path] = {};
+  const std::size_t length = default_config_path(path, sizeof(path));
+  if (length == 0) {
+    return false;  // no path to publish
+  }
+  if (std::memcmp(settings.menu_config_path, path, sizeof(settings.menu_config_path)) == 0) {
+    return false;  // the path is already published
+  }
+  std::memset(settings.menu_config_path, 0, sizeof(settings.menu_config_path));
+  std::memcpy(settings.menu_config_path, path, length);
+  return true;
+}
+
 auto load(const char* path) -> std::optional<Config> {
   TextBuffer<k_max_config_bytes> text;
   if (!read_file(path, text)) {

@@ -500,6 +500,25 @@ auto test_published_block_is_adopted() -> void {
   assert(protocol.adopt(shared, copy) == SettingsStatus::unchanged);
 }
 
+// The config file's path is published into the live block.
+//
+// The path is a read-only display field: the payload owns it and publishes it
+// so the menu can show where the file lives. It is only written when it
+// changes, so the publication never disturbs the menu's in-flight edits.
+auto test_config_path_is_published() -> void {
+  const std::filesystem::path path = temp_path("cs2-internal-config-path.cfg");
+  assert(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()));
+
+  Settings settings{};
+  assert(cs2::features::publish_config_path(settings));
+  assert(std::string(settings.menu_config_path) == path.string());
+
+  // The path is already published: nothing changes, nothing is disturbed.
+  Settings untouched = settings;
+  assert(!cs2::features::publish_config_path(settings));
+  assert(std::memcmp(&settings, &untouched, sizeof(Settings)) == 0);
+}
+
 // The one-shot op protocol: the menu sets the op and bumps the token, and the
 // payload carries the op out once per token.
 auto test_op_protocol() -> void {
@@ -665,6 +684,7 @@ auto main() -> int {
   test_torn_read_is_detected();
   test_segment_version();
   test_published_block_is_adopted();
+  test_config_path_is_published();
   test_op_protocol();
   test_save_persists_live_settings();
   test_write_back_preserves_protocol_state();
