@@ -87,6 +87,28 @@ live one is `659940c1…`. Only `docs/re/occlusion.md` has been re-derived. See
 the warning at the top of [`docs/re/README.md`](re/README.md) — **no address
 from those notes may be used without re-verifying it on the current build.**
 
+What the RE has already established for T5 (third person, `client.dll` build
+25947352):
+
+- the third-person switch is a **single byte**, `CCSGOInput + 0x229`; the camera
+  state is pitch `+0x230`, yaw `+0x234`, distance `+0x238` (default `30.0f`),
+  mode `+0x6a8`; `CCSGOInput` is `*(void**)(client + 0x223bd00)`;
+- the engine **clears the flag on death / respawn**, so it must be re-asserted
+  every frame from the `CreateMove` hook — the `Present` hook is too late;
+- the **view struct must not be written** (it is rebuilt every frame); the
+  durable state is the input object, and the `thirdperson` convar's callback
+  initialises it correctly;
+- the engine **publishes the real camera origin per slot** at
+  `client + 0x256af48 + slot*0xc` — that is what the ESP's capsule silhouettes
+  must use in third person (the **ragebot keeps using the player's eye**);
+- **CS2's client implements no shoulder offset and no pivot**: the
+  `c_thirdpersonshoulder*` convars are registered but never read, and the camera
+  orbits the player's eye. The camera *angle* is smoothed toward the view yaw,
+  so a fixed offset is damped, and the view setup's FOV field is unconfirmed.
+  ⇒ of the settings the menu offers, **the distance and the on/off switch are
+  real; the angle is best-effort; the pivot, the side and the FOV are not
+  supported by the engine.**
+
 What the RE has already established for T6 (material system, `materialsystem2.dll`):
 
 - the interface is **`VMaterialSystem2_001`** (there is no `MaterialSystem`);
