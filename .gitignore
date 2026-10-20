@@ -30,3 +30,6 @@ re/**/strings.txt
 # Editor / OS
 .DS_Store
 *.swp
+
+# The local protection policy (this machine's choices, not the repo's)
+tools/protect/policy.local.json
