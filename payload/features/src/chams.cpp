@@ -396,10 +396,10 @@ void Chams::apply_colour() noexcept {
     return;
   }
   const float rgba[4] = {
-      static_cast<float>(colour_.r) / 255.0f,
-      static_cast<float>(colour_.g) / 255.0f,
-      static_cast<float>(colour_.b) / 255.0f,
-      static_cast<float>(colour_.a) / 255.0f,
+      static_cast<float>(colour_.r) / 255.0F,
+      static_cast<float>(colour_.g) / 255.0F,
+      static_cast<float>(colour_.b) / 255.0F,
+      static_cast<float>(colour_.a) / 255.0F,
   };
   float original[4]{};
   const game::ColourResult result = materials_.set_colour(handle_, material, rgba, original);

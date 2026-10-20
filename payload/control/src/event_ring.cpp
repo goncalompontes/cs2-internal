@@ -1,5 +1,6 @@
 #include "cs2/control/event_ring.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 namespace cs2::control {
@@ -44,9 +45,7 @@ auto EventRing::push(std::string_view name, const EventArg* args, std::size_t ar
   slot.time_ms = time_ms;
   copy_cstr(slot.name, sizeof(slot.name), name);
   std::size_t stored = arg_count;
-  if (stored > EventEntry::k_max_args) {
-    stored = EventEntry::k_max_args;
-  }
+  stored = std::min(stored, EventEntry::k_max_args);
   slot.arg_count = static_cast<std::uint8_t>(stored);
   for (std::size_t i = 0; i < stored; ++i) {
     copy_cstr(slot.args[i].key, sizeof(slot.args[i].key), args[i].key);
@@ -67,9 +66,7 @@ auto EventRing::recent(EventEntry* out, std::size_t limit) const noexcept -> std
   lock();
   const std::uint64_t total = count_.load(std::memory_order_relaxed);
   std::size_t available = total < k_capacity ? static_cast<std::size_t>(total) : k_capacity;
-  if (available > limit) {
-    available = limit;
-  }
+  available = std::min(available, limit);
   const std::uint64_t begin = total - available;  // skip older entries
   for (std::size_t i = 0; i < available; ++i) {
     out[i] = entries_[(begin + i) % k_capacity];

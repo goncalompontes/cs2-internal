@@ -370,7 +370,7 @@ void Input::write_engine_buttons(std::uint64_t set_bits, std::uint64_t clear_bit
   *state = (*state | set_bits) & ~clear_bits;
 }
 
-void Input::rage_tick(std::uint8_t* cmd, std::uint64_t* buttons) noexcept {
+void Input::rage_tick(std::uint8_t* cmd, const std::uint64_t* buttons) noexcept {
   if (!rage_active_.load()) {
     return;
   }
@@ -408,7 +408,7 @@ void Input::rage_tick(std::uint8_t* cmd, std::uint64_t* buttons) noexcept {
     auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
     state[0] = (state[0] & ~extra) | extra;  // held
     state[1] = (state[1] & ~extra) | extra;  // changed (a press edge)
-    *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3u;
+    *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
   }
   // Also assert the extra buttons in the engine's own held-button word
   // (`CInButtonState` at the movement services), which some weapon actions read
@@ -817,7 +817,7 @@ auto Input::write_strafe_wish(std::uint8_t* base, std::uint8_t* cmd, float forwa
     auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
     state[0] = (state[0] & ~move_bits) | held;
     state[1] = (state[1] & ~move_bits) | held;
-    *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3u;
+    *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
   }
 
   // The raw axes are the source `create_move_input` derives the command floats
@@ -1106,9 +1106,7 @@ auto Input::current_cmd() noexcept -> void* {
   int tick = 0;
   tick_(reinterpret_cast<void*>(controller), &tick);
   int index = tick - 1;
-  if (index < -1) {
-    index = -1;
-  }
+  index = std::max(index, -1);
   const auto array_base = *reinterpret_cast<std::uintptr_t*>(client_base_ + user_cmd_array_rva_);
   if (!writable(array_base, 8)) {
     return nullptr;
@@ -1758,7 +1756,7 @@ void Input::apply(void* cmd) noexcept {
                                                        k_buttonstate_values_offset);
         state[0] = (state[0] & ~move_bits) | (held & move_bits);  // buttonstate1: held
         state[1] = (state[1] & ~move_bits) | (held & move_bits);  // buttonstate2: changed
-        *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3u;
+        *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
       }
       if (move_step_.load()) {
         write_move_steps(reinterpret_cast<void*>(base), move_forward_.load() - axes[0],
@@ -1824,7 +1822,7 @@ void Input::apply(void* cmd) noexcept {
       auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
       state[0] = (state[0] & ~move_bits) | (held & move_bits);
       state[1] = (state[1] & ~move_bits) | (held & move_bits);
-      *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3u;
+      *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
     }
     if (ccsgo_input_ != 0) {
       auto* raw = reinterpret_cast<float*>(ccsgo_input_ + k_input_move_offset);
@@ -1889,7 +1887,7 @@ auto Input::on_ground() const noexcept -> bool {
   if (!cs2::game::read(pawn + flags_offset_, flags)) {
     return false;
   }
-  return (flags & 1u) != 0;  // FL_ONGROUND
+  return (flags & 1U) != 0;  // FL_ONGROUND
 }
 
 void Input::refresh() noexcept {

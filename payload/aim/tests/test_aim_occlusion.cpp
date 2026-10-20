@@ -415,7 +415,12 @@ auto main() -> int {
   {
     // A closed box (12 triangles) at x in [49, 51], offset in z so the +X ray hits a
     // face interior rather than a triangulation diagonal.
-    const float x0 = 49.0F, x1 = 51.0F, y0 = -5.0F, y1 = 5.0F, z0 = -4.7F, z1 = 5.3F;
+    const float x0 = 49.0F;
+    const float x1 = 51.0F;
+    const float y0 = -5.0F;
+    const float y1 = 5.0F;
+    const float z0 = -4.7F;
+    const float z1 = 5.3F;
     const std::vector<Vec3> verts = {{.x = x0, .y = y0, .z = z0}, {.x = x1, .y = y0, .z = z0},
                                      {.x = x1, .y = y1, .z = z0}, {.x = x0, .y = y1, .z = z0},
                                      {.x = x0, .y = y0, .z = z1}, {.x = x1, .y = y0, .z = z1},

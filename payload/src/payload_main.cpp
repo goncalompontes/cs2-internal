@@ -169,8 +169,8 @@ auto parse_movement_env() noexcept -> MovementConfig {
     return config;
   }
   const std::string names(value);
-  config.strafe = names.find("strafe") != std::string::npos;
-  config.bhop = names.find("bhop") != std::string::npos;
+  config.strafe = names.contains("strafe");
+  config.bhop = names.contains("bhop");
   return config;
 }
 

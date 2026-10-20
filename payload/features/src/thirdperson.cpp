@@ -60,7 +60,7 @@ constexpr std::uint64_t k_rearm_interval_ms = 1000;
 [[nodiscard]] auto unpack_angles(std::uint64_t packed) noexcept -> game::Angle {
   game::Angle angles;
   const auto pitch = static_cast<std::uint32_t>(packed >> 32);
-  const auto yaw = static_cast<std::uint32_t>(packed & 0xffffffffu);
+  const auto yaw = static_cast<std::uint32_t>(packed & 0xffffffffU);
   std::memcpy(&angles.pitch, &pitch, sizeof(angles.pitch));
   std::memcpy(&angles.yaw, &yaw, sizeof(angles.yaw));
   return angles;

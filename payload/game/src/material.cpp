@@ -183,7 +183,7 @@ namespace {
   }
   using get_param_fn = void (*)(void*, float*, const char*, const float*);
   const auto get = reinterpret_cast<get_param_fn>(slot);
-  const float fallback[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  const float fallback[4] = {0.0F, 0.0F, 0.0F, 0.0F};
   get(reinterpret_cast<void*>(material), out, name, fallback);
   return true;
 }

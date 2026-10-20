@@ -73,12 +73,8 @@ constexpr double k_gl_w[8] = {0.1012285362903763, 0.2223810344533745, 0.31370664
       continue;
     }
     int segments = static_cast<int>(std::ceil(length));  // ~1 standard deviation each
-    if (segments < 1) {
-      segments = 1;
-    }
-    if (segments > 64) {
-      segments = 64;
-    }
+    segments = std::max(segments, 1);
+    segments = std::min(segments, 64);
     const double seg_dx = dx / segments;
     const double seg_dy = dy / segments;
     double edge_mass = 0.0;     // ∫ edge φΦ du

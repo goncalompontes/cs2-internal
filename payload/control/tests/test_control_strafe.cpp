@@ -486,10 +486,10 @@ void test_the_button_names_map_to_the_engine_bits() {
   assert(cs2::control::button_bit("turnright") == button::k_turnright);
   // The bits themselves are the engine's own (`client.dll`'s button-name table
   // at `0x181b28cf0`).
-  assert(button::k_moveleft == (1ull << 9));    // IN_MOVELEFT
-  assert(button::k_moveright == (1ull << 10));  // IN_MOVERIGHT
-  assert(button::k_turnleft == (1ull << 7));    // IN_TURNLEFT
-  assert(button::k_turnright == (1ull << 8));   // IN_TURNRIGHT
+  assert(button::k_moveleft == (1ULL << 9));    // IN_MOVELEFT
+  assert(button::k_moveright == (1ULL << 10));  // IN_MOVERIGHT
+  assert(button::k_turnleft == (1ULL << 7));    // IN_TURNLEFT
+  assert(button::k_turnright == (1ULL << 8));   // IN_TURNRIGHT
   // The runner's aliases resolve to the same bits.
   assert(cs2::control::button_bit("a") == button::k_moveleft);
   assert(cs2::control::button_bit("d") == button::k_moveright);
@@ -521,26 +521,26 @@ struct EngineButton {
 };
 
 constexpr EngineButton k_engine_buttons[] = {
-    {.name = "IN_ALL", .bit = 0xffffffffffffffffull},  // the "every button" mask
-    {.name = "IN_ATTACK", .bit = 1ull << 0},
-    {.name = "IN_JUMP", .bit = 1ull << 1},
-    {.name = "IN_DUCK", .bit = 1ull << 2},
-    {.name = "IN_FORWARD", .bit = 1ull << 3},
-    {.name = "IN_BACK", .bit = 1ull << 4},
-    {.name = "IN_USE", .bit = 1ull << 5},
-    {.name = "IN_TURNLEFT", .bit = 1ull << 7},
-    {.name = "IN_TURNRIGHT", .bit = 1ull << 8},
-    {.name = "IN_MOVELEFT", .bit = 1ull << 9},
-    {.name = "IN_MOVERIGHT", .bit = 1ull << 10},
-    {.name = "IN_ATTACK2", .bit = 1ull << 11},
-    {.name = "IN_RELOAD", .bit = 1ull << 13},
-    {.name = "IN_SPEED", .bit = 1ull << 16},
-    {.name = "IN_JOYAUTOSPRINT", .bit = 1ull << 17},
-    {.name = "IN_FIRST_MOD_SPECIFIC_BIT", .bit = 1ull << 32},  // the mod-specific range starts here
-    {.name = "IN_USEORRELOAD", .bit = 1ull << 32},
-    {.name = "IN_SCORE", .bit = 1ull << 33},
-    {.name = "IN_ZOOM", .bit = 1ull << 34},
-    {.name = "IN_LOOK_AT_WEAPON", .bit = 1ull << 35},
+    {.name = "IN_ALL", .bit = 0xffffffffffffffffULL},  // the "every button" mask
+    {.name = "IN_ATTACK", .bit = 1ULL << 0},
+    {.name = "IN_JUMP", .bit = 1ULL << 1},
+    {.name = "IN_DUCK", .bit = 1ULL << 2},
+    {.name = "IN_FORWARD", .bit = 1ULL << 3},
+    {.name = "IN_BACK", .bit = 1ULL << 4},
+    {.name = "IN_USE", .bit = 1ULL << 5},
+    {.name = "IN_TURNLEFT", .bit = 1ULL << 7},
+    {.name = "IN_TURNRIGHT", .bit = 1ULL << 8},
+    {.name = "IN_MOVELEFT", .bit = 1ULL << 9},
+    {.name = "IN_MOVERIGHT", .bit = 1ULL << 10},
+    {.name = "IN_ATTACK2", .bit = 1ULL << 11},
+    {.name = "IN_RELOAD", .bit = 1ULL << 13},
+    {.name = "IN_SPEED", .bit = 1ULL << 16},
+    {.name = "IN_JOYAUTOSPRINT", .bit = 1ULL << 17},
+    {.name = "IN_FIRST_MOD_SPECIFIC_BIT", .bit = 1ULL << 32},  // the mod-specific range starts here
+    {.name = "IN_USEORRELOAD", .bit = 1ULL << 32},
+    {.name = "IN_SCORE", .bit = 1ULL << 33},
+    {.name = "IN_ZOOM", .bit = 1ULL << 34},
+    {.name = "IN_LOOK_AT_WEAPON", .bit = 1ULL << 35},
 };
 
 // The engine's **input actions** and the button mask each one puts in the
@@ -553,19 +553,19 @@ struct EngineAction {
 };
 
 constexpr EngineAction k_engine_actions[] = {
-    {.action = "attack", .bit = 1ull << 0},
-    {.action = "jump", .bit = 1ull << 1},
-    {.action = "duck", .bit = 1ull << 2},
-    {.action = "forward", .bit = 1ull << 3},
-    {.action = "back", .bit = 1ull << 4},
-    {.action = "use", .bit = 1ull << 5},
-    {.action = "turnleft", .bit = 1ull << 7},
-    {.action = "turnright", .bit = 1ull << 8},
-    {.action = "left", .bit = 1ull << 9},
-    {.action = "right", .bit = 1ull << 10},
-    {.action = "attack2", .bit = 1ull << 11},
-    {.action = "reload", .bit = 1ull << 13},
-    {.action = "sprint", .bit = 1ull << 16},
+    {.action = "attack", .bit = 1ULL << 0},
+    {.action = "jump", .bit = 1ULL << 1},
+    {.action = "duck", .bit = 1ULL << 2},
+    {.action = "forward", .bit = 1ULL << 3},
+    {.action = "back", .bit = 1ULL << 4},
+    {.action = "use", .bit = 1ULL << 5},
+    {.action = "turnleft", .bit = 1ULL << 7},
+    {.action = "turnright", .bit = 1ULL << 8},
+    {.action = "left", .bit = 1ULL << 9},
+    {.action = "right", .bit = 1ULL << 10},
+    {.action = "attack2", .bit = 1ULL << 11},
+    {.action = "reload", .bit = 1ULL << 13},
+    {.action = "sprint", .bit = 1ULL << 16},
     {.action = "turnup", .bit = 0},
     {.action = "turndown", .bit = 0},
     {.action = "moveup", .bit = 0},
@@ -648,10 +648,10 @@ void test_the_button_bits_are_the_engine_bits() {
 
   // The bits that were wrong (T14): the engine moved `IN_SCORE` to 33 and
   // `IN_ZOOM` to 34, and `IN_SPEED` is 16 (bit 17 is `IN_JOYAUTOSPRINT`).
-  assert(button::k_score == (1ull << 33));
-  assert(button::k_zoom == (1ull << 34));
-  assert(button::k_speed == (1ull << 16));
-  assert(engine_bit("IN_JOYAUTOSPRINT") == (1ull << 17));
+  assert(button::k_score == (1ULL << 33));
+  assert(button::k_zoom == (1ULL << 34));
+  assert(button::k_speed == (1ULL << 16));
+  assert(engine_bit("IN_JOYAUTOSPRINT") == (1ULL << 17));
 
   // The engine's **action** table is a second, independent reading of the same
   // bits (the console-command objects carry the mask themselves), so the two

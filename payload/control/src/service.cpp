@@ -439,9 +439,7 @@ void Service::do_events(const Json& args, Json& out) noexcept {
   if (const Json* arg = args.find("limit"); arg != nullptr && arg->is_number()) {
     limit = arg->as_int();
   }
-  if (limit < 0) {
-    limit = 0;
-  }
+  limit = std::max<std::int64_t>(limit, 0);
   // The optional `since` cursor: only the events with `seq > since` are
   // returned, so a client does not have to diff the sequence numbers by hand.
   // `last_seq` is the highest sequence the ring holds — the client's next
@@ -491,9 +489,7 @@ void Service::do_wait_for(const Json& args, Json& out) noexcept {
   if (const Json* timeout = args.find("timeout_ms"); timeout != nullptr && timeout->is_number()) {
     timeout_ms = timeout->as_int();
   }
-  if (timeout_ms < 0) {
-    timeout_ms = 0;
-  }
+  timeout_ms = std::max<std::int64_t>(timeout_ms, 0);
 
   // Optional event gate: match once `event` fires *after* this request, carrying
   // every `event_args` value. We subscribe before snapshotting the count so the
@@ -676,7 +672,7 @@ void Service::do_log(const Json& args, Json& out) noexcept {
     return;
   }
   LARGE_INTEGER size{};
-  if (!GetFileSizeEx(file, &size)) {
+  if (GetFileSizeEx(file, &size) == 0) {
     CloseHandle(file);
     set_error(out, "log unavailable: the log file's size could not be read");
     return;
@@ -2107,8 +2103,7 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     const std::uint64_t perf_snapshots = perf_.snapshot_frames.load(std::memory_order_relaxed);
     const auto avg_snap =
         [perf_snapshots](const std::atomic<std::uint64_t>& acc) -> unsigned long long {
-      return static_cast<unsigned long long>(
-          perf_snapshots != 0 ? acc.load(std::memory_order_relaxed) / perf_snapshots : 0);
+      return (perf_snapshots != 0 ? acc.load(std::memory_order_relaxed) / perf_snapshots : 0);
     };
     char line[400];
     std::snprintf(

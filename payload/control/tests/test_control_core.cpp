@@ -122,7 +122,7 @@ void test_snapshot_serialization() {
   assert(json.find("in_map") != nullptr && json.find("in_map")->as_bool());
   const Json* players = json.find("players");
   assert(players != nullptr && players->items().size() == 1);
-  const Json* player = &players->items()[0];
+  const Json* player = players->items().data();
   assert(player->find("health")->as_int() == 42);
   assert(player->find("team")->as_int() == 3);
   assert(player->find("name")->as_string() == "me");

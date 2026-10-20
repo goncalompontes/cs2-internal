@@ -749,7 +749,7 @@ auto test_save_persists_live_settings() -> void {
   expect(loaded.has_value() && loaded->esp.max_box_scale == 1.75F,
          "the file holds the live box scale");
   expect(loaded.has_value() && !loaded->esp.box, "the file holds the live box setting");
-  expect(loaded.has_value() && loaded->rage.per_weapon,
+  expect(loaded.has_value() && (loaded->rage.per_weapon != 0u),
          "the file holds the live per-weapon setting");
 
   // The live block is untouched: the user's toggles survive the save.

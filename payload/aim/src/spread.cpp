@@ -1,5 +1,6 @@
 #include "cs2/aim/spread.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 
@@ -129,9 +130,7 @@ auto UniformRandomStream::random_float(float low, float high) noexcept -> float 
   constexpr double k_am = 1.0 / 2147483647.0;
   constexpr double k_rnmx = 1.0 - 1.2e-7;  // 1.0 - EPS
   double value = k_am * static_cast<double>(random_int());
-  if (value > k_rnmx) {
-    value = k_rnmx;
-  }
+  value = std::min(value, k_rnmx);
   return static_cast<float>(value * (static_cast<double>(high) - static_cast<double>(low)) +
                             static_cast<double>(low));
 }
