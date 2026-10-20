@@ -103,7 +103,18 @@ class Chams {
 
  private:
   // The material the current mode uses (0 when none could be resolved).
-  [[nodiscard]] auto resolve_material(ChamsMode mode) noexcept -> game::Material;
+  [[nodiscard]] auto resolve_material(ChamsMode mode, game::MaterialHandle& handle) noexcept
+      -> game::Material;
+
+  // Write the operator's colour into the chams material and remember the
+  // material's own colour, so it can be put back.
+  //
+  // Nothing happens when the material is not resolved or has no colour
+  // parameter: the chams then draw with the material's own colour.
+  void apply_colour() noexcept;
+
+  // Put the material's own colour back.
+  void restore_colour() noexcept;
 
   // Is the entity one of the players the visibility filter lets through?
   [[nodiscard]] auto is_visible(std::uintptr_t entity) const noexcept -> bool;
@@ -120,6 +131,9 @@ class Chams {
 
   hooks::InlineHook hook_;
   game::MaterialSystem materials_{};
+  // The material system's handle for the chams material: the draw takes the
+  // material, the material system's parameter setter takes the handle.
+  game::MaterialHandle handle_{0};
   // The override material, published to the render thread.
   std::atomic<game::Material> material_{0};
   std::atomic<bool> enabled_{false};
@@ -133,6 +147,14 @@ class Chams {
   // operator last asked for (the payload's thread only).
   ChamsMode resolved_mode_ = ChamsMode::flat;
   bool material_resolved_ = false;
+  // The operator's colour and the material's own colour (the payload's
+  // thread only; the render thread never touches the material).
+  Color colour_{};
+  float original_colour_[4]{};
+  bool colour_applied_ = false;
+  // The material has no colour parameter: the chams keep drawing with the
+  // material's own colour and the payload stops asking for it.
+  bool colour_failed_ = false;
   std::atomic<bool> install_failed_{false};
   std::atomic<std::uint64_t> drawn_{0};
   std::atomic<std::uint64_t> skipped_{0};
