@@ -261,6 +261,19 @@ control_strafe_test = executable('control_strafe_test',
 )
 test('control-strafe', control_strafe_test)
 
+# The triggerbot's decision maths (the angle gate, the hitchance gate, the head
+# preference, the reaction delay and the "already firing" latch) — a pure
+# header, so the test compiles the header alone.
+control_trigger_test = executable('control_trigger_test',
+  files(
+    'payload/control/tests/test_control_trigger.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+  ],
+)
+test('control-trigger', control_trigger_test)
+
 # The ESP's out-of-module providers (the sound events and the per-player
 # visibility cache). Their host-testable parts are header-only, so the test
 # compiles the event ring next to them.

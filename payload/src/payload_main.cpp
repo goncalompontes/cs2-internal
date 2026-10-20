@@ -232,6 +232,62 @@ auto parse_rage_env() noexcept -> RageConfig {
   return config;
 }
 
+// `CS2_PAYLOAD_TRIGGER` — the payload's own switch for the triggerbot
+// (`docs/ragebot.md` §"The trigger"). Comma-separated tokens: `on`/`off`,
+// `fire`/`nofire` (whether the trigger pulls the trigger itself), `force` (bypass
+// the trigger key's check), `key=<vk>`, `mode=hold|always|toggle`,
+// `hitchance=<0..1>`, `head_hitchance=<0..1>`, `yaw_tolerance=<deg>`,
+// `pitch_tolerance=<deg>`, `delay_ms=<n>` and `solve_interval_ms=<n>`.
+//
+// The trigger's settings are **not** in the wire settings block (the block is
+// versioned and full), so they travel through the control channel's `trigger`
+// command and this environment, like the ragebot's own tuning.
+auto parse_trigger_env() noexcept -> cs2::control::TriggerConfig {
+  cs2::control::TriggerConfig config{};
+  const char* value = std::getenv("CS2_PAYLOAD_TRIGGER");
+  if (value == nullptr) {
+    return config;
+  }
+  for (const std::string& token : split_tokens(std::string(value))) {
+    if (token == "on") {
+      config.on = true;
+    } else if (token == "off") {
+      config.on = false;
+    } else if (token == "fire") {
+      config.fire = true;
+    } else if (token == "nofire") {
+      config.fire = false;
+    } else if (token == "force") {
+      config.force = true;
+    } else if (token.starts_with("mode=")) {
+      const std::string mode = token.substr(5);
+      config.mode = mode == "always"   ? cs2::control::TriggerMode::always
+                    : mode == "toggle" ? cs2::control::TriggerMode::toggle
+                                       : cs2::control::TriggerMode::hold;
+    } else if (token.starts_with("key=")) {
+      config.key = std::atoi(token.c_str() + 4);
+    } else if (token.starts_with("hitchance=")) {
+      config.hitchance = std::atof(token.c_str() + 10);
+    } else if (token.starts_with("head_hitchance=")) {
+      config.head_hitchance = std::atof(token.c_str() + 15);
+    } else if (token.starts_with("yaw_tolerance=")) {
+      config.yaw_tolerance = std::atof(token.c_str() + 14);
+    } else if (token.starts_with("pitch_tolerance=")) {
+      config.pitch_tolerance = std::atof(token.c_str() + 16);
+    } else if (token.starts_with("delay_ms=")) {
+      config.delay_ms = static_cast<std::uint32_t>(std::atoi(token.c_str() + 9));
+    } else if (token.starts_with("solve_interval_ms=")) {
+      config.solve_interval_ms = static_cast<std::uint32_t>(std::atoi(token.c_str() + 18));
+    } else {
+      const int key = std::atoi(token.c_str());
+      if (key > 0) {
+        config.key = key;
+      }
+    }
+  }
+  return config;
+}
+
 // The overlay menu's `Movement`/`Ragebot` tabs write the shared settings; the
 // publisher calls this on every published frame, and the payload's features follow (so
 // the menu is the single owner).
@@ -494,6 +550,21 @@ DWORD WINAPI install_thread(void*) {
         false /*backtrack: off by default*/);
     cs2::payload::runtime().publisher.set_rage_defaults(rage.enabled, rage.key, rage.fire);
     cs2::payload::runtime().menu.set_rage_defaults(rage.enabled, rage.key, rage.fire);
+    // The triggerbot (`docs/ragebot.md` §"The trigger"): the environment's
+    // defaults, then the `trigger` control command owns the feature. The
+    // trigger's settings are not in the wire settings block (the block is
+    // versioned and full), so they travel through the control channel and the
+    // environment.
+    {
+      const cs2::control::TriggerConfig trigger = parse_trigger_env();
+      cs2::game::append_log(std::string("[cs2-payload] trigger: on=") + (trigger.on ? "1" : "0") +
+                            " key=" + std::to_string(trigger.key) +
+                            " fire=" + (trigger.fire ? "1" : "0") +
+                            " hitchance=" + std::to_string(trigger.hitchance) +
+                            " head_hitchance=" + std::to_string(trigger.head_hitchance) +
+                            " delay_ms=" + std::to_string(trigger.delay_ms));
+      cs2::payload::runtime().control.set_trigger_features(trigger);
+    }
     // The in-process menu's settings sink: the features follow the **menu's**
     // block every frame.
     //

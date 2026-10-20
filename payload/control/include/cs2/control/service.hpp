@@ -28,6 +28,7 @@
 #include "cs2/control/occlusion_query.hpp"
 #include "cs2/control/rage_config.hpp"
 #include "cs2/control/settings_access.hpp"
+#include "cs2/control/trigger.hpp"
 #include "cs2/game/state_reader.hpp"
 
 namespace cs2::control {
@@ -277,6 +278,16 @@ class Service {
                          const char* weapon, int config_op, std::uint32_t config_token, bool recoil,
                          float stop_speed, bool backtrack) noexcept;
 
+  // Configure the triggerbot (`docs/ragebot.md` §"The trigger"): the `trigger`
+  // control command and the payload's environment (`CS2_PAYLOAD_TRIGGER`) set the
+  // same state. The trigger's settings are **not** in the wire settings block (the
+  // block is versioned and full), so they travel through the control channel and
+  // the environment, like the ragebot's own tuning.
+  //
+  // The trigger never writes a view angle: it only pulls the trigger through the
+  // command backend (`Input::press`/`Input::release`).
+  void set_trigger_features(const TriggerConfig& config) noexcept;
+
   // Run the ragebot for one state refresh. The overlay's per-frame sink calls this
   // with the current snapshot; the solve runs on the render thread and stashes the
   // aim, which `Input::apply()` writes per tick as the silent sub-tick view angles.
@@ -384,6 +395,11 @@ class Service {
   // Ragebot keybind: enable / configure the hold-key ragebot (`on`, `key`,
   // `fire`, `damage`, `headshot`, `objective`).
   void do_rage(const Json& args, Json& out) noexcept;
+  // The triggerbot (`docs/ragebot.md` §"The trigger"): configure / query the
+  // trigger (`on`, `hitchance`, `head_hitchance`, `yaw_tolerance`,
+  // `pitch_tolerance`, `delay_ms`, `key`, `fire`, `mode`). With no arguments it
+  // returns the current state.
+  void do_trigger(const Json& args, Json& out) noexcept;
   // The multi-target damage heatmap (`docs/ragebot.md`, ADR-0022): project every
   // enemy's hitboxes — and their sampled lag records — into one shared angular
   // chart, valued by damage, and return the cells for the Python renderer.
@@ -624,6 +640,10 @@ class Service {
   Console console_;
   EventLog events_;
   Input input_;
+  // The triggerbot (`docs/ragebot.md` §"The trigger"). It runs on the **game
+  // thread** (the same sink the ragebot's `rage_tick` runs in) and never writes
+  // a view angle.
+  Trigger trigger_{};
   std::optional<game::StateReader> reader_;
   // The access to the live feature settings block (ADR-0021), registered by
   // the block's owner (`payload_main.cpp`).

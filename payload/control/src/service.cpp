@@ -227,6 +227,10 @@ void Service::run() noexcept {
       }
     }
     channel_.disconnect();
+    // The control channel disconnected: the trigger's state is reset, so a
+    // trigger that was holding the shot releases it (a trigger that pressed and
+    // never released would leave the gun firing).
+    trigger_.reset(input_);
   }
 }
 
@@ -286,6 +290,8 @@ auto Service::handle(const std::string& line, std::string& response) noexcept ->
     do_aim(arguments, out);
   } else if (command == "rage") {
     do_rage(arguments, out);
+  } else if (command == "trigger") {
+    do_trigger(arguments, out);
   } else if (command == "heatmap") {
     do_heatmap(arguments, out);
   } else if (command == "predict") {
@@ -1072,6 +1078,13 @@ void Service::set_rage_features(bool on, int key, bool fire, int objective, int 
   }
 }
 
+void Service::set_trigger_features(const TriggerConfig& config) noexcept {
+  // The triggerbot's configuration (`docs/ragebot.md` §"The trigger"). It is set
+  // by the `trigger` control command and by the payload's environment
+  // (`CS2_PAYLOAD_TRIGGER`) — never by the wire settings block, which is versioned.
+  trigger_.configure(config);
+}
+
 void Service::apply_rage_config_op(int op, const char* weapon) noexcept {
   char key[24] = {};
   bool persist = false;
@@ -1552,17 +1565,40 @@ void Service::on_game_thread() noexcept {
   // the aim belongs to the command being built — not to the render thread's frame. The
   // hitboxes are re-read inside the solve, so only the player list / eye / weapon come
   // from the (at most one frame old) snapshot (`docs/ragebot-perf.md` §3.3).
-  if (!rage_enabled_.load() && !rage_force_.load()) {
+  //
+  // The triggerbot runs in the same sink (`docs/ragebot.md` §"The trigger"): it is
+  // per-tick work on the game thread, and it never writes a view angle.
+  const bool rage_wanted = rage_enabled_.load() || rage_force_.load();
+  const bool trigger_wanted = trigger_.enabled();
+  if (!rage_wanted && !trigger_wanted) {
     input_.clear_rage_aim();
+    trigger_.reset(input_);
     return;
   }
   game::Snapshot snapshot;
+  bool have_snapshot = false;
   {
     std::lock_guard<std::mutex> lock(snapshot_mutex_);
-    if (!have_snapshot_.load(std::memory_order_relaxed)) {
-      return;
+    have_snapshot = have_snapshot_.load(std::memory_order_relaxed);
+    if (have_snapshot) {
+      snapshot = last_snapshot_;
     }
-    snapshot = last_snapshot_;
+  }
+  if (trigger_wanted) {
+    if (have_snapshot) {
+      trigger_.tick(snapshot, input_, now_ms());
+    } else {
+      // No snapshot: the game state is unknown, so the trigger stands down
+      // (a trigger that pressed and never released would leave the gun firing).
+      trigger_.reset(input_);
+    }
+  }
+  if (!rage_wanted) {
+    input_.clear_rage_aim();
+    return;
+  }
+  if (!have_snapshot) {
+    return;
   }
   rage_tick(snapshot);
 }
@@ -2688,6 +2724,94 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   set_ok(out, std::move(payload));
 }
 
+void Service::do_trigger(const Json& args, Json& out) noexcept {
+  // The triggerbot's settings surface (`docs/ragebot.md` §"The trigger"). The
+  // trigger's configuration is **not** in the wire settings block (the block is
+  // versioned and full), so it travels through the control channel and the
+  // environment. With no arguments this is a pure query: it returns the current
+  // state and the last decision.
+  TriggerConfig config = trigger_.config();
+  if (const Json* value = args.find("on"); value != nullptr && value->is_bool()) {
+    config.on = value->as_bool();
+  }
+  if (const Json* value = args.find("hitchance"); value != nullptr && value->is_number()) {
+    config.hitchance = std::clamp(static_cast<float>(value->as_number()), 0.0F, 1.0F);
+  }
+  if (const Json* value = args.find("head_hitchance"); value != nullptr && value->is_number()) {
+    config.head_hitchance = std::clamp(static_cast<float>(value->as_number()), 0.0F, 1.0F);
+  }
+  if (const Json* value = args.find("yaw_tolerance"); value != nullptr && value->is_number()) {
+    config.yaw_tolerance = std::clamp(static_cast<float>(value->as_number()), 0.0F, 360.0F);
+  }
+  if (const Json* value = args.find("pitch_tolerance"); value != nullptr && value->is_number()) {
+    config.pitch_tolerance = std::clamp(static_cast<float>(value->as_number()), 0.0F, 360.0F);
+  }
+  if (const Json* value = args.find("delay_ms"); value != nullptr && value->is_number()) {
+    config.delay_ms = static_cast<std::uint32_t>(std::clamp(value->as_number(), 0.0, 60000.0));
+  }
+  if (const Json* value = args.find("key"); value != nullptr && value->is_number()) {
+    config.key = static_cast<int>(value->as_int());
+  }
+  if (const Json* value = args.find("fire"); value != nullptr && value->is_bool()) {
+    config.fire = value->as_bool();
+  }
+  if (const Json* value = args.find("force"); value != nullptr && value->is_bool()) {
+    config.force = value->as_bool();
+  }
+  if (const Json* value = args.find("solve_interval_ms"); value != nullptr && value->is_number()) {
+    config.solve_interval_ms =
+        static_cast<std::uint32_t>(std::clamp(value->as_number(), 0.0, 1000.0));
+  }
+  // The mode: 0 hold / 1 always / 2 toggle, or the names `hold`/`always`/`toggle`.
+  if (const Json* value = args.find("mode"); value != nullptr) {
+    if (value->is_number()) {
+      const auto mode = value->as_int();
+      config.mode =
+          mode == 1 ? TriggerMode::always : (mode == 2 ? TriggerMode::toggle : TriggerMode::hold);
+    } else if (value->is_string()) {
+      const std::string_view name = value->as_string();
+      config.mode = name == "always" ? TriggerMode::always
+                                     : (name == "toggle" ? TriggerMode::toggle : TriggerMode::hold);
+    }
+  }
+  trigger_.configure(config);
+
+  const TriggerDecision decision = trigger_.last_decision();
+  Json payload = Json::object();
+  payload.set("enabled", Json::boolean(config.on));
+  payload.set("hitchance", Json::number(static_cast<double>(config.hitchance)));
+  payload.set("head_hitchance", Json::number(static_cast<double>(config.head_hitchance)));
+  payload.set("yaw_tolerance", Json::number(static_cast<double>(config.yaw_tolerance)));
+  payload.set("pitch_tolerance", Json::number(static_cast<double>(config.pitch_tolerance)));
+  payload.set("delay_ms", Json::number(static_cast<double>(config.delay_ms)));
+  payload.set("key", Json::number(static_cast<double>(config.key)));
+  payload.set("fire", Json::boolean(config.fire));
+  payload.set("force", Json::boolean(config.force));
+  payload.set("mode", Json::number(static_cast<double>(config.mode)));
+  payload.set("mode_name",
+              Json::string(config.mode == TriggerMode::always
+                               ? "always"
+                               : (config.mode == TriggerMode::toggle ? "toggle" : "hold")));
+  payload.set("solve_interval_ms", Json::number(static_cast<double>(config.solve_interval_ms)));
+  // The last decision: the operator's window. `firing` is what the trigger
+  // actually does — with `fire` off it decides but never pulls the trigger.
+  payload.set("firing", Json::boolean(config.fire && decision.hold));
+  payload.set("reason", Json::string(std::string(to_string(decision.reason))));
+  payload.set("delay_remaining_ms", Json::number(static_cast<double>(decision.delay_remaining_ms)));
+  payload.set("target", Json::number(static_cast<double>(trigger_.target_index())));
+  // The instrumentation: how often the trigger was evaluated, how often the
+  // cheap pre-check skipped the solve, and what the last solve cost.
+  payload.set("evaluations", Json::number(static_cast<double>(trigger_.evaluations())));
+  payload.set("gate_skips", Json::number(static_cast<double>(trigger_.gate_skips())));
+  payload.set("solves", Json::number(static_cast<double>(trigger_.solves())));
+  payload.set("shots", Json::number(static_cast<double>(trigger_.shots())));
+  payload.set("last_solve_us", Json::number(static_cast<double>(trigger_.last_solve_us())));
+  // The press goes through the command backend, so the backend decides whether
+  // it reaches the command at all (`docs/control-harness.md` §"Input backends").
+  payload.set("backend", Json::string(Input::backend_name(input_.backend())));
+  set_ok(out, std::move(payload));
+}
+
 void Service::do_heatmap(const Json& args, Json& out) noexcept {
   refresh_reader(true);
   if (!reader_.has_value()) {
@@ -3196,6 +3320,9 @@ auto Service::start() noexcept -> bool {
 
 void Service::stop() noexcept {
   running_.store(false, std::memory_order_relaxed);
+  // The trigger must not leave the gun firing: release the shot before the
+  // service goes away (`docs/ragebot.md` §"The trigger").
+  trigger_.reset(input_);
   // Closing the pipe unblocks a thread parked in ConnectNamedPipe/ReadFile.
   channel_.close();
   if (thread_ != nullptr) {
