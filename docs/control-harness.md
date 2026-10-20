@@ -623,6 +623,8 @@ were **strings**, now superseded above.
   `usercmd-move`, `bhop`, `subtick-aim`, `subtick-shot`, `subtick-move`,
   `movement-probe`, `strafe-probe`, `autostrafe`, `move-to`, `screens`, `status`,
   `aim-probe`, `aim-shot`, `rage`);
+  `mcp/` (the MCP server: the schema bridge, the session, the tool catalogue
+  and the JSON-RPC/stdio server — see §"The OpenCode / MCP integration");
   `scripts/run-scenario.py` (CLI).
 - PID/module discovery: `external/dumper/target/release/cs2-dumper.exe
   --process cs2.exe --json`; injection: `build-injector/injector.exe`.
@@ -648,6 +650,133 @@ is input-only, so console output must come from `-condebug` (console log), a
 payload hook on the console-print/logging path, or a game-event listener. Until
 then, `wait_for` predicates are state-based (an `exec_output`/`text` predicate is
 TBD).
+
+## The OpenCode / MCP integration
+
+The scenario API is also an **MCP server**: a local stdio server that exposes
+the control channel as tools, so an agent can probe and drive the game inline
+— the way the REA tools do (`tools.rea.*`). The tools appear as `tools.cs2.*`
+in the Code Mode `execute` runtime.
+
+The code lives in `scripts/scenario/mcp/`:
+
+| file | what it is |
+|---|---|
+| `schema.py` | the `TypedDict` -> JSON Schema bridge (and the validator that enforces it) |
+| `session.py` | the lazy, cached pipe connection to the running game |
+| `tools.py` | the tool catalogue (one tool per API area) |
+| `server.py` | the JSON-RPC 2.0 / stdio server |
+
+### The transport
+
+MCP's stdio transport is **one JSON object per line** on stdin/stdout. The
+server implements `initialize`, `notifications/initialized` (a notification, so
+it is never answered), `tools/list`, `tools/call` and `ping`.
+
+It is **standard library only** — the `mcp` Python package may be installed on
+the machine, but the server must run on a bare Python 3.11. (The test suite
+uses the installed package to prove the protocol conformance and *skips* that
+test when the package is absent.)
+
+**stdout is the protocol channel.** The server duplicates the real stdout for
+the protocol and points `sys.stdout` at stderr, so a stray `print` (the state
+machine's debug log, a scenario's progress line) becomes a diagnostic instead
+of a corrupt frame. The state machine is therefore always built with
+`debug=False`.
+
+A malformed line, an unknown method, an unknown tool or a tool that raises is
+**answered** — never fatal. A tool failure is a *tool* error (`isError: true`
+with the message in the text), because the agent has to see the message and
+correct itself; an unknown tool is a protocol error (`-32602`).
+
+### The tools
+
+| tool | what it does |
+|---|---|
+| `cs2_ping` | liveness: the payload's readiness flags and the command-surface version |
+| `cs2_state` | the typed snapshot (local player, players, rules) |
+| `cs2_screen` | the screen, the capabilities, and **the reason** for every refusal |
+| `cs2_ensure` | drive the game into a screen (the state machine's transitions) |
+| `cs2_exec` | queue one console line |
+| `cs2_look` | aim the view (the console `setang` or the silent sub-tick angles) |
+| `cs2_move` | the analog move axes |
+| `cs2_press` / `cs2_release` | the buttons |
+| `cs2_aim` | the ragebot's solve |
+| `cs2_rage` | the hold-key ragebot's configuration |
+| `cs2_events` | the captured game events (with the `since` cursor) |
+| `cs2_wait_for` | the structured predicate wait |
+| `cs2_settings_get` / `cs2_settings_set` | the feature settings block |
+| `cs2_list_scenarios` / `cs2_run_scenario` | the scenario registry |
+| `cs2_launch` / `cs2_inject` | **destructive**: start the game / inject the payload |
+
+`cs2_launch` and `cs2_inject` are the only tools that change the game. They
+say so in their description and need `confirm: true`; the launch goes through
+the **`CS2Launch` scheduled task** (the agent runs in session 0 without a GPU,
+so `cs2.exe` would die there) and nothing is ever killed.
+
+### The schemas are generated, not written
+
+Every tool's `inputSchema` is **generated from the typed models**: the
+argument shapes in `tools.py` are built from the library's own aliases
+(`ButtonName`, `AimObjective`, `InputBackend`, the `WaitExpr` predicate, the
+`Screen` enum), and `schema.py` projects them onto JSON Schema — a `TypedDict`
+becomes an object with `required` and `additionalProperties: false`, a
+`Literal` becomes an `enum`, the `Screen` enum becomes an enum of its
+kebab-case names, `X | None` becomes `anyOf: [X, null]`.
+
+The projection is **also the validator**: the server checks the arguments
+against the very schema it advertised, so a bad argument is refused *before*
+the request reaches the game. An annotation the bridge cannot express falls
+back to "any" and is **reported** (never a wrong schema).
+
+### The connection
+
+The server is a long-lived process; the game is not. So the pipe connection is
+**lazy** (the first tool that needs the game opens it), **cached** (the
+payload's pipe takes one client at a time), **bounded** (a connect attempt
+gives up after a few seconds) and **self-healing** (a dropped pipe is detected
+and the next call reconnects — the `Control` class has no reconnect of its
+own, so the retry lives in the MCP layer).
+
+When the game is not running the tool answers with an actionable message, not
+a hang and not a traceback:
+
+> the game is not running: the control channel is not connected
+> (`\\.\pipe\cs2-internal-control`). Is CS2 running? Launch it with
+> `schtasks /run /tn CS2Launch` ... and inject the payload
+> (`meson compile -C build-payload`, then `build-injector/injector.exe cs2.exe
+> build-payload/payload.dll --load-missing`). The game is never killed by this
+> server.
+
+The server **never kills the game**: on exit it closes the pipe (the payload
+keeps running and the next client can reconnect).
+
+### The registration
+
+The server is registered in the **global** OpenCode config
+(`C:\Users\gpmpo\.config\opencode\opencode.jsonc`), next to the `rea` entry:
+
+```jsonc
+"mcp": {
+  "rea": { /* unchanged */ },
+  "cs2": {
+    "type": "local",
+    "command": ["python", "C:\\Users\\gpmpo\\cs2-internal\\scripts\\scenario\\mcp\\server.py"],
+    "enabled": true,
+    "environment": { "PYTHONPATH": "C:\\Users\\gpmpo\\cs2-internal\\scripts" }
+  }
+}
+```
+
+The MCP server hot-reloads: the change takes effect without restarting
+OpenCode (and `opencode service restart` must **not** be run — it kills the
+agent session). The server adds its own package root to `sys.path`, so it runs
+from any working directory:
+
+```powershell
+python scripts\scenario\mcp\server.py            # the server (waits on stdin)
+python scripts\scenario\mcp\server.py --list-tools  # the catalogue, for a human
+```
 
 ## RE status for `exec`
 
