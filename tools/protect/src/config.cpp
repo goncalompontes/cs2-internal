@@ -13,6 +13,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/SHA256.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace cs2::protect {
 
@@ -137,6 +138,10 @@ struct ScanResult {
 }
 
 /// Parses a hexadecimal seed ("0xA0..." or "A0...").
+///
+/// The seed is 64 bits. A longer seed keeps its **low 64 bits** — the
+/// example policy of the spec carries a 128-bit value — and the truncation
+/// is reported (see `seed_is_truncated`).
 [[nodiscard]] auto parse_seed(std::string_view text) -> std::expected<std::uint64_t, std::string> {
   std::string_view digits = text;
   if (digits.size() > 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) {
@@ -144,11 +149,6 @@ struct ScanResult {
   }
   if (digits.empty()) {
     return std::unexpected(std::string("the seed is empty"));
-  }
-  // A seed is 64 bits: more digits than that would silently wrap around.
-  if (digits.size() > 16) {
-    return std::unexpected(std::string("the seed has more than 16 hexadecimal digits: '") +
-                           std::string(text) + "'");
   }
   std::uint64_t value = 0;
   for (const char c : digits) {
@@ -165,6 +165,21 @@ struct ScanResult {
     }
   }
   return value;
+}
+
+/// Whether the seed text has more digits than the 64-bit seed holds.
+[[nodiscard]] auto seed_is_truncated(std::string_view text) noexcept -> bool {
+  std::string_view digits = text;
+  if (digits.size() > 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) {
+    digits.remove_prefix(2);
+  }
+  return digits.size() > 16;
+}
+
+/// Reports a seed that did not fit into the 64 bits of the seed.
+void report_truncated_seed(std::string_view origin, std::string_view text) {
+  llvm::errs() << "[cs2-protect] " << origin << ": the seed is 64 bits; the high bits of '" << text
+               << "' are dropped\n";
 }
 
 [[nodiscard]] auto parse_level(std::string_view text)
@@ -277,6 +292,9 @@ struct ScanResult {
     if (!parsed) {
       return std::unexpected(parsed.error());
     }
+    if (seed_is_truncated(*seed)) {
+      report_truncated_seed("the policy's seed", *seed);
+    }
     policy.seed = *parsed;
   } else if (object->get("seed") != nullptr) {
     return std::unexpected(std::string("'seed' must be a hexadecimal string"));
@@ -368,9 +386,13 @@ auto load_config() -> std::expected<Config, ConfigError> {
   }
 
   if (const char* seed = std::getenv("CS2_PROTECT_SEED"); seed != nullptr && *seed != '\0') {
-    auto parsed = parse_seed(trim(seed));
+    const std::string_view value = trim(seed);
+    auto parsed = parse_seed(value);
     if (!parsed) {
       return std::unexpected(ConfigError{"CS2_PROTECT_SEED: " + parsed.error()});
+    }
+    if (seed_is_truncated(value)) {
+      report_truncated_seed("CS2_PROTECT_SEED", value);
     }
     config.seed = *parsed;
   }

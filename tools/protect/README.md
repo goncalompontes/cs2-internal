@@ -186,6 +186,10 @@ leaves one) is trimmed on both sides.
 * `deny` wins over every selection source.
 * An unknown key is an error, not a warning: a typo in a policy file must
   not be ignored silently.
+* The seed is **64 bits**. A longer seed (the example above carries a
+  128-bit value) keeps its low 64 bits, and the plugin says so:
+  `[cs2-protect] the policy's seed: the seed is 64 bits; the high bits of
+  '0xA042…' are dropped`.
 
 ### How the file is read
 

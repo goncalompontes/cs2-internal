@@ -133,11 +133,12 @@ def run(command: list[str], use_vcvars: bool, log: Path) -> int:
     understand the quoting that Python uses for an argument that contains
     quotes of its own.
 
-    The output goes to the log file: the script's stdout carries the path of
-    the built DLL and nothing else, so that a caller can capture it.
+    The output is appended to the log file: the script's stdout carries the
+    path of the built DLL and nothing else, so that a caller can capture it.
     """
     if not use_vcvars:
-        with log.open("w", encoding="utf-8", errors="replace") as handle:
+        with log.open("a", encoding="utf-8", errors="replace") as handle:
+            handle.write(f"--- {' '.join(command)}\n")
             completed = subprocess.run(
                 command, check=False, stdout=handle, stderr=subprocess.STDOUT
             )
@@ -161,7 +162,8 @@ def run(command: list[str], use_vcvars: bool, log: Path) -> int:
         batch.write("exit /b %ERRORLEVEL%\n")
         script = Path(batch.name)
     try:
-        with log.open("w", encoding="utf-8", errors="replace") as handle:
+        with log.open("a", encoding="utf-8", errors="replace") as handle:
+            handle.write(f"--- {' '.join(command)}\n")
             completed = subprocess.run(
                 ["cmd", "/c", str(script)],
                 check=False,
@@ -223,6 +225,7 @@ def main(argv: list[str]) -> int:
     # The build log lives next to the build: the stdout of this script is
     # the path of the DLL and nothing else.
     log = build_dir / "build-protect-plugin.log"
+    log.write_text("", encoding="utf-8")
     print(f"build-protect-plugin: the build log is '{log}'", file=sys.stderr)
 
     use_vcvars = not msvc_environment_ready()

@@ -97,9 +97,13 @@ void test_policy_reader() {
   auto number = cs2::protect::parse_policy_text(R"({"seed": 1.2.3})");
   check(!number.has_value(), "a malformed number is rejected");
 
-  // A seed is 64 bits: a longer one would wrap around silently.
+  // A seed is 64 bits: a longer one keeps its low bits, and says so.
   auto seed = cs2::protect::parse_policy_text(R"({"seed": "0123456789ABCDEF0"})");
-  check(!seed.has_value(), "an over-long seed is rejected");
+  check(seed.has_value(), "an over-long seed is truncated, not rejected");
+  if (seed.has_value() && seed->seed.has_value()) {
+    check_equal(std::to_string(*seed->seed), "1311768467463790320",
+                "the low 64 bits of the seed are kept");
+  }
 }
 
 /// The qualified name --------------------------------------------------------
