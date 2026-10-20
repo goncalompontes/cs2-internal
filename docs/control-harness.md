@@ -20,7 +20,13 @@ bot loses hp). **Analog movement is validated live** — `move(forward=1.0)` wal
 204 units in a second (1.01× the engine's own console `+forward`) and
 `move(forward=0.5)` walks 115 (0.57×), so the magnitude is honoured; the missing
 ingredient was the engine's own units (`±1`, not 450), plus a clear spot
-(`movement-probe` pins one). Remaining: **console-output capture**.
+(`movement-probe` pins one). The **control surface is versioned** now
+(`protocol: 2` on `ping`) and the channel is a real interface, not a probe:
+the **`settings`** command reads and writes the live feature settings block by
+its flat wire field name (the generated name table, ADR-0021), the **`batch`**
+command runs a list of commands in order (the "run a script" primitive) and
+the **`log`** command returns the payload's own log tail. Remaining:
+**console-output capture**.
 **Screens/round phases are now modelled once** in the screen state machine
 (`scripts/scenario/screens.py`) instead of being re-derived per scenario: the
 payload's new `level` block is the **main-screen rule** (the level's
@@ -78,31 +84,45 @@ with cs2_session() as g:          # launch (CS2Launch task) + inject + connect
                   ── input  → engine button commands (+forward/…) & `setang`,
                                 injected through exec (no OS SendInput)
                   ── wait   → predicate over snapshots
-                  ── events → IGameEventListener2 registered with the client
-                                CGameEventManager (client.dll), fed into an
-                                EventRing (docs/re/client-dll.md §"Game events")
+                  ── events → the client's CGameEventManager dispatch
+                                vtable is patched (FireEvent /
+                                FireEventClientSide, client.dll); the fired
+                                names are fed into an EventRing
+                                (docs/re/client-dll.md §"Game events").
+                                No IGameEventListener2 is registered: that
+                                faults from the control thread.
    publish thread ── shm ──▶ Vulkan overlay layer (render)
 ```
 
-## Command surface (v1)
+## Command surface (v2)
 
 Requests are `{"id": <n>, "cmd": <name>, "args": {…}}`; responses are
 `{"id": <n>, "ok": <bool>, "result": {…}}` or `{"id": <n>, "ok": false,
 "error": "<message>"}`.
 
+The **command-surface version** is `2`: the surface this table documents as
+"v1" plus the `settings`, `batch` and `log` commands. `ping` reports it as
+`protocol` (the response envelope itself is unchanged, so an old client still
+parses it) — a stale client and a new payload can now disagree loudly.
+
 | cmd | args | returns |
 |---|---|---|
-| `ping` | — | `{pong, pid, exec_ready, events_ready, input_ready, input_hooked, input_backend, state_ready}` |
-| `state` | — | snapshot: `valid`, `in_map`, `local_pawn`, `local{…}`, `players[…]` |
+| `ping` | — | `{pong, pid, protocol, uptime_ms, exec_ready, events_ready, events_subscribed, events_dispatch_calls, input_ready, input_hooked, input_backend, state_ready}` — `protocol` is the command-surface version (currently **2**) |
+| `state` | — | snapshot: `valid`, `in_map`, `local_pawn`, `local{…}`, `players[…]`, `level{…}` (the level's rules proxy) and `rules{…}` (the `C_CSGameRules` block: `warmup`, `freeze`, `round_win_status`, the buy windows, the round phase) |
 | `exec` | `line` | `{queued}` (semicolon-separated console line) |
-| `events` | `limit`, `subscribe` | `{count, events: [{name, seq}, …]}` — recent game events (oldest first); `subscribe` is a name or array of names to register on demand |
+| `events` | `limit`, `subscribe`, `since` | `{count, last_seq, subscribe{accepted, rejected}, events: [{name, seq, args}, …]}` — recent game events (oldest first); `subscribe` is a name or array of names to register on demand; `since` is a **cursor**: the events with `seq > since` are returned (the `limit` still caps how many of the newest are), and `last_seq` (the highest sequence the ring holds) is the client's next cursor |
 | `wait_for` | `expr`, `event`, `timeout_ms` | `{matched, snapshot}` |
+| `settings` | `get` (a name or an array of names), `set` (an object of name → value) | `{values: {…}}` — the **live** feature settings block; a `set` also returns `{changed: […]}` (only the keys whose value actually changed) |
+| `batch` | `steps` (an array of request objects) | `{results: [{cmd, ok, result\|error}, …]}` — the steps run in order, exactly as if they had been sent one at a time; a failing step is recorded and the batch continues |
+| `log` | `count` (the last N lines, default 50, cap 500) | `{path, count, lines: […]}` — the payload's own log tail (`%LOCALAPPDATA%\cs2-internal\cs2-payload.log`) |
 | `input` | `via` (`"console"`\|`"usercmd"`) | backend + hook status `{backend, ready, hooked, slot, slot5, buttons_set, buttons_clear, bhop, calls, writes, move_*, angles, base_has_bits, base_move, raw_move, entry_move, steps, step_dump, entry_writes, step_writes, cmd_words, base_words}` plus the bhop block `{bhop_writes, bhop_presses, bhop_a, bhop_b, bhop_skipped, bhop_landed_tick, bhop_landed_frac, bhop_build, bhop_age, bhop_tick_base, bhop_client_tick, bhop_cmd_number, bhop_mode, bhop_when, bhop_holding_ticks, bhop_air_ticks}` (`bhop_a`/`bhop_b` = landings answered with placement A / the B catch-up; **A firing is the phase proof**, validated live) and the strafe block `{strafe, strafe_airborne, strafe_speed, strafe_delta, strafe_goal, strafe_wish, strafe_rot, strafe_side, strafe_steps, strafe_reason, strafe_clamped, strafe_wishspeed, strafe_writes}` (`strafe_rot` = the basis rotation written, `strafe_steps` the yaw steps queued, `strafe_reason` why the tick did/did not act (1 ground, 2 slow, 3 no angles, 4 wrote, 5 no room), `strafe_clamped` how often the rotation had to be clamped so the gate could not drop the shared step array) |
 | `press` / `release` | `buttons` (name, array, or mask); `reset` | hold / release command buttons on the active backend |
-| `look` | `pitch`, `yaw`, `roll`; `clear` | write the sub-tick `view_angles` (silent; `usercmd` backend) |
+| `look` | `pitch`, `yaw`, `roll`; `clear`; `command` (also write the command's own `viewangles`), `raw` (the raw per-sub-tick input angle history), `step_yaw` (a yaw delta on the sub-tick move channel) | write the sub-tick `view_angles` (silent; `usercmd` backend) |
+| `strafe` | `on`, `mode` (0 = off, 1 = camera-relative, 2 = directional), `ignore` (1 = a held A/D stands the feature down), `wishspeed`, `subtick` (the number of `yaw_delta` steps; 0 = the camera-frame analog) | the payload's **silent auto-strafe** (`docs/re/strafing.md`): the goal heading comes from the held keys in the view frame and the air-acceleration wish is pushed perpendicular to the velocity at the `AirAccelerate` optimum. Returns the `input` status block. |
+| `predict` | `on` | toggle the manual engine-simulation (`RunCommand`) bhop path — **off by default**: it crashes without the `CPrediction` envelope |
 | `aim` | `target` (entity index; default nearest), `objective` (`damage`\|`hitchance`\|`expected`\|`pellets`), `sigma`, `damage`, `range_modifier`, `penetration`, `headshot`, `write`, `seed`/`sequence` + `spread`/`inaccuracy`/`pellets` (for `objective: pellets`), `cone` (the hitchance cone, radians) | **ragebot solve** (`docs/ragebot.md`): solve the damage field for the enemy and return `{valid, yaw, pitch, value, hitchance, cone, cells, aim_u, aim_v, wrote_view, hitcount, hitboxes[…]}`. `hitchance` is the probability the shot (perturbed by the `cone`) lands on the target (`docs/ragebot.md` §2); the objective `hitchance` maximizes it when `cone` > 0, else it uses the Chebyshev-centre margin. `write: true` applies the solve to the **silent** sub-tick `view_angles`. `hitboxes` is the pawn's **real studio hitbox set** (bone, hitgroup, name, radius, bone-local `min/max`, world centre). `objective: pellets` maximizes the deterministic pellet sum (`docs/ragebot.md` §2/§3): the seed is `seed` or `sequence`→`MD5_PseudoRandom`, `spread` defaults to the weapon's real `m_flSpread`. |
-| `rage` | `on`, `key` (VK code, 0 = none), `fire`, `force` (bypass the key check), `objective`, `damage`, `headshot`, `range_modifier`, `sigma`, `hitbox` (0 auto, 1 head, 2 body), `fov`, `min_damage`, `min_hitchance` | **hold-key ragebot** (`docs/ragebot.md`): the payload solves per frame (render thread) and writes the result per tick as the silent sub-tick aim, pressing attack while the key is held. Target selection is the nearest enemy within `fov` (degrees; 0 = unlimited); the aim/fire is gated on `min_damage`/`min_hitchance`; the solve is wallbang-aware (the enumerated solids attenuate the hitboxes with the engine penetration model). Returns `{enabled, key, fire, force, active, target, hitbox, objective, fov, min_damage, min_hitchance, occluders, backtracks, record, solves, writes, shots}`. **The overlay menu's `Ragebot` tab owns the same state** (it re-writes the settings every published frame), so a control-side set is reverted — use `force` to drive it from a scenario.
-| `heatmap` | `target` (centre the chart on this entity index), `fov` (horizontal degrees, default 90), `history` (lag records per player, default 6), `sample` (toggle continuous record sampling), `clear` (empty the record store), `all` (include teammates as well as enemies), `walls` (enumerate the world solids and attenuate by penetration — `docs/re/occlusion.md`), `pen` (`simple`\|`engine` — the penetration model), `pen_mod`/`dmg_mod`/`max_pen`/`material`/`grate` (override the real per-shape surface for the engine model), `damage`, `range_modifier`, `penetration`, `headshot` | **multi-target damage heatmap** (`docs/ragebot.md`, ADR-0022): projects **every** enemy's hitboxes — and their sampled **lag records** — into one shared angular chart, valued by damage, and returns the tagged silhouette cells for the Python renderer. Returns `{valid, eye, basis, fov, extent, weapon, sampling, history, capacity, tick_base, rewind_tick, window_ticks, targets[…], cells[…], cell_count, walls{enabled,ok,faulted,records,shapes,hulls,occluders}}`. The render thread samples each enemy's hitboxes per frame into a bounded ring (default 32); `history` selects how many recent records per player join the chart. With `walls: true` the payload enumerates the world collision solids between the eye and each target (`CGamePhysicsQueryInterface::EntitiesInBox`, fault-guarded) and attenuates the silhouettes by penetration. `walls` also returns `bodies`, `type_counts` (shape-type histogram), `occluder_polygons` (the projected world solids in chart space, for the renderer), and two one-record RE probes: `material_token`/`material_float` and `compound` (docs/re/occlusion.md, docs/re/vphysics2.md). Rendered by `scripts/heatmap-view.py` / the `heatmap` scenario; `scripts/heatmap-live.py` is a **live** debug view (a local HTTP server + canvas page polling the pipe at ~10 Hz, with `mode`/`fov`/`history`/`target`/rate controls, `/_look`+`/_exec` passthrough and a `--png` frame dump) and `scripts/heatmap-walls.py` renders a base/cells/walls/occluders comparison set. The `walls` solids attenuate only where the shot to a hitbox reaches them *before* the hitbox (`OccluderCell::ray_span`, per-cell depth — `docs/re/occlusion.md`). With `pen=engine` the cells are valued with the engine's real per-surface penetration loss instead of the approximation (`docs/re/penetration.md`), and a new **`penetration`** Python render mode draws that damage with the solids and each cell's attenuation outline (`scenario/heatmap.py :: render(mode="penetration")`, `heatmap-view.py --mode penetration --pen engine`, the live viewer's *penetration* mode). |
+| `rage` | `on`, `key` (VK code, 0 = none), `fire`, `force` (bypass the key check), `objective`, `damage`, `headshot`, `range_modifier`, `sigma`, `hitbox` (0 auto, 1 head, 2 body), `fov`, `min_damage`, `min_hitchance`, `autostop` (0 off, 1 always while solving, 2 only while firing), `autoscope` (the same modes), `autoreload`, `only_visible`, `recoil`, `stop_speed` (the auto-stop threshold), `backtrack`, `mode` (0 hold the key, 1 always on, 2 toggle), `per_weapon`, `weapon` (the per-weapon profile's key) | **hold-key ragebot** (`docs/ragebot.md`): the payload solves per frame (render thread) and writes the result per tick as the silent sub-tick aim, pressing attack while the key is held. Target selection is the nearest enemy within `fov` (degrees; 0 = unlimited); the aim/fire is gated on `min_damage`/`min_hitchance`; the solve is wallbang-aware (the enumerated solids attenuate the hitboxes with the engine penetration model). Returns `{enabled, key, fire, force, active, target, hitbox, objective, fov, min_damage, min_hitchance, occluders, backtracks, record, solves, writes, shots, stops, visible, mode, per_weapon, weapon, profiles}` plus the instrumentation object `perf{frames, snapshot_frames, total_us, last_us, max_us, sample_us, query_us, build_us, project_us, solve_us, backtrack_us, solve_project_us, solve_occlude_us, solve_argmax_us, solve_calls, candidates, hitboxes, occluders, poses, cells}` (`docs/ragebot-perf.md`; the microsecond figures are per frame since the last poll). **The overlay menu's `Ragebot` tab owns the same state** (it re-writes the settings every published frame), so a control-side set is reverted — use `force` to drive it from a scenario.
+| `heatmap` | `target` (centre the **view window** on this entity index; the chart itself stays the absolute world yaw/pitch field), `fov` (horizontal degrees, default 90), `history` (lag records per player, default 6), `sample` (toggle continuous record sampling), `clear` (empty the record store), `all` (include teammates as well as enemies), `walls` (enumerate the world solids and attenuate by penetration — `docs/re/occlusion.md`), `pen` (`simple`\|`engine` — the penetration model), `pen_mod`/`dmg_mod`/`max_pen`/`material`/`grate` (override the real per-shape surface for the engine model), `walls_call` (run the world query on the game thread), `max_unlag`/`interp` (the lag-comp window), `enum` (`box`\|`both` — the enumeration self-check), `damage`, `range_modifier`, `penetration`, `headshot` | **multi-target damage heatmap** (`docs/ragebot.md`, ADR-0022): projects **every** enemy's hitboxes — and their sampled **lag records** — into one shared angular chart, valued by damage, and returns the tagged silhouette cells for the Python renderer. Returns `{valid, eye, basis, fov, extent, view_yaw, view_pitch, view_target, weapon, sampling, history, capacity, tick_base, rewind_tick, max_unlag, interp, window_ticks, targets[…], cells[…], cell_count, walls{enabled,ok,faulted,records,shapes,hulls,occluders}}`. With `target: <entity index>` the **view window** — the `fov`-wide window the chart is clipped to and rendered through — is centred on the direction from the eye to that entity instead of on the camera; the chart's **basis does not change** (it stays the absolute world yaw/pitch field), so the cell values are the same and only the window moves. The result reports the window's centre as `view_yaw`/`view_pitch` and the entity as `view_target`. The render thread samples each enemy's hitboxes per frame into a bounded ring (default 32); `history` selects how many recent records per player join the chart. With `walls: true` the payload enumerates the world collision solids between the eye and each target (`CGamePhysicsQueryInterface::EntitiesInBox`, fault-guarded) and attenuates the silhouettes by penetration. `walls` also returns `bodies`, `type_counts` (shape-type histogram), `occluder_polygons` (the projected world solids in chart space, for the renderer), and two one-record RE probes: `material_token`/`material_float` and `compound` (docs/re/occlusion.md, docs/re/vphysics2.md). Rendered by `scripts/heatmap-view.py` / the `heatmap` scenario; `scripts/heatmap-live.py` is a **live** debug view (a local HTTP server + canvas page polling the pipe at ~10 Hz, with `mode`/`fov`/`history`/`target`/rate controls, `/_look`+`/_exec` passthrough and a `--png` frame dump) and `scripts/heatmap-walls.py` renders a base/cells/walls/occluders comparison set. The `walls` solids attenuate only where the shot to a hitbox reaches them *before* the hitbox (`OccluderCell::ray_span`, per-cell depth — `docs/re/occlusion.md`). With `pen=engine` the cells are valued with the engine's real per-surface penetration loss instead of the approximation (`docs/re/penetration.md`), and a new **`penetration`** Python render mode draws that damage with the solids and each cell's attenuation outline (`scenario/heatmap.py :: render(mode="penetration")`, `heatmap-view.py --mode penetration --pen engine`, the live viewer's *penetration* mode). |
 | `bhop` | `on` | toggle the payload auto-jump |
 | `move` | `forward`, `side`, `up`; `clear`; `quantize`, `step`, `raw_entry` | set the analog move; the three flags opt into the community ingredients (`docs/re/subtick.md` §"Community cross-check, second pass") |
 | `quit` | — | closes the channel |
@@ -129,6 +149,99 @@ always-true predicate.
 *after* the request started. When both `expr` and `event` are given, both must
 hold. Events themselves are read with the `events` command (or
 `game.events(...)`), backed by the payload's listener (below).
+
+### The `settings` command — the feature settings block
+
+`settings` reads and writes the **live** feature settings block — the same
+block the overlay menu owns (ADR-0021), not a copy of it.
+
+```jsonc
+// get one or more
+{"cmd": "settings", "args": {"get": ["box", "movement_thirdperson_distance"]}}
+→ {"ok": true, "result": {"values": {"box": 1, "movement_thirdperson_distance": 64.0}}}
+
+// set one or more
+{"cmd": "settings", "args": {"set": {"box": 0, "esp_color_enemy": [255, 0, 0, 255]}}}
+→ {"ok": true, "result": {"changed": ["box", "esp_color_enemy"],
+                          "values":   {"box": 0, "esp_color_enemy": [255, 0, 0, 255]}}}
+
+// get everything
+{"cmd": "settings", "args": {}}
+→ {"ok": true, "result": {"values": { ...every field... }}}
+```
+
+- The keys are the **flat wire field names** — the `wire::Settings` field
+  names (`box`, `health_bar`, `esp_color_enemy`,
+  `movement_thirdperson_distance`, `visuals_chams`, …), **not** the config
+  file's `<section>.<field>` keys (`esp.box`). The table is generated from
+  `overlay/include/cs2/overlay/wire.hpp` by `scripts/gen-settings-table.py`
+  into `overlay/include/cs2/overlay/settings_table.hpp`, so it cannot drift
+  from the struct (the host test `control-core` proves it: one entry per
+  field, the right offsets).
+- A **flag** (a one-byte field) takes `0`/`1` or `true`/`false`; the
+  byte-valued settings that are not booleans (the box thickness, the mode
+  selectors, the menu key code) take their own number in 0..255. A **number**
+  takes a JSON number, a **colour** an array of four integers 0..255
+  (`[r, g, b, a]`), a **text** a string.
+- An **unknown key is an error**, not a silent no-op:
+  `{"ok": false, "error": "settings: unknown key \"esp_bxo\""}`. A **wrong
+  value type** is an error naming the key and the expected type
+  (`settings: "box" expects a flag (0/1 or true/false)`). The whole request is
+  validated before anything is written, so a typo in one key leaves the block
+  untouched.
+- `changed` lists only the keys whose value **actually changed** (a set to the
+  value it already had is not a change). It is only reported for a `set`.
+- A number that is out of the field's range is **accepted and clamped**, not
+  an error: the payload's features read the block through
+  `features::from_wire_settings`, which clamps every numeric field again
+  (and an unknown enum falls back to its documented default). Only a wrong
+  *type* is an error.
+- **Who owns the block.** The in-process overlay menu owns it; in the
+  Vulkan-layer mode the shared segment does (the layer's menu writes it, the
+  payload publishes it). The owner registers a reader and a writer with the
+  control service (`Service::set_settings_access`), so a control-side change
+  and a menu-side change are the same block and the owner's next frame does
+  not overwrite the change. With the **menu open**, the menu's widgets own the
+  block and re-write their own values — close the menu for a control-side
+  change to stick. The command reports
+  `settings unavailable: the live settings block is not published yet` until
+  the owner has published its first block.
+
+### The `batch` command — the "run a script" primitive
+
+```jsonc
+{"cmd": "batch", "args": {"steps": [
+   {"cmd": "exec", "args": {"line": "sv_cheats 1"}},
+   {"cmd": "look",  "args": {"yaw": 90, "pitch": 0}},
+   {"cmd": "press", "args": {"buttons": ["forward"]}}
+]}}
+→ {"ok": true, "result": {"results": [
+      {"cmd": "exec",  "ok": true,  "result": {"queued": true}},
+      {"cmd": "look",  "ok": true,  "result": { ... }},
+      {"cmd": "press", "ok": false, "error": "unknown button \"foward\""}
+   ]}}
+```
+
+- The steps run **in order, on the control thread**, exactly as if they had
+  been sent one at a time: each step goes through the service's own
+  dispatcher, so a step's behaviour is identical to a direct request. The
+  per-step result is the same object the command would have returned on its
+  own.
+- A **failing step does not abort the batch**: it is recorded (`ok: false`
+  plus its `error`) and the batch continues. The batch's own `ok` is `true`
+  unless the batch itself was malformed.
+- The work is **bounded**: at most 64 steps and a nesting depth of 1.
+  Exceeding either is an error, not a truncation. A step may not be a `batch`
+  (the recursion guard): `{"ok": false, "error": "batch: a step must not be
+  a batch"}`.
+
+### The `log` command — the payload's own log tail
+
+`{"cmd": "log", "args": {"count": 100}}` returns the last *N* lines of the
+payload's log file (`%LOCALAPPDATA%\cs2-internal\cs2-payload.log`, the file
+`cs2::game::append_log` writes): `{path, count, lines: [...]}`. The default is
+50 lines and the cap is 500. The file is **read** — there is no second
+in-memory buffer.
 
 ## Input helpers (runner-side)
 
@@ -438,13 +551,27 @@ were **strings**, now superseded above.
 ## Code layout
 
 - `payload/control/` (new): `include/cs2/control/{json,predicate,snapshot_json,
-  console,events,event_ring,input,channel,service}.hpp` + `src/*.cpp` +
+  console,events,event_ring,input,channel,service,settings_access}.hpp` +
+  `src/*.cpp` +
   `meson.build` (`control_lib`/`control_dep`). Started from `install_thread` in
   `payload/src/payload_main.cpp`, gated by `CS2_PAYLOAD_NO_CONTROL`. Uses
   `payload/game`'s `StateReader` for snapshots. `json`/`predicate`/
-  `snapshot_json`/`event_ring` are platform-independent and built host-side by
+  `snapshot_json`/`event_ring`/`settings_access` are platform-independent and
+  built host-side by
   the `control-core` Meson test (`payload/control/tests/test_control_core.cpp`).
   `input.cpp` is the `usercmd` backend (hooks `CreateMove`).
+  `settings_access.{hpp,cpp}` holds the platform-independent command logic —
+  the typed access to the live settings block (the `settings` command), the
+  batch runner (the `batch` command) and the log tail (the `log` command) — so
+  the host test can cover them without the Windows-only `Service`.
+- The **settings name table**: `overlay/include/cs2/overlay/settings_table.hpp`
+  is **generated** by `scripts/gen-settings-table.py` from
+  `overlay/include/cs2/overlay/wire.hpp` (the `Settings` struct). The Meson
+  build regenerates it on every build (`build_always_stale`) and the
+  `settings-table` test fails when the file on disk differs from a fresh
+  generation; the generator itself fails loudly (non-zero exit) on a parse
+  error rather than emitting an empty table. The table is the reason the
+  `settings` command can address all 87 fields by name.
 - `scripts/scenario/`: `session.py` (kill stale `cs2.exe` → run the `CS2Launch`
   task → wait for `client.dll` → inject `build-payload/payload.dll` →
   connect → teardown), `control.py` (pipe client + typed helpers),
