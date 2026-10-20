@@ -440,6 +440,11 @@ void Service::do_events(const Json& args, Json& out) noexcept {
     limit = arg->as_int();
   }
   limit = std::max<std::int64_t>(limit, 0);
+  if (limit > static_cast<std::int64_t>(EventRing::k_capacity)) {
+    // The ring holds at most `k_capacity` events, so a larger limit asks for
+    // nothing (the same explicit cap the `log` command has).
+    limit = static_cast<std::int64_t>(EventRing::k_capacity);
+  }
   // The optional `since` cursor: only the events with `seq > since` are
   // returned, so a client does not have to diff the sequence numbers by hand.
   // `last_seq` is the highest sequence the ring holds — the client's next
@@ -467,7 +472,11 @@ void Service::do_events(const Json& args, Json& out) noexcept {
     recent = std::move(filtered);
   }
   Json result = Json::object();
-  result.set("count", Json::integer(static_cast<std::int64_t>(events_.count())));
+  // `count` is the number of events in this answer; `last_seq` is the highest
+  // sequence the ring holds (the client's next cursor). They are different
+  // numbers: the ring keeps the last `k_capacity` events, while the sequence
+  // counts every event the payload ever saw.
+  result.set("count", Json::integer(static_cast<std::int64_t>(recent.items().size())));
   result.set("last_seq", Json::integer(static_cast<std::int64_t>(events_.count())));
   result.set("subscribe", std::move(subscriptions));
   result.set("events", std::move(recent));
@@ -602,7 +611,7 @@ auto Service::do_batch(const Json& args, Json& out) noexcept -> bool {
   }
   batch_closed_ = false;
   Json results = Json::array();
-  const auto outcome = BatchRunner::run(*steps, 1, &Service::dispatch_step, this, results);
+  const auto outcome = BatchRunner::run(*steps, &Service::dispatch_step, this, results);
   if (!outcome.has_value()) {
     // A malformed batch: the whole command fails, and no step ran.
     set_error(out, outcome.error().message);
@@ -2207,8 +2216,16 @@ auto Service::recent_sounds(SoundEvent* out, int max) noexcept -> int {
     if (!fields.valid) {
       return true;  // not a sound event
     }
+    // Keep the **newest** markers. The ring is walked oldest first and it is
+    // shared with every game event, so a fixed-size buffer filled from the
+    // front would keep the **oldest** footsteps and drop the freshest ones —
+    // and the 1 s age filter below then discarded the survivors. A full
+    // buffer shifts and appends.
     if (captured_count >= static_cast<int>(std::size(captured))) {
-      return false;  // the ESP's marker budget
+      for (int i = 1; i < captured_count; ++i) {
+        captured[i - 1] = captured[i];
+      }
+      --captured_count;
     }
     captured[captured_count] = Captured{.slot = fields.slot,
                                         .radius = fields.radius,
@@ -2904,7 +2921,13 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
       set_error(out, "heatmap: unknown target entity " + std::to_string(view_target));
       return;
     }
-    const game::Vec3 delta = target->eye_origin - eye;
+    // The window is centred on the target's **body**, not on its eyes: the
+    // chart's cells are the hitboxes (the body), so a window centred on the
+    // eye is offset by the view height (~1.6 m) from what it should frame.
+    const game::Vec3 centre{(target->origin.x + target->eye_origin.x) * 0.5F,
+                            (target->origin.y + target->eye_origin.y) * 0.5F,
+                            (target->origin.z + target->eye_origin.z) * 0.5F};
+    const game::Vec3 delta = centre - eye;
     const float length = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
     if (length <= 0.0F) {
       set_error(out, "heatmap: target " + std::to_string(view_target) + " is at the eye");

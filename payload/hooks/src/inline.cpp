@@ -407,12 +407,18 @@ auto InlineHook::install(void* target, void* detour) noexcept -> std::optional<I
     free_executable(trampoline, trampoline_size);
     return InlineError::protect_failed;
   }
-  std::memcpy(code, patch, total);
-
+  // The trampoline is **published before the patch**: a detour that runs in the
+  // window between the patch and the publication would find `original() ==
+  // nullptr` and drop the call (the chams' draw hook returns without drawing
+  // when there is no trampoline, so a primitive drawn in that window would be
+  // silently lost). The trampoline is complete at this point, so publishing it
+  // early is safe; `installed_` still comes after the patch, so the hook cannot
+  // be uninstalled while it is being written.
   target_ = target;
   trampoline_ = trampoline;
   trampoline_size_ = trampoline_size;
   patched_size_ = total;
+  std::memcpy(code, patch, total);
   installed_ = true;
   return std::nullopt;
 }

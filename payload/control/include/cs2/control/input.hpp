@@ -205,11 +205,32 @@ class Input {
 
   // Hold / release buttons. `set_mask` bits are forced on every tick, `clear_mask`
   // bits forced off; a press removes the bit from the clear mask and vice versa.
+  //
+  // These are the **control channel's** buttons (`press`/`release`): they are
+  // applied to the command only in the `usercmd` backend, because the
+  // `console` backend drives the engine's own `+button` commands instead.
   void press(std::uint64_t bits) noexcept;
   void release(std::uint64_t bits) noexcept;
   void reset_buttons() noexcept;
   [[nodiscard]] std::uint64_t buttons_set() const noexcept { return set_mask_.load(); }
   [[nodiscard]] std::uint64_t buttons_clear() const noexcept { return clear_mask_.load(); }
+
+  // Hold / release a button on behalf of a **payload feature** (the triggerbot).
+  //
+  // A feature's button reaches the command in **every** backend: the features
+  // have no console equivalent, and the control channel's own `press` is
+  // backend-gated. The triggerbot used to press through the control channel's
+  // mask, so in the default `console` backend it decided to fire, counted the
+  // shot and answered `{"firing": true}` — while the gun stayed silent.
+  //
+  // The bits are only ever **set** on the command, never cleared, so a
+  // feature's release cannot take the player's own press of the same button
+  // away.
+  void press_feature(std::uint64_t bits) noexcept;
+  void release_feature(std::uint64_t bits) noexcept;
+  [[nodiscard]] std::uint64_t feature_buttons() const noexcept {
+    return feature_mask_.load();
+  }
 
   // Auto-jump (**assist**): while the player is actually holding jump it answers
   // each landing with a sub-tick press placed at the engine's own recorded landing
@@ -650,6 +671,9 @@ class Input {
   std::atomic<std::uint64_t> calls5_{0};
   std::atomic<std::uint64_t> set_mask_{0};
   std::atomic<std::uint64_t> clear_mask_{0};
+  // The buttons the **payload features** hold (the triggerbot's attack). They
+  // are applied to the command in every backend — see `press_feature`.
+  std::atomic<std::uint64_t> feature_mask_{0};
   std::atomic<bool> bhop_{false};
   std::atomic<bool> predict_{false};
   std::atomic<bool> angles_enabled_{false};

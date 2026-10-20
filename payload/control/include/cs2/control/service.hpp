@@ -284,8 +284,10 @@ class Service {
   // block is versioned and full), so they travel through the control channel and
   // the environment, like the ragebot's own tuning.
   //
-  // The trigger never writes a view angle: it only pulls the trigger through the
-  // command backend (`Input::press`/`Input::release`).
+  // The trigger never writes a view angle: it only pulls the trigger through
+  // the **feature** button path (`Input::press_feature`), which reaches the
+  // command in every backend — the control channel's own `press` is applied
+  // only in the `usercmd` backend, and the trigger used to go through it.
   void set_trigger_features(const TriggerConfig& config) noexcept;
 
   // Run the ragebot for one state refresh. The overlay's per-frame sink calls this

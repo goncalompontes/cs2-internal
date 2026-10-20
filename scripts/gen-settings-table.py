@@ -63,9 +63,12 @@ HEADER_TEMPLATE = """#pragma once
 // the offsets depend on the packed layout, so they are generated rather than
 // hand-maintained.
 //
-// Regenerate with `python scripts/gen-settings-table.py`; the Meson build does
-// it on every build, and `scripts/gen-settings-table.py --check` fails when
-// the file on disk is out of date.
+// The file is **checked in** and both builds **verify** it: the Meson targets
+// run `scripts/gen-settings-table.py --check` and fail when the table is out
+// of date, so a stale table can never reach a build (a stale offset would
+// write a neighbouring field's bytes -- silent corruption, no error).
+//
+// Regenerate with `python scripts/gen-settings-table.py` and commit the result.
 
 #include <array>
 #include <cstddef>

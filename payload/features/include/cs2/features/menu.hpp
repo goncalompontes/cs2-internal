@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 
 #include "cs2/features/overlay.hpp"
 #include "cs2/features/settings.hpp"
@@ -51,11 +52,34 @@ class Menu {
 
   void shutdown() noexcept;
 
-  [[nodiscard]] const cs2::overlay::wire::Settings& settings() const noexcept {
-    return settings_;
-  }
-  [[nodiscard]] cs2::overlay::wire::Settings& settings() noexcept { return settings_; }
   [[nodiscard]] bool open() const noexcept { return open_; }
+
+  // --- The live settings block ------------------------------------------------
+  //
+  // The block has **two writers**: the menu's own widgets (the render thread)
+  // and the control channel's `settings` command (the control thread). Every
+  // access therefore goes through this class's lock: a plain 441-byte copy
+  // from two threads is a data race, and a whole-block replacement loses the
+  // changes the other thread made in between.
+  //
+  // There is deliberately **no** accessor that hands out a reference to the
+  // block: a reference cannot be handed out while another thread may write it.
+
+  // A copy of the block as it stands.
+  [[nodiscard]] auto settings_snapshot() const noexcept -> cs2::overlay::wire::Settings;
+
+  // Merge the fields a control-side change carries into the live block, and
+  // return the block as it stands afterwards.
+  [[nodiscard]] auto merge_settings(const cs2::overlay::wire::SettingsPatch& patch) noexcept
+      -> cs2::overlay::wire::Settings;
+
+  // Replace the whole block (a configuration load or a reset: those *are* a
+  // replacement, not a merge).
+  void replace_settings(const cs2::overlay::wire::Settings& values) noexcept;
+
+  // The settings file's path (the payload publishes where the file lives; the
+  // menu shows it read-only).
+  void set_config_path(const char* path) noexcept;
 
  private:
   void set_open(bool open, void* hwnd) noexcept;
@@ -78,6 +102,10 @@ class Menu {
 
   Overlay* overlay_;
   cs2::overlay::wire::Settings settings_ = default_wire_settings();
+  // The lock around `settings_`: the menu's widgets write it on the render
+  // thread and the control channel merges a change into it on the control
+  // thread.
+  mutable std::mutex settings_mutex_;
   SettingsSink settings_sink_ = nullptr;
   void* settings_sink_context_ = nullptr;
   void* window_ = nullptr;        // HWND

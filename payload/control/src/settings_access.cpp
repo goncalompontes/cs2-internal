@@ -186,6 +186,19 @@ auto write_field(wire::Settings& block, const SettingInfo& info, const Json& val
   return false;
 }
 
+// True when the field belongs to the **protocol** rather than to a feature.
+//
+// The one-shot config ops (the menu bumps the token, the payload acts on it
+// once) and the config file's path (the payload publishes it; the menu shows
+// it read-only) are the protocol's own. A `settings set` must not touch them:
+// a set of an op field would **trigger** the op, and a set of the path would
+// be reverted on the next frame — the client would see
+// `changed: ["menu_config_path"]` and the value would not stick.
+auto is_protocol_field(std::string_view name) noexcept -> bool {
+  return name == "menu_config_op" || name == "menu_config_token" || name == "menu_config_path" ||
+         name == "rage_config_op" || name == "rage_config_token";
+}
+
 }  // namespace
 
 auto run_settings(const Json& args, SettingsAccess& access)
@@ -221,6 +234,11 @@ auto run_settings(const Json& args, SettingsAccess& access)
       if (info == nullptr) {
         return std::unexpected(CommandError{"settings: unknown key \"" + name + "\""});
       }
+      if (is_protocol_field(name)) {
+        // The protocol's own fields are read-only: a set of an op field would
+        // trigger the op, and a set of the path would not stick.
+        return std::unexpected(CommandError{"settings: \"" + name + "\" is read-only"});
+      }
       writes.emplace_back(info, &value);
     }
   }
@@ -247,10 +265,26 @@ auto run_settings(const Json& args, SettingsAccess& access)
       changed.emplace_back(info->name);
     }
   }
-  if (!changed.empty()) {
-    // Only a real change is published: a set to the value the field already
-    // has leaves the owner's block alone.
-    access.write(updated);
+  if (set != nullptr) {
+    // The write is a **field-wise merge**: the owner applies the requested
+    // fields to its own block under its lock. A whole-block replacement would
+    // clobber the fields the owner changed between the read above and this
+    // write — a lost update — and copying the block between the two threads
+    // without a lock is a data race.
+    //
+    // Every **requested** field is written, not only the ones the `changed`
+    // list names: the block read above may already be stale (the owner may
+    // have changed the field since), and the client's intent has to win.
+    std::vector<std::size_t> offsets;
+    std::vector<std::size_t> sizes;
+    offsets.reserve(writes.size());
+    sizes.reserve(writes.size());
+    for (const auto& write : writes) {
+      offsets.push_back(write.first->offset);
+      sizes.push_back(write.first->size);
+    }
+    const wire::SettingsPatch patch{&updated, offsets.data(), sizes.data(), offsets.size()};
+    access.write(patch);
   }
 
   // The values the client asked for: the requested fields, the written
@@ -277,11 +311,8 @@ auto run_settings(const Json& args, SettingsAccess& access)
   return outcome;
 }
 
-auto BatchRunner::run(const Json& steps, int depth, Dispatch dispatch, void* context, Json& results)
+auto BatchRunner::run(const Json& steps, Dispatch dispatch, void* context, Json& results)
     -> std::expected<void, CommandError> {
-  if (depth > k_max_depth) {
-    return std::unexpected(CommandError{"batch: nested too deep"});
-  }
   if (!steps.is_array()) {
     return std::unexpected(CommandError{"batch requires a \"steps\" array"});
   }
@@ -299,8 +330,9 @@ auto BatchRunner::run(const Json& steps, int depth, Dispatch dispatch, void* con
     if (cmd == nullptr || !cmd->is_string()) {
       return std::unexpected(CommandError{"batch: every step needs a \"cmd\" string"});
     }
-    // The recursion guard: a step may not be a batch (the depth is bounded
-    // too, but a nested batch is rejected outright).
+    // The recursion guard: a step may not be a batch. There is **no nesting
+    // at all** — a nested batch is rejected outright, so there is no depth to
+    // bound.
     if (cmd->as_string() == "batch") {
       return std::unexpected(CommandError{"batch: a step must not be a batch"});
     }

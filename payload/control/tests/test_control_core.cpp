@@ -200,15 +200,25 @@ void test_event_ring() {
 struct FakeSettings {
   cs2::overlay::wire::Settings block{};
   int writes = 0;
+  // When it is not negative, the fake owner changes this field right after the
+  // read — the menu's widgets run on the render thread, so the owner can
+  // change its block between the control channel's read and its write.
+  float distance_after_read = -1.0F;
 };
 
 void fake_read(void* context, cs2::overlay::wire::Settings& out) {
-  out = static_cast<const FakeSettings*>(context)->block;
+  auto* fake = static_cast<FakeSettings*>(context);
+  out = fake->block;
+  if (fake->distance_after_read >= 0.0F) {
+    fake->block.movement_thirdperson_distance = fake->distance_after_read;
+  }
 }
 
-void fake_write(void* context, const cs2::overlay::wire::Settings& in) {
+// The owner merges the changed fields into its own block: a whole-block
+// replacement would clobber the changes the owner made in between.
+void fake_write(void* context, const cs2::overlay::wire::SettingsPatch& patch) {
   auto* fake = static_cast<FakeSettings*>(context);
-  fake->block = in;
+  cs2::overlay::wire::apply_settings_patch(fake->block, patch);
   fake->writes += 1;
 }
 
@@ -348,13 +358,16 @@ void test_settings_command() {
   assert(fake.writes == 0);
   assert(fake.block.box == 1);
 
-  // A set to the value the field already has is not a change, and nothing is
-  // published to the owner.
+  // A set to the value the field already has is not a change. The request is
+  // still routed to the owner (the write is a field-wise merge, so the owner's
+  // block keeps every field the request did not name), but the owner's block
+  // does not change and the `changed` list stays empty.
   const auto same = run_settings(*Json::parse(R"({"set": {"box": 1}})"), access);
   assert(same.has_value());
   assert(same->wrote);
   assert(same->changed.empty());
-  assert(fake.writes == 0);
+  assert(fake.writes == 1);
+  assert(fake.block.box == 1);
 
   // A real change is listed, and the owner holds the new value.
   const auto changed = run_settings(
@@ -363,7 +376,7 @@ void test_settings_command() {
   assert(changed->changed.size() == 2);
   assert(changed->changed[0] == "box");
   assert(changed->changed[1] == "esp_color_enemy");
-  assert(fake.writes == 1);
+  assert(fake.writes == 2);
   assert(fake.block.box == 0);
   assert(fake.block.esp_color_enemy[0] == 255);
   assert(fake.block.esp_color_enemy[1] == 0);
@@ -385,11 +398,35 @@ void test_settings_command() {
   assert(got->values.find("movement_thirdperson_distance")->as_number() == 64.0);
   assert(got->values.find("esp_color_enemy") == nullptr);
 
-  // A text field is truncated to the field's size and NUL-terminated.
+  // A text field is truncated to the field's size and NUL-terminated. The
+  // config path is the protocol's own (read-only, see below), so the text
+  // field here is the ragebot's per-weapon key.
   const auto text =
-      run_settings(*Json::parse(R"({"set": {"menu_config_path": "C:/tmp/cs2.cfg"}})"), access);
+      run_settings(*Json::parse(R"({"set": {"rage_weapon": "weapon_ak47"}})"), access);
   assert(text.has_value());
-  assert(std::string(fake.block.menu_config_path) == "C:/tmp/cs2.cfg");
+  assert(std::string(fake.block.rage_weapon) == "weapon_ak47");
+
+  // The protocol's own fields are read-only: a set of a one-shot op field
+  // would **trigger** the op, and a set of the config path would be reverted on
+  // the next frame (the payload publishes its own path every frame).
+  const int writes_before = fake.writes;
+  for (const char* field : {"menu_config_op", "menu_config_token", "menu_config_path",
+                            "rage_config_op", "rage_config_token"}) {
+    Json request = Json::object();
+    Json set = Json::object();
+    set.set(field, Json::integer(1));
+    request.set("set", std::move(set));
+    const auto op = run_settings(request, access);
+    assert(!op.has_value());
+    assert(op.error().message.find("read-only") != std::string::npos);
+  }
+  assert(fake.writes == writes_before);
+
+  // A get of a protocol field still works: the fields are read-only, not
+  // hidden.
+  const auto op_get = run_settings(*Json::parse(R"({"get": ["menu_config_path"]})"), access);
+  assert(op_get.has_value());
+  assert(op_get->values.find("menu_config_path") != nullptr);
 
   // With neither a get nor a set, every field is reported.
   const auto all = run_settings(*Json::parse("{}"), access);
@@ -397,13 +434,45 @@ void test_settings_command() {
   assert(all->values.members().size() == SETTING_TABLE.size());
   assert(all->values.find("esp_color_enemy") != nullptr);
   assert(all->values.find("menu_config_path") != nullptr);
-  assert(all->values.find("menu_config_path")->as_string() == "C:/tmp/cs2.cfg");
+  assert(all->values.find("menu_config_path")->as_string().empty());
 
   // A request that names nothing returns nothing: only a request with
   // neither a get nor a set returns every field.
   const auto empty_get = run_settings(*Json::parse(R"({"get": []})"), access);
   assert(empty_get.has_value());
   assert(empty_get->values.members().empty());
+}
+
+// The `settings` write is a **field-wise merge**, not a whole-block
+// replacement.
+//
+// The owner of the block (the overlay menu) writes it from its own thread, so
+// it can change a field between the control channel's read and its write. A
+// whole-block replacement would clobber that change — a lost update — and the
+// copy itself would be a data race (441 bytes of plain data, two writers).
+void test_the_settings_write_merges_the_fields() {
+  using cs2::control::Json;
+  using cs2::control::run_settings;
+  using cs2::control::SettingsAccess;
+
+  FakeSettings fake;
+  fake.block.box = 1;
+  fake.block.movement_thirdperson_distance = 64.0F;
+  // The owner changes the distance right after the control channel's read.
+  fake.distance_after_read = 128.0F;
+
+  SettingsAccess access;
+  access.set(&fake_read, &fake_write, &fake);
+
+  const auto outcome = run_settings(*Json::parse(R"({"set": {"box": 0}})"), access);
+  assert(outcome.has_value());
+  assert(outcome->changed.size() == 1);
+  assert(outcome->changed[0] == "box");
+  // The client's intent reached the owner ...
+  assert(fake.block.box == 0);
+  // ... and the change the owner made in between survived: a whole-block
+  // replacement would have put the stale 64 back.
+  assert(fake.block.movement_thirdperson_distance == 128.0F);
 }
 
 // The `batch` command: the failure isolation, the recursion guard and the
@@ -420,7 +489,7 @@ void test_batch_runner() {
   const auto ran = BatchRunner::run(
       *Json::parse(
           R"([{"cmd":"exec","args":{"line":"sv_cheats 1"}},{"cmd":"boom"},{"cmd":"ping"}])"),
-      1, &fake_dispatch, &fake, results);
+      &fake_dispatch, &fake, results);
   assert(ran.has_value());
   assert(fake.ran.size() == 3);
   assert(fake.ran[0] == "exec");
@@ -439,26 +508,22 @@ void test_batch_runner() {
   assert(third.find("cmd")->as_string() == "ping");
   assert(third.find("ok")->as_bool());
 
-  // The recursion guard: a step must not be a batch.
+  // The recursion guard: a step must not be a batch. There is **no nesting at
+  // all** — the guard is the step's name, not a depth counter.
   FakeDispatcher nested_fake;
   Json nested_results = Json::array();
-  const auto nested = BatchRunner::run(*Json::parse(R"([{"cmd":"batch","args":{"steps":[]}}])"), 1,
+  const auto nested = BatchRunner::run(*Json::parse(R"([{"cmd":"batch","args":{"steps":[]}}])"),
                                        &fake_dispatch, &nested_fake, nested_results);
   assert(!nested.has_value());
   assert(nested.error().message.find("must not be a batch") != std::string::npos);
   assert(nested_fake.ran.empty());
-
-  // The depth is bounded too.
-  const auto deep = BatchRunner::run(*Json::parse("[]"), BatchRunner::k_max_depth + 1,
-                                     &fake_dispatch, &fake, results);
-  assert(!deep.has_value());
 
   // More steps than the limit is an error, not a truncation.
   Json many = Json::array();
   for (std::size_t i = 0; i <= BatchRunner::k_max_steps; ++i) {
     many.push_back(Json::object());
   }
-  const auto too_many = BatchRunner::run(many, 1, &fake_dispatch, &fake, results);
+  const auto too_many = BatchRunner::run(many, &fake_dispatch, &fake, results);
   assert(!too_many.has_value());
   assert(too_many.error().message.find("too many steps") != std::string::npos);
 
@@ -466,9 +531,9 @@ void test_batch_runner() {
   FakeDispatcher malformed_fake;
   Json malformed_results = Json::array();
   const auto not_array =
-      BatchRunner::run(*Json::parse("{}"), 1, &fake_dispatch, &malformed_fake, malformed_results);
+      BatchRunner::run(*Json::parse("{}"), &fake_dispatch, &malformed_fake, malformed_results);
   assert(!not_array.has_value());
-  const auto no_cmd = BatchRunner::run(*Json::parse(R"([{"args":{}}])"), 1, &fake_dispatch,
+  const auto no_cmd = BatchRunner::run(*Json::parse(R"([{"args":{}}])"), &fake_dispatch,
                                        &malformed_fake, malformed_results);
   assert(!no_cmd.has_value());
   assert(malformed_fake.ran.empty());
@@ -507,6 +572,7 @@ auto main() -> int {
   test_event_ring();
   test_settings_table_matches_the_struct();
   test_settings_command();
+  test_the_settings_write_merges_the_fields();
   test_batch_runner();
   test_log_tail();
   std::puts("control-core: ok");

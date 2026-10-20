@@ -205,10 +205,19 @@ test('aim-penetration', aim_penetration_test)
 # would drift. `scripts/gen-settings-table.py` parses `wire.hpp` and writes the
 # table into the source tree (the same pattern as `scripts/gen-sdk.py`); it
 # fails loudly on a parse error rather than emitting an empty table.
+#
+# The table is **checked in** and the build **verifies** it: the target below
+# runs the generator in `--check` mode, so a table that no longer matches
+# `wire.hpp` fails the build instead of reaching a binary. (It used to rewrite
+# the file on every build, which made the `settings-table` test vacuous: the
+# test ran after the target had already regenerated the file, so it could never
+# fail -- and a **payload-only** build, which had no such target at all,
+# compiled against the stale table and wrote a neighbouring field's bytes.)
 gen_settings_table = find_program('scripts/gen-settings-table.py')
 settings_table = custom_target('settings-table',
   output : 'settings-table.stamp',
   command : [gen_settings_table,
+             '--check',
              meson.current_source_dir() / 'overlay' / 'include' / 'cs2' / 'overlay' / 'wire.hpp',
              meson.current_source_dir() / 'overlay' / 'include' / 'cs2' / 'overlay' / 'settings_table.hpp',
              '@OUTPUT@'],
@@ -221,8 +230,8 @@ settings_table_dep = declare_dependency(
 )
 
 # The table must never be stale: the check fails when the file on disk differs
-# from a fresh generation (the build above regenerates it, so this catches a
-# hand-edited table).
+# from a fresh generation. The build does not rewrite the file, so the file the
+# test compares against is the checked-in one.
 test('settings-table', gen_settings_table, args : ['--check'])
 
 # Control-channel core (ADR-0020): the platform-independent parts of
@@ -260,6 +269,35 @@ control_strafe_test = executable('control_strafe_test',
   ],
 )
 test('control-strafe', control_strafe_test)
+
+# The input backend's **button gate** and the ragebot's auto-stop counter-wish
+# (both pure functions in `cs2/control/strafe_geometry.hpp`). The gate is what
+# decides whether a feature's button reaches the command: the triggerbot used
+# to go through the control channel's backend-gated mask, so in the default
+# `console` backend it decided to fire and the gun stayed silent.
+control_input_test = executable('control_input_test',
+  files(
+    'payload/control/tests/test_control_input.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+  ],
+)
+test('control-input', control_input_test)
+
+# The settings **sink** (the payload's entry point) must hand the features the
+# clamped configuration: it used to read the wire fields directly, so a control
+# client's `settings set` could put an out-of-range value into the engine's
+# camera-distance field. The sink needs the game, so the check is a source
+# check.
+settings_sink_test = executable('settings_sink_test',
+  files(
+    'payload/tests/test_settings_sink.cpp',
+  ),
+)
+test('settings-sink', settings_sink_test,
+  args : [meson.current_source_dir()],
+)
 
 # The triggerbot's decision maths (the angle gate, the hitchance gate, the head
 # preference, the reaction delay and the "already firing" latch) — a pure

@@ -155,6 +155,66 @@ inline constexpr NamedButton k_named_buttons[] = {
   return 0;
 }
 
+// --- The backend's button gate ------------------------------------------------
+//
+// The control channel's `press`/`release` commands are a **backend choice**:
+// the `usercmd` backend writes the command's button mask itself, while the
+// `console` backend drives the engine's own `+button` commands — so in that
+// backend the command's mask must be left alone.
+//
+// The **payload features** are not a backend choice: the triggerbot, the
+// ragebot's fire and the movement assists are owned by the overlay menu
+// (ADR-0021), they have **no console equivalent**, and they must act whatever
+// the backend is.
+//
+// The triggerbot is the case that proves it. Its press used to travel through
+// the control channel's mask, which the `console` backend (the **default**)
+// never applies to the command: the trigger decided to fire, counted the shot
+// and answered `{"firing": true}` — and the gun stayed silent. The failure is
+// invisible to the operator, so the decision is pinned here, in one pure
+// function, where the host test can reach it (the live behaviour needs a
+// game).
+enum class ButtonPath {
+  control_command,  // a `press`/`release` control command
+  feature,          // a payload feature's own button (the triggerbot)
+};
+
+//: Whether a button held through `path` reaches the command's button mask.
+//
+// A **control command's** button reaches the command only in the `usercmd`
+// backend. A **feature's** button reaches it in **every** backend: the
+// features have no console equivalent, and the ragebot's own fire has always
+// been written that way.
+[[nodiscard]] inline constexpr auto button_reaches_command(ButtonPath path,
+                                                           bool usercmd_backend) noexcept -> bool {
+  switch (path) {
+    case ButtonPath::control_command:
+      return usercmd_backend;
+    case ButtonPath::feature:
+      break;
+  }
+  return true;
+}
+
+//: The command's button mask: the engine's own state, the control command's
+//: buttons and the features' buttons.
+//
+// The features' bits are only ever **set**, never cleared: a feature that
+// releases the attack button must not take the player's own press of the same
+// button away.
+[[nodiscard]] inline constexpr auto compose_button_mask(
+    std::uint64_t engine_mask, std::uint64_t control_set, std::uint64_t control_clear,
+    std::uint64_t feature_mask, bool usercmd_backend) noexcept -> std::uint64_t {
+  std::uint64_t value = engine_mask;
+  if (button_reaches_command(ButtonPath::control_command, usercmd_backend)) {
+    value = (value | control_set) & ~control_clear;
+  }
+  if (button_reaches_command(ButtonPath::feature, usercmd_backend)) {
+    value |= feature_mask;
+  }
+  return value;
+}
+
 // --- Constants ---------------------------------------------------------------
 
 //: Pi, for the degrees <-> radians conversions.
@@ -281,6 +341,63 @@ struct ViewBasis {
     bits |= button::k_moveright;
   }
   return bits;
+}
+
+// --- The ragebot's auto-stop --------------------------------------------------
+//
+// The auto-stop brakes the player: it writes the wish that **opposes** the
+// player's velocity (the "counter-wish") as the command's move axes.
+//
+// `rel_deg` is the counter-wish's bearing **from the aim**, counter-clockwise
+// positive. Two things the naive computation got wrong:
+//
+//   * the **sign** of the side axis. The counter-wish's component along the
+//     aim's **left** vector is `+sin(rel)`, and the engine's `leftmove` is
+//     positive to the **left**, so a counter-wish at +90 degrees needs
+//     `leftmove = +1` (the player strafes *left*, against their own rightward
+//     drift). The old code wrote `sign(-sin(rel))` — the exact negative — so
+//     the brake pushed the player the way they were **already** moving: the
+//     assist's whole purpose inverted, and the button bits (`IN_MOVERIGHT`
+//     instead of `IN_MOVELEFT`) with it;
+//   * the **forward** component at exactly 90 degrees. `cos(pi/2)` in float is
+//     `-4.37e-8`, and the sign of that is `-1`: the brake pushed the player
+//     **backwards** instead of sideways. A counter-strafe wants **lateral
+//     only**, so a component below the dead zone is dropped rather than
+//     signed.
+//
+// The side goes through the convention helper (`engine_side_axis_for_wish`),
+// so the value and the button bits (`engine_move_buttons`) cannot disagree.
+
+//: The dead zone of the counter-wish's components. A component whose magnitude
+//: is below it is dropped (0) instead of taking the sign of the rounding noise
+//: (`cos(90 degrees)` is `-4.37e-8` in float).
+inline constexpr float k_counter_wish_deadzone = 0.05F;
+
+//: The sign of a component, with a dead zone: 0 when the component is inside
+//: the dead zone.
+[[nodiscard]] inline auto signed_axis(float value, float epsilon) noexcept -> float {
+  if (value > epsilon) {
+    return 1.0F;
+  }
+  if (value < -epsilon) {
+    return -1.0F;
+  }
+  return 0.0F;
+}
+
+//: The ragebot's auto-stop: the move axes that brake the player.
+struct CounterWish {
+  float forward = 0.0F;  // the engine's forward axis
+  float side = 0.0F;     // the engine's side axis (positive to the player's left)
+};
+
+//: The counter-wish for a bearing `rel_deg` counter-clockwise from the aim.
+[[nodiscard]] inline auto counter_wish_for(float rel_deg) noexcept -> CounterWish {
+  CounterWish wish{};
+  const float rel = rel_deg * k_deg_to_rad;
+  wish.forward = signed_axis(std::cos(rel), k_counter_wish_deadzone);
+  wish.side = signed_axis(engine_side_axis_for_wish(rel_deg), k_counter_wish_deadzone);
+  return wish;
 }
 
 // --- The decision ------------------------------------------------------------

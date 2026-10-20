@@ -28,6 +28,7 @@ from .mcp import schema_for, validate_arguments
 from .protocol import (
     AimObjective,
     ButtonName,
+    CONSOLE_BUTTONS,
     ControlTransport,
     EventsResult,
     ExecResult,
@@ -41,6 +42,7 @@ from .protocol import (
     RageMode,
     StateSnapshotDict,
     TeamName,
+    UsercmdButtonName,
     WaitExpr,
     WaitResult,
 )
@@ -67,6 +69,7 @@ __all__ = [
     "TRANSITIONS",
     "AimObjective",
     "ButtonName",
+    "CONSOLE_BUTTONS",
     "Can",
     "Control",
     "ControlError",
@@ -91,6 +94,7 @@ __all__ = [
     "StateSnapshotDict",
     "TeamName",
     "Transition",
+    "UsercmdButtonName",
     "WaitExpr",
     "WaitResult",
     "add_bots",

@@ -62,6 +62,31 @@ sdk_dep = declare_dependency(
   sources : sdk_headers,
 )
 
+# --- The settings name table -------------------------------------------------
+# The control channel's `settings` command addresses a setting by its flat wire
+# field name, and the byte offset of a field is a property of the packed
+# layout. The table is generated (`scripts/gen-settings-table.py`) and checked
+# in; **both** builds verify it, so a table that no longer matches `wire.hpp`
+# fails the build instead of reaching the binary.
+#
+# The payload had no such target: a payload-only build compiled against the
+# checked-in table, so a `wire.hpp` change without a regenerated table wrote a
+# neighbouring field's bytes (silent corruption, no error, no log line).
+gen_settings_table = find_program(meson.current_source_dir() / '..' / 'scripts' / 'gen-settings-table.py')
+settings_table = custom_target('settings-table',
+  output : 'settings-table.stamp',
+  command : [gen_settings_table,
+             '--check',
+             meson.current_source_dir() / '..' / 'overlay' / 'include' / 'cs2' / 'overlay' / 'wire.hpp',
+             meson.current_source_dir() / '..' / 'overlay' / 'include' / 'cs2' / 'overlay' / 'settings_table.hpp',
+             '@OUTPUT@'],
+  build_always_stale : true,
+  console : true,
+)
+settings_table_dep = declare_dependency(
+  sources : settings_table,
+)
+
 if host_machine.system() != 'windows'
   message(
     'cs2-payload targets Windows. This configure produced no targets. ' +
@@ -87,5 +112,5 @@ else
     include_directories : loader_inc,
     link_with : loader_lib,
     dependencies : [sdk_dep, hooks_dep, game_dep, aim_dep, diag_dep, render_dep, features_dep,
-                    control_dep])
+                    control_dep, settings_table_dep])
 endif

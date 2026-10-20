@@ -339,6 +339,48 @@ inline void write_settings(Shared& shared, const Settings& in) noexcept {
   return false;
 }
 
+// --- The settings patch -------------------------------------------------------
+//
+// The settings block has **two writers**: the menu that owns it (the render
+// thread) and the control channel's `settings` command (the control thread).
+// A whole-block write between them is a data race (441 bytes of plain data
+// copied by two threads) and a **lost update**: the control channel reads the
+// block, changes a field and writes the whole block back, so every field the
+// menu changed in between is clobbered.
+//
+// The write is therefore **field-wise**: it carries the fields it changes, and
+// the owner merges them into its own block under its lock. The patch lives in
+// this header because it is the shared contract between the payload's modules
+// (the control channel, the menu) and the Vulkan layer's menu.
+struct SettingsPatch {
+  // The new values: a block whose patched fields hold the requested values.
+  const Settings* values = nullptr;
+  // The patched fields: their byte offset and their length in the packed
+  // block.
+  const std::size_t* offsets = nullptr;
+  const std::size_t* sizes = nullptr;
+  // How many fields the patch carries.
+  std::size_t count = 0;
+};
+
+// Apply `patch` to `block`: the patched fields take the patch's values, every
+// other field of the block is left alone.
+inline void apply_settings_patch(Settings& block, const SettingsPatch& patch) noexcept {
+  if (patch.values == nullptr || patch.offsets == nullptr || patch.sizes == nullptr) {
+    return;
+  }
+  auto* bytes = reinterpret_cast<unsigned char*>(&block);
+  const auto* source = reinterpret_cast<const unsigned char*>(patch.values);
+  for (std::size_t i = 0; i < patch.count; ++i) {
+    const std::size_t offset = patch.offsets[i];
+    const std::size_t size = patch.sizes[i];
+    if (offset + size > sizeof(Settings)) {
+      continue;  // a field outside the block: ignore it
+    }
+    std::memcpy(bytes + offset, source + offset, size);
+  }
+}
+
 // The shared defaults for the settings block.
 //
 // Both sides derive their defaults from this one function — the payload's

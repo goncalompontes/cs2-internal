@@ -110,7 +110,7 @@ parses it) — a stale client and a new payload can now disagree loudly.
 | `ping` | — | `{pong, pid, protocol, uptime_ms, exec_ready, events_ready, events_subscribed, events_dispatch_calls, input_ready, input_hooked, input_backend, state_ready}` — `protocol` is the command-surface version (currently **2**) |
 | `state` | — | snapshot: `valid`, `in_map`, `local_pawn`, `local{…}`, `players[…]`, `level{…}` (the level's rules proxy) and `rules{…}` (the `C_CSGameRules` block: `warmup`, `freeze`, `round_win_status`, the buy windows, the round phase) |
 | `exec` | `line` | `{queued}` (semicolon-separated console line) |
-| `events` | `limit`, `subscribe`, `since` | `{count, last_seq, subscribe{accepted, rejected}, events: [{name, seq, args}, …]}` — recent game events (oldest first); `subscribe` is a name or array of names to register on demand; `since` is a **cursor**: the events with `seq > since` are returned (the `limit` still caps how many of the newest are), and `last_seq` (the highest sequence the ring holds) is the client's next cursor |
+| `events` | `limit`, `subscribe`, `since` | `{count, last_seq, subscribe{accepted, rejected}, events: [{name, seq, args}, …]}` — recent game events (oldest first); `count` is the number of events in the answer, `last_seq` the highest sequence the ring holds (the client's next cursor); `subscribe` is a name or array of names to register on demand; `since` is a **cursor**: the events with `seq > since` are returned (the `limit` still caps how many of the newest are) |
 | `wait_for` | `expr`, `event`, `timeout_ms` | `{matched, snapshot}` |
 | `settings` | `get` (a name or an array of names), `set` (an object of name → value) | `{values: {…}}` — the **live** feature settings block; a `set` also returns `{changed: […]}` (only the keys whose value actually changed) |
 | `batch` | `steps` (an array of request objects) | `{results: [{cmd, ok, result\|error}, …]}` — the steps run in order, exactly as if they had been sent one at a time; a failing step is recorded and the batch continues |
@@ -175,9 +175,12 @@ block the overlay menu owns (ADR-0021), not a copy of it.
   `movement_thirdperson_distance`, `visuals_chams`, …), **not** the config
   file's `<section>.<field>` keys (`esp.box`). The table is generated from
   `overlay/include/cs2/overlay/wire.hpp` by `scripts/gen-settings-table.py`
-  into `overlay/include/cs2/overlay/settings_table.hpp`, so it cannot drift
-  from the struct (the host test `control-core` proves it: one entry per
-  field, the right offsets).
+  into `overlay/include/cs2/overlay/settings_table.hpp` and **checked in**:
+  both builds run the generator in `--check` mode, so a table that no longer
+  matches the struct fails the build instead of reaching a binary (a stale
+  offset would write a neighbouring field's bytes). The host test
+  `control-core` proves the table matches the struct it is compiled against:
+  one entry per field, the right offsets.
 - A **flag** (a one-byte field) takes `0`/`1` or `true`/`false`; the
   byte-valued settings that are not booleans (the box thickness, the mode
   selectors, the menu key code) take their own number in 0..255. A **number**

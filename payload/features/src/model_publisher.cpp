@@ -220,6 +220,30 @@ void ModelPublisher::publish_settings_block(const wire::Settings& settings) noex
 #endif
 }
 
+auto ModelPublisher::merge_settings_block(const wire::SettingsPatch& patch) noexcept
+    -> wire::Settings {
+#if defined(_WIN32)
+  auto* shared = static_cast<wire::Shared*>(shared_);
+  wire::Settings merged{};
+  if (shared == nullptr) {
+    return merged;
+  }
+  // The layer's menu owns the block in this mode: the control-side change is
+  // merged into the block as it stands, not written over it (the layer's own
+  // widgets would lose their edits). A torn read is refused — the block has
+  // two writers — and the merge is retried with the next request.
+  if (!wire::read_settings(*shared, merged)) {
+    return merged;
+  }
+  wire::apply_settings_patch(merged, patch);
+  protocol_.publish(*shared, merged);
+  return merged;
+#else
+  (void)patch;
+  return wire::Settings{};
+#endif
+}
+
 void ModelPublisher::apply_settings() noexcept {
   auto* shared = static_cast<wire::Shared*>(shared_);
   if (shared == nullptr) {
