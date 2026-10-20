@@ -710,11 +710,17 @@ def deduce(raw: StateSnapshotDict, events: Iterable[str] = (),
     """
     event_names = tuple(events)  # oldest -> newest (the payload's order)
 
-    if loading and not _level_settled_up(raw):
-        # A map load is in flight. The teardown clears the local state, so this
-        # is the only place where "the level is coming" is visible — without it
-        # the machine would read the main screen and issue *another* `map`
-        # command, restarting the load forever (observed 2026-10-15).
+    if loading and not _level_up(raw, event_names):
+        # A map load is in flight: the teardown cleared the local state, so the
+        # level reads as "not up" — the same as the main menu. Without this the
+        # machine would read the main screen and issue *another* `map` command,
+        # restarting the load forever (observed 2026-10-15).
+        #
+        # The *weak* level rule is the right one here: it flips back to "a level
+        # is up" as soon as the local player exists again, so the screen leaves
+        # LOADING exactly when the old code left NOT_IN_GAME — the team-select
+        # screen then covers the rest of the spawn, and the machine's settle
+        # check waits for the level to stop progressing.
         return GameState(Screen.LOADING, raw, event_names,
                          ("level load in flight",))
 
@@ -1272,7 +1278,14 @@ class Machine:
                     break
             elif state.screen is Screen.LOADING:
                 self._note("wait_load", state, "waiting for the level")
-                self._do_wait_load(timeout=remaining)
+                if not self._do_wait_load(timeout=min(load_budget, remaining)):
+                    # The load stalled for a whole budget: re-issue the map, the
+                    # same retry the machine does from the main screen (the
+                    # attempt window is refreshed while the load progresses, so
+                    # a slow load is never restarted).
+                    self._note("load_map", state, f"map {self.map_name} (the load stalled)")
+                    if not self._do_load_map(timeout=remaining, load_budget=load_budget):
+                        break
             elif state.screen is Screen.DISCONNECTED:
                 self._note("reconnect", state, "the client lost the server")
                 self._do_reconnect()

@@ -294,6 +294,21 @@ class TestMachineDrive(unittest.TestCase):
         self.assertIn("reconnect", game.execs)
         self.assertIs(state.screen, Screen.LIVE)
 
+    def test_the_machine_does_not_re_issue_the_map_during_a_load(self) -> None:
+        """Re-issuing ``map`` during a load restarts it (the 2026-10-15 livelock).
+
+        The load is the machine's own knowledge: while the screen is LOADING the
+        machine waits for the level — it does not read the main screen and ask
+        for another map.
+        """
+        machine, game = machine_for(Frame(blank()))
+        machine._loading = True
+        machine.observe()
+        self.assertIs(machine.state.screen, Screen.LOADING)
+        # The action of the LOADING screen waits; it never asks for a map.
+        machine._do_wait_load(timeout=0.2)
+        self.assertEqual(game.execs, [])
+
     def test_the_machine_reports_the_loading_screen_while_a_map_is_in_flight(self) -> None:
         """The machine knows it asked for a map — the payload does not say so."""
         machine, _ = machine_for(Frame(blank()))
