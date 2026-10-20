@@ -48,10 +48,10 @@ class Parser {
  private:
   static constexpr int k_max_depth = 64;
 
-  auto at_end() const noexcept -> bool {
+  [[nodiscard]] auto at_end() const noexcept -> bool {
     return pos_ >= text_.size();
   }
-  auto peek() const noexcept -> char {
+  [[nodiscard]] auto peek() const noexcept -> char {
     return at_end() ? '\0' : text_[pos_];
   }
 
