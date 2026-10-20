@@ -40,20 +40,29 @@ play/injection testing — it will land in session 0 and there will be no GPU.
 
 ## Where to resume (current work)
 
-**Start at [`docs/next-session-ragebot-research.md`](docs/next-session-ragebot-research.md).**
+**Start at [`NEXT_SESSION_WAVE2.md`](NEXT_SESSION_WAVE2.md) →
+[`docs/handoff-wave2.md`](docs/handoff-wave2.md).**
 
-The current, ordered handoff is the **follow-up section at the top of**
-[`docs/next-session-ragebot-research.md`](docs/next-session-ragebot-research.md). It
-supersedes the older ranked list in that file. Current state: the prepared-clipper,
-penetration-order, pitch-gradient, and per-hitbox cap fail-closed changes are uncommitted;
-the host suite passes 17/17. No live engine differential or saved-scene benchmark was run.
-Do not reset or discard the working tree; the handoff identifies the remaining exactness
-gaps. The REA blocker (the cache root) is **resolved** — see the RE tooling section.
+That is the 2026-10-21 handoff for the feature wave: where every artifact lives
+(the repo, the task worktrees, the neverlose reversal, the Linux box, the OpenCode
+config), what landed, what is open, and the **orchestration playbook** — a
+written spec per task, one git worktree per agent, an implementer sub-agent, an
+**adversarial** reviewer sub-agent that reads the same spec, a fix round, and a
+merge with the full verify loop. The mechanics of that loop are a plugin
+(`tools.orchestrate.plan` / `.review` / `.merge`), and every task spec, the
+shared brief, the reviewer's role and the review prompt template live in
+[`docs/orchestration/`](docs/orchestration/).
 
-The short orientation brief is [`docs/ragebot-research.md`](docs/ragebot-research.md); the
-three deep briefs (with measured benchmarks, primary-source citations, licence notes and
-the bugs they found in our code) are indexed at
-[`docs/research/README.md`](docs/research/README.md).
+**Do this first:** the operator reports that the movement (the auto-strafer or
+the bhop) **no longer accelerates**. `docs/handoff-wave2.md` §5.1 has a specific
+suspect — a default this wave changed, which moved the strafe onto a path the
+server gates off — and the two-minute measurement that settles it.
+
+**The earlier, ragebot-focused handoff is still in
+[`docs/next-session-ragebot-research.md`](docs/next-session-ragebot-research.md)**
+(it is the follow-up section at the top) and the deep briefs are indexed at
+[`docs/research/README.md`](docs/research/README.md). It describes the ragebot's
+remaining *exactness* gaps, which are a separate, deeper project from this wave.
 
 **Live measurement caveat:** a "before/after" is *not* comparable across a game restart —
 the bots respawn elsewhere, so the cell count changes and dominates the timings. Use the
