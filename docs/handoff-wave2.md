@@ -7,8 +7,9 @@
 > The one-line version: the wave landed (121 commits, 42 Meson tests, 389 Python
 > tests, mypy strict clean); the **reviews** caught four blockers and eleven
 > majors that would otherwise have shipped; the **chams** are refused because
-> their hook target is wrong; and **the auto-strafe no longer accelerates** —
-> there is a specific, testable suspect for that on this page.
+> their hook target is wrong; and the **auto-strafe's gate is now measured** — the
+> silent encoding works, but only on a server that honours the sub-tick view
+> angles, and the payload now says so instead of doing nothing quietly (§5.1).
 
 ---
 
@@ -129,51 +130,66 @@ the game's code), and the chams hook's **target address was wrong** (see §5).
 
 ## 5. Open items, in the order they should be picked up
 
-### 5.1 The auto-strafe no longer accelerates — **the suspect is known**
+### 5.1 The auto-strafe no longer accelerates — **RESOLVED (2026-10-20)**
 
 The operator reports that the movement (the auto-strafer or the bhop) no longer
-accelerates. **The most likely cause is a default this wave changed**, not a
-regression in the strafe's maths:
+accelerates. The suspect was this:
 
 > `wire::Settings::movement_strafe_subticks` was changed from **0 to 8**
 > (`d6fc5bc`), on the reasoning that 8 is the live-validated slice count
 > (+85.1 u/s per hop, `docs/handoff.md`).
 
-But **0 is the camera-frame analog path** and **8 is the sub-tick `yaw_delta`
-rotation path**, and the RE says the rotation path is **gated** by
-`sv_subtick_movement_view_angles`: *"the rotation ran but **did not move the
-velocity**, which is what landmine 11 predicts when the policy is off"*
-(`docs/re/strafing.md`, §"The two biggest suspects"). On a listen server that
-policy was **off**. So the default flip moved the strafe from the path that
-works to the path that is gated off — and it would silently stop accelerating.
+**Measured, the suspect is wrong and the proposed fix would have made it worse.**
+The live A/B (de_dust2 listen server, the `autostrafe` scenario, everything else
+identical) is in [`docs/re/strafing.md`](re/strafing.md) §"The gate":
 
-**How to settle it (do this first, it is cheap):**
+| arm | `subticks` | `sv_subtick_movement_view_angles` | max speed |
+|---|---|---|---|
+| the control (the strafe off) | – | 1 | 105.7 u/s |
+| the rotation encoding | 8 | **0** | 100.2 u/s |
+| the rotation encoding | 8 | **1** | **195.8 u/s** |
+| the camera-frame analog | 0 | 0 | 106.4 u/s |
+| the camera-frame analog | 0 | 1 | 109.0 u/s |
 
-```powershell
-# with the game in a bot match, from the repo root:
-python scripts/run-scenario.py autostrafe --set watch=6
-```
+Three things follow:
 
-The `autostrafe` scenario observes the menu-owned strafe and reports the gain and
-the eye drift. Run it with `movement_strafe_subticks` at **0** and at **8** and
-compare. Also try `sv_subtick_movement_view_angles 1` on the server.
+1. **The rotation encoding (`subticks = 8`) is the only one that accelerates** —
+   and only when the server honours the sub-tick view angles. With the policy off
+   the payload still writes every tick (744 writes, 54 of 55 airborne samples
+   acting) and the player does not accelerate: the wish is never applied.
+2. **The camera-frame analog (`subticks = 0`) accelerates nothing in either
+   configuration** — it is the control's own number. Defaulting back to 0 would
+   have swapped one inert path for another. **The default stays 8**, and the
+   golden settings checksum does not move.
+3. **The policy is on by default.** A freshly launched server (the convar never
+   touched) gives the working numbers: 107.4 u/s for the control, **184.5 u/s**
+   with the strafe on. The earlier "the policy is off on a listen server" note
+   describes a server that *something else* had set it to 0 on — the
+   `movement-probe` scenario sets it to 0 and only restores it in its `finally`,
+   so an interrupted run leaves it off for the rest of the session.
 
-**If the analog path is the one that gains**, the fix is to default
-`movement_strafe_subticks` back to **0** (and keep 8 as an opt-in), or to make
-the strafe **fall back** to the analog path when the rotation has demonstrably not
-steered the velocity. Both are one-line changes in
-`overlay/include/cs2/overlay/wire.hpp` **plus** the matching default in
-`payload/features/include/cs2/features/esp.hpp` — and the golden settings
-checksum must be **recomputed** (the `static_assert` fires in all three builds
-and prints the new value).
+**What landed (T16):**
 
-> The sign fix (T13) also changed the analog write — from `-sin(rel)` to
-> `+sin(rel)`, and the button bit from `IN_MOVERIGHT` to `IN_MOVELEFT`. That is
-> **correct** (confirmed live: holding A moves the player +20.1 units along the
-> engine's LEFT vector, `docs/re/strafe-sign.md` §5.0), and an air-strafe gains
-> speed in either direction — so it should not be the cause. Check it anyway by
-> running the same scenario with the pre-T13 binary, but the `subticks` default
-> is the stronger suspect.
+* the strafe **measures** the gate and reports it: `strafe_steered`,
+  `strafe_steered_ticks`, `strafe_ignored` (the counters) and `strafe_gain` (the
+  speed gained over the last airtime — the outcome) are in the `input` status and
+  on the overlay's **movement** HUD line;
+* the `autostrafe` scenario now says it outright: *"the server ignored the
+  rotation … sv_subtick_movement_view_angles is off on this server, so the silent
+  encoding cannot steer"*;
+* the movement scenarios' settings read was **fixed**: `scripts/scenario/settings.py`
+  parsed the shared segment's **version 4** layout (a 16-byte block at offset 24)
+  while the wire is now **version 13** (441 bytes at offset 28, with a checksum), so
+  every call raised *"segment version 13 != 4"* and the scenarios reported the
+  features as **off while the payload was acting** (748 strafe writes in a window
+  the scenario called "skipped"). The scenarios now read the **live** block
+  through the control channel, which cannot go stale.
+
+**What is left for the operator:** if their server ignores the sub-tick view
+angles, the silent auto-strafe cannot work there at all — no silent channel can
+express a wish relative to the velocity when the rotation is switched off. The
+payload now says so instead of doing nothing quietly. The non-silent alternative
+(the command's own view angles) would move the eye angles, so it is not a drop-in.
 
 ### 5.2 The chams: the hook target is wrong
 
@@ -361,12 +377,12 @@ the bots hold still), joins a team and adds the bots.
   `git worktree remove <path>` (and `git branch -d <branch>`) when you want the
   space back. **Do not `worktree remove --force` one that still has a junction
   inside it** — see §4.1.
-- The host suite is **42/42**, the Python suite **389**, mypy **0 errors**.
+- The host suite is **42/42**, the Python suite **387**, mypy **0 errors**.
 - The payload, the overlay and the injector all build.
 
 ## 8. The one thing to do first
 
-**Run the `autostrafe` scenario and settle whether the strafe still accelerates**
-(§5.1). It is a two-minute measurement, it has a strong suspect, and the fix is
-one line in each of two files plus a checksum recomputation. Everything else in
-this handoff is either done or a bigger project.
+**§5.1 is done** — the strafe's gate is measured, the default is right, and the
+payload reports the outcome and the gate (§5.1). What is left is the **chams'**
+hook target (§5.2), which needs the class's own vtable; everything else in this
+handoff is either done or a bigger project.

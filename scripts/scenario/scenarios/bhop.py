@@ -46,10 +46,12 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2") -> dict
         raise SessionError(f"usercmd backend not hooked: {status}")
 
     try:
-        menu = settings.read()
+        menu = settings.read(game)
     except settings.SettingsError as error:
-        print(f"[bhop] cannot read the menu settings: {error}", flush=True)
-        menu = None
+        # A block that could not be read is **not** "the feature is off" (the
+        # old reader failed this way and the scenario reported itself as
+        # skipped while the payload was acting).
+        raise SessionError(f"cannot read the live settings block: {error}") from error
     enabled = bool(menu and menu.bhop)
     print(f"[bhop] menu bhop={enabled} (settings block read-only)", flush=True)
     if not enabled:

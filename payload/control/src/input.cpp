@@ -500,17 +500,45 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   strafe_reason_.store(0);
   if (base == nullptr || !strafe_enabled_.load()) {
     strafe_side_last_.store(0);
+    // The feature is off: there is no airtime to measure and no sample to
+    // compare against. The gain is the **last airtime the feature acted in**,
+    // so it goes back to zero rather than reporting a stale one.
+    airtime_.abandon();
+    strafe_vel_yaw_valid_.store(false);
+    strafe_gain_.store(0.0F);
     return;
   }
   const int mode = strafe_mode_.load();
   if (mode == static_cast<int>(StrafeMode::off)) {
     strafe_reason_.store(8);  // the settings turned the feature off
     strafe_side_last_.store(0);
+    airtime_.abandon();
+    strafe_vel_yaw_valid_.store(false);
+    strafe_gain_.store(0.0F);
     return;
   }
   if (on_ground()) {
     strafe_reason_.store(1);  // grounded: leave the player's own input alone
     strafe_side_last_.store(0);
+    // The airtime just ended: the speed the player carried out of it is the
+    // feature's **outcome** — the gain the operator sees (the working encoding
+    // gains ~+85 u/s per hop; a server that ignores the sub-tick view angles
+    // gains nothing). The velocity is read here, in the hook, before the
+    // engine simulates this command's ground movement — so it is still the
+    // speed the player had in the air.
+    if (airtime_.airborne()) {
+      float gx = 0.0F;
+      float gy = 0.0F;
+      if (velocity(gx, gy)) {
+        const float landing_speed = std::sqrt(gx * gx + gy * gy);
+        strafe_gain_.store(airtime_.end(landing_speed));
+      } else {
+        airtime_.abandon();
+      }
+    }
+    // A new jump starts from a clean sample: the first airborne tick's turn is
+    // the effect of the *take-off* tick's write, and there was none.
+    strafe_vel_yaw_valid_.store(false);
     return;
   }
   float vx = 0.0F;
@@ -518,6 +546,7 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   if (!velocity(vx, vy)) {
     strafe_reason_.store(2);
     strafe_side_last_.store(0);
+    strafe_vel_yaw_valid_.store(false);  // no sample: the next turn is not comparable
     return;
   }
   const float speed = std::sqrt(vx * vx + vy * vy);
@@ -525,9 +554,19 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   if (speed < k_strafe_min_speed) {
     strafe_reason_.store(2);
     strafe_side_last_.store(0);
+    strafe_vel_yaw_valid_.store(false);  // no sample: the next turn is not comparable
     return;
   }
   strafe_airborne_.store(true);
+  // The take-off speed of this airtime: the gain is measured against it.
+  if (!airtime_.airborne()) {
+    airtime_.begin(speed);
+    // The counters describe **this** airtime: a later phase (a fall down a
+    // wall, where the wish cannot turn the velocity) must not poison the
+    // verdict of the airtime that worked.
+    strafe_steered_ticks_.store(0);
+    strafe_ignored_.store(0);
+  }
 
   auto* bytes_base = static_cast<std::uint8_t*>(base);
   auto* bytes_cmd = static_cast<std::uint8_t*>(cmd);
@@ -605,6 +644,35 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   strafe_wish_.store(wish_yaw);
   strafe_delta_.store(rot);
 
+  // The command's own number: **the hook runs more than once per command**
+  // (the engine builds the command more than once, and the payload's own
+  // `strafe_steps_present` exists because of it). The velocity reading is the
+  // same on every one of those runs, so a turn measured between two of them
+  // reads as zero — and a zero turn is exactly what a **gated** rotation looks
+  // like. The verdict is therefore made **once per command**, on the run whose
+  // command number changed (the same signal the bhop's phase correction uses).
+  const auto command_number = cmd != nullptr
+                                  ? *reinterpret_cast<const std::uint32_t*>(
+                                        static_cast<std::uint8_t*>(cmd) + k_cmd_number_offset)
+                                  : 0U;
+  const bool fresh_command = command_number != strafe_cmd_number_;
+  strafe_cmd_number_ = command_number;
+
+  // **Did the engine apply the rotation?** The turn of the velocity heading
+  // between this tick's read and the previous one is the effect of the
+  // rotation written in between: the engine turns the velocity toward the
+  // wish when it honours the sub-tick view angles, and it does not turn it at
+  // all when the server ignores them (`sv_subtick_movement_view_angles 0` —
+  // `docs/re/strafing.md` §"The gate"). The sample is the one the **previous**
+  // tick left behind, together with the side it pushed the wish on, so a side
+  // that flipped in between is judged against the side that was actually
+  // written.
+  //
+  // The verdict is made **after** the write (below), and only when the write
+  // succeeded: a tick that asked for a rotation and did not write one (no
+  // room in the sub-tick array) asked for nothing, and judging it would
+  // count an "ignored" rotation the payload never sent.
+
   // The per-slice basis rotations for the sub-tick mode. The engine **accumulates**
   // each step's `yaw_delta` onto the basis, so splitting the whole rotation evenly
   // ramps the wish and only the last slice lands on `theta*` (≈ 1/N of the gain).
@@ -672,9 +740,56 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   if (write_strafe_wish(bytes_base, bytes_cmd, forward, left, deltas, steps)) {
     strafe_reason_.store(4);
     strafe_writes_.fetch_add(1);
+    // The wish was written: the next command's turn of the velocity heading is
+    // the effect of **this** write, so this is where the sample is taken and
+    // the verdict is made — once per command (see `fresh_command` above). The
+    // rotation recorded with the sample is the one that was **written**
+    // (`strafe_rot_`, after the gate's clamp), not the one that was asked for:
+    // in the camera-frame analog encoding there is no rotation at all, and the
+    // verdict is then simply unknown — the gate does not apply there.
+    if (fresh_command) {
+      strafe_judge_steer(vel_yaw, decision.side, strafe_rot_.load());
+    }
   } else if (strafe_reason_.load() == 0) {
     strafe_reason_.store(5);  // the sub-tick array had no room
   }
+}
+
+// The steering verdict (the gate): did the engine turn the velocity toward the
+// wish the payload asked for?
+//
+// The sample is the heading the **previous** writing tick read, together with
+// the side that tick pushed the wish on: the turn between them is the effect
+// of that write, and a side that flipped in between is judged against the side
+// that was actually written. With no earlier sample there is nothing to
+// compare (the first airborne tick), so the tick is only recorded.
+void Input::strafe_judge_steer(float vel_yaw, int side, float written_rotation) noexcept {
+  if (strafe_vel_yaw_valid_.load()) {
+    const float turn = steer_turn(strafe_vel_yaw_last_.load(), vel_yaw);
+    strafe_turn_.store(turn);
+    // The verdict is made on the rotation the **previous** tick wrote (the one
+    // whose effect this turn measures) and the side it pushed the wish on: the
+    // current tick's request has not been written yet, and the rotation that
+    // was written may have been clamped by the gate's limit.
+    switch (classify_steer(strafe_vel_yaw_last_.load(), vel_yaw,
+                           strafe_side_sample_.load(),
+                           strafe_rot_sample_.load())) {
+      case SteerVerdict::followed:
+        strafe_steered_ticks_.fetch_add(1);
+        strafe_steered_.store(true);
+        break;
+      case SteerVerdict::ignored:
+        strafe_ignored_.fetch_add(1);
+        strafe_steered_.store(false);
+        break;
+      case SteerVerdict::unknown:
+        break;
+    }
+  }
+  strafe_vel_yaw_last_.store(vel_yaw);
+  strafe_side_sample_.store(side);
+  strafe_rot_sample_.store(written_rotation);
+  strafe_vel_yaw_valid_.store(true);
 }
 
 // True when the command's `subtick_moves` already holds a yaw-only step (button 0,

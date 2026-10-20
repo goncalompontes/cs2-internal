@@ -744,9 +744,10 @@ regardless of the control backend and gates only the explicit `press`/`move`/
    strip the movement bits out of every command (silently removing *all* movement —
    a scenario that ended with `move(forward=0, side=0)` left the operator unable to
    move). It now only overrides the bits when the wish is non-zero; `move(clear=True)`
-   turns the override off. Also note the **overlay menu owns the settings block** (the
-   layer re-writes it every frame), so a Python `settings.write()` can be clobbered —
-   toggle the features in the menu when a write "does not stick".
+   turns the override off. Also note the **overlay menu owns the settings block**
+   (ADR-0021): a scenario that drives it now goes through the **control channel**
+   (`settings_set`), which writes *through the owner* and merges field-wise — so it
+   cannot be clobbered the way a direct write to the shared segment could.
 1. **Bhop — validated live** (2026-10-15: `python scripts/run-scenario.py bhop`,
    de_dust2 bot match, operator-confirmed): hops, `bhop_writes`/`bhop_presses`
    climb, and placement **A fires** (`bhop_a`), i.e. the phase
@@ -771,10 +772,15 @@ regardless of the control backend and gates only the explicit `press`/`move`/
    - `strafe(subtick=0)` (camera-frame analog): nearly flat — the `{-1,0,1}` snap
      loses the exact perpendicular angle, so the rotation channel is the one to use.
    The `strafe` control command, the `wire::Settings.auto_strafe` byte and the menu
-   toggle are wired back in; the `autostrafe` scenario observes it. Drive the settings
-   block (`scripts/scenario/settings.py`) for a test — the menu owns the feature and
-   reverts a control-side enable on the next published frame. RE:
-   `docs/re/strafing.md`.
+   toggle are wired back in; the `autostrafe` scenario observes it. Drive the
+   settings block for a test with the **control channel** (`settings_set`, or
+   `scripts/scenario/settings.py`'s `write(game, …)`): it writes *through the
+   block's owner* and merges field-wise, so the menu cannot clobber it. RE:
+   `docs/re/strafing.md` — and read its **§"The gate"** (2026-10-20): the rotation
+   only accelerates the player when the server honours the sub-tick view angles,
+   the camera-frame analog accelerates nothing at all, and the payload now reports
+   both the outcome (`strafe_gain`) and the gate (`strafe_steered` /
+   `strafe_ignored`).
 3. Re-check the bhop's `bhop_b` share (B is the beta catch-up; a high share means
    the phase slips) and consider the optional fresh-frame hull-trace guess.
 

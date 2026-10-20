@@ -53,10 +53,13 @@ merge with the full verify loop. The mechanics of that loop are a plugin
 shared brief, the reviewer's role and the review prompt template live in
 [`docs/orchestration/`](docs/orchestration/).
 
-**Do this first:** the operator reports that the movement (the auto-strafer or
-the bhop) **no longer accelerates**. `docs/handoff-wave2.md` §5.1 has a specific
-suspect — a default this wave changed, which moved the strafe onto a path the
-server gates off — and the two-minute measurement that settles it.
+**Do this first:** the operator reported that the movement (the auto-strafer or
+the bhop) **no longer accelerates**. That is **settled** (`docs/handoff-wave2.md`
+§5.1, `docs/re/strafing.md` §"The gate"): the silent encoding is the only one
+that gains speed, it works out of the box (the server honours the sub-tick view
+angles by default), and the payload now **reports** the outcome (`strafe_gain`)
+and the gate (`strafe_steered` / `strafe_ignored`) instead of doing nothing
+quietly. The next open item is the **chams' hook target** (§5.2).
 
 **The earlier, ragebot-focused handoff is still in
 [`docs/next-session-ragebot-research.md`](docs/next-session-ragebot-research.md)**

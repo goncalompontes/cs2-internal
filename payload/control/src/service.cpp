@@ -776,6 +776,17 @@ auto Service::input_status() noexcept -> Json {
   result.set("strafe_deadzone_deg", Json::number(input_.strafe_deadzone_deg()));
   result.set("strafe_writes", Json::number(static_cast<double>(input_.strafe_writes())));
   result.set("strafe_raw_writes", Json::number(static_cast<double>(input_.strafe_raw_writes())));
+  // The **outcome** and the **gate verdict**: the speed gained over the last
+  // airtime (the number the operator asked for: "does it accelerate?") and
+  // whether the engine applied the basis rotation (it does not when the server
+  // ignores the sub-tick view angles — `docs/re/strafing.md` §"The gate").
+  result.set("strafe_gain", Json::number(input_.strafe_gain()));
+  result.set("strafe_steered", Json::boolean(input_.strafe_steered()));
+  result.set("strafe_steered_ticks",
+             Json::number(static_cast<double>(input_.strafe_steered_ticks())));
+  result.set("strafe_ignored",
+             Json::number(static_cast<double>(input_.strafe_ignored())));
+  result.set("strafe_turn", Json::number(input_.strafe_turn()));
   result.set("bhop_presses", Json::number(static_cast<double>(input_.bhop_presses())));
   result.set("bhop_writes", Json::number(static_cast<double>(input_.bhop_writes())));
   result.set("bhop_landed_tick", Json::number(static_cast<double>(input_.bhop_landed_tick())));
@@ -2174,6 +2185,44 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
 }
 
 // --- The ESP's out-of-module data providers --------------------------------
+
+auto Service::movement_status(char* out, std::size_t size) const noexcept -> bool {
+  if (out == nullptr || size == 0) {
+    return false;
+  }
+  const bool strafe = input_.strafe();
+  const bool bhop = input_.bhop();
+  if (!strafe && !bhop) {
+    return false;
+  }
+  // The two numbers that answer "does the movement accelerate?": the **gain**
+  // of the last airtime (u/s; the working encoding gains ~+85) and whether the
+  // engine applied the basis rotation. The second is the **gate**: a server
+  // that ignores the sub-tick view angles makes the silent encoding inert, and
+  // the operator has to see that instead of guessing
+  // (`docs/re/strafing.md` §"The gate").
+  const int subticks = input_.strafe_subticks();
+  // The steering verdict, with the three states it really has: the engine
+  // applied the rotation ("yes"), it ignored it ("no (ignored)"), or nothing
+  // has been judged yet ("?" — the player has not been airborne). The verdict
+  // is the **ratio** of the counters, not the last judged tick: one noisy tick
+  // (a wall, a landing) flips the last verdict, and the counters do not. The
+  // counters cover the **current airtime** — a later phase (a fall down a
+  // wall) must not poison the verdict of the airtime that worked.
+  const std::uint64_t followed = input_.strafe_steered_ticks();
+  const std::uint64_t ignored = input_.strafe_ignored();
+  const std::uint64_t judged = followed + ignored;
+  const char* steering = judged == 0 ? "?" : (ignored * 2 > judged ? "no" : "yes");
+  const char* ignored_note = (judged != 0 && ignored * 2 > judged) ? " (ignored)" : "";
+  std::snprintf(out, size,
+                "strafe %s (%d slice%s, gain %+.0f u/s, steering %s%s, turn "
+                "%+.1f deg) bhop %s (presses %llu)",
+                strafe ? "on" : "off", subticks, subticks == 1 ? "" : "s",
+                input_.strafe_gain(), steering, ignored_note,
+                input_.strafe_turn(), bhop ? "on" : "off",
+                static_cast<unsigned long long>(input_.bhop_presses()));
+  return true;
+}
 
 void Service::ensure_sound_subscription() noexcept {
   if (sound_subscribed_.load(std::memory_order_relaxed)) {

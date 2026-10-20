@@ -46,9 +46,10 @@ def run(game: Game, *, bhop_seconds: float = BHOP_SECONDS,
     # mask (the player's own held input) and reports what the menu's setting does —
     # it does not toggle the feature itself.
     try:
-        bhop_enabled = settings.read().bhop
-    except settings.SettingsError:
-        bhop_enabled = False
+        bhop_enabled = settings.read(game).bhop
+    except settings.SettingsError as error:
+        # A block that could not be read is **not** "the feature is off".
+        raise SessionError(f"cannot read the live settings block: {error}") from error
     presses_before = (game.input().get("bhop_presses") or 0)
     game.buttons(press=["jump"])  # "holding space"
     landings = 0

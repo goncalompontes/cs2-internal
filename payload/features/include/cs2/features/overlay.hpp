@@ -75,6 +75,18 @@ class Overlay {
     rage_status_context_ = context;
   }
 
+  // A provider for the **movement features'** one-line status (the auto-strafe
+  // and the bhop), added to the HUD when it returns true. It carries the two
+  // numbers that answer "does the movement accelerate?": the gain of the last
+  // airtime and whether the engine applied the strafe's basis rotation (the
+  // sub-tick view-angle gate — `docs/re/strafing.md` §"The gate").
+  using MovementStatusProvider = bool (*)(void* context, char* out, std::size_t size);
+  void set_movement_status_provider(MovementStatusProvider provider,
+                                   void* context) noexcept {
+    movement_status_provider_ = provider;
+    movement_status_context_ = context;
+  }
+
   // A provider for a pawn's **real studio hitboxes** (world capsules), so the
   // overlay can draw them. Returns the number written (<= `max`).
   //
@@ -125,6 +137,8 @@ class Overlay {
   void* snapshot_context_ = nullptr;
   RageStatusProvider rage_status_provider_ = nullptr;
   void* rage_status_context_ = nullptr;
+  MovementStatusProvider movement_status_provider_ = nullptr;
+  void* movement_status_context_ = nullptr;
   HitboxProvider hitbox_provider_ = nullptr;
   void* hitbox_context_ = nullptr;
   RageTargetProvider rage_target_provider_ = nullptr;

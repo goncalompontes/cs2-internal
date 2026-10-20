@@ -465,6 +465,12 @@ auto on_rage_status(void* context, char* out, std::size_t size) noexcept -> bool
   return static_cast<Runtime*>(context)->control.rage_status(out, size);
 }
 
+// The overlay HUD asks for the movement features' one-line status (the
+// auto-strafe's gain and the sub-tick view-angle gate verdict).
+auto on_movement_status(void* context, char* out, std::size_t size) noexcept -> bool {
+  return static_cast<Runtime*>(context)->control.movement_status(out, size);
+}
+
 // The overlay's hitbox visualiser asks the payload for a pawn's real studio
 // hitbox capsules (`docs/re/aim.md`).
 auto on_hitboxes(void* context, std::uintptr_t pawn, cs2::game::HitboxCapsule* out,
@@ -602,6 +608,8 @@ DWORD WINAPI install_thread(void*) {
     cs2::payload::runtime().overlay.set_snapshot_sink(&on_snapshot, &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_rage_status_provider(&on_rage_status,
                                                              &cs2::payload::runtime());
+    cs2::payload::runtime().overlay.set_movement_status_provider(&on_movement_status,
+                                                                 &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_hitbox_provider(&on_hitboxes, &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_rage_target_provider(&on_rage_target,
                                                              &cs2::payload::runtime());

@@ -476,6 +476,20 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
       model_.hud.sections.push_back(std::move(section));
     }
   }
+  // The movement features (the auto-strafe and the bhop): the gain of the last
+  // airtime and whether the engine applied the strafe's basis rotation. The
+  // second is the **gate** — a server that ignores the sub-tick view angles
+  // makes the silent encoding inert, and the operator has to see it
+  // (`docs/re/strafing.md` §"The gate").
+  if (movement_status_provider_ != nullptr) {
+    char status[160] = {};
+    if (movement_status_provider_(movement_status_context_, status, sizeof(status))) {
+      render::HudSection section;
+      section.title = "movement";
+      section.lines.push_back(render::HudLine{.label = "state", .value = status});
+      model_.hud.sections.push_back(std::move(section));
+    }
+  }
 
   // ESP (screen-space draw list).
   const game::Matrix4x4 view = reader_->view_matrix(0);
