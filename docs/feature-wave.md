@@ -16,7 +16,7 @@
 | "Directional autostrafe: WASD dictates the wish direction" | The **WASD intent becomes the travel heading**; the wish is still the `AirAccelerate` optimum, pushed perpendicular to the velocity **on the side of that heading**. A/D no longer switches the feature off (it biases the heading); the legacy behaviour stays available behind a setting. |
 | Chams | **True 3D material chams** (a scene/material hook in `client.dll` + `materialsystem2.dll`), not an overlay approximation. |
 | Third person | **Force the game's camera** into third person (the `CViewRender` view struct), not merely "make the cheat work in 3rd person". |
-| Neverlose | The Linux machine with `/var/tmp/rea-work` will be made available; the reversal work continues against it. |
+| Neverlose | The Linux machine was reached over Tailscale SSH and the reversal artifacts were **pulled to this machine**; the mining report is in `docs/research/neverlose-mining.md`. |
 
 ## 1. The tasks
 
@@ -62,7 +62,7 @@ in the loop.
   types. S1 is independent of all three and runs alongside them.
 - **S6 last**: the typing gate must judge the *final* code, not a moving
   target.
-- The **neverlose** mining (T7) is still blocked on the machine.
+- The **neverlose** mining (T7) is **done** - the report is in `docs/research/neverlose-mining.md` and the artifacts are local (`C:\Users\gpmpo\nea\rea-work\`, including the reconstructed loadable PE, so the analysis no longer needs the Linux box).
 
 
 ### Why the tasks are ordered this way
@@ -275,8 +275,8 @@ would be its own task with its own spec and review.
 
 | # | Feature | Why it fits here | Effort |
 |---|---|---|---|
-| 1 | **Triggerbot** — fires when the crosshair is over a target at a computed hit chance, with a delay/FOV/reaction-time model | The ragebot already computes a per-cell hit probability (`payload/aim`'s damage field). A trigger is the *safe* half of the same machinery: no angle is written, so it cannot break the shot model. It reuses the solver rather than duplicating it. | med |
-| 2 | **Anti-aim (fake-lag / desync / jitter)** — the movement side | Purely `CUserCmd` work, in the same module as the strafe and the bhop (`payload/control`). High value, self-contained, and it exercises the *silent* angle channel the repo already has. The Neverlose image has a fake-lag cluster (`NEXT_SESSION_PROMPT.md` §7.4) to compare against. | med |
+| 1 | **Triggerbot** — fires when the crosshair is over a target at a computed hit chance, with a delay/FOV/reaction-time model | The ragebot already computes a per-cell hit probability (`payload/aim`'s damage field). A trigger is the *safe* half of the same machinery: no angle is written, so it cannot break the shot model. It reuses `aim::solve` rather than duplicating it — and the expensive solve is gated behind cheap preconditions, because the ragebot's solve is measured at ~5 ms of the tick at the best spot. | med |
+| 2 | **Anti-aim (fake-lag / desync / jitter)** — the movement side | Purely `CUserCmd` work, in the same module as the strafe and the bhop (`payload/control`). The repo already has both halves of the desync primitive: the **silent** `input_history` angles (what the client renders) and the **command's** own `viewangles` (what the server sees). High value, self-contained. The Neverlose reversal has a fake-lag cluster (`NEXT_SESSION_PROMPT.md` §7.4) to compare against. | med |
 | 3 | **Hit log / damage indicators** — a killfeed with the hitbox hit, the damage and the distance | The payload already captures `player_hurt`, `player_death` and `weapon_fire` **with their arguments** (`payload/control/src/events.cpp`). This is nearly free and gives the operator the feedback loop the ragebot work is missing. | low |
 | 4 | **Movement QoL** — auto-crouch in combat, ledge auto-jump, silent jump, ground auto-strafe, auto-backstab | All in `payload/control`, all reusing the existing movement model and the `on_ground` / velocity reads. Each is a small, independently testable feature. | low-med |
 | 5 | **World-ESP completion** — smoke's *active* radius, molotov fire area, flashbang/HE blast radius, grenade trajectory preview | T4 adds the grenade/C4/weapon markers; the *volumes* (what the smoke actually blocks, where the molotov will burn) are the part that is actually useful in a round, and they need the projectile's radius and velocity. | med |
