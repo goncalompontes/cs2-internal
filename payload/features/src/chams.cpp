@@ -144,13 +144,25 @@ void Chams::configure(const Config::Visuals& visuals) noexcept {
   include_local_.store(visuals.chams_local, std::memory_order_relaxed);
   visible_only_.store(visuals.chams_visible, std::memory_order_relaxed);
   mode_.store(visuals.chams_mode, std::memory_order_relaxed);
-  // The colour is *not* applied yet: the material system's "set a parameter
-  // by its hashed name" entry point is unknown (only the getter was located),
-  // and the colour parameter's name is not in any module — it lives in the
-  // .vmat data. The flat material therefore keeps its own colour. The hash
-  // and the parameter lookup are in `cs2::game` (`material_parameter_hash`),
-  // ready for the setter.
-  (void)visuals.chams_color;
+
+  // The colour: the material system's parameter setter writes it into the
+  // chams material. The decision is a pure function (`game::colour_action`),
+  // so the same rule covers the colour changing, the chams being switched off
+  // and the material not being ready yet.
+  const bool changed = visuals.chams_color != colour_;
+  colour_ = visuals.chams_color;
+  const game::Material material = material_.load(std::memory_order_relaxed);
+  const bool tintable = material != 0 && !colour_failed_;
+  switch (game::colour_action(visuals.chams, tintable, colour_applied_, changed)) {
+    case game::ColourAction::apply:
+      apply_colour();
+      break;
+    case game::ColourAction::restore:
+      restore_colour();
+      break;
+    case game::ColourAction::none:
+      break;
+  }
 }
 
 void Chams::update(const game::Snapshot& snapshot) noexcept {
@@ -192,12 +204,21 @@ void Chams::update(const game::Snapshot& snapshot) noexcept {
   // once published, so the render thread can use it without a lock.
   const ChamsMode mode = mode_.load(std::memory_order_relaxed);
   if (!material_resolved_ || mode != resolved_mode_) {
+    // The material is swapped: the old one gets its own colour back before
+    // the new one is tinted.
+    restore_colour();
     resolved_mode_ = mode;
     material_resolved_ = true;
-    const game::Material resolved = resolve_material(mode);
+    game::MaterialHandle handle = 0;
+    const game::Material resolved = resolve_material(mode, handle);
+    handle_ = handle;
     material_.store(resolved, std::memory_order_relaxed);
     if (resolved == 0) {
       game::append_log("[cs2-features] chams: the material could not be resolved");
+    } else if (enabled_.load(std::memory_order_relaxed)) {
+      // The colour can only be written once the material is known.
+      colour_failed_ = false;
+      apply_colour();
     }
   }
 
@@ -357,14 +378,62 @@ auto Chams::install() noexcept -> bool {
   return true;
 }
 
-auto Chams::resolve_material(ChamsMode mode) noexcept -> game::Material {
+auto Chams::resolve_material(ChamsMode mode, game::MaterialHandle& handle) noexcept
+    -> game::Material {
+  handle = 0;
   if (!materials_.valid()) {
     materials_ = game::MaterialSystem::attach();
   }
   if (!materials_.valid()) {
     return 0;
   }
-  return materials_.find_material(material_path(mode));
+  return materials_.find_material(material_path(mode), handle);
+}
+
+void Chams::apply_colour() noexcept {
+  const game::Material material = material_.load(std::memory_order_relaxed);
+  if (material == 0 || handle_ == 0) {
+    return;
+  }
+  const float rgba[4] = {
+      static_cast<float>(colour_.r) / 255.0f,
+      static_cast<float>(colour_.g) / 255.0f,
+      static_cast<float>(colour_.b) / 255.0f,
+      static_cast<float>(colour_.a) / 255.0f,
+  };
+  float original[4]{};
+  const game::ColourResult result = materials_.set_colour(handle_, material, rgba, original);
+  if (result == game::ColourResult::applied) {
+    if (!colour_applied_) {
+      // The first write: the material's own colour is what has to be put
+      // back when the chams go off.
+      for (std::size_t index = 0; index < 4; ++index) {
+        original_colour_[index] = original[index];
+      }
+    }
+    colour_applied_ = true;
+    colour_failed_ = false;
+    return;
+  }
+  if (result == game::ColourResult::no_parameter) {
+    // The material has no colour parameter the payload knows: the chams keep
+    // drawing with the material's own colour, and the payload stops asking.
+    colour_failed_ = true;
+    game::append_log(
+        "[cs2-features] chams: the material has no colour parameter; "
+        "the chams keep the material's own colour");
+  }
+}
+
+void Chams::restore_colour() noexcept {
+  if (!colour_applied_) {
+    return;
+  }
+  const game::Material material = material_.load(std::memory_order_relaxed);
+  if (material != 0 && handle_ != 0) {
+    (void)materials_.restore_colour(handle_, material, original_colour_);
+  }
+  colour_applied_ = false;
 }
 
 auto Chams::is_visible(std::uintptr_t entity) const noexcept -> bool {

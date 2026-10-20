@@ -1,5 +1,5 @@
-// Unit tests for the material system's parameter-name hash and for the chams'
-// "is this entity one of ours" decision.
+// Unit tests for the material system's parameter-name hash, for the chams'
+// "is this entity one of ours" decision and for the chams' colour decision.
 //
 // **The hash** is the engine's own (recovered from materialsystem2.dll
 // `FUN_180007f20`): MurmurHash2 over the case-folded name, seed
@@ -10,10 +10,20 @@
 // "PlayerVisibilityDataColor" — both of which are the hashes the live
 // binaries use.
 //
+// **The colour parameters** are the names the engine's own shaders use for
+// their colour. They are pinned twice: the name hashes against the
+// constants the engine's compiled shaders carry, and the table against the
+// hash function (so a change to either is caught).
+//
 // **The decision** is a pure function of the four facts about a drawn entity
 // (team, life state, local, view model). It is the part of the chams that
 // decides whether a model is drawn with the flat material, so it is pinned
 // here: a wrong answer either chams the whole world or chams nothing.
+//
+// **The colour decision** is the other pure function: it says whether the
+// operator's colour has to be written into the material, whether the
+// material's own colour has to be put back, or whether nothing is to be
+// done.
 
 #include <cstdio>
 
@@ -65,6 +75,33 @@ auto main() -> int {
     expect(
         cs2::game::material_parameter_hash("Color") == cs2::game::material_parameter_hash("Color"),
         "the hash is stable");
+  }
+
+  // --- The colour parameters -------------------------------------------------
+  {
+    // The engine's own names for a shader's colour, with the hashes the
+    // engine's compiled shaders carry for them.
+    expect(cs2::game::material_parameter_hash("g_vOverrideColor") == 0xD4BD94B3U,
+           "hash(g_vOverrideColor) == 0xD4BD94B3");
+    expect(cs2::game::material_parameter_hash("g_vWireframeColor") == 0xCE09A55CU,
+           "hash(g_vWireframeColor) == 0xCE09A55C");
+    expect(cs2::game::material_parameter_hash("g_vColorTint") == 0x20A77985U,
+           "hash(g_vColorTint) == 0x20A77985");
+    expect(cs2::game::material_parameter_hash("g_vColor") == 0xF05CC739U,
+           "hash(g_vColor) == 0xF05CC739");
+    // The table the payload uses has to agree with the hash function, and
+    // with the constants above: a name and a hash that drift apart would
+    // make the payload log (or look up) the wrong parameter.
+    const std::size_t count = sizeof(cs2::game::k_colour_parameter_names) /
+                              sizeof(cs2::game::k_colour_parameter_names[0]);
+    expect(count == sizeof(cs2::game::k_colour_parameter_hashes) /
+                        sizeof(cs2::game::k_colour_parameter_hashes[0]),
+           "the colour parameter names and hashes have the same length");
+    for (std::size_t index = 0; index < count; ++index) {
+      expect(cs2::game::material_parameter_hash(cs2::game::k_colour_parameter_names[index]) ==
+                 cs2::game::k_colour_parameter_hashes[index],
+             "the colour parameter hash matches its name");
+    }
   }
 
   // --- The chams decision ----------------------------------------------------
@@ -136,6 +173,39 @@ auto main() -> int {
       expect(!cs2::game::wants_chams(local_viewmodel, with_local),
              "the view model is not chamsed even with the local player included");
     }
+  }
+
+  // --- The colour decision ---------------------------------------------------
+  {
+    using cs2::game::colour_action;
+    using cs2::game::ColourAction;
+
+    // The chams are on, the material is ready and the colour has not been
+    // written yet: it has to be written.
+    expect(colour_action(true, true, false, false) == ColourAction::apply,
+           "the colour is applied when it has not been written yet");
+    // The operator changed the colour: it has to be written again.
+    expect(colour_action(true, true, true, true) == ColourAction::apply,
+           "the colour is applied again when it changed");
+    // Nothing changed and the colour is in place: nothing is to be done.
+    expect(colour_action(true, true, true, false) == ColourAction::none,
+           "nothing is done when the colour is in place");
+    // The chams are off: the material's own colour goes back.
+    expect(colour_action(false, true, true, false) == ColourAction::restore,
+           "the material's own colour is restored when the chams are off");
+    // The chams are off and the colour was never written: nothing to undo.
+    expect(colour_action(false, true, false, false) == ColourAction::none,
+           "nothing is restored when the colour was never written");
+    // The material cannot be tinted (it has no colour parameter): the
+    // colour that was written has to go back.
+    expect(colour_action(true, false, true, false) == ColourAction::restore,
+           "the material's own colour is restored when it cannot be tinted");
+    expect(colour_action(true, false, false, false) == ColourAction::none,
+           "nothing is done when the material cannot be tinted");
+    // The chams are off *and* the material cannot be tinted: the colour
+    // still has to go back.
+    expect(colour_action(false, false, true, false) == ColourAction::restore,
+           "the material's own colour is restored when the chams are off");
   }
 
   if (failures != 0) {

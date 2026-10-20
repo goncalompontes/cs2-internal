@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <string>
+#include <string_view>
 
 #include "cs2/game/memory.hpp"
 #include "cs2/game/module.hpp"
@@ -16,6 +18,208 @@ namespace {
 [[nodiscard]] auto fold(std::string_view name, std::size_t index) noexcept -> std::uint8_t {
   const auto value = static_cast<std::uint8_t>(name[index]);
   return (value >= 'A' && value <= 'Z') ? static_cast<std::uint8_t>(value + 32) : value;
+}
+
+// The material system's parameter names are compared case-insensitively
+// (`V_stricmp_fast`), so the payload compares them the same way.
+[[nodiscard]] auto equals_ignore_case(std::string_view left, std::string_view right) noexcept
+    -> bool {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (std::size_t index = 0; index < left.size(); ++index) {
+    if (fold(left, index) != fold(right, index)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Does the name mention a colour? The engine names its texture parameters
+// "g_t...", so those are excluded: a texture parameter's value is a handle,
+// not a colour.
+[[nodiscard]] auto mentions_colour(std::string_view name) noexcept -> bool {
+  if (name.size() > 2 && name[1] == '_' && (name[0] == 'g' || name[0] == 'm') && name[2] == 't') {
+    return false;
+  }
+  static constexpr std::string_view k_words[] = {"color", "colour", "tint"};
+  for (const std::string_view word : k_words) {
+    if (name.size() < word.size()) {
+      continue;
+    }
+    for (std::size_t offset = 0; offset + word.size() <= name.size(); ++offset) {
+      bool same = true;
+      for (std::size_t index = 0; index < word.size(); ++index) {
+        const auto left = fold(name, offset + index);
+        const auto right = fold(word, index);
+        if (left != right) {
+          same = false;
+          break;
+        }
+      }
+      if (same) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Copy a name into a caller-owned buffer. Returns false when it does not fit.
+[[nodiscard]] auto copy_name(char* out, std::size_t size, std::string_view name) noexcept -> bool {
+  if (out == nullptr || size == 0 || name.size() + 1 > size) {
+    return false;
+  }
+  for (std::size_t index = 0; index < name.size(); ++index) {
+    out[index] = name[index];
+  }
+  out[name.size()] = '\0';
+  return true;
+}
+
+// The material's parameter table: the array pointer and the number of
+// parameters. Both reads go through the fault-safe helper, so a material
+// whose layout is not what the engine's is simply "not there".
+[[nodiscard]] auto parameter_array(Material material, std::uintptr_t& array,
+                                   std::int32_t& count) noexcept -> bool {
+  if (material == 0) {
+    return false;
+  }
+  if (!read(material + k_material_param_count_offset, count) || count <= 0 ||
+      count > k_max_material_parameters) {
+    return false;
+  }
+  if (!read(material + k_material_param_array_offset, array) || array == 0) {
+    return false;
+  }
+  return true;
+}
+
+// The name of the parameter at `index`, or the empty string.
+[[nodiscard]] auto parameter_name(std::uintptr_t array, std::size_t index) noexcept -> std::string {
+  const std::uintptr_t entry =
+      array + static_cast<std::uintptr_t>(index) * k_material_param_entry_size;
+  std::uintptr_t name_pointer = 0;
+  if (!read(entry + k_material_param_name_offset, name_pointer) || name_pointer == 0) {
+    return {};
+  }
+  return read_cstring(name_pointer, k_max_parameter_name_length);
+}
+
+// Does the material have a parameter with this name?
+[[nodiscard]] auto has_parameter(Material material, std::string_view name) noexcept -> bool {
+  std::uintptr_t array = 0;
+  std::int32_t count = 0;
+  if (!parameter_array(material, array, count)) {
+    return false;
+  }
+  for (std::int32_t index = 0; index < count; ++index) {
+    const std::string entry_name = parameter_name(array, static_cast<std::size_t>(index));
+    if (!entry_name.empty() && equals_ignore_case(entry_name, name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The material's colour parameter.
+//
+// The engine's own names are tried first. When the material has none of them
+// its own parameter names are scanned for a colour-like one — but only when
+// there is exactly one, because a material with several colour-ish
+// parameters would be tinted with the wrong one.
+[[nodiscard]] auto find_colour_parameter(Material material, char* out, std::size_t size) noexcept
+    -> bool {
+  for (const std::string_view candidate : k_colour_parameter_names) {
+    if (has_parameter(material, candidate)) {
+      return copy_name(out, size, candidate);
+    }
+  }
+
+  std::uintptr_t array = 0;
+  std::int32_t count = 0;
+  if (!parameter_array(material, array, count)) {
+    return false;
+  }
+  std::string found;
+  int matches = 0;
+  for (std::int32_t index = 0; index < count; ++index) {
+    const std::string entry_name = parameter_name(array, static_cast<std::size_t>(index));
+    if (entry_name.empty() || !mentions_colour(entry_name)) {
+      continue;
+    }
+    found = entry_name;
+    ++matches;
+  }
+  if (matches != 1) {
+    return false;
+  }
+  return copy_name(out, size, found);
+}
+
+// Read the material's own value of a named parameter.
+//
+// `CMaterial2::GetVectorParam` is vtable slot 35; the slot has to point into
+// materialsystem2.dll, or the material is not the one the offsets were
+// derived on.
+[[nodiscard]] auto read_parameter(Material material, const char* name, float out[4]) noexcept
+    -> bool {
+  if (material == 0 || name == nullptr || out == nullptr) {
+    return false;
+  }
+  std::uintptr_t vtable = 0;
+  if (!read(material, vtable) || vtable == 0) {
+    return false;
+  }
+  std::uintptr_t slot = 0;
+  if (!read(vtable + static_cast<std::uintptr_t>(k_get_material_param_slot) * sizeof(void*),
+            slot) ||
+      slot == 0) {
+    return false;
+  }
+  const ModuleInfo materials = find_module("materialsystem2.dll");
+  if (!materials.valid() || !materials.contains(slot)) {
+    return false;
+  }
+  using get_param_fn = void (*)(void*, float*, const char*, const float*);
+  const auto get = reinterpret_cast<get_param_fn>(slot);
+  const float fallback[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  get(reinterpret_cast<void*>(material), out, name, fallback);
+  return true;
+}
+
+// Write a value into a named parameter of the material the handle refers to.
+//
+// `CMaterialSystem2::SetMaterialVectorParam` is vtable slot 23; the value is
+// handed over as a string, because that is what the entry point parses.
+[[nodiscard]] auto write_parameter(std::uintptr_t system, MaterialHandle handle, const char* name,
+                                   const float value[4]) noexcept -> bool {
+  if (system == 0 || handle == 0 || name == nullptr || value == nullptr) {
+    return false;
+  }
+  std::uintptr_t vtable = 0;
+  if (!read(system, vtable) || vtable == 0) {
+    return false;
+  }
+  std::uintptr_t slot = 0;
+  if (!read(vtable + static_cast<std::uintptr_t>(k_set_material_param_slot) * sizeof(void*),
+            slot) ||
+      slot == 0) {
+    return false;
+  }
+  const ModuleInfo materials = find_module("materialsystem2.dll");
+  if (!materials.valid() || !materials.contains(slot)) {
+    return false;
+  }
+  char text[64];
+  const int written =
+      std::snprintf(text, sizeof(text), "%f %f %f %f", value[0], value[1], value[2], value[3]);
+  if (written <= 0 || static_cast<std::size_t>(written) >= sizeof(text)) {
+    return false;
+  }
+  using set_param_fn = bool (*)(void*, void*, const char*, const char*);
+  const auto set = reinterpret_cast<set_param_fn>(slot);
+  return set(reinterpret_cast<void*>(system), reinterpret_cast<void*>(handle), name, text);
 }
 
 }  // namespace
@@ -92,7 +296,9 @@ auto MaterialSystem::attach() noexcept -> MaterialSystem {
   return result;
 }
 
-auto MaterialSystem::find_material(std::string_view path) noexcept -> Material {
+auto MaterialSystem::find_material(std::string_view path, MaterialHandle& handle) noexcept
+    -> Material {
+  handle = 0;
   if (system_ == 0 || path.empty()) {
     return 0;
   }
@@ -110,21 +316,72 @@ auto MaterialSystem::find_material(std::string_view path) noexcept -> Material {
     return 0;
   }
 
-  // `FindMaterial(this, out, path)` returns a handle to the material *slot*;
-  // the material itself is `*handle` (the client's own usage).
+  // `FindMaterial(this, out, path)` writes the material system's *handle*
+  // into `out` and returns the out parameter itself. The handle's first word
+  // is the material and its reference count is at `+0x20`, so the material
+  // the scene system's draw needs is `*handle` — and the parameter setter
+  // wants the handle.
   using find_material_fn = std::uintptr_t (*)(void*, void**, const char*);
   const auto find = reinterpret_cast<find_material_fn>(slot);
   const std::string terminated(path);
   void* out = nullptr;
-  const std::uintptr_t handle = find(reinterpret_cast<void*>(system_), &out, terminated.c_str());
-  if (handle == 0) {
+  const std::uintptr_t result = find(reinterpret_cast<void*>(system_), &out, terminated.c_str());
+  if (result == 0) {
+    return 0;
+  }
+  std::uintptr_t material_handle = 0;
+  if (!read(result, material_handle) || material_handle == 0) {
     return 0;
   }
   std::uintptr_t material = 0;
-  if (!read(handle, material) || material == 0) {
+  if (!read(material_handle, material) || material == 0) {
     return 0;
   }
+  // The material's first word is its vtable pointer; it has to point into
+  // materialsystem2.dll, or the pointer is not a material at all.
+  std::uintptr_t material_vtable = 0;
+  if (!read(material, material_vtable) || material_vtable == 0 ||
+      !materials.contains(material_vtable)) {
+    return 0;
+  }
+  handle = material_handle;
   return material;
+}
+
+auto MaterialSystem::set_colour(MaterialHandle handle, Material material, const float rgba[4],
+                                float old[4]) noexcept -> ColourResult {
+  if (system_ == 0 || handle == 0 || material == 0 || rgba == nullptr || old == nullptr) {
+    return ColourResult::no_material;
+  }
+
+  // The parameter to write: the material's own table says which colour
+  // parameter it has.
+  char name[k_max_parameter_name_length];
+  if (!find_colour_parameter(material, name, sizeof(name))) {
+    return ColourResult::no_parameter;
+  }
+
+  // The material's own colour, so it can be put back later.
+  if (!read_parameter(material, name, old)) {
+    return ColourResult::no_parameter;
+  }
+
+  if (!write_parameter(system_, handle, name, rgba)) {
+    return ColourResult::no_parameter;
+  }
+  return ColourResult::applied;
+}
+
+auto MaterialSystem::restore_colour(MaterialHandle handle, Material material,
+                                    const float rgba[4]) noexcept -> bool {
+  if (system_ == 0 || handle == 0 || material == 0 || rgba == nullptr) {
+    return false;
+  }
+  char name[k_max_parameter_name_length];
+  if (!find_colour_parameter(material, name, sizeof(name))) {
+    return false;
+  }
+  return write_parameter(system_, handle, name, rgba);
 }
 
 auto wants_chams(const ChamsEntity& entity, const ChamsPolicy& policy) noexcept -> bool {
