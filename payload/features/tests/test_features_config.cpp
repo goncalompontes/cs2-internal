@@ -731,9 +731,11 @@ auto test_write_back_preserves_protocol_state() -> void {
   assert(cs2::features::apply_pending_op(config, live, state).ran);
 
   // The menu now asks for a load with a new token and sets a ragebot op in
-  // the same frame.
+  // the same frame. The menu is open, too: the open state is the menu's, not
+  // the file's (the file recorded it closed).
   Settings request = live;
-  request.esp_skeleton = 0;    // the user turned the skeleton off
+  request.esp_skeleton = 0;  // the user turned the skeleton off
+  request.menu_open = 1;
   request.rage_config_op = 1;  // save-to-weapon
   request.rage_config_token = 99;
   request.menu_config_op = static_cast<std::uint8_t>(cs2::features::ConfigOp::load);
@@ -745,11 +747,15 @@ auto test_write_back_preserves_protocol_state() -> void {
   // The loaded configuration reached the block...
   assert(loaded.block.esp_skeleton == 1);
   // ...but the live protocol state did not.
-  assert(loaded.block.menu_open == request.menu_open);
+  assert(loaded.block.menu_open == 1);
   assert(loaded.block.menu_config_op == request.menu_config_op);
   assert(loaded.block.menu_config_token == request.menu_config_token);
   assert(loaded.block.rage_config_op == request.rage_config_op);
   assert(loaded.block.rage_config_token == request.rage_config_token);
+
+  // The op did not re-trigger: the block still carries the live token, not
+  // the file's (an old) one.
+  assert(loaded.block.menu_config_token != 3);
 
   std::filesystem::remove(path, error);
 }
