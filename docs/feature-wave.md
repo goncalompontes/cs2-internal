@@ -146,6 +146,36 @@ Each worktree carries its own `build/`, `build-payload/`, `build-overlay/` and
 `build-injector/` (they are gitignored), so the agents never fight over ninja's
 state.
 
+### 4.1 The integration order and the conflicts to expect
+
+The branches are merged into `feat/occlusion-penetration` in the integration
+tree in this order, and the **expected conflicts** are listed so they are
+resolved deliberately rather than with `--ours`:
+
+| # | Branch | Merged | Expected conflict |
+|---|---|---|---|
+| 1 | `feat/t2-menu` | 1st | none |
+| 2 | `feat/t3-strafe` | 2nd | `payload/src/payload_main.cpp` — T3 adds the strafe settings to `on_movement_settings` |
+| 3 | `feat/t5-thirdperson` | 3rd | `payload/src/payload_main.cpp` (the same function) and `payload/features/meson.build` (the new source) |
+| 4 | `feat/t4-esp` | 4th | `payload/features/meson.build` (the new sources) |
+
+Every conflict is **additive** (two agents adding a different line to the same
+function or the same source list), so they are resolved by keeping **both**
+sides. Do not resolve with `git checkout --ours` / `--theirs` — read the hunk
+and keep both changes.
+
+The base for all of them is T1's commit (`206e81c`) plus the config-op wiring
+(`ae49b72`), so the settings struct, the typed config and the config store are
+already in every branch.
+
+### 4.2 The review pipeline
+
+Each landed branch gets an **adversarial review** in the `rev` worktree, using
+the dispatch template in the session temp dir
+(`review-prompt-template.md`). The reviews are **serial** — they share the
+`rev` worktree — and they run **alongside** the next task's implementation,
+which is in its own worktree and therefore unaffected.
+
 ## 5. The style sweep (T8)
 
 `scripts/clang-tidy-fix.py` runs one check group per commit. The sweep already
