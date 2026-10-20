@@ -191,8 +191,26 @@ express a wish relative to the velocity when the rotation is switched off. The
 payload now says so instead of doing nothing quietly. The non-silent alternative
 (the command's own view angles) would move the eye angles, so it is not a drop-in.
 
-### 5.2 The chams: the hook target is wrong
+### 5.1b The third-person camera **crashes the game** (reported 2026-10-20)
 
+The operator turned the third-person camera on and the game died. The payload's
+log has the evidence, one line before the crash:
+
+```
+[cs2-features] third person: the camera update is hooked
+[crash] first-chance code=0xc0000005 at 0x1832100dd9c read addr=0xffffffffffffffff
+```
+
+So the **inline hook on the camera update is installed and then the first
+detour call faults** — the same class of problem as the chams' hook target
+(§5.2): the address was taken from a build that no longer matches. The hook is
+installed from the render thread (`ThirdPerson::update` → `install()`) while the
+game's own thread may be executing that very function, which is the other
+candidate. Until it is re-derived, the third-person camera should **stay off**
+(the console route still works on any build — the code says so at
+`payload/features/src/thirdperson.cpp`).
+
+### 5.2 The chams: the hook target is wrong
 `payload/features/src/chams.cpp` now **refuses** to install the draw hook, behind
 `k_draw_hook_target_verified = false`. The address came from an MSVC RTTI
 **lambda** type; a lambda's `operator()` is **static** (eight arguments, no
