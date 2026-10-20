@@ -167,6 +167,14 @@ hashing a candidate name and comparing it identifies the parameter.
   `g_vColorTint` (`0x20A77985`, `float3`), `g_flModelTintAmount`
   (`0x55FC14C5`), `g_vTexCoordScale`/`Offset`, …
 
+The encoding was validated on the `csgo_unlitgeneric` shader: four of its
+marked hashes are the hashes of names that are in the material system's own
+parameter table (`g_vColorTint`, `g_vTexCoordScale`, `g_vTexCoordOffset`,
+`g_nScaleTexCoord{UV}ByModelScaleAxis`), so the marked words really are the
+parameter names' hashes. The remaining names were recovered by hashing
+candidate names against the table (the engine's `g_v…`/`g_t…`/`g_fl…`
+convention, over the engine's own vocabulary).
+
 The four names the payload uses, with their hashes (the host test pins
 both):
 

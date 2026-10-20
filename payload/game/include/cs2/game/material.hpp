@@ -119,7 +119,8 @@ inline constexpr std::size_t k_max_parameter_name_length = 64;
 //
 // Every shader names its colour differently, so the payload asks the material
 // which of these it has. The names come from the engine's own shader
-// parameter tables:
+// parameter tables (the compiled shader's table stores each parameter's name
+// as the material system's name hash):
 //
 //   * `"g_vOverrideColor"` — the `tools_wireframe` shader, the one behind
 //     `materials/tools/show_collision_geometry_wire.vmat`. Read out of the
