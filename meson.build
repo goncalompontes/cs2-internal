@@ -255,6 +255,9 @@ control_sound_test = executable('control_sound_test',
     include_directories('payload/control/include'),
     include_directories('payload/game/include'),
     include_directories('payload/aim/include'),
+    # The control service now reaches the shared settings block (the generated
+    # name table lives next to it), so the host build needs that include path.
+    include_directories('overlay/include'),
   ],
 )
 test('control-sound', control_sound_test)
