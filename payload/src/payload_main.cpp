@@ -15,6 +15,7 @@
 #include "cs2/control/service.hpp"
 #include "cs2/diag/crash_handler.hpp"
 #include "cs2/diag/watchdog.hpp"
+#include "cs2/features/chams.hpp"
 #include "cs2/features/config_store.hpp"
 #include "cs2/features/esp.hpp"
 #include "cs2/features/game_present_hook.hpp"
@@ -92,6 +93,10 @@ struct Runtime {
   // The third-person camera: the engine's own camera, driven by the
   // operator's parameters.
   features::ThirdPerson thirdperson;
+  // The 3D chams: the player models are drawn with one of the game's own flat
+  // materials. The hook is installed lazily (the scene system only exists
+  // once the game is up) from the per-frame snapshot sink below.
+  features::Chams chams;
   control::Service control;
   // The payload's own copy of the settings, so a config **load** has somewhere to
   // land: the menu owns the live block, the file owns the persisted one, and the
@@ -285,6 +290,22 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
   // answer only runs while one of the two is on.
   runtime->control.set_esp_features(settings.esp_glow != 0, settings.esp_visible_only != 0);
 
+  // The 3D chams: the switch, the mode and the two per-player switches. The
+  // colour is passed on too, but the material system's parameter API is not
+  // resolved yet, so the flat material keeps its own colour (the chams'
+  // `configure` says so).
+  {
+    features::Config::Visuals visuals;
+    visuals.chams = settings.visuals_chams != 0;
+    visuals.chams_mode = settings.visuals_chams_mode > 2
+                             ? features::ChamsMode::flat
+                             : static_cast<features::ChamsMode>(settings.visuals_chams_mode);
+    visuals.chams_visible = settings.visuals_chams_visible != 0;
+    visuals.chams_local = settings.visuals_chams_local != 0;
+    visuals.chams_color = features::Color::from_wire(settings.visuals_chams_color);
+    runtime->chams.configure(visuals);
+  }
+
   // The menu's one-shot config op (save / load / reset the settings file). The op
   // runs **once per token** — the token bookkeeping lives in the store's state,
   // so the two callers of this sink (the menu and the publisher) cannot both
@@ -361,6 +382,10 @@ void on_snapshot(void* context, const cs2::game::Snapshot& snapshot) noexcept {
     eye = snapshot.local->eye_origin;
   }
   runtime->thirdperson.update(view, eye);
+  // The 3D chams: the per-frame step. It installs the draw hook (retrying
+  // until the scene system is up), keeps the material in step with the mode
+  // and refreshes the local player and the visibility filter.
+  runtime->chams.update(snapshot);
 }
 
 // The overlay HUD asks for the ragebot's one-line status while it is enabled.
