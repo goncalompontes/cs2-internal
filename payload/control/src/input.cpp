@@ -634,6 +634,20 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   strafe_wish_.store(wish_yaw);
   strafe_delta_.store(rot);
 
+  // The command's own number: **the hook runs more than once per command**
+  // (the engine builds the command more than once, and the payload's own
+  // `strafe_steps_present` exists because of it). The velocity reading is the
+  // same on every one of those runs, so a turn measured between two of them
+  // reads as zero — and a zero turn is exactly what a **gated** rotation looks
+  // like. The verdict is therefore made **once per command**, on the run whose
+  // command number changed (the same signal the bhop's phase correction uses).
+  const auto command_number = cmd != nullptr
+                                  ? *reinterpret_cast<const std::uint32_t*>(
+                                        static_cast<std::uint8_t*>(cmd) + k_cmd_number_offset)
+                                  : 0U;
+  const bool fresh_command = command_number != strafe_cmd_number_;
+  strafe_cmd_number_ = command_number;
+
   // **Did the engine apply the rotation?** The turn of the velocity heading
   // between this tick's read and the previous one is the effect of the
   // rotation written in between: the engine turns the velocity toward the
@@ -716,10 +730,12 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   if (write_strafe_wish(bytes_base, bytes_cmd, forward, left, deltas, steps)) {
     strafe_reason_.store(4);
     strafe_writes_.fetch_add(1);
-    // The wish was written: the next tick's turn of the velocity heading is
+    // The wish was written: the next command's turn of the velocity heading is
     // the effect of **this** write, so this is where the sample is taken and
-    // the verdict is made.
-    strafe_judge_steer(vel_yaw, decision.side, rot);
+    // the verdict is made — once per command (see `fresh_command` above).
+    if (fresh_command) {
+      strafe_judge_steer(vel_yaw, decision.side, rot);
+    }
   } else if (strafe_reason_.load() == 0) {
     strafe_reason_.store(5);  // the sub-tick array had no room
   }

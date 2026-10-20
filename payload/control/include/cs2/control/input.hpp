@@ -809,6 +809,11 @@ class Input {
   std::atomic<int> strafe_side_sample_{0};
   std::atomic<float> strafe_takeoff_speed_{0.0F};
   std::atomic<bool> strafe_air_phase_{false};
+  // The command number of the last strafe tick: the hook runs more than once
+  // per command, and the steering verdict compares two velocity readings, so it
+  // must be made once per command (`docs/re/subtick.md` §"the hook runs more
+  // than once").
+  std::uint32_t strafe_cmd_number_{0};
   std::atomic<bool> move_enabled_{false};
   std::atomic<bool> move_quantize_{false};
   std::atomic<bool> move_step_{false};
