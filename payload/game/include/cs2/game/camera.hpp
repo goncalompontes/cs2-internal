@@ -13,14 +13,15 @@
 // **Offsets** (client.dll build 25947352, Steam; PE timestamp 0x6ad01314) were
 // re-derived by the reverse-engineering pass on the live build. They are
 // build-specific — `docs/re/client-dll.md` documents an older build and none of
-// its addresses may be reused — so every *write* is guarded by
-// `client_build_verified()`.
+// its addresses may be reused — so every *read* and every *write* of them is
+// guarded by `client_build_verified()`.
 //
 // This header carries the **pure** camera model (the origin/distance/angle
 // composition) so it can be regression-tested on the host without the engine;
 // the engine access lives in `camera.cpp`.
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -113,6 +114,23 @@ inline constexpr float k_degrees_to_radians = 0.01745329251994329577F;
   return requested != 0.0F ? requested : current;
 }
 
+// --- The build guard --------------------------------------------------------
+
+// Whether the build-specific camera reads may run.
+//
+// Every address the camera module reads (the published view, the view setup,
+// the input object's camera block) was derived on one client build. On
+// another build the same address is still inside `client.dll`'s `.data`, so
+// the read **succeeds** — with floats that are indistinguishable from real
+// ones. The ESP's capsule silhouettes are then drawn from a garbage camera
+// origin: wrong silhouettes, no crash, silently wrong.
+//
+// The guard is therefore not "is the address readable" but "is this the build
+// the offsets came from".
+[[nodiscard]] constexpr auto camera_reads_allowed(bool build_verified) noexcept -> bool {
+  return build_verified;
+}
+
 // --- The engine's camera state ---------------------------------------------
 
 // The camera the engine rendered the frame with: the origin and the angles of
@@ -133,24 +151,73 @@ struct ThirdPersonState {
   bool valid = false;
 };
 
+// Whether the third-person switch has to be re-armed.
+//
+// The engine clears the switch on death, respawn and round-state changes, so
+// the camera has to be re-asserted. When the state cannot be read — an
+// unverified build, or a read that failed — the switch is **unknown**, and an
+// unknown switch is re-armed rather than trusted: the switch's address is
+// build-specific, so a byte read from it on another build is arbitrary, and
+// trusting it would drop the camera out of third person on the next
+// respawn — exactly the failure the feature exists to prevent.
+[[nodiscard]] constexpr auto third_person_needs_rearm(const ThirdPersonState& state) noexcept
+    -> bool {
+  return !state.valid || !state.switch_on;
+}
+
+// --- The engine access ------------------------------------------------------
+
+// The engine access the camera's build-specific reads need.
+//
+// The production build binds it to the live `client.dll`; the host test binds
+// it to a fake, so the build guard can be proven without a game (the fake
+// answers every read with garbage, exactly as a different build's `.data`
+// does).
+struct CameraEngine {
+  // The client's image base (0 when the client is not loaded).
+  std::uintptr_t client_base = 0;
+  // True when the running client is the build the offsets were verified on.
+  bool build_verified = false;
+  // The input object's address (0 when it is unknown).
+  std::uintptr_t input_object = 0;
+  // Read `count` bytes at `address`; false when the address is not readable.
+  using ReadBytes = bool (*)(void* context, std::uintptr_t address, void* out, std::size_t count);
+  ReadBytes read_bytes = nullptr;
+  void* read_context = nullptr;
+};
+
 // The client's input object (`CCSGOInput`), or 0 when the client is not up.
 [[nodiscard]] auto input_object() noexcept -> std::uintptr_t;
 
 // True when the running client.dll is the build the offsets were verified on.
-// Every write is gated on this: a stale offset would write into the wrong
-// field of the input object.
+// Every read and every write of a build-specific address is gated on this: a
+// stale offset would read or write the wrong field of the wrong object.
 [[nodiscard]] auto client_build_verified() noexcept -> bool;
 
 // The client.dll PE timestamp (the build guard's raw value).
 [[nodiscard]] auto client_build_timestamp() noexcept -> std::uint32_t;
 
+// The live client's engine access (the payload's entry point).
+[[nodiscard]] auto camera_engine() noexcept -> CameraEngine;
+
 // The published per-slot view state (`client + 0x256af48 + slot*0xc`): the
 // origin (12 bytes) then the angles (12 bytes), written by the view-setup
 // finaliser every frame. This is the camera's **real** position.
+//
+// Refused unless the client build is the verified one: on another build the
+// address is still inside `.data`, so the read would succeed with garbage.
+[[nodiscard]] auto read_published_view(const CameraEngine& engine, int slot) noexcept
+    -> CameraState;
+
+// The live client's published view state.
 [[nodiscard]] auto read_published_view(int slot) noexcept -> CameraState;
 
 // The view setup's own origin (`CViewRender + 0x10 + slot*0x990 + 0x4a0`) —
-// the fallback when the published state is not readable.
+// the fallback when the published state is not readable. Refused unless the
+// client build is the verified one.
+[[nodiscard]] auto read_view_setup_origin(const CameraEngine& engine, int slot) noexcept -> Vec3;
+
+// The live client's view setup origin.
 [[nodiscard]] auto read_view_setup_origin(int slot) noexcept -> Vec3;
 
 // The view setup's two **FOV candidates**: `+0x4cc` (the builder writes
@@ -165,13 +232,29 @@ struct FovCandidates {
   bool valid = false;
 };
 
+// The view setup's FOV candidates. Refused unless the client build is the
+// verified one.
+[[nodiscard]] auto read_view_setup_fov(const CameraEngine& engine, int slot) noexcept
+    -> FovCandidates;
+
+// The live client's view setup FOV candidates.
 [[nodiscard]] auto read_view_setup_fov(int slot) noexcept -> FovCandidates;
 
 // The camera's origin for the **rendering** maths: the published state, then
-// the view setup, then `fallback` (the caller's own default).
+// the view setup, then `fallback` (the caller's own default). On an
+// unverified build the build-specific reads are refused, so the fallback is
+// what the caller gets — never a garbage origin.
+[[nodiscard]] auto camera_origin(const CameraEngine& engine, int slot,
+                                 const Vec3& fallback) noexcept -> Vec3;
+
+// The live client's camera origin.
 [[nodiscard]] auto camera_origin(int slot, const Vec3& fallback) noexcept -> Vec3;
 
-// The camera block of the input object, read.
+// The camera block of the input object, read. Refused unless the client
+// build is the verified one.
+[[nodiscard]] auto read_third_person_state(const CameraEngine& engine) noexcept -> ThirdPersonState;
+
+// The live client's camera block.
 [[nodiscard]] auto read_third_person_state() noexcept -> ThirdPersonState;
 
 // The engine's third-person switch (`CCSGOInput + 0x229`).
@@ -188,7 +271,7 @@ struct FovCandidates {
 
 // The engine's own command buffer (`Cbuf_AddText`): the console route. The
 // command is queued and runs on the game's thread when the buffer is drained,
-// so it is the race-free way to drive the camera from another thread.
+// so this is the race-free way to drive the camera from another thread.
 [[nodiscard]] auto exec_engine_command(std::string_view line) noexcept -> bool;
 
 // The `cam_idealdist` convar's value — the distance the engine's camera lerps

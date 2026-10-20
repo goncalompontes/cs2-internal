@@ -865,6 +865,12 @@ inline void draw_players(wire::Settings& settings) noexcept {
   toggle("Local player", settings.esp_local_player);
   toggle("Spectators", settings.esp_show_spectators);
   toggle("Teammates", settings.esp_show_teammates);
+  // The switches are not independent: "Only enemies" is the master that
+  // hides the local player and the teammates, and the two switches below it
+  // bring them back. The relationship is stated here so a switch that does
+  // not do what its label says is not a surprise.
+  ImGui::TextDisabled("Only enemies hides the local player and the teammates;");
+  ImGui::TextDisabled("Local player and Teammates bring them back.");
 
   ImGui::SeparatorText("Extras");
   toggle("Head box", settings.esp_head_box);
@@ -991,10 +997,20 @@ inline void draw_movement(wire::Settings& settings) noexcept {
   toggle("Third person", settings.movement_thirdperson);
   slider_float("Distance", settings.movement_thirdperson_distance, 64.0F, 512.0F, "%.0f u");
   slider_float("Angle", settings.movement_thirdperson_angle, 0.0F, 360.0F, "%.0f deg");
+  // The three settings below travel in the wire (its format is versioned and
+  // other code reads them), but the game never sees them: the client has no
+  // shoulder camera, the camera orbits the player's eye (so there is no
+  // pivot) and the view setup's FOV field is unconfirmed. They are greyed
+  // out with the reason, so a slider that does nothing does not look like a
+  // broken feature.
+  ImGui::BeginDisabled(true);
   slider_float("Pivot height", settings.movement_thirdperson_pivot_z, 0.0F, 64.0F, "%.0f u");
   slider_float("FOV", settings.movement_thirdperson_fov, 0.0F, 180.0F, "%.0f deg");
   static const char* const k_sides[] = {"Left shoulder", "Right shoulder"};
   combo("Shoulder", settings.movement_thirdperson_side, k_sides, 2);
+  ImGui::EndDisabled();
+  ImGui::TextDisabled("Pivot, FOV and shoulder are inert: no shoulder camera,");
+  ImGui::TextDisabled("the camera orbits the eye, and the FOV field is unconfirmed.");
 }
 
 // The Visuals page: the chams and the menu's own look.

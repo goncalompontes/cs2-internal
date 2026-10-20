@@ -22,18 +22,30 @@ ThirdPerson* g_active = nullptr;
 // forwards whatever the original leaves in the return register.
 using CameraUpdateFn = std::uint64_t(__fastcall*)(void* input, int slot);
 
+// The trampoline: the function the detour replaced. It is captured at
+// install time, so the detour always calls the game's own camera update —
+// even when the feature is uninstalled or the active pointer is gone.
+// Skipping it would skip the game's camera update entirely.
+CameraUpdateFn g_original = nullptr;
+
 std::uint64_t __fastcall camera_update_detour(void* input, int slot) {
   ThirdPerson* active = g_active;
-  auto* original =
-      active != nullptr ? reinterpret_cast<CameraUpdateFn>(active->original()) : nullptr;
   if (active != nullptr) {
     active->on_camera_update(input, slot);
   }
-  if (original != nullptr) {
-    return original(input, slot);
+  if (g_original != nullptr) {
+    return g_original(input, slot);
   }
   return 0;
 }
+
+// How often the console route may re-arm the camera, in milliseconds.
+//
+// The engine's own change callback resets the camera's distance field to the
+// engine's default every time it fires, so a re-arm per frame would fight
+// the operator's distance setting. A second is short enough that the camera
+// is back in third person before the operator notices it dropped out.
+constexpr std::uint64_t k_rearm_interval_ms = 1000;
 
 // The view angles, packed into one atomic so the pitch/yaw pair is consistent
 // for the game thread.
@@ -68,6 +80,9 @@ std::uint64_t __fastcall camera_update_detour(void* input, int slot) {
 ThirdPerson::~ThirdPerson() {
   if (hook_.installed()) {
     hook_.uninstall();
+    // The trampoline belongs to the hook: it is invalid once the hook is
+    // gone.
+    g_original = nullptr;
   }
   if (g_active == this) {
     g_active = nullptr;
@@ -126,6 +141,10 @@ bool ThirdPerson::install() noexcept {
                           std::string(hooks::to_string(*error)));
     return false;
   }
+  // The trampoline is captured now: the detour calls it on every frame, and
+  // it must be the game's own camera update even if the feature is torn
+  // down later.
+  g_original = reinterpret_cast<CameraUpdateFn>(hook_.original());
   cs2::game::append_log("[cs2-features] third person: the camera update is hooked");
   return true;
 }
@@ -155,11 +174,31 @@ void ThirdPerson::update(const game::Angle& view_angles, const game::Vec3& eye_o
   // The engine clears the switch on death, respawn and round-state changes.
   // With the game-thread hook the switch is re-asserted every frame; without
   // it, the console route re-arms it.
-  if (!hook_.installed() && !game::read_third_person_switch()) {
-    // The convar's change callback only fires on a *value change*, so the
-    // command toggles the value and puts it back: the callback then
-    // re-initialises the camera state.
-    push_command("thirdperson 0; thirdperson 1");
+  //
+  // The state is **unknown** when the client build is not the one the
+  // offsets were verified on: the switch's address is build-specific, so the
+  // byte read from it on another build is arbitrary. An unknown switch is
+  // re-armed, never trusted — trusting it would drop the camera out of third
+  // person on the next respawn, exactly the failure the feature exists to
+  // prevent.
+  if (!hook_.installed()) {
+    const std::uint64_t now = now_ms();
+    const bool due =
+        last_rearm_ms_ == 0 || (now != 0 && now - last_rearm_ms_ >= k_rearm_interval_ms);
+    if (due && game::third_person_needs_rearm(game::read_third_person_state())) {
+      last_rearm_ms_ = now != 0 ? now : 1;
+      // The convar's change callback only fires on a *value change*, so the
+      // command toggles the value and puts it back: the callback then
+      // re-initialises the camera state. Two commands, not one
+      // `;`-separated line: the engine's command buffer takes one command per
+      // entry, and nothing else in the tree assumes a separator.
+      push_command("thirdperson 0");
+      push_command("thirdperson 1");
+      // The callback resets the camera's distance field to the engine's own
+      // default, so the distance knob is re-asserted right after: the engine
+      // then eases the camera back to the operator's distance.
+      push_ideal_distance(params.distance);
+    }
   }
   report(view_angles, eye_origin, params);
 }

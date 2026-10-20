@@ -13,9 +13,15 @@
 //   applied, so the block and the table cannot drift apart, and the round trip
 //   has to come back byte-identical. A field that the conversion forgets — in
 //   either direction — changes a byte and fails the test.
+//
+// The checks are **explicit**: the test counts its failures instead of using
+// `assert`, so it still bites in a release build. Meson's `b_ndebug` default
+// is `if-release`, so `NDEBUG` is defined in the configuration
+// `scripts/release.sh` builds and every `assert` would be compiled out — a
+// test that only bites in the debug build is not a test.
 
-#include <cassert>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -30,6 +36,17 @@ namespace {
 
 using cs2::features::Config;
 using cs2::overlay::wire::Settings;
+
+// The number of failed checks. The test's exit code is the verdict, so a
+// release build (where `assert` is compiled out) still reports the failure.
+int failures = 0;
+
+void expect(bool condition, const char* what) {
+  if (!condition) {
+    std::printf("FAIL: %s\n", what);
+    ++failures;
+  }
+}
 
 // A differential case: the wire field and the config field it feeds.
 //
@@ -258,7 +275,7 @@ auto test_wire_round_trip() -> void {
   const Settings original = sentinel_settings();
   const Config config = cs2::features::from_wire_settings(original);
   const Settings restored = cs2::features::to_wire_settings(config);
-  assert(same_settings(original, restored));
+  expect(same_settings(original, restored), "the wire round trip is byte-identical");
 }
 
 // The conversion is **pairing-sensitive**: mutating exactly one wire field
@@ -277,10 +294,9 @@ auto test_field_pairing() -> void {
     const Config actual = cs2::features::from_wire_settings(mutated);
     Config expected = default_config;
     entry.set_config(expected);
-    if (actual != expected) {
-      std::fprintf(stderr, "features-config: mis-paired wire field: %s\n", entry.name);
-    }
-    assert(actual == expected);
+    // The field's name is the failure's description: it names the pair that
+    // does not line up.
+    expect(actual == expected, entry.name);
   }
 }
 
@@ -288,9 +304,12 @@ auto test_field_pairing() -> void {
 // payload and the Vulkan layer can never disagree about a fresh segment.
 auto test_defaults_agree() -> void {
   const Settings shared = cs2::overlay::wire::default_settings();
-  assert(same_settings(cs2::features::default_wire_settings(), shared));
-  assert(same_settings(cs2::features::to_wire_settings(Config{}), shared));
+  expect(same_settings(cs2::features::default_wire_settings(), shared),
+         "the typed defaults are the shared defaults");
+  expect(same_settings(cs2::features::to_wire_settings(Config{}), shared),
+         "a default config converts back to the shared defaults");
 }
+
 // A corrupt or stale shared segment cannot push a value out of its range.
 auto test_clamping() -> void {
   Settings settings = cs2::overlay::wire::default_settings();
@@ -323,43 +342,50 @@ auto test_clamping() -> void {
   settings.rage_stop_speed = 99999.0F;
 
   const Config config = cs2::features::from_wire_settings(settings);
-  assert(config.esp.max_box_scale == 2.0F);
-  assert(config.esp.box_thickness == 20);
-  assert(config.esp.box_style == cs2::features::BoxStyle::straight);
-  assert(config.esp.tracer_origin == cs2::features::TracerOrigin::screen_bottom);
-  assert(config.esp.max_distance_m == 250);
-  assert(config.movement.strafe_mode == cs2::features::StrafeMode::directional);
-  assert(config.movement.strafe_wishspeed == 3200.0F);
-  assert(config.movement.thirdperson_distance == 512.0F);
-  assert(config.movement.thirdperson_angle == 360.0F);
-  assert(config.movement.thirdperson_pivot_z == 64.0F);
-  assert(config.movement.thirdperson_fov == 180.0F);
-  assert(config.movement.thirdperson_side == cs2::features::ThirdPersonSide::right);
-  assert(config.visuals.chams_mode == cs2::features::ChamsMode::flat);
-  assert(config.menu.transparency == 100);
-  assert(config.menu.config_op == 0);
-  assert(config.esp.hitbox_mode == cs2::features::HitboxMode::outline);
-  assert(config.rage.objective == 1);
-  assert(config.rage.hitbox == 0);
-  assert(config.rage.autostop == 0);
-  assert(config.rage.autoscope == 0);
-  assert(config.rage.mode == 0);
-  assert(config.rage.fov == 360.0F);
-  assert(config.rage.min_damage == 200.0F);
-  assert(config.rage.min_hitchance == 1.0F);
-  assert(config.rage.stop_speed == 3200.0F);
+  expect(config.esp.max_box_scale == 2.0F, "the box scale is clamped to its maximum");
+  expect(config.esp.box_thickness == 20, "the box thickness is clamped to its maximum");
+  expect(config.esp.box_style == cs2::features::BoxStyle::straight,
+         "an out-of-range box style falls back to the default");
+  expect(config.esp.tracer_origin == cs2::features::TracerOrigin::screen_bottom,
+         "an out-of-range tracer origin falls back to the default");
+  expect(config.esp.max_distance_m == 250, "the distance cap keeps the whole byte range");
+  expect(config.movement.strafe_mode == cs2::features::StrafeMode::directional,
+         "an out-of-range strafe mode falls back to the default");
+  expect(config.movement.strafe_wishspeed == 3200.0F, "the wish speed is clamped");
+  expect(config.movement.thirdperson_distance == 512.0F, "the camera distance is clamped");
+  expect(config.movement.thirdperson_angle == 360.0F, "the camera angle is clamped");
+  expect(config.movement.thirdperson_pivot_z == 64.0F, "the camera pivot is clamped");
+  expect(config.movement.thirdperson_fov == 180.0F, "the camera fov is clamped");
+  expect(config.movement.thirdperson_side == cs2::features::ThirdPersonSide::right,
+         "an out-of-range camera side falls back to the default");
+  expect(config.visuals.chams_mode == cs2::features::ChamsMode::flat,
+         "an out-of-range chams mode falls back to the default");
+  expect(config.menu.transparency == 100, "the transparency is clamped");
+  expect(config.menu.config_op == 0, "an out-of-range config op is dropped");
+  expect(config.esp.hitbox_mode == cs2::features::HitboxMode::outline,
+         "an out-of-range hitbox mode falls back to the default");
+  expect(config.rage.objective == 1, "an out-of-range objective falls back to the default");
+  expect(config.rage.hitbox == 0, "an out-of-range hitbox falls back to the default");
+  expect(config.rage.autostop == 0, "an out-of-range auto-stop falls back to the default");
+  expect(config.rage.autoscope == 0, "an out-of-range auto-scope falls back to the default");
+  expect(config.rage.mode == 0, "an out-of-range rage mode falls back to the default");
+  expect(config.rage.fov == 360.0F, "the rage fov is clamped");
+  expect(config.rage.min_damage == 200.0F, "the minimum damage is clamped");
+  expect(config.rage.min_hitchance == 1.0F, "the minimum hitchance is clamped");
+  expect(config.rage.stop_speed == 3200.0F, "the auto-stop speed is clamped");
 
   // The low ends.
   settings.esp_max_box_scale = -5.0F;
   settings.movement_thirdperson_distance = 1.0F;
   const Config low = cs2::features::from_wire_settings(settings);
-  assert(low.esp.max_box_scale == 0.25F);
-  assert(low.movement.thirdperson_distance == 64.0F);
+  expect(low.esp.max_box_scale == 0.25F, "the box scale is clamped to its minimum");
+  expect(low.movement.thirdperson_distance == 64.0F,
+         "the camera distance is clamped to its minimum");
 
   // A NaN must not reach a slider.
   settings.esp_max_box_scale = std::nanf("");
   const Config not_a_number = cs2::features::from_wire_settings(settings);
-  assert(not_a_number.esp.max_box_scale == 0.25F);
+  expect(not_a_number.esp.max_box_scale == 0.25F, "a NaN box scale is clamped away");
 }
 
 // The store round-trips every field of the settings block.
@@ -369,16 +395,17 @@ auto test_store_round_trip() -> void {
   std::filesystem::remove(path, error);
 
   Config config = cs2::features::from_wire_settings(sentinel_settings());
-  assert(cs2::features::save(path.string().c_str(), config));
+  expect(cs2::features::save(path.string().c_str(), config), "the settings file is written");
 
   const auto loaded = cs2::features::load(path.string().c_str());
-  assert(loaded.has_value());
-  assert(*loaded == config);
+  expect(loaded.has_value(), "the settings file is read back");
+  expect(loaded.has_value() && *loaded == config, "the settings file round trips");
 
   // A missing file is not an error the caller has to handle: it just means
   // "keep the defaults".
   std::filesystem::remove(path, error);
-  assert(!cs2::features::load(path.string().c_str()).has_value());
+  expect(!cs2::features::load(path.string().c_str()).has_value(),
+         "a missing settings file is not an error");
   std::filesystem::remove(path, error);
 }
 
@@ -391,13 +418,14 @@ auto test_store_rejects_garbage() -> void {
   auto write = [&](const char* text) -> void {
 #if defined(_WIN32)
     std::FILE* file = nullptr;
-    assert(fopen_s(&file, path.string().c_str(), "wb") == 0 && file != nullptr);
+    expect(fopen_s(&file, path.string().c_str(), "wb") == 0 && file != nullptr,
+           "the test file is opened");
 #else
     std::FILE* file = std::fopen(path.string().c_str(), "wb");
-    assert(file != nullptr);
+    expect(file != nullptr, "the test file is opened");
 #endif
     const std::size_t written = std::fwrite(text, 1, std::strlen(text), file);
-    assert(written == std::strlen(text));
+    expect(written == std::strlen(text), "the test file is written");
     std::fclose(file);
   };
 
@@ -405,19 +433,21 @@ auto test_store_rejects_garbage() -> void {
       "# a comment\n"
       "esp.box = 0\n"
       "esp.box = not-a-number\n");
-  assert(!cs2::features::load(path.string().c_str()).has_value());
+  expect(!cs2::features::load(path.string().c_str()).has_value(),
+         "a non-numeric value is rejected");
 
   write("this line has no equals sign\n");
-  assert(!cs2::features::load(path.string().c_str()).has_value());
+  expect(!cs2::features::load(path.string().c_str()).has_value(),
+         "a line without an equals sign is rejected");
 
   write(
       "esp.box = 0\n"
       "esp.unknown_setting = 5\n"
       "unknown_section.box = 5\n");
   const auto loaded = cs2::features::load(path.string().c_str());
-  assert(loaded.has_value());
-  assert(!loaded->esp.box);
-  assert(loaded->esp.health_bar);  // the default, the file did not name it
+  expect(loaded.has_value(), "an unknown key is ignored");
+  expect(loaded.has_value() && !loaded->esp.box, "the named setting is applied");
+  expect(loaded.has_value() && loaded->esp.health_bar, "an unnamed setting keeps its default");
 
   // A UTF-8 BOM (what Notepad adds by default) must not make the file
   // corrupt: the first line is still a `key = value` line.
@@ -425,18 +455,22 @@ auto test_store_rejects_garbage() -> void {
       "\xEF\xBB\xBF"
       "esp.box = 0\n");
   const auto with_bom = cs2::features::load(path.string().c_str());
-  assert(with_bom.has_value());
-  assert(!with_bom->esp.box);
+  expect(with_bom.has_value(), "a byte-order mark is not a corrupt file");
+  expect(with_bom.has_value() && !with_bom->esp.box,
+         "the setting after a byte-order mark is applied");
 
   // A colour with the wrong number of components is corrupt, not a colour.
   write("esp.color_enemy = 1,2,3,4,5\n");
-  assert(!cs2::features::load(path.string().c_str()).has_value());
+  expect(!cs2::features::load(path.string().c_str()).has_value(),
+         "a colour with five components is rejected");
   write("esp.color_enemy = 1,2,3\n");
-  assert(!cs2::features::load(path.string().c_str()).has_value());
+  expect(!cs2::features::load(path.string().c_str()).has_value(),
+         "a colour with three components is rejected");
   write("esp.color_enemy = 1,2,3,4\n");
   const auto with_color = cs2::features::load(path.string().c_str());
-  assert(with_color.has_value());
-  assert(with_color->esp.color_enemy.g == 2);
+  expect(with_color.has_value(), "a four-component colour is accepted");
+  expect(with_color.has_value() && with_color->esp.color_enemy.g == 2,
+         "the colour's components are applied");
 
   std::filesystem::remove(path, error);
 }
@@ -452,13 +486,15 @@ auto test_settings_checksum() -> void {
   using cs2::overlay::wire::k_default_settings_checksum;
   using cs2::overlay::wire::settings_checksum;
 
-  assert(settings_checksum(default_settings()) == k_default_settings_checksum);
+  expect(settings_checksum(default_settings()) == k_default_settings_checksum,
+         "the default block carries the golden checksum");
 
   // One changed byte changes the checksum.
   const Settings original = default_settings();
   Settings changed = original;
   changed.esp_color_enemy[0] = static_cast<std::uint8_t>(changed.esp_color_enemy[0] + 1);
-  assert(settings_checksum(changed) != settings_checksum(original));
+  expect(settings_checksum(changed) != settings_checksum(original),
+         "one changed byte changes the checksum");
 
   // A clean round trip through the segment keeps the checksum.
   // The segment is 3 MB, so it lives in the static storage, not on the stack.
@@ -467,9 +503,10 @@ auto test_settings_checksum() -> void {
   shared.version = cs2::overlay::wire::k_version;
   cs2::overlay::wire::write_settings(shared, changed);
   Settings copy{};
-  assert(cs2::overlay::wire::read_settings(shared, copy));
-  assert(settings_checksum(copy) == settings_checksum(changed));
-  assert(std::memcmp(&copy, &changed, sizeof(Settings)) == 0);
+  expect(cs2::overlay::wire::read_settings(shared, copy), "a whole block is read");
+  expect(settings_checksum(copy) == settings_checksum(changed),
+         "the round trip keeps the checksum");
+  expect(std::memcmp(&copy, &changed, sizeof(Settings)) == 0, "the round trip keeps every byte");
 }
 
 // A torn read is always detected.
@@ -521,12 +558,13 @@ auto test_torn_read_is_detected() -> void {
 
   Settings copy{};
   std::uint32_t read_sequence = 0;
-  assert(!cs2::overlay::wire::read_settings(shared, copy, &read_sequence));
+  expect(!cs2::overlay::wire::read_settings(shared, copy, &read_sequence),
+         "a torn block is rejected");
 
   // A block that was not torn is read back unchanged.
   cs2::overlay::wire::write_settings(shared, first);
-  assert(cs2::overlay::wire::read_settings(shared, copy, &read_sequence));
-  assert(std::memcmp(&copy, &first, sizeof(Settings)) == 0);
+  expect(cs2::overlay::wire::read_settings(shared, copy, &read_sequence), "a whole block is read");
+  expect(std::memcmp(&copy, &first, sizeof(Settings)) == 0, "the whole block comes back unchanged");
 }
 
 // A stale binary refuses a segment it does not understand: the version is
@@ -537,10 +575,10 @@ auto test_segment_version() -> void {
   using cs2::overlay::wire::k_version;
   using cs2::overlay::wire::segment_is_compatible;
 
-  assert(segment_is_compatible(k_magic, k_version));
-  assert(!segment_is_compatible(k_magic, k_version - 1));
-  assert(!segment_is_compatible(k_magic, k_version + 1));
-  assert(!segment_is_compatible(0x12345678U, k_version));
+  expect(segment_is_compatible(k_magic, k_version), "the current segment is compatible");
+  expect(!segment_is_compatible(k_magic, k_version - 1), "an older segment is refused");
+  expect(!segment_is_compatible(k_magic, k_version + 1), "a newer segment is refused");
+  expect(!segment_is_compatible(0x12345678U, k_version), "a foreign segment is refused");
 }
 
 // A block published back has to be adopted by the next read.
@@ -564,8 +602,8 @@ auto test_published_block_is_adopted() -> void {
   Settings menu_block = cs2::overlay::wire::default_settings();
   menu_block.esp_skeleton = 1;
   cs2::overlay::wire::write_settings(shared, menu_block);
-  assert(protocol.adopt(shared, copy) == SettingsStatus::adopted);
-  assert(copy.esp_skeleton == 1);
+  expect(protocol.adopt(shared, copy) == SettingsStatus::adopted, "the menu's block is adopted");
+  expect(copy.esp_skeleton == 1, "the menu's block reaches the copy");
 
   // The payload publishes a loaded configuration back into the segment.
   Settings loaded = cs2::overlay::wire::default_settings();
@@ -574,12 +612,14 @@ auto test_published_block_is_adopted() -> void {
 
   // The next read has to notice the change and adopt the published block: that
   // is the only path from the published block to the ESP's configuration.
-  assert(protocol.adopt(shared, copy) == SettingsStatus::adopted);
-  assert(copy.esp_max_box_scale == 1.75F);
-  assert(cs2::features::from_wire_settings(copy).esp.max_box_scale == 1.75F);
+  expect(protocol.adopt(shared, copy) == SettingsStatus::adopted, "the published block is adopted");
+  expect(copy.esp_max_box_scale == 1.75F, "the published block reaches the copy");
+  expect(cs2::features::from_wire_settings(copy).esp.max_box_scale == 1.75F,
+         "the published block reaches the configuration");
 
   // A frame that reads the same block again does not re-apply it.
-  assert(protocol.adopt(shared, copy) == SettingsStatus::unchanged);
+  expect(protocol.adopt(shared, copy) == SettingsStatus::unchanged,
+         "an unchanged block is not re-applied");
 }
 
 // The config file's path is published into the live block.
@@ -589,16 +629,19 @@ auto test_published_block_is_adopted() -> void {
 // changes, so the publication never disturbs the menu's in-flight edits.
 auto test_config_path_is_published() -> void {
   const std::filesystem::path path = temp_path("cs2-internal-config-path.cfg");
-  assert(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()));
+  expect(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()),
+         "the config path environment variable is set");
 
   Settings settings{};
-  assert(cs2::features::publish_config_path(settings));
-  assert(std::string(settings.menu_config_path) == path.string());
+  expect(cs2::features::publish_config_path(settings), "the config path is published");
+  expect(std::string(settings.menu_config_path) == path.string(),
+         "the published config path is the file's path");
 
   // The path is already published: nothing changes, nothing is disturbed.
   Settings untouched = settings;
-  assert(!cs2::features::publish_config_path(settings));
-  assert(std::memcmp(&settings, &untouched, sizeof(Settings)) == 0);
+  expect(!cs2::features::publish_config_path(settings), "the config path is published once");
+  expect(std::memcmp(&settings, &untouched, sizeof(Settings)) == 0,
+         "the second publication disturbs nothing");
 }
 
 // The one-shot op protocol: the menu sets the op and bumps the token, and the
@@ -607,15 +650,18 @@ auto test_op_protocol() -> void {
   const std::filesystem::path path = temp_path("cs2-internal-config-op.cfg");
   std::error_code error;
   std::filesystem::remove(path, error);
-  assert(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()));
+  expect(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()),
+         "the config path environment variable is set");
   char published[cs2::features::k_max_config_path] = {};
-  assert(cs2::features::default_config_path(published, sizeof(published)) > 0);
-  assert(std::string(published) == path.string());
+  expect(cs2::features::default_config_path(published, sizeof(published)) > 0,
+         "the default config path is published");
+  expect(std::string(published) == path.string(), "the default config path is the file's path");
 
   // The payload publishes the file's path in the settings block.
   Config published_config{};
   cs2::features::set_config_path(published_config);
-  assert(std::string(published_config.menu.config_path.data()) == path.string());
+  expect(std::string(published_config.menu.config_path.data()) == path.string(),
+         "the configuration carries the file's path");
 
   Config config = cs2::features::from_wire_settings(sentinel_settings());
   std::snprintf(config.menu.config_path.data(), config.menu.config_path.size(), "%s",
@@ -628,40 +674,41 @@ auto test_op_protocol() -> void {
   settings.menu_config_token = 1;
   cs2::features::ConfigOpState state;
   const auto saved = cs2::features::apply_pending_op(config, settings, state);
-  assert(saved.ran);
-  assert(!saved.changed);  // a save changes nothing
-  assert(std::filesystem::exists(path, error));
+  expect(saved.ran, "the save op runs");
+  expect(!saved.changed, "a save changes nothing");
+  expect(std::filesystem::exists(path, error), "the save writes the file");
 
   // The same token does not run the op twice.
-  assert(!cs2::features::apply_pending_op(config, settings, state).ran);
+  expect(!cs2::features::apply_pending_op(config, settings, state).ran,
+         "the op runs once per token");
 
   // Load: the config comes back from the file.
   config = Config{};
   settings.menu_config_op = static_cast<std::uint8_t>(cs2::features::ConfigOp::load);
   settings.menu_config_token = 2;
   const auto loaded = cs2::features::apply_pending_op(config, settings, state);
-  assert(loaded.ran);
-  assert(loaded.changed);
-  assert(config.esp.skeleton);
-  assert(config.esp.max_box_scale == 1.75F);
-  assert(config.rage.weapon[0] == 'w');
+  expect(loaded.ran, "the load op runs");
+  expect(loaded.changed, "the load op changes the configuration");
+  expect(config.esp.skeleton, "the loaded configuration carries the skeleton");
+  expect(config.esp.max_box_scale == 1.75F, "the loaded configuration carries the box scale");
+  expect(config.rage.weapon[0] == 'w', "the loaded configuration carries the weapon");
 
   // Reset: the defaults are back.
   settings.menu_config_op = static_cast<std::uint8_t>(cs2::features::ConfigOp::reset);
   settings.menu_config_token = 3;
   const auto reset = cs2::features::apply_pending_op(config, settings, state);
-  assert(reset.ran);
-  assert(reset.changed);
+  expect(reset.ran, "the reset op runs");
+  expect(reset.changed, "the reset op changes the configuration");
   // The defaults are back. The config path is the payload's own, so it is not
   // part of the defaults.
   Config defaults{};
   cs2::features::set_config_path(defaults);
-  assert(config == defaults);
+  expect(config == defaults, "the reset restores the defaults");
 
   // No op: nothing happens.
   settings.menu_config_op = 0;
   settings.menu_config_token = 4;
-  assert(!cs2::features::apply_pending_op(config, settings, state).ran);
+  expect(!cs2::features::apply_pending_op(config, settings, state).ran, "an op of 0 does nothing");
 
   std::filesystem::remove(path, error);
 }
@@ -675,7 +722,8 @@ auto test_save_persists_live_settings() -> void {
   const std::filesystem::path path = temp_path("cs2-internal-config-save.cfg");
   std::error_code error;
   std::filesystem::remove(path, error);
-  assert(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()));
+  expect(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()),
+         "the config path environment variable is set");
 
   // The live block: the user has toggled a few things.
   Settings live = cs2::overlay::wire::default_settings();
@@ -691,21 +739,23 @@ auto test_save_persists_live_settings() -> void {
   Config config{};
   cs2::features::ConfigOpState state;
   const auto outcome = cs2::features::apply_pending_op(config, live, state);
-  assert(outcome.ran);
-  assert(!outcome.changed);  // a save changes nothing
+  expect(outcome.ran, "the save op runs");
+  expect(!outcome.changed, "a save changes nothing");
 
   // The file holds the **live** values, not the defaults.
   const auto loaded = cs2::features::load(path.string().c_str());
-  assert(loaded.has_value());
-  assert(loaded->esp.skeleton);
-  assert(loaded->esp.max_box_scale == 1.75F);
-  assert(!loaded->esp.box);
-  assert(loaded->rage.per_weapon);
+  expect(loaded.has_value(), "the saved file is read back");
+  expect(loaded.has_value() && loaded->esp.skeleton, "the file holds the live skeleton setting");
+  expect(loaded.has_value() && loaded->esp.max_box_scale == 1.75F,
+         "the file holds the live box scale");
+  expect(loaded.has_value() && !loaded->esp.box, "the file holds the live box setting");
+  expect(loaded.has_value() && loaded->rage.per_weapon,
+         "the file holds the live per-weapon setting");
 
   // The live block is untouched: the user's toggles survive the save.
-  assert(live.esp_skeleton == 1);
-  assert(live.esp_max_box_scale == 1.75F);
-  assert(live.box == 0);
+  expect(live.esp_skeleton == 1, "the live skeleton setting survives the save");
+  expect(live.esp_max_box_scale == 1.75F, "the live box scale survives the save");
+  expect(live.box == 0, "the live box setting survives the save");
   std::filesystem::remove(path, error);
 }
 
@@ -719,7 +769,8 @@ auto test_write_back_preserves_protocol_state() -> void {
   const std::filesystem::path path = temp_path("cs2-internal-config-protocol.cfg");
   std::error_code error;
   std::filesystem::remove(path, error);
-  assert(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()));
+  expect(set_env("CS2_PAYLOAD_CONFIG", path.string().c_str()),
+         "the config path environment variable is set");
 
   // Save a configuration. The file records the op and the token of the save.
   Settings live = cs2::overlay::wire::default_settings();
@@ -728,7 +779,7 @@ auto test_write_back_preserves_protocol_state() -> void {
   live.menu_config_token = 3;
   Config config{};
   cs2::features::ConfigOpState state;
-  assert(cs2::features::apply_pending_op(config, live, state).ran);
+  expect(cs2::features::apply_pending_op(config, live, state).ran, "the save op runs");
 
   // The menu now asks for a load with a new token and sets a ragebot op in
   // the same frame. The menu is open, too: the open state is the menu's, not
@@ -742,20 +793,24 @@ auto test_write_back_preserves_protocol_state() -> void {
   request.menu_config_token = 4;
 
   const auto loaded = cs2::features::apply_pending_op(config, request, state);
-  assert(loaded.ran);
-  assert(loaded.changed);
+  expect(loaded.ran, "the load op runs");
+  expect(loaded.changed, "the load op changes the configuration");
   // The loaded configuration reached the block...
-  assert(loaded.block.esp_skeleton == 1);
+  expect(loaded.block.esp_skeleton == 1, "the loaded configuration reached the block");
   // ...but the live protocol state did not.
-  assert(loaded.block.menu_open == 1);
-  assert(loaded.block.menu_config_op == request.menu_config_op);
-  assert(loaded.block.menu_config_token == request.menu_config_token);
-  assert(loaded.block.rage_config_op == request.rage_config_op);
-  assert(loaded.block.rage_config_token == request.rage_config_token);
+  expect(loaded.block.menu_open == 1, "the menu's open state survives the write-back");
+  expect(loaded.block.menu_config_op == request.menu_config_op,
+         "the menu's op survives the write-back");
+  expect(loaded.block.menu_config_token == request.menu_config_token,
+         "the menu's token survives the write-back");
+  expect(loaded.block.rage_config_op == request.rage_config_op,
+         "the menu's ragebot op survives the write-back");
+  expect(loaded.block.rage_config_token == request.rage_config_token,
+         "the menu's ragebot token survives the write-back");
 
   // The op did not re-trigger: the block still carries the live token, not
   // the file's (an old) one.
-  assert(loaded.block.menu_config_token != 3);
+  expect(loaded.block.menu_config_token != 3, "the write-back does not re-trigger the op");
 
   std::filesystem::remove(path, error);
 }
@@ -777,6 +832,10 @@ auto main() -> int {
   test_op_protocol();
   test_save_persists_live_settings();
   test_write_back_preserves_protocol_state();
+  if (failures != 0) {
+    std::printf("features-config: %d failed check(s)\n", failures);
+    return 1;
+  }
   std::puts("features-config: ok");
   return 0;
 }

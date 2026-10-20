@@ -328,28 +328,34 @@ void build_players(Frame& frame) {
 
     const float box_w = max.x - min.x;
     const float box_h = max.y - min.y;
-    if (box_h < 3.0F || box_w < 1.0F) {
-      if (frame.stats != nullptr) {
-        ++frame.stats->skipped_small;
-      }
-      continue;
-    }
 
     // The target is off screen when its box misses the viewport.
     const bool on_screen =
         max.x >= 0.0F && min.x <= frame.width && max.y >= 0.0F && min.y <= frame.height;
-    if (!on_screen) {
-      if (config.esp.offscreen) {
-        const float cx = (min.x + max.x) * 0.5F;
-        const float cy = (min.y + max.y) * 0.5F;
-        const esp_geometry::Direction direction{.x = cx - frame.width * 0.5F,
-                                                .y = cy - frame.height * 0.5F};
-        draw_offscreen_arrow(frame, player, direction);
+    // What the ESP draws for this box. The arrow comes first: a target
+    // outside the viewport must get its arrow even when its box is tiny.
+    switch (esp_geometry::player_box_outcome(on_screen, box_w, box_h)) {
+      case esp_geometry::PlayerBoxOutcome::arrow: {
+        if (config.esp.offscreen) {
+          const float cx = (min.x + max.x) * 0.5F;
+          const float cy = (min.y + max.y) * 0.5F;
+          const esp_geometry::Direction direction{.x = cx - frame.width * 0.5F,
+                                                  .y = cy - frame.height * 0.5F};
+          draw_offscreen_arrow(frame, player, direction);
+        }
+        if (frame.stats != nullptr) {
+          ++frame.stats->skipped_box;
+        }
+        continue;
       }
-      if (frame.stats != nullptr) {
-        ++frame.stats->skipped_box;
-      }
-      continue;
+      case esp_geometry::PlayerBoxOutcome::degenerate:
+        if (frame.stats != nullptr) {
+          ++frame.stats->skipped_small;
+        }
+        continue;
+      case esp_geometry::PlayerBoxOutcome::draw:
+      default:
+        break;
     }
 
     if (frame.stats != nullptr) {

@@ -35,6 +35,7 @@ enum class GrenadeKind : std::uint8_t {
   incendiary,
   he,
   decoy,
+  other,  // a grenade with no tint of its own (the sensor grenade, the mine)
 };
 
 // Where the radar widget sits. There is no setting for it, so it is a

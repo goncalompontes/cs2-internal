@@ -149,8 +149,13 @@ struct ArrowPlacement {
   const float cy = height * 0.5F;
   // The distance from the centre to the border along the direction; the
   // smaller of the two keeps the arrow inside the margin on both axes.
-  const float tx = (std::abs)(dx) > 1e-4F ? (cx - margin) / (std::abs)(dx) : 1e9F;
-  const float ty = (std::abs)(dy) > 1e-4F ? (cy - margin) / (std::abs)(dy) : 1e9F;
+  //
+  // The margin is clamped at zero: a viewport narrower than twice the
+  // margin has no room for it, and the unclamped distance would be
+  // negative — which puts the arrow on the **wrong** side of the screen (a
+  // target to the left would be drawn to the right of the centre).
+  const float tx = (std::abs)(dx) > 1e-4F ? (std::max)(cx - margin, 0.0F) / (std::abs)(dx) : 1e9F;
+  const float ty = (std::abs)(dy) > 1e-4F ? (std::max)(cy - margin, 0.0F) / (std::abs)(dy) : 1e9F;
   const float t = (std::min)(tx, ty);
   placement.x = cx + dx * t;
   placement.y = cy + dy * t;
@@ -175,6 +180,32 @@ struct ArrowPlacement {
   return points;
 }
 
+// --- The player's box --------------------------------------------------------
+
+// What the ESP draws for a projected player box.
+enum class PlayerBoxOutcome : std::uint8_t {
+  draw,        // the box is drawn
+  arrow,       // the target is outside the viewport: the arrow is drawn
+  degenerate,  // the box is too small to draw and the target is on screen
+};
+
+// What the ESP draws for a projected player box.
+//
+// The order matters: the off-screen test comes **first**, so a target that is
+// outside the viewport *and* small gets its arrow. A degenerate box is only
+// dropped when the target is on screen — otherwise the target would be
+// silently dropped altogether.
+[[nodiscard]] constexpr auto player_box_outcome(bool on_screen, float box_w, float box_h) noexcept
+    -> PlayerBoxOutcome {
+  if (!on_screen) {
+    return PlayerBoxOutcome::arrow;
+  }
+  if (box_h < 3.0F || box_w < 1.0F) {
+    return PlayerBoxOutcome::degenerate;
+  }
+  return PlayerBoxOutcome::draw;
+}
+
 // --- The radar --------------------------------------------------------------
 
 // A point in the radar's screen space.
@@ -182,6 +213,16 @@ struct RadarPoint {
   float x = 0.0F;
   float y = 0.0F;
 };
+
+// Whether a radar point is inside the radar's **disc**.
+//
+// The squared distance decides: a point at 45 degrees and exactly the
+// radius is on the ring, not outside it (the coordinate-wise test drew the
+// square around the circle).
+[[nodiscard]] constexpr auto inside_radar(const RadarPoint& point, float radius_px) noexcept
+    -> bool {
+  return point.x * point.x + point.y * point.y <= radius_px * radius_px;
+}
 
 // Map a world offset (in metres) to the radar's screen space, with the
 // viewer's own direction pointing up.

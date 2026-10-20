@@ -1,7 +1,7 @@
 #include "cs2/features/game_present_hook.hpp"
 
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 
 #include "cs2/diag/watchdog.hpp"
 #include "cs2/tls/bootstrap.hpp"
@@ -27,14 +27,21 @@ using PresentFn = std::uint64_t(__fastcall*)(void* self, std::uint64_t a, std::u
 
 GamePresentHook* g_active = nullptr;
 
+// The trampoline: the function the detour replaced. It is captured at install
+// time, so the detour always calls the game's own Present — even when the
+// hook is uninstalled or the active pointer is gone. Skipping it would skip
+// the frame's presentation entirely.
+PresentFn g_original = nullptr;
+
 std::uint64_t __fastcall present_detour(void* self, std::uint64_t a, std::uint64_t b,
                                         std::uint64_t c) {
-  if (g_active == nullptr) {
-    return 0;
+  if (g_active != nullptr) {
+    g_active->on_present();
   }
-  auto* original = reinterpret_cast<PresentFn>(g_active->original());
-  g_active->on_present();
-  return original(self, a, b, c);
+  if (g_original != nullptr) {
+    return g_original(self, a, b, c);
+  }
+  return 0;
 }
 
 #endif
@@ -43,7 +50,9 @@ std::uint64_t __fastcall present_detour(void* self, std::uint64_t a, std::uint64
 
 GamePresentHook::GamePresentHook(ModelPublisher& publisher) noexcept : publisher_(&publisher) {}
 
-GamePresentHook::~GamePresentHook() { uninstall(); }
+GamePresentHook::~GamePresentHook() {
+  uninstall();
+}
 
 auto GamePresentHook::install() noexcept -> bool {
   if (installed_) {
@@ -63,6 +72,9 @@ auto GamePresentHook::install() noexcept -> bool {
     std::printf("[cs2-features] game present inline hook failed: %s\n", hooks::to_string(*error));
     return false;
   }
+  // The trampoline is captured now: the detour calls it on every frame, and
+  // it must be the game's own Present even if the hook is torn down later.
+  g_original = reinterpret_cast<PresentFn>(hook_.original());
   installed_ = true;
   std::puts("[cs2-features] CRenderContextBase::Present hooked (game present)");
   return true;
@@ -76,6 +88,8 @@ void GamePresentHook::uninstall() noexcept {
     return;
   }
   hook_.uninstall();
+  // The trampoline belongs to the hook: it is invalid once the hook is gone.
+  g_original = nullptr;
   g_active = nullptr;
   installed_ = false;
 }

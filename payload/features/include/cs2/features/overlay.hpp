@@ -77,11 +77,20 @@ class Overlay {
 
   // A provider for a pawn's **real studio hitboxes** (world capsules), so the
   // overlay can draw them. Returns the number written (<= `max`).
+  //
+  // The ESP's head box and its skeleton need the same capsules, so the
+  // provider is handed to the `Esp` as well: the model is then read by one
+  // reader, not twice (the ESP's own fallback re-reads the model the
+  // provider has just read — several hundred scattered reads per pawn).
   using HitboxProvider = int (*)(void* context, std::uintptr_t pawn, game::HitboxCapsule* out,
                                  int max);
   void set_hitbox_provider(HitboxProvider provider, void* context) noexcept {
     hitbox_provider_ = provider;
     hitbox_context_ = context;
+    EspProviders providers = esp_.providers();
+    providers.hitboxes = provider;
+    providers.hitboxes_context = context;
+    esp_.set_providers(providers);
   }
 
   // The entity index the ragebot is currently aiming at (-1 = none); its

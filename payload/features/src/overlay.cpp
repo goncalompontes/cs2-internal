@@ -23,6 +23,18 @@ namespace {
 // A player's hitbox set is 19 boxes; leave headroom for the visualiser buffer.
 constexpr int k_max_hitboxes = 40;
 
+// How many players the hitbox visualiser draws.
+//
+// The filled (solid) mode puts every capsule's silhouette into the shared
+// segment's vertex pool: 19 capsules x up to 32 hull points x the players
+// drawn. The pool holds 16384 vertices, so a full server (64 players) would
+// overrun it by a factor of two and a half. The publisher clamps the
+// overflow away — it drops the excess, it does not corrupt the segment — but
+// the capsules would simply stop being drawn. The cap keeps the pool inside
+// its budget; the visualiser is a debugging aid, and the outline mode (the
+// default) does not use the pool at all.
+constexpr int k_max_visualised_players = 16;
+
 // Samples around each capsule end cap; the pill outline is the hull of both.
 constexpr int k_capsule_segments = 16;
 // The wireframe mesh cage is coarser: segments per ring, cap subdivisions.
@@ -125,8 +137,8 @@ void project_sphere_outline(const game::Matrix4x4& view, float width, float heig
   // `radius*cos_a` (Pythagoras on the tangent cone from the eye to the sphere).
   const game::Vec3 circle_center = center - axis * (radius * sin_a);
   const float circle_radius = radius * cos_a;
-  const game::Vec3 reference = std::fabs(axis.z) < 0.9F ? game::Vec3{0.0F, 0.0F, 1.0F}
-                                                        : game::Vec3{1.0F, 0.0F, 0.0F};
+  const game::Vec3 reference =
+      std::fabs(axis.z) < 0.9F ? game::Vec3{0.0F, 0.0F, 1.0F} : game::Vec3{1.0F, 0.0F, 0.0F};
   const game::Vec3 u = game::normalized(game::cross(axis, reference));
   const game::Vec3 v = game::cross(axis, u);
   constexpr float k_tau = 6.28318530717958648F;
@@ -159,8 +171,7 @@ auto capsule_silhouette(const game::Matrix4x4& view, float width, float height,
 
 // A framing test: an entirely off-screen silhouette draws nothing, so nothing
 // visible is ever discarded.
-auto outline_on_screen(const std::vector<game::Vec2>& outline, float width,
-                       float height) -> bool {
+auto outline_on_screen(const std::vector<game::Vec2>& outline, float width, float height) -> bool {
   if (outline.size() < 3) {
     return false;
   }
@@ -190,8 +201,8 @@ void draw_capsule_axis(render::DrawList& out, const game::Matrix4x4& view, float
 
 // OUTLINE: the silhouette as a closed polyline.
 void draw_capsule_outline(render::DrawList& out, const game::Matrix4x4& view, float width,
-                          float height, const game::Vec3& eye,
-                          const game::HitboxCapsule& capsule, const render::Color& color) {
+                          float height, const game::Vec3& eye, const game::HitboxCapsule& capsule,
+                          const render::Color& color) {
   if (capsule.radius <= 0.0F) {
     draw_capsule_axis(out, view, width, height, capsule, color);
     return;
@@ -209,8 +220,8 @@ void draw_capsule_outline(render::DrawList& out, const game::Matrix4x4& view, fl
 
 // SOLID: the silhouette as a filled convex polygon.
 void draw_capsule_solid(render::DrawList& out, const game::Matrix4x4& view, float width,
-                        float height, const game::Vec3& eye,
-                        const game::HitboxCapsule& capsule, const render::Color& color) {
+                        float height, const game::Vec3& eye, const game::HitboxCapsule& capsule,
+                        const render::Color& color) {
   if (capsule.radius <= 0.0F) {
     draw_capsule_axis(out, view, width, height, capsule, color);
     return;
@@ -245,8 +256,8 @@ void capsule_rings(const game::Vec3& a, const game::Vec3& b, float radius,
     axis = end - a;
   }
   const game::Vec3 n = game::normalized(axis);
-  const game::Vec3 reference = std::fabs(n.z) < 0.9F ? game::Vec3{0.0F, 0.0F, 1.0F}
-                                                     : game::Vec3{1.0F, 0.0F, 0.0F};
+  const game::Vec3 reference =
+      std::fabs(n.z) < 0.9F ? game::Vec3{0.0F, 0.0F, 1.0F} : game::Vec3{1.0F, 0.0F, 0.0F};
   const game::Vec3 u = game::normalized(game::cross(n, reference));
   const game::Vec3 v = game::cross(n, u);
   const auto make_ring = [&](const game::Vec3& center, float ring_radius,
@@ -254,8 +265,7 @@ void capsule_rings(const game::Vec3& a, const game::Vec3& b, float radius,
     std::vector<CapsuleSample> points;
     points.reserve(k_wire_segments);
     for (int i = 0; i < k_wire_segments; ++i) {
-      const float theta =
-          2.0F * k_pi * static_cast<float>(i) / static_cast<float>(k_wire_segments);
+      const float theta = 2.0F * k_pi * static_cast<float>(i) / static_cast<float>(k_wire_segments);
       const game::Vec3 position =
           center + (u * std::cos(theta) + v * std::sin(theta)) * ring_radius;
       points.push_back(CapsuleSample{position, game::normalized(position - sphere)});
@@ -265,13 +275,11 @@ void capsule_rings(const game::Vec3& a, const game::Vec3& b, float radius,
   rings.clear();
   rings.push_back(make_ring(a - n * radius, 0.0F, a));
   for (int k = 1; k <= k_wire_cap_rings; ++k) {
-    const float phi =
-        (k_pi * 0.5F) * static_cast<float>(k) / static_cast<float>(k_wire_cap_rings);
+    const float phi = (k_pi * 0.5F) * static_cast<float>(k) / static_cast<float>(k_wire_cap_rings);
     rings.push_back(make_ring(a - n * (radius * std::cos(phi)), radius * std::sin(phi), a));
   }
   for (int k = k_wire_cap_rings; k >= 1; --k) {
-    const float phi =
-        (k_pi * 0.5F) * static_cast<float>(k) / static_cast<float>(k_wire_cap_rings);
+    const float phi = (k_pi * 0.5F) * static_cast<float>(k) / static_cast<float>(k_wire_cap_rings);
     rings.push_back(make_ring(end + n * (radius * std::cos(phi)), radius * std::sin(phi), end));
   }
   rings.push_back(make_ring(end + n * radius, 0.0F, end));
@@ -280,8 +288,8 @@ void capsule_rings(const game::Vec3& a, const game::Vec3& b, float radius,
 // WIREFRAME: the mesh cage — every ring plus longitudinal lines, with
 // back-facing edges dimmed (the same look as the Python renderer).
 void draw_capsule_wire(render::DrawList& out, const game::Matrix4x4& view, float width,
-                       float height, const game::Vec3& eye,
-                       const game::HitboxCapsule& capsule, const render::Color& color) {
+                       float height, const game::Vec3& eye, const game::HitboxCapsule& capsule,
+                       const render::Color& color) {
   if (capsule.radius <= 0.0F) {
     draw_capsule_axis(out, view, width, height, capsule, color);
     return;
@@ -382,8 +390,7 @@ auto local_section(const game::Snapshot& snapshot) -> render::HudSection {
 
 auto players_section(const game::Snapshot& snapshot) -> render::HudSection {
   render::HudSection section;
-  section.title =
-      "Players (" + format_long(static_cast<long long>(snapshot.players.size())) + ")";
+  section.title = "Players (" + format_long(static_cast<long long>(snapshot.players.size())) + ")";
   for (const game::PlayerSnapshot& p : snapshot.players) {
     std::string value = team_name(p.team);
     value += p.is_local ? " (you)" : "";
@@ -481,7 +488,11 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
     const game::Vec3 camera_eye = game::camera_origin(0, snapshot.local->eye_origin);
     const int rage_target =
         rage_target_provider_ != nullptr ? rage_target_provider_(rage_target_context_) : -1;
+    int drawn = 0;
     for (const game::PlayerSnapshot& player : snapshot.players) {
+      if (drawn >= k_max_visualised_players) {
+        break;  // the vertex pool's budget (see k_max_visualised_players)
+      }
       if (!player.alive || player.is_local || player.pawn == 0) {
         continue;
       }
@@ -497,6 +508,7 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
       const Config& config = esp_config();
       game::HitboxCapsule capsules[k_max_hitboxes] = {};
       const int count = hitbox_provider_(hitbox_context_, player.pawn, capsules, k_max_hitboxes);
+      ++drawn;
       for (int i = 0; i < count; ++i) {
         draw_hitbox(model_.draw, view, screen_width, screen_height, camera_eye, capsules[i],
                     hitbox_color(config, capsules[i].group, active), config.esp.hitbox_mode);

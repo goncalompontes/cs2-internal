@@ -16,12 +16,26 @@ auto read_bytes(std::uintptr_t address, void* out, std::size_t count) noexcept -
   }
 #if defined(_WIN32)
   SIZE_T transferred = 0;
-  const BOOL ok = ReadProcessMemory(GetCurrentProcess(),
-                                    reinterpret_cast<const void*>(address), out, count,
-                                    &transferred);
+  const BOOL ok = ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address),
+                                    out, count, &transferred);
   return ok != 0 && transferred == count;
 #else
   std::memcpy(out, reinterpret_cast<const void*>(address), count);
+  return true;
+#endif
+}
+
+auto write_bytes(std::uintptr_t address, const void* data, std::size_t count) noexcept -> bool {
+  if (address == 0 || data == nullptr || count == 0) {
+    return false;
+  }
+#if defined(_WIN32)
+  SIZE_T transferred = 0;
+  const BOOL ok = WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(address), data,
+                                     count, &transferred);
+  return ok != 0 && transferred == count;
+#else
+  std::memcpy(reinterpret_cast<void*>(address), data, count);
   return true;
 #endif
 }
