@@ -361,6 +361,22 @@ a run that was interrupted leaves it off for the rest of the session).
   sv_subtick_movement_view_angles is off on this server, so the silent encoding
   cannot steer"*.
 
+**The verdict is made once per _command_.** The engine builds the command more
+than once, so the payload's hook runs several times per tick and the velocity
+it reads is the **same** on every one of those runs; a turn measured between two
+of them reads as zero — and a zero turn is what a gated rotation looks like.
+The verdict therefore waits for the run whose command number changed (`cmd +
+0x8`, the `CUserCmd::nSequenceNumber` — the same signal the bhop's phase
+correction uses). Without that gate three runs out of four were counted as
+"ignored", and the live HUD showed *"steering no (ignored)"* while the strafe
+was demonstrably steering.
+
+**The gain can be negative, and that is honest.** The strafe acts on a player
+who is **falling** as well (the move type is not checked — the RE's "landmine
+18", still a gap): a falling player's horizontal speed is constant, so the
+perpendicular wish pushes the velocity sideways and the speed drops. A gain of
+−59 u/s on the HUD is a fall, not a broken feature.
+
 **What it cannot do.** There is no *silent* way to steer the movement when the
 server ignores the sub-tick view angles: the wish direction is built from the
 command's move axes and the command's view angles, and the only silent channel that
