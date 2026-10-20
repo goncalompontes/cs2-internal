@@ -212,8 +212,10 @@ void ModelPublisher::publish_settings_block(const wire::Settings& settings) noex
   if (shared == nullptr) {
     return;
   }
-  // The protocol writes the block under the seqlock the layer reads it with and
-  // records the sequence it published.
+  // The protocol writes the block under the seqlock the layer reads it with.
+  // It deliberately does **not** record the sequence it published: the next
+  // `apply_settings` has to see the change and adopt the published block, or
+  // a loaded configuration would never reach the ESP.
   protocol_.publish(*shared, settings);
 #endif
 }
