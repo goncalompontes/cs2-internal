@@ -6,6 +6,7 @@
 
 #include <imgui.h>
 
+#include "cs2/overlay/menu_pages.hpp"
 #include "log.hpp"
 
 #if defined(_WIN32)
@@ -22,9 +23,12 @@ std::atomic<bool> g_menu_open{false};
 HWND g_window = nullptr;
 WNDPROC g_old_proc = nullptr;
 bool g_cursor_shown = false;
-bool g_previous_insert = false;
+bool g_previous_toggle = false;
 bool g_force_open = false;
 ImGuiContext* g_context = nullptr;
+// The keybind capture's counter when the toggle key was last polled: a
+// capture that took a key owns it, so the menu must not toggle as well.
+std::uint32_t g_capture_epoch = 0;
 
 // Debug aid: a marker file (`<payload dir>\overlay-menu-open`) forces the menu
 // open as soon as the game is in a map. Unlike an environment variable this
@@ -113,6 +117,9 @@ void set_menu_open(bool open) {
       ImGui::GetIO().AddMousePosEvent(static_cast<float>(cursor.x), static_cast<float>(cursor.y));
     }
     ImGui::GetIO().AddFocusEvent(true);
+    // The key state is dropped with the menu: a key held when the menu closed
+    // would otherwise stay "down" in ImGui's queue.
+    ImGui::GetIO().ClearInputKeys();
     if (!g_cursor_shown) {
       ShowCursor(TRUE);
       g_cursor_shown = true;
@@ -124,6 +131,9 @@ void set_menu_open(bool open) {
     overlay_log("cs2-overlay: menu opened (hwnd %p)", static_cast<void*>(g_window));
   } else {
     g_menu_open.store(false, std::memory_order_relaxed);
+    // An armed keybind capture belongs to the closed menu: drop it, so the
+    // next key press is not swallowed by a capture nobody can see.
+    cancel_capture();
     if (g_window != nullptr && g_old_proc != nullptr) {
       SetWindowLongPtrW(g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(g_old_proc));
     }
@@ -178,13 +188,38 @@ LRESULT CALLBACK hooked_wndproc(HWND window, UINT message, WPARAM wparam, LPARAM
     case WM_MOUSEWHEEL:
       io.AddMouseWheelEvent(0.0F, static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA);
       break;
+    case WM_XBUTTONDOWN:
+    case WM_XBUTTONUP: {
+      // The mouse's extra buttons are bindable keys: the wire's "Mouse 4" and
+      // "Mouse 5" are the virtual-key codes 0x05 and 0x06.
+      const auto key = static_cast<std::uint8_t>(0x04 + GET_XBUTTON_WPARAM(wparam));
+      if (message == WM_XBUTTONDOWN && capture_key(key)) {
+        break;  // the capture took the key: the game must not see it
+      }
+      swallow = false;  // the extra buttons belong to the game
+      break;
+    }
     case WM_KEYDOWN:
-    case WM_SYSKEYDOWN:
+    case WM_SYSKEYDOWN: {
+      const auto key = static_cast<std::uint8_t>(wparam);
+      // A keybind capture owns the keyboard while it is armed: the key is
+      // consumed here, so it never reaches the game.
+      if (capture_key(key)) {
+        break;
+      }
+      // The menu's text fields and its keyboard navigation need the key.
+      feed_key(io, key, true);
+      break;
+    }
     case WM_KEYUP:
     case WM_SYSKEYUP:
+      feed_key(io, static_cast<std::uint8_t>(wparam), false);
+      break;
     case WM_CHAR:
+      feed_character(io, static_cast<std::uint16_t>(lparam));
+      break;
     case WM_SYSCHAR:
-      // Keys belong to the menu while it is open: the game sees none of them.
+      // Alt+key: the system menu's character, not text.
       break;
     case WM_INPUT: {
       // Drain the raw-input buffer (so the system stays consistent) but do not
@@ -220,7 +255,7 @@ LRESULT CALLBACK hooked_wndproc(HWND window, UINT message, WPARAM wparam, LPARAM
   return CallWindowProcW(previous_proc, window, message, wparam, lparam);
 }
 
-void poll_toggle(bool in_game) {
+void poll_toggle(bool in_game, const wire::Settings& settings) {
   const bool open = g_menu_open.load(std::memory_order_relaxed);
   if (open) {
     if (g_window == nullptr || IsWindow(g_window) == FALSE) {
@@ -238,7 +273,7 @@ void poll_toggle(bool in_game) {
     if (open) {
       set_menu_open(false);  // left the map: give input back to the game
     }
-    g_previous_insert = false;
+    g_previous_toggle = false;
     return;
   }
   if (g_force_open && !open) {
@@ -247,208 +282,30 @@ void poll_toggle(bool in_game) {
       g_force_open = false;
     }
   }
-  // Two keys, because many keyboards need Fn for Insert.
-  const bool insert_down = (GetAsyncKeyState(VK_INSERT) & 0x8000) != 0;
-  const bool delete_down = (GetAsyncKeyState(VK_DELETE) & 0x8000) != 0;
-  const bool down = insert_down || delete_down;
-  if (down != g_previous_insert) {
-    overlay_log("cs2-overlay: menu key %s (%s, in_game=%d, window=%p, open=%d)",
-                down ? "down" : "up", insert_down ? "insert" : "delete", in_game ? 1 : 0,
-                static_cast<void*>(g_window), g_menu_open.load(std::memory_order_relaxed) ? 1 : 0);
+  // The toggle key is the menu's own setting (`wire::Settings::menu_key`).
+  // Insert stays a second toggle key, because many keyboards need Fn for it.
+  const int key = settings.menu_key != 0 ? static_cast<int>(settings.menu_key) : VK_INSERT;
+  const bool key_down = (GetAsyncKeyState(key) & 0x8000) != 0;
+  const bool insert_down = key != VK_INSERT && (GetAsyncKeyState(VK_INSERT) & 0x8000) != 0;
+  const bool down = key_down || insert_down;
+  // A keybind capture owns the keyboard while it is armed, and for the frame in
+  // which it took a key: the menu must not toggle at the same time (the
+  // capture's key press would otherwise close the menu behind the user's back).
+  const std::uint32_t epoch = capture_epoch();
+  if (capture_armed() || epoch != g_capture_epoch) {
+    g_capture_epoch = epoch;
+    g_previous_toggle = down;
+    return;
   }
-  if (down && !g_previous_insert) {
+  if (down != g_previous_toggle) {
+    overlay_log("cs2-overlay: menu key %s (in_game=%d, window=%p, open=%d)", down ? "down" : "up",
+                in_game ? 1 : 0, static_cast<void*>(g_window),
+                g_menu_open.load(std::memory_order_relaxed) ? 1 : 0);
+  }
+  if (down && !g_previous_toggle) {
     set_menu_open(!g_menu_open.load(std::memory_order_relaxed));
   }
-  g_previous_insert = down;
-}
-
-void toggle(const char* label, std::uint8_t& value) {
-  bool on = value != 0;
-  if (ImGui::Checkbox(label, &on)) {
-    value = on ? 1 : 0;
-  }
-}
-
-// Ragebot trigger-key choices (Win32 virtual-key codes).
-const char* const k_rage_key_names[] = {"X",   "C",    "V",        "Z",       "F",
-                                        "E",   "Q",    "Left Alt", "Left Shift",
-                                        "Mouse 4", "Mouse 5"};
-const int k_rage_key_vks[] = {0x58, 0x43,     0x56, 0x5A, 0x46,
-                              0x45, 0x51,     0xA4, 0xA0, 0x05,  0x06};
-
-auto rage_key_index(std::uint8_t vk) -> int {
-  for (int i = 0; i < IM_ARRAYSIZE(k_rage_key_vks); ++i) {
-    if (k_rage_key_vks[i] == vk) {
-      return i;
-    }
-  }
-  return 0;
-}
-
-// Draws the menu; returns false when the user closed it with the window button.
-auto draw_window(wire::Settings& settings) -> bool {
-  bool open = true;
-  ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowPos(ImVec2(90, 90), ImGuiCond_FirstUseEver);
-  if (ImGui::Begin("cs2-internal", &open)) {
-    if (ImGui::BeginTabBar("##tabs")) {
-      if (ImGui::BeginTabItem("ESP")) {
-        toggle("Box", settings.box);
-        toggle("Health bar", settings.health_bar);
-        toggle("Ammo bar", settings.ammo_bar);
-        ImGui::Separator();
-        toggle("Name", settings.name);
-        toggle("Weapon", settings.weapon);
-        toggle("Flags", settings.flags);
-        ImGui::Separator();
-        toggle("Only enemies", settings.only_enemies);
-        toggle("Show dead", settings.show_dead);
-        ImGui::Separator();
-        toggle("Hitboxes (studio)", settings.hitboxes);
-        if (settings.hitboxes != 0) {
-          static const char* const k_modes[] = {"Outline", "Solid", "Wireframe"};
-          int mode = settings.hitbox_mode <= 2 ? settings.hitbox_mode : 0;
-          ImGui::SetNextItemWidth(160.0F);
-          if (ImGui::Combo("Mode", &mode, k_modes, IM_ARRAYSIZE(k_modes))) {
-            settings.hitbox_mode = static_cast<std::uint8_t>(mode);
-          }
-          static const char* const k_colors[] = {"Automatic (hitgroup)", "Custom"};
-          int color_mode = settings.hitbox_color_mode != 0 ? 1 : 0;
-          ImGui::SetNextItemWidth(160.0F);
-          if (ImGui::Combo("Colour", &color_mode, k_colors, IM_ARRAYSIZE(k_colors))) {
-            settings.hitbox_color_mode = static_cast<std::uint8_t>(color_mode);
-          }
-          if (settings.hitbox_color_mode != 0) {
-            float rgba[4] = {settings.hitbox_color[0] / 255.0F, settings.hitbox_color[1] / 255.0F,
-                             settings.hitbox_color[2] / 255.0F, settings.hitbox_color[3] / 255.0F};
-            if (ImGui::ColorEdit4("Colour pick", rgba,
-                                  ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoInputs)) {
-              for (int i = 0; i < 4; ++i) {
-                const float clamped = rgba[i] < 0.0F ? 0.0F : (rgba[i] > 1.0F ? 1.0F : rgba[i]);
-                settings.hitbox_color[i] = static_cast<std::uint8_t>(clamped * 255.0F + 0.5F);
-              }
-            }
-          }
-          ImGui::TextDisabled("Outline: silhouette. Solid: filled. Wireframe: mesh cage.");
-        }
-        ImGui::EndTabItem();
-      }
-      if (ImGui::BeginTabItem("Interface")) {
-        toggle("Debug HUD window", settings.show_hud);
-        ImGui::TextDisabled("Insert or Delete toggles this menu");
-        ImGui::EndTabItem();
-      }
-      if (ImGui::BeginTabItem("Movement")) {
-        toggle("Auto-strafe (silent)", settings.auto_strafe);
-        toggle("Bunnyhop", settings.bhop);
-        ImGui::Separator();
-        ImGui::TextDisabled("Applied by the payload per tick while airborne (strafe)");
-        ImGui::TextDisabled("or grounded (bhop). The camera does not move.");
-        ImGui::EndTabItem();
-      }
-      if (ImGui::BeginTabItem("Ragebot")) {
-        toggle("Ragebot", settings.rage);
-        // The trigger (`docs/ragebot.md`): hold the key, always on, or toggle the key.
-        static const char* const k_trigger_modes[] = {"Hold key", "Always on", "Toggle key"};
-        int trigger = settings.rage_mode <= 2 ? settings.rage_mode : 0;
-        ImGui::SetNextItemWidth(160.0F);
-        if (ImGui::Combo("Trigger", &trigger, k_trigger_modes, IM_ARRAYSIZE(k_trigger_modes))) {
-          settings.rage_mode = static_cast<std::uint8_t>(trigger);
-        }
-        if (settings.rage_mode == 0) {
-          int key_index = rage_key_index(settings.rage_key);
-          if (ImGui::Combo("Trigger key", &key_index, k_rage_key_names,
-                           IM_ARRAYSIZE(k_rage_key_names))) {
-            settings.rage_key = static_cast<std::uint8_t>(k_rage_key_vks[key_index]);
-          }
-        }
-        toggle("Auto fire", settings.rage_fire);
-        ImGui::Separator();
-        // Objective: what the solve maximizes.
-        static const char* const k_objectives[] = {"Damage", "Hitchance", "Expected damage"};
-        int objective = settings.rage_objective <= 2 ? settings.rage_objective : 0;
-        ImGui::SetNextItemWidth(160.0F);
-        if (ImGui::Combo("Objective", &objective, k_objectives, IM_ARRAYSIZE(k_objectives))) {
-          settings.rage_objective = static_cast<std::uint8_t>(objective);
-        }
-        // Hitbox: which boxes the solve may pick.
-        static const char* const k_boxes[] = {"Auto (head first)", "Head only", "Body only"};
-        int hitbox = settings.rage_hitbox <= 2 ? settings.rage_hitbox : 0;
-        ImGui::SetNextItemWidth(160.0F);
-        if (ImGui::Combo("Hitbox", &hitbox, k_boxes, IM_ARRAYSIZE(k_boxes))) {
-          settings.rage_hitbox = static_cast<std::uint8_t>(hitbox);
-        }
-        ImGui::SetNextItemWidth(160.0F);
-        ImGui::SliderFloat("FOV", &settings.rage_fov, 0.0F, 180.0F, "%.0f deg");
-        ImGui::SetNextItemWidth(160.0F);
-        ImGui::SliderFloat("Min damage", &settings.rage_min_damage, 0.0F, 200.0F, "%.0f");
-        ImGui::SetNextItemWidth(160.0F);
-        ImGui::SliderFloat("Min hitchance", &settings.rage_min_hitchance, 0.0F, 1.0F, "%.2f");
-        ImGui::Separator();
-        // The common assists (`docs/ragebot.md`).
-        static const char* const k_assist_modes[] = {"Off", "Always", "When firing"};
-        int autostop = settings.rage_autostop <= 2 ? settings.rage_autostop : 0;
-        ImGui::SetNextItemWidth(160.0F);
-        if (ImGui::Combo("Auto-stop", &autostop, k_assist_modes, IM_ARRAYSIZE(k_assist_modes))) {
-          settings.rage_autostop = static_cast<std::uint8_t>(autostop);
-        }
-        int autoscope = settings.rage_autoscope <= 2 ? settings.rage_autoscope : 0;
-        ImGui::SetNextItemWidth(160.0F);
-        if (ImGui::Combo("Auto-scope", &autoscope, k_assist_modes, IM_ARRAYSIZE(k_assist_modes))) {
-          settings.rage_autoscope = static_cast<std::uint8_t>(autoscope);
-        }
-        toggle("Auto-reload (empty clip)", settings.rage_autoreload);
-        toggle("Only visible (no wallbang)", settings.rage_only_visible);
-        toggle("Recoil compensation", settings.rage_recoil);
-        ImGui::SetNextItemWidth(160.0F);
-        ImGui::SliderFloat("Auto-stop speed", &settings.rage_stop_speed, 0.0F, 250.0F, "%.0f u/s");
-        ImGui::TextDisabled("Counter-strafe down to this speed. 0 = default (34%% of max).");
-        ImGui::Separator();
-        // Per-weapon profiles (`rage_config.hpp`): the live sliders above are the
-        // *global* tuning; save/load a weapon's copy, and `Per-weapon` applies the
-        // profile matching the active weapon at solve time.
-        toggle("Per-weapon config", settings.rage_per_weapon);
-        ImGui::SetNextItemWidth(180.0F);
-        ImGui::InputText("Weapon key", settings.rage_weapon, sizeof(settings.rage_weapon));
-        if (ImGui::Button("Save to weapon")) {
-          settings.rage_config_op = 1;
-          ++settings.rage_config_token;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Load from weapon")) {
-          settings.rage_config_op = 2;
-          ++settings.rage_config_token;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Delete")) {
-          settings.rage_config_op = 5;
-          ++settings.rage_config_token;
-        }
-        if (ImGui::Button("Save file")) {
-          settings.rage_config_op = 3;
-          ++settings.rage_config_token;
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Load file")) {
-          settings.rage_config_op = 4;
-          ++settings.rage_config_token;
-        }
-        ImGui::Separator();
-        ImGui::TextDisabled("Hold the key to aim at the best enemy in FOV (silent),");
-        ImGui::TextDisabled("through walls with the real penetration model.");
-        ImGui::TextDisabled("Fires while held when Auto fire is on.");
-        ImGui::EndTabItem();
-      }
-      if (ImGui::BeginTabItem("About")) {
-        ImGui::TextWrapped("cs2-internal overlay. ESP labels are outlined; the player name is not.");
-        ImGui::TextDisabled("font: Dear ImGui default, antialiasing off");
-        ImGui::EndTabItem();
-      }
-      ImGui::EndTabBar();
-    }
-  }
-  ImGui::End();
-  return open;
+  g_previous_toggle = down;
 }
 
 #endif  // _WIN32
@@ -472,12 +329,15 @@ void frame(wire::Settings& settings, bool in_game) noexcept {
       menu_marker_exists()) {
     g_force_open = true;
   }
-  poll_toggle(in_game);
+  poll_toggle(in_game, settings);
   if (g_menu_open.load(std::memory_order_relaxed)) {
     // The game re-clips the cursor every frame while it has focus; keep it unclipped so
     // the menu is usable without the game's own mouse-release.
     ClipCursor(nullptr);
-    if (!draw_window(settings)) {
+    // The pages, the widgets and the keybind capture are shared with the
+    // payload's in-process menu (`cs2/overlay/menu_pages.hpp`); this file only
+    // owns the window plumbing.
+    if (!draw_menu(settings, "Vulkan implicit layer")) {
       set_menu_open(false);
     }
   }
