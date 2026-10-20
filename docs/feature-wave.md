@@ -30,6 +30,7 @@
 | **T6** | True 3D chams: a scene/material hook | `payload/features/src/chams.cpp` (new), `payload/game/*` | blocked on the RE |
 | **T7** | Neverlose mining (item 6) | — | blocked on the machine |
 | **T8** | The remaining clang-tidy sweep groups + the manual refactors | repo-wide | to run at the end of the wave |
+| **T9** | The ESP's out-of-module data providers: the **sound** provider (the `player_footstep` / `player_sound` events are captured but *not* in the default subscription set, and the `userid` argument is a player *slot*, so the position must be resolved from the snapshot) and the **visibility** provider (cached, low-rate, reusing the ragebot's existing occlusion machinery — never a per-player-per-frame query) | `payload/control/**`, `payload/src/payload_main.cpp` | in progress |
 
 ### 1.1 The second workstream: the scenario / control API
 
