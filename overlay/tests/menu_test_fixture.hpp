@@ -6,8 +6,10 @@
 // real ImGui context and a real display size. The fixture owns that context
 // and the helpers the cases share.
 
+#include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <string>
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -111,12 +113,26 @@ inline void reset_ui_state() noexcept {
 }
 
 // The temporary directory the cases write their files in.
+//
+// It is **per process**, not the shared system temp directory: the menu
+// persists its window geometry to a side file next to the settings file, and
+// `meson test` runs the suites **concurrently** - two suites sharing one
+// directory would race on that file (and one of them would write into the
+// operator's real configuration directory).
 [[nodiscard]] inline auto temp_directory() -> std::filesystem::path {
-  std::error_code error;
-  std::filesystem::path path = std::filesystem::temp_directory_path(error);
-  if (error) {
-    return std::filesystem::path(".");
-  }
+  static const std::filesystem::path path = [] {
+    std::error_code error;
+    std::filesystem::path base = std::filesystem::temp_directory_path(error);
+    if (error) {
+      base = std::filesystem::path(".");
+    }
+    // The stamp is taken once, on the first call, so every case in this
+    // process shares the directory and no two processes share one.
+    const auto stamp = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    std::filesystem::path directory = base / ("cs2-menu-test-" + std::to_string(stamp));
+    std::filesystem::create_directories(directory, error);
+    return directory;
+  }();
   return path;
 }
 
