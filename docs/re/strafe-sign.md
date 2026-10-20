@@ -390,6 +390,28 @@ them).
 
 ## 5. The live check (the confirmation, and how to re-run it)
 
+### 5.0 The result (2026-10-20): the convention is confirmed
+
+**Holding `A` moves the player to their LEFT**, so the engine's side axis is
+**positive-LEFT** and §2-§4 hold. The measured displacement over a 1.5 s hold,
+projected onto the engine's own left vector `(−sin yaw, +cos yaw)`:
+
+```
+displacement: 71.7 units
+  along the engine's LEFT vector: +20.1      <- holding A goes LEFT
+  along the view forward:           +68.8
+```
+
+The positive lateral component is the confirmation: the repo's **goal** was
+right, the repo's **analog write** was mirrored, and the fix of §4.2 (write
+`+sin(rel)`, and pair it with `IN_MOVELEFT`) is correct.
+
+The check was run through the OpenCode MCP tools — `cs2_press({key: "a",
+hold: 1.5})` then `cs2_state()` — against a live bot match, with the payload
+reporting `protocol: 2`.
+
+### 5.1 How to re-run it
+
 The static derivation above is self-consistent and complete, but one
 observation confirms it end to end: **read the command's side axis while the
 player holds `A` and nothing else.**
