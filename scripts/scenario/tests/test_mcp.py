@@ -31,12 +31,12 @@ import subprocess
 import sys
 import threading
 import unittest
-from typing import Any, Literal, Mapping, NotRequired, Required, TypedDict
+from typing import Any, Literal, Mapping, NotRequired, Required, TypedDict, cast
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
 from scenario import protocol  # noqa: E402
-from scenario.control import ControlError  # noqa: E402
+from scenario.control import Control, ControlError  # noqa: E402
 from scenario.mcp import schema as schema_bridge  # noqa: E402
 from scenario.mcp import server as mcp_server  # noqa: E402
 from scenario.mcp import session as mcp_session  # noqa: E402
@@ -420,7 +420,7 @@ class SessionTest(unittest.TestCase):
     def test_the_game_is_never_killed(self) -> None:
         control = _FakeControl()
         session = mcp_session.Session(pipe_name="fake-pipe")
-        session._control = control
+        session._control = cast(Control, control)
         session.close()
         self.assertNotIn("quit", control.calls)
         self.assertIn("close", control.calls)
@@ -433,6 +433,18 @@ class SessionTest(unittest.TestCase):
 
 
 # --- the server, in process ------------------------------------------------
+def _answer(response: dict[str, Any] | None) -> dict[str, Any]:
+    """The server's answer to a request.
+
+    ``Server.handle`` answers ``None`` for a *notification* — a message that
+    must not be answered — so a request path has to say "there is an answer"
+    before it reads one.
+    """
+    if response is None:
+        raise AssertionError("the server answered a request with silence")
+    return response
+
+
 class ServerDispatchTest(unittest.TestCase):
     """The dispatch: every bad input is answered, never fatal."""
 
@@ -445,7 +457,7 @@ class ServerDispatchTest(unittest.TestCase):
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "2025-06-18"},
         })
-        result = response["result"]
+        result = _answer(response)["result"]
         self.assertEqual(result["protocolVersion"], "2025-06-18")
         self.assertIn("tools", result["capabilities"])
         self.assertEqual(result["serverInfo"]["name"], mcp_server.SERVER_NAME)
@@ -455,16 +467,16 @@ class ServerDispatchTest(unittest.TestCase):
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {"protocolVersion": "1999-01-01"},
         })
-        self.assertIn(response["result"]["protocolVersion"],
+        self.assertIn(_answer(response)["result"]["protocolVersion"],
                       mcp_server.PROTOCOL_VERSIONS)
 
     def test_an_unknown_method_is_an_error(self) -> None:
         response = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "nope"})
-        self.assertEqual(response["error"]["code"], mcp_server.METHOD_NOT_FOUND)
+        self.assertEqual(_answer(response)["error"]["code"], mcp_server.METHOD_NOT_FOUND)
 
     def test_a_malformed_request_is_an_error(self) -> None:
         response = self.server.handle(["not", "an", "object"])
-        self.assertEqual(response["error"]["code"], mcp_server.INVALID_REQUEST)
+        self.assertEqual(_answer(response)["error"]["code"], mcp_server.INVALID_REQUEST)
 
     def test_a_notification_is_never_answered(self) -> None:
         self.assertIsNone(self.server.handle(
@@ -472,7 +484,7 @@ class ServerDispatchTest(unittest.TestCase):
 
     def test_the_tool_list_carries_the_schemas(self) -> None:
         response = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-        tools = response["result"]["tools"]
+        tools = _answer(response)["result"]["tools"]
         self.assertEqual([tool["name"] for tool in tools], list(EXPECTED_TOOLS))
         for tool in tools:
             self.assertEqual(tool["inputSchema"]["type"], "object")
@@ -482,14 +494,14 @@ class ServerDispatchTest(unittest.TestCase):
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "cs2_nope", "arguments": {}},
         })
-        self.assertEqual(response["error"]["code"], mcp_server.INVALID_PARAMS)
+        self.assertEqual(_answer(response)["error"]["code"], mcp_server.INVALID_PARAMS)
 
     def test_wrong_arguments_are_a_tool_error(self) -> None:
         response = self.server.handle({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "cs2_exec", "arguments": {"line": 5}},
         })
-        result = response["result"]
+        result = _answer(response)["result"]
         self.assertTrue(result["isError"])
         self.assertIn("invalid arguments", result["content"][0]["text"])
 
@@ -501,7 +513,7 @@ class ServerDispatchTest(unittest.TestCase):
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "cs2_ping", "arguments": {}},
             })
-        result = response["result"]
+        result = _answer(response)["result"]
         self.assertTrue(result["isError"])
         self.assertIn("the game is not running", result["content"][0]["text"])
         self.assertNotIn("Traceback", result["content"][0]["text"])
@@ -750,7 +762,10 @@ class McpClientTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(names, set(EXPECTED_TOOLS))
                 outcome = await session.call_tool("cs2_ping", {})
                 self.assertTrue(outcome.is_error)
-                self.assertIn("the game is not running", outcome.content[0].text)
+                # The content block is a union of the MCP content kinds; the
+                # tool error is a text block.
+                text = getattr(outcome.content[0], "text", "")
+                self.assertIn("the game is not running", text)
 
 
 # --- the runtime dependency rule -------------------------------------------
