@@ -2199,13 +2199,18 @@ auto Service::movement_status(char* out, std::size_t size) const noexcept -> boo
   // the operator has to see that instead of guessing
   // (`docs/re/strafing.md` §"The gate").
   const int subticks = input_.strafe_subticks();
+  // The steering verdict, with the three states it really has: the engine
+  // applied the rotation ("yes"), it ignored it ("no (ignored)"), or nothing
+  // has been judged yet ("?" — the player has not been airborne).
+  const bool judged = input_.strafe_steered_ticks() > 0 || input_.strafe_ignored() > 0;
+  const bool followed = input_.strafe_steered();
+  const char* steering = !judged ? "?" : (followed ? "yes" : "no");
+  const char* ignored = (judged && !followed) ? " (ignored)" : "";
   std::snprintf(
       out, size,
       "strafe %s (%d slice%s, gain %+.0f u/s, steering %s%s) bhop %s (presses %llu)",
-      strafe ? "on" : "off", subticks, subticks == 1 ? "" : "s", input_.strafe_gain(),
-      input_.strafe_steered() ? "yes" : "no",
-      input_.strafe_ignored() > 0 && !input_.strafe_steered() ? " (ignored)" : "",
-      bhop ? "on" : "off",
+      strafe ? "on" : "off", subticks, subticks == 1 ? "" : "s", input_.strafe_gain(), steering,
+      ignored, bhop ? "on" : "off",
       static_cast<unsigned long long>(input_.bhop_presses()));
   return true;
 }
