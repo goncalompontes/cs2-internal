@@ -281,6 +281,33 @@ features_esp_geometry_test = executable('features_esp_geometry_test',
 )
 test('features-esp-geometry', features_esp_geometry_test)
 
+# The shared menu header (`overlay/include/cs2/overlay/menu_pages.hpp`): the
+# one definition of the menu's content for both renderers. Dear ImGui runs
+# headless, so the **real** `draw_menu()` can be driven with a real ImGui
+# context: the keybind capture, the key names and the config-op protocol are
+# host-testable.
+menu_pages_test = executable('menu_pages_test',
+  files(
+    'overlay/tests/test_menu_pages.cpp',
+    'payload/features/src/settings.cpp',
+    'payload/features/src/config_store.cpp',
+    'payload/game/src/log.cpp',
+    'payload/third_party/imgui/imgui.cpp',
+    'payload/third_party/imgui/imgui_draw.cpp',
+    'payload/third_party/imgui/imgui_tables.cpp',
+    'payload/third_party/imgui/imgui_widgets.cpp',
+  ),
+  include_directories : [
+    include_directories('overlay/include'),
+    include_directories('overlay/tests'),
+    include_directories('payload/features/include'),
+    include_directories('payload/game/include'),
+    include_directories('payload/render/include'),
+    include_directories('payload/third_party/imgui'),
+  ],
+)
+test('menu-pages', menu_pages_test)
+
 # --- Generated C++ SDK headers -------------------------------------------
 # Render payload/sdk/*.hpp from the calibration dumps in calibration/. The
 # generator is the Rust dumper, built on demand by scripts/gen-sdk.py. With
