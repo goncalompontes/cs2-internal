@@ -1170,7 +1170,13 @@ inline void draw_pages(wire::Settings& settings, const char* renderer_label = nu
   // (`ImClamp(size, min, max)` in `imgui.cpp`), so "no maximum" is `FLT_MAX`:
   // a zero maximum clamps the window to `ImClamp(size, 520, 0) == 0` and then
   // to ImGui's 32x32 floor, which hides the whole menu.
-  ImGui::SetNextWindowSizeConstraints(ImVec2(k_min_width, k_min_height), ImVec2(0.0F, 0.0F));
+  // The window is at least the minimum and at most the screen.
+  //
+  // Dear ImGui reads the second argument as a **real** maximum
+  // (`ImClamp(size, min, max)` in `imgui.cpp`), so "no maximum" is `FLT_MAX`:
+  // a zero maximum clamps the window to `ImClamp(size, 520, 0) == 0` and then
+  // to ImGui's 32x32 floor, which hides the whole menu.
+  ImGui::SetNextWindowSizeConstraints(ImVec2(k_min_width, k_min_height), ImVec2(FLT_MAX, FLT_MAX));
 
   // The accent and the transparency are the menu's own settings.
   const ImVec4 accent = ImVec4(static_cast<float>(settings.menu_accent[0]) / 255.0F,
