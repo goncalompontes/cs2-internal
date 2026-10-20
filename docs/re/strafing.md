@@ -369,6 +369,43 @@ The camera-frame analog cannot substitute (measured above), and the command's ow
 view angles would steer — but they move the eye angles, so the feature would stop
 being silent.
 
+### The gain is a **cold-start** effect (measured 2026-10-20)
+
+A second measurement, on **flat** ground with ~960 units of clear run (the
+long corridor at `y ≈ 2100`, `x ≈ 1423` on de_dust2), separates the two things
+the operator's report conflates:
+
+| start | arm | air speed after ~3 hops |
+|---|---|---|
+| **standstill** (~30 u/s) | the control (the strafe off) | 107.4 u/s |
+| **standstill** | the rotation encoding | **184.5 u/s** |
+| **the run speed** (250 u/s) | the control | 250 → 257 u/s |
+| **the run speed** | the rotation encoding | 250 → **258** u/s |
+
+So:
+
+* **the bhop preserves the speed, it does not add any** (250 → 257 over three
+  hops, which is the noise). That is what a bunnyhop is — the *strafe* is what
+  adds speed, and the two are a pair.
+* **the auto-strafe's gain is large from a slow start and collapses at the run
+  speed**: +~40-50 u/s per hop at 30 u/s, but only a few u/s per hop at 250 u/s.
+  That is what the engine's arithmetic says: the air-acceleration budget is a
+  fixed amount per tick, so the speed it can add falls as 1/s.
+
+**Open (this is the next RE question, not a claim):** the community's air-strafe
+reaches 300-400 u/s *at* the run speed, so a few u/s per hop is below what the
+engine should give. The payload's own model of the budget
+(`accel_tick = wishspeed · sv_airaccelerate · dt`, i.e. 46.9 u/s per tick with
+the **uncapped** wish speed) may be the wrong one: `AirAccelerate` caps the
+*addspeed* at `sv_air_max_wishspeed` (30) while the budget uses the player's
+run speed, and the optimum angle depends on which of the two binds. Setting the
+model's wish speed to 30 instead of 250 changed **nothing** measurable
+(258 vs 259 u/s), so the discrepancy is elsewhere — most likely in how the
+engine applies the accumulated `yaw_delta` to the movement's basis. Until that
+is re-derived, the honest statement is: **the feature accelerates the player
+from a slow start; at the full run speed the engine's air-acceleration budget
+is nearly exhausted.**
+
 ### Measurement method (a correction to this session's own attempts)
 
 Sampling the *snapshot's* velocity as fast as the control pipe allows gives ~700 Hz
