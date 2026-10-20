@@ -7,11 +7,12 @@ player ignores input, ...), so the sequence lives here once instead of being
 re-derived in every scenario.
 
 The **screen state machine** lives in :mod:`.screens`: it reduces the payload
-state to one screen (main menu / team-select / warmup / freeze / live / dead /
-round-end), says which capabilities that screen has, and drives the transitions.
-These helpers are the thin, backwards-compatible face of it — ``screen``,
-``state``, ``require`` and ``ensure`` are the machine-first API that new
-scenarios should use::
+state to one screen (main menu / loading / disconnected / team-select / warmup /
+freeze / half-time / overtime / paused / dead / round-end / defusing / planted /
+buy-time / live), says which capabilities that screen has, and drives the
+transitions. These helpers are the thin, backwards-compatible face of it —
+``screen``, ``state``, ``require`` and ``ensure`` are the machine-first API that
+new scenarios should use::
 
     from . import awaiting
 

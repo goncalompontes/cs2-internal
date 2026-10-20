@@ -41,13 +41,27 @@ from .protocol import (
     WaitExpr,
     WaitResult,
 )
-from .screens import Can, GameState, Machine, Screen
+from .screens import (
+    CAPABILITIES,
+    KNOWN_ACTIONS,
+    TARGETS,
+    TRANSITIONS,
+    Can,
+    GameState,
+    Machine,
+    Screen,
+    Transition,
+)
 from .session import Game, SessionError, cs2_session
 
 __all__ = [
+    "CAPABILITIES",
     "DEFAULT_PIPE",
+    "KNOWN_ACTIONS",
     "PLAYGROUND_CONVARS",
     "RESPAWN_CONVARS",
+    "TARGETS",
+    "TRANSITIONS",
     "AimObjective",
     "ButtonName",
     "Can",
@@ -71,6 +85,7 @@ __all__ = [
     "SessionError",
     "StateSnapshotDict",
     "TeamName",
+    "Transition",
     "WaitExpr",
     "WaitResult",
     "add_bots",
