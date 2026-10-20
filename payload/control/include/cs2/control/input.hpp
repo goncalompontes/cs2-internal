@@ -436,8 +436,7 @@ class Input {
   [[nodiscard]] std::uint64_t strafe_steered_ticks() const noexcept {
     return strafe_steered_ticks_.load();
   }
-  [[nodiscard]] std::uint64_t strafe_ignored() const noexcept { return strafe_ignored_.load(); }
-  // How many times the bhop assist queued a (sub-tick) jump press.
+  [[nodiscard]] std::uint64_t strafe_ignored() const noexcept { return strafe_ignored_.load(); }  // How many times the bhop assist queued a (sub-tick) jump press.
   [[nodiscard]] std::uint64_t bhop_presses() const noexcept { return bhop_presses_.load(); }
   // Bhop gate diagnostics: ticks the engine's button state showed the player
   // holding jump, and of those how many were airborne.
@@ -646,6 +645,11 @@ class Input {
   // One tick of the auto-strafe (see `set_strafe`); called from `apply()` with the
   // `CBaseUserCmdPB` (`base`) and the owning `CUserCmd` (`cmd`).
   void strafe_tick(void* base, void* cmd) noexcept;
+  // The steering verdict (the gate): compare the turn of the velocity heading
+  // with the rotation the payload asked for, and record the sample for the
+  // next tick. Called once per **writing** tick — a tick that did not write
+  // asked for nothing, so it is not judged.
+  void strafe_judge_steer(float vel_yaw, int side, float requested_rotation) noexcept;
   // Write the strafe's wish: the analog move floats + both button states, and (in
   // the `subticks >= 1` mode) the basis-rotating `yaw_delta` steps (`deltas[0..steps)`,
   // already the per-slice optimum — see `strafe_tick`). Returns false when nothing
