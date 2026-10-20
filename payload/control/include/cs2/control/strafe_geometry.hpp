@@ -21,12 +21,17 @@
 //     `AirAccelerate` optimum `theta*`), so the velocity curves toward the goal
 //     and re-perpendicularises every tick instead of decaying.
 //
+// The module also owns the engine's **button bits and their names** (the
+// `IN_*` masks and the name -> bit map the payload's button mask uses), so the
+// host test can pin them without the engine.
+//
 // This header must stay dependency-free: no engine headers, no `<windows.h>`.
 // It is compiled into the host test and into the payload.
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <string_view>
 
 namespace cs2::control {
 
@@ -37,6 +42,12 @@ namespace cs2::control {
 // engine in. The names are the engine's own `IN_*` bits (`docs/re/subtick.md`
 // §"The command build"); the source of the mask is the `CUserCmd` button word
 // at `cmd + 0x60`.
+//
+// The engine's own button-name table (client.dll build 25947352: the table at
+// `0x181b28cf0`, the names at `0x181b28f70`) is the authority for the bits —
+// and it spells them the way CS2 does: the bits 7/8 are `IN_TURNLEFT` /
+// `IN_TURNRIGHT` (the **look**) and 9/10 are `IN_MOVELEFT` / `IN_MOVERIGHT`
+// (the **strafe**). There is no `IN_LEFT`/`IN_RIGHT` in CS2.
 namespace button {
 inline constexpr std::uint64_t k_attack = 1ull << 0;
 inline constexpr std::uint64_t k_jump = 1ull << 1;
@@ -45,8 +56,8 @@ inline constexpr std::uint64_t k_forward = 1ull << 3;
 inline constexpr std::uint64_t k_back = 1ull << 4;
 inline constexpr std::uint64_t k_use = 1ull << 5;
 inline constexpr std::uint64_t k_cancel = 1ull << 6;
-inline constexpr std::uint64_t k_left = 1ull << 7;
-inline constexpr std::uint64_t k_right = 1ull << 8;
+inline constexpr std::uint64_t k_turnleft = 1ull << 7;
+inline constexpr std::uint64_t k_turnright = 1ull << 8;
 inline constexpr std::uint64_t k_moveleft = 1ull << 9;
 inline constexpr std::uint64_t k_moveright = 1ull << 10;
 inline constexpr std::uint64_t k_attack2 = 1ull << 11;
@@ -59,6 +70,76 @@ inline constexpr std::uint64_t k_speed = 1ull << 17;
 inline constexpr std::uint64_t k_walk = 1ull << 18;
 inline constexpr std::uint64_t k_zoom = 1ull << 19;
 }  // namespace button
+
+// --- The engine's button names -----------------------------------------------
+//
+// The names the payload's button mask accepts, and the bit each one drives.
+// The **engine's own** names come first, and they are the ones CS2 uses:
+//
+//   * the **strafe** actions are named `left` / `right` — `client.dll` registers
+//     them (`FUN_1800d0980` and the table at `0x181c60548`ff) and the engine's
+//     own input forms the lateral axis as `value("left") - value("right")`
+//     (RVA `0xb8f6e0`); they drive `IN_MOVELEFT` / `IN_MOVERIGHT`;
+//   * the **look** actions are named `turnleft` / `turnright` (the strings at
+//     `0x1c60458` / `0x1c60468`); they drive `IN_TURNLEFT` / `IN_TURNRIGHT`.
+//
+// The console commands are the action names with a `+` in front — CS2's own
+// shipped binds (`game/csgo/cfg/user_keys_default.vcfg`) are `"a" -> "+left"`,
+// `"d" -> "+right"`, `"LEFTARROW" -> "+turnleft"`. There is **no**
+// `+moveleft` / `+moveright` in CS2 (the strings do not exist in `client.dll`),
+// so a name the engine does not know is a name the console path cannot use.
+//
+// The remaining entries are the runner's friendly aliases (`a`, `d`, `mouse1`,
+// ...) — they resolve to the same bits.
+struct NamedButton {
+  std::string_view name;
+  std::uint64_t bit;
+};
+
+//: The name -> bit map of the payload's button mask.
+inline constexpr NamedButton k_named_buttons[] = {
+    {"attack", button::k_attack},
+    {"mouse1", button::k_attack},
+    {"jump", button::k_jump},
+    {"space", button::k_jump},
+    {"duck", button::k_duck},
+    {"crouch", button::k_duck},
+    {"ctrl", button::k_duck},
+    {"forward", button::k_forward},
+    {"w", button::k_forward},
+    {"back", button::k_back},
+    {"s", button::k_back},
+    {"use", button::k_use},
+    {"e", button::k_use},
+    {"left", button::k_moveleft},
+    {"right", button::k_moveright},
+    {"moveleft", button::k_moveleft},
+    {"a", button::k_moveleft},
+    {"moveright", button::k_moveright},
+    {"d", button::k_moveright},
+    {"turnleft", button::k_turnleft},
+    {"turnright", button::k_turnright},
+    {"attack2", button::k_attack2},
+    {"mouse2", button::k_attack2},
+    {"run", button::k_run},
+    {"reload", button::k_reload},
+    {"r", button::k_reload},
+    {"speed", button::k_speed},
+    {"shift", button::k_speed},
+    {"walk", button::k_walk},
+    {"zoom", button::k_zoom},
+};
+
+//: Resolve a friendly or engine button name to its `IN_*` bit; 0 when the name
+//: is unknown.
+[[nodiscard]] inline auto button_bit(std::string_view name) noexcept -> std::uint64_t {
+  for (const NamedButton& entry : k_named_buttons) {
+    if (entry.name == name) {
+      return entry.bit;
+    }
+  }
+  return 0;
+}
 
 // --- Constants ---------------------------------------------------------------
 
@@ -161,6 +242,31 @@ struct ViewBasis {
   // (positive to the player's right): the engine's basis is the left vector, so
   // a counter-clockwise wish is a *negative* right.
   return engine_side_axis(-std::sin(rel));
+}
+
+//: The engine's **button bits** for a camera-frame move: `forward` (positive =
+//: the view forward) and `side` (the engine's side axis — positive to the
+//: player's **left**).
+//
+// The bits follow the same convention as the value they accompany: a positive
+// side axis is the player's LEFT, so it goes with `IN_MOVELEFT`, and a negative
+// one with `IN_MOVERIGHT`. The command carries both, and they have to agree —
+// the value is what multiplies into the wish, the bit is what the engine's own
+// input reads (`docs/re/strafe-sign.md` §4.2).
+[[nodiscard]] inline auto engine_move_buttons(float forward, float side, float epsilon) noexcept
+    -> std::uint64_t {
+  std::uint64_t bits = 0;
+  if (forward > epsilon) {
+    bits |= button::k_forward;
+  } else if (forward < -epsilon) {
+    bits |= button::k_back;
+  }
+  if (side > epsilon) {
+    bits |= button::k_moveleft;
+  } else if (side < -epsilon) {
+    bits |= button::k_moveright;
+  }
+  return bits;
 }
 
 // --- The decision ------------------------------------------------------------

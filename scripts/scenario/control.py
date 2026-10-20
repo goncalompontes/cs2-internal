@@ -83,12 +83,21 @@ DEFAULT_PIPE = r"\\.\pipe\cs2-internal-control"
 # The values are the engine's own button names, so they are typed: a typo in the
 # table is a type error, and the known names are checked against the payload's
 # own list (`ButtonName`).
+#
+# **The names are CS2's own, not Source 1's.** The console command is the
+# engine's *input action* name with a `+` in front, and CS2's input actions are
+# named `left`/`right` for the **strafe** and `turnleft`/`turnright` for the
+# **look** — CS2's own shipped binds say so (`game/csgo/cfg/
+# user_keys_default.vcfg`: `"a" -> "+left"`, `"d" -> "+right"`,
+# `"LEFTARROW" -> "+turnleft"`). There is no `+moveleft`/`+moveright` in CS2
+# (the strings do not exist in `client.dll`), so `exec "+moveleft"` was an
+# unknown command and the player's A/D never reached the engine.
 BUTTONS: Mapping[str, ButtonName] = {
     # movement
     "w": "forward",
     "s": "back",
-    "a": "moveleft",
-    "d": "moveright",
+    "a": "left",
+    "d": "right",
     "space": "jump",
     "jump": "jump",
     "ctrl": "duck",
@@ -104,9 +113,13 @@ BUTTONS: Mapping[str, ButtonName] = {
     "reload": "reload",
     "e": "use",
     "use": "use",
-    # view (turn/pitch; `look` uses `setang` for absolute angles)
+    # the engine's own names for the lateral buttons (`+left` / `+right` — the
+    # strafe, the same commands `a` / `d` drive)
     "left": "left",
     "right": "right",
+    # view (turn/pitch; `look` uses `setang` for absolute angles).
+    # The engine's look commands are `+turnup`/`+turndown`; `ButtonName` does
+    # not spell them yet, so these two still name the source-1 commands.
     "up": "lookup",
     "down": "lookdown",
 }

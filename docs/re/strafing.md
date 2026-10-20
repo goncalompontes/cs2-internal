@@ -111,17 +111,24 @@ and the wish's lateral part is `(-sin yaw, +cos yaw)` — the heading `yaw + 90�
 the player's **left**; `D` (`IN_MOVERIGHT`) writes `-1` and the lateral part is
 `(sin yaw, -cos yaw)` — the heading `yaw - 90°`, the player's **right**.
 
+The engine's **input actions** are named `left` / `right` (the strafe) and
+`turnleft` / `turnright` (the look), so the **console commands** are `+left` /
+`+right` and `+turnleft` / `+turnright` — CS2's own shipped binds say so
+(`game/csgo/cfg/user_keys_default.vcfg`: `"a" -> "+left"`, `"d" -> "+right"`).
+There is no `+moveleft` / `+moveright` in CS2; the button bits themselves are
+`IN_MOVELEFT = 1 << 9` and `IN_MOVERIGHT = 1 << 10` (the engine's own
+button-name table, `client.dll` `0x181b28cf0`).
+
 > **The old note in this document was wrong in two cancelling halves:** it
 > called the engine's second basis output "the right vector" (it is its
 > negation) *and* called a positive side axis "the right" (it is the left).
 > The two cancelled in `strafe_geometry.hpp`'s goal heading — so the goal was
-> never wrong — but **not** in the analog write, which still writes the side
-> axis with the old sign (see `strafe-sign.md` §4.2; the fix is in
-> `payload/control/src/input.cpp`).
->
-> The convention now lives in exactly one place,
-> `strafe_geometry.hpp`'s `k_engine_side_axis_positive_is_left`, and the host
-> test pins it.
+> never wrong — but **not** in the analog write, which wrote the side axis
+> with the old sign. **That write is now fixed** (2026-10-20, T13): it goes
+> through `strafe_geometry.hpp`'s `engine_side_axis_for_wish()` and the button
+> bits through `engine_move_buttons()`, so the sign lives in exactly one place
+> — `k_engine_side_axis_positive_is_left` — and the host test pins it (see
+> `strafe-sign.md` §4.2).
 
 ## `AirAccelerate` — the gain rule
 
