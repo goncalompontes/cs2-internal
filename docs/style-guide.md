@@ -235,6 +235,11 @@ python scripts/clang-tidy-fix.py --apply --format       # + whole-file format
      sentinel (crashed `hooks-inline`). Run only with per-hunk review.
    - `modernize-use-std-print`: pulls `<print>` (CRT/iostream machinery) into the
      **mapped payload**, which the code deliberately avoids.
+   - `readability-convert-member-functions-to-static`: its fix emits
+     `static [[nodiscard]] auto f(...)`, and an attribute list may not appear
+     there — the attribute must precede the decl-specifier-seq
+     (`[[nodiscard]] static auto f(...)`). The result does not compile, so the
+     check is excluded from the `readability` group.
 5. **Verify loop** after applying any group:
 
    ```sh

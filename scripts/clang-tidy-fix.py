@@ -96,7 +96,11 @@ GROUPS: dict[str, list[str]] = {
     ],
     "readability": [
         "readability-container-size-empty",
-        "readability-convert-member-functions-to-static",
+        # readability-convert-member-functions-to-static is EXCLUDED: its fix
+        # emits `static [[nodiscard]] auto f(...)`, and an attribute list may
+        # not appear there - the attribute must precede the decl-specifier-seq
+        # (`[[nodiscard]] static auto f(...)`). The result does not compile.
+        # See docs/style-guide.md §7.
         "readability-else-after-return",
         "readability-inconsistent-declaration-parameter-name",
         "readability-redundant-string-cstr",
