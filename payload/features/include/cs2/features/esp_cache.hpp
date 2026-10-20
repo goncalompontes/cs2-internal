@@ -99,6 +99,25 @@ struct EspProviders {
   void* visibility_context = nullptr;
 };
 
+// The payload's provider registry.
+//
+// The `Esp` lives inside the `Overlay`, and the overlay is constructed before
+// the control service, so the owner cannot hand the providers to the `Esp`
+// instance at construction time. The registry is the seam: the payload's
+// install thread fills it in once, the render thread reads it.
+//
+// It is the ADR-0010 escape hatch — shared state behind a typed accessor. The
+// value is stored in a function-local static, which is constant-initialised
+// (the mapped image never runs the CRT's static-init guard) and trivially
+// destructible (no atexit handler is registered). The install thread writes it
+// **before** the render and publish threads are created, which orders the
+// write before every read.
+[[nodiscard]] auto esp_providers() noexcept -> EspProviders;
+
+// Replace the registry's value. Call it from the install thread, before the
+// render path starts.
+void set_esp_providers(const EspProviders& providers) noexcept;
+
 // The per-pawn studio hitbox cache.
 //
 // Reading a pawn's studio hitboxes is the ESP's most expensive read (the

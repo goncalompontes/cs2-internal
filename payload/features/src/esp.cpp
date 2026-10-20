@@ -22,6 +22,31 @@ auto now_ms() noexcept -> std::uint64_t {
 
 }  // namespace esp_detail
 
+namespace {
+
+// The `Esp`'s own providers, falling back to the payload's registry for the
+// ones it does not set. The registry is how the owner wires the sound events
+// and the visibility state, which live outside the features module.
+auto merge_providers(const EspProviders& own) -> EspProviders {
+  EspProviders merged = own;
+  const EspProviders registry = esp_providers();
+  if (merged.hitboxes == nullptr && registry.hitboxes != nullptr) {
+    merged.hitboxes = registry.hitboxes;
+    merged.hitboxes_context = registry.hitboxes_context;
+  }
+  if (merged.sounds == nullptr && registry.sounds != nullptr) {
+    merged.sounds = registry.sounds;
+    merged.sounds_context = registry.sounds_context;
+  }
+  if (merged.visibility == nullptr && registry.visibility != nullptr) {
+    merged.visibility = registry.visibility;
+    merged.visibility_context = registry.visibility_context;
+  }
+  return merged;
+}
+
+}  // namespace
+
 void Esp::build(const game::Snapshot& snapshot, const game::Matrix4x4& view, float width,
                 float height, render::DrawList& out, EspStats* stats) const {
   if (stats != nullptr) {
@@ -40,7 +65,7 @@ void Esp::build(const game::Snapshot& snapshot, const game::Matrix4x4& view, flo
       .height = height,
       .out = out,
       .config = config_,
-      .providers = providers_,
+      .providers = merge_providers(providers_),
       .stats = stats,
       .now_ms = esp_detail::now_ms(),
       .hitboxes = hitboxes_,

@@ -81,7 +81,9 @@ struct Frame {
   float height = 0.0F;
   render::DrawList& out;
   const Config& config;
-  const EspProviders& providers;
+  // The merged providers: the `Esp`'s own ones, falling back to the
+  // payload's registry.
+  EspProviders providers;
   EspStats* stats = nullptr;
   std::uint64_t now_ms = 0;
   // The per-frame caches (owned by the `Esp`).
