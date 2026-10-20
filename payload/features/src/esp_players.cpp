@@ -328,17 +328,13 @@ void build_players(Frame& frame) {
 
     const float box_w = max.x - min.x;
     const float box_h = max.y - min.y;
-    if (box_h < 3.0F || box_w < 1.0F) {
-      if (frame.stats != nullptr) {
-        ++frame.stats->skipped_small;
-      }
-      continue;
-    }
 
     // The target is off screen when its box misses the viewport.
     const bool on_screen =
         max.x >= 0.0F && min.x <= frame.width && max.y >= 0.0F && min.y <= frame.height;
     if (!on_screen) {
+      // The arrow is the fallback for a target outside the viewport, so the
+      // small-box test below must not swallow it.
       if (config.esp.offscreen) {
         const float cx = (min.x + max.x) * 0.5F;
         const float cy = (min.y + max.y) * 0.5F;
@@ -348,6 +344,16 @@ void build_players(Frame& frame) {
       }
       if (frame.stats != nullptr) {
         ++frame.stats->skipped_box;
+      }
+      continue;
+    }
+
+    // A degenerate box (a target at the far edge of the screen, or a broken
+    // projection) is not drawn. The test applies to the on-screen path only:
+    // an off-screen target gets its arrow instead.
+    if (box_h < 3.0F || box_w < 1.0F) {
+      if (frame.stats != nullptr) {
+        ++frame.stats->skipped_small;
       }
       continue;
     }
