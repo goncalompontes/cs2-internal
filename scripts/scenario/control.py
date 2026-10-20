@@ -16,6 +16,14 @@ answer, so a renamed field is a type error here instead of a ``KeyError``
 three frames away. The one thing static types cannot cover — the payload being
 a *separately built* binary — is covered by the runtime validator in the same
 module, which :meth:`Control.state` and :meth:`Control.ping` run.
+
+Every request runs under a **deadline** (:data:`DEFAULT_REQUEST_TIMEOUT`): the
+pipe's read is blocking and the payload answers a command *inline* on its one
+service thread, so a payload that never answers would otherwise block the
+caller — and every other caller behind it — forever.  A request that runs out
+of time raises :class:`ControlTimeout` and **releases the channel** (the
+payload's pipe takes one client at a time, so a stuck handle would keep the
+next client out).
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import threading
 import time
 from typing import Any, Literal, Mapping, Sequence, Unpack, overload
 
@@ -49,6 +58,7 @@ from .protocol import (
     ProtocolError,
     RageResult,
     ReleaseResult,
+    SettingsValue,
     StateSnapshotDict,
     StrafeResult,
     UsercmdButtonName,
@@ -61,9 +71,12 @@ from .protocol import (
 __all__ = [
     "BUTTONS",
     "DEFAULT_PIPE",
+    "DEFAULT_REQUEST_TIMEOUT",
     "Control",
     "ControlError",
+    "ControlTimeout",
     "ProtocolError",
+    "REQUEST_TIMEOUT_ENV",
 ]
 
 
@@ -74,6 +87,28 @@ def _angle_delta(a: float, b: float) -> float:
 
 
 DEFAULT_PIPE = r"\\.\pipe\cs2-internal-control"
+
+#: How long one wire request may take before the client gives up on it.
+#:
+#: The pipe's read is **blocking** and the payload serves the pipe from a
+#: single thread that answers a command *inline* (``Service::handle`` in
+#: ``payload/control/src/service.cpp``), so a command that never finishes — a
+#: wedged service thread, a slow ``do_heatmap``, a payload that died
+#: mid-request — blocks the read forever.  The deadline is what turns that
+#: into an error the caller can act on instead of a permanent wedge.
+DEFAULT_REQUEST_TIMEOUT = 30.0
+
+#: The environment variable that overrides the request deadline.  It exists so
+#: a test (or an impatient operator) does not have to wait the full default.
+REQUEST_TIMEOUT_ENV = "CS2_CONTROL_REQUEST_TIMEOUT"
+
+#: How much longer the wire deadline is than the command's own timeout: the
+#: payload's answer comes after *its* wait, plus the round trip.
+REQUEST_TIMEOUT_MARGIN = 10.0
+
+#: How long the release waits for the cancelled reader to unwind before the
+#: pipe is closed anyway (the close is the fallback, not the plan).
+RELEASE_JOIN_TIMEOUT = 2.0
 
 # Input is driven through the engine's own console commands (via `exec`), not
 # synthetic OS input: the runner may be in session 0 while the game is in
@@ -179,14 +214,71 @@ def console_button(name: str) -> str:
     return button
 
 
+class ControlTimeout(ControlError):
+    """The payload did not answer within the request's deadline.
+
+    The channel is **released** when this is raised (the pending read is
+    cancelled and the pipe is closed), so the next call reconnects instead of
+    waiting on a handle nobody will ever answer.
+    """
+
+
+def _timeout_from_env(name: str, default: float) -> float:
+    """A positive float from the environment (the default when unset)."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _cancel_read(pipe: Any, reader: threading.Thread) -> bool:
+    """Cancel the blocking read ``reader`` is stuck in.
+
+    On Windows the read is a ``ReadFile`` on the pipe's handle, and
+    ``CancelIoEx`` aborts every pending I/O on that handle: the reader
+    unwinds with an error instead of waiting for an answer that will never
+    come.  It is a no-op elsewhere — the pipe is closed anyway, which is what
+    a POSIX pipe offers.
+    """
+    if pipe is None or os.name != "nt":
+        return False
+    try:
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(pipe.fileno())
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CancelIoEx.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        kernel32.CancelIoEx.restype = ctypes.c_int
+        # A NULL overlapped pointer cancels the I/O of *every* thread: the
+        # read belongs to the worker, and the call is made from this one.
+        return bool(kernel32.CancelIoEx(ctypes.c_void_p(handle), None))
+    except (AttributeError, OSError, ValueError):  # pragma: no cover - defensive
+        return False
+
+
 class Control:
     """A connection to the payload's control channel."""
 
-    def __init__(self, pipe_name: str | None = None) -> None:
+    def __init__(self, pipe_name: str | None = None, *,
+                 request_timeout: float | None = None) -> None:
         self.pipe_name = pipe_name or os.environ.get("CS2_CONTROL_PIPE") or DEFAULT_PIPE
+        #: The deadline of one wire request (see :data:`DEFAULT_REQUEST_TIMEOUT`).
+        self.request_timeout = (DEFAULT_REQUEST_TIMEOUT if request_timeout is None
+                                else request_timeout)
+        if request_timeout is None:
+            self.request_timeout = _timeout_from_env(REQUEST_TIMEOUT_ENV,
+                                                      DEFAULT_REQUEST_TIMEOUT)
         self._pipe: Any = None
         self._buffer = bytearray()
         self._ids = itertools.count(1)
+        #: The thread that is currently blocked in the pipe's read (``None``
+        #: when no read is in flight).
+        self._reader: threading.Thread | None = None
 
     # --- connection -------------------------------------------------------
     def connect(self, timeout: float = 30.0, interval: float = 0.25) -> "Control":
@@ -207,11 +299,33 @@ class Control:
                 time.sleep(interval)
 
     def close(self) -> None:
-        if self._pipe is not None:
+        """Close the channel (and cancel a read that is still in flight)."""
+        self._release_channel()
+
+    def _release_channel(self) -> None:
+        """Give the channel up: cancel the pending read and close the pipe.
+
+        The payload's pipe accepts **one** client at a time, so a channel that
+        is stuck has to be *given up*, not merely abandoned: the next call has
+        to be able to reconnect.  The pending read is cancelled first (so the
+        reader unwinds instead of waiting for an answer that will never come)
+        and the pipe is closed afterwards.
+        """
+        pipe, self._pipe = self._pipe, None
+        reader, self._reader = self._reader, None
+        if reader is not None and reader.is_alive():
+            _cancel_read(pipe, reader)
+        if pipe is not None:
             try:
-                self._pipe.close()
-            finally:
-                self._pipe = None
+                pipe.close()
+            except OSError:  # pragma: no cover - a broken pipe on close
+                pass
+        if reader is not None and reader.is_alive():
+            # The close releases the reader (a Windows pipe read is cancelled
+            # by the handle's close, a fake one by its own event), so this is
+            # only the wait for the unwind.
+            reader.join(timeout=RELEASE_JOIN_TIMEOUT)
+        self._buffer.clear()
 
     def __enter__(self) -> "Control":
         return self
@@ -220,22 +334,79 @@ class Control:
         self.close()
 
     # --- framing ----------------------------------------------------------
-    def _read_line(self) -> bytes:
+    def _read_line(self, deadline: float, budget: float) -> bytes:
+        """One frame — or an error when the deadline passes.
+
+        ``deadline`` is the absolute time the answer has to arrive by and
+        ``budget`` the number of seconds it was given (the message names it).
+        """
         while True:
             newline = self._buffer.find(b"\n")
             if newline != -1:
                 line = bytes(self._buffer[:newline])
                 del self._buffer[: newline + 1]
                 return line
-            chunk = self._pipe.read(4096)
+            chunk = self._read_chunk(deadline, budget)
             if not chunk:
                 raise ControlError("control channel closed")
             self._buffer.extend(chunk)
 
+    def _read_chunk(self, deadline: float, budget: float) -> bytes:
+        """Read one chunk from the pipe, giving up at the deadline.
+
+        The pipe's read is **blocking**, so it runs in a worker thread and the
+        caller waits for it with a deadline.  When the deadline passes the
+        pending read is cancelled and the pipe is **released**: the payload's
+        pipe accepts one client at a time, so a handle that is kept would
+        lock the next client out.
+        """
+        pipe = self._pipe
+        if pipe is None:
+            raise ControlError("not connected")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            self._release_channel()
+            raise ControlTimeout(self._timeout_message(budget))
+        outcome: dict[str, Any] = {}
+        finished = threading.Event()
+
+        def read() -> None:
+            try:
+                outcome["chunk"] = pipe.read(4096)
+            except BaseException as error:  # noqa: BLE001 - handed to the caller
+                outcome["error"] = error
+            finally:
+                finished.set()
+
+        reader = threading.Thread(target=read, name="cs2-control-read", daemon=True)
+        self._reader = reader
+        reader.start()
+        if not finished.wait(remaining):
+            self._release_channel()
+            raise ControlTimeout(self._timeout_message(budget))
+        self._reader = None
+        error = outcome.get("error")
+        if error is not None:
+            raise ControlError(f"the control channel failed while reading: {error}") from error
+        chunk = outcome.get("chunk")
+        return chunk if isinstance(chunk, bytes) else b""
+
+    def _timeout_message(self, budget: float) -> str:
+        """The message of a request that ran out of time."""
+        return (f"the payload did not answer within {budget:.1f}s "
+                "(the control channel was released; the next call reconnects)")
+
     def _write_all(self, payload: bytes) -> None:
         view = memoryview(payload)
         while view:
-            written = self._pipe.write(view)
+            try:
+                written = self._pipe.write(view)
+            except OSError as error:
+                # A pipe that was closed under the client's feet (the payload
+                # restarted, the client raced the server's disconnect): that is
+                # a dropped channel, not a crash — and the session reconnects.
+                raise ControlError(
+                    f"control channel closed while writing: {error}") from error
             if not written:
                 raise ControlError("control channel closed while writing")
             view = view[written:]
@@ -244,81 +415,99 @@ class Control:
     # The overloads are the command surface: each command answers with its own
     # type, so the helpers below are precise without a cast. The last overload
     # keeps the generic escape hatch for a command this client does not know.
+    #
+    # Every overload carries the same `timeout` keyword: the deadline of the
+    # request (the default is `Control.request_timeout`). A command that waits
+    # on its own timeout (`wait_for`) passes a longer one.
     @overload
-    def request(self, cmd: Literal["ping"], args: None = ...) -> PingResult: ...
+    def request(self, cmd: Literal["ping"], args: None = ...,
+                *, timeout: float | None = ...) -> PingResult: ...
 
     @overload
-    def request(self, cmd: Literal["state"], args: None = ...) -> StateSnapshotDict: ...
+    def request(self, cmd: Literal["state"], args: None = ...,
+                *, timeout: float | None = ...) -> StateSnapshotDict: ...
 
     @overload
-    def request(self, cmd: Literal["exec"],
-                args: Mapping[str, Any] | None = ...) -> ExecResult: ...
+    def request(self, cmd: Literal["exec"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> ExecResult: ...
 
     @overload
-    def request(self, cmd: Literal["events"],
-                args: Mapping[str, Any] | None = ...) -> EventsResult: ...
+    def request(self, cmd: Literal["events"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> EventsResult: ...
 
     @overload
-    def request(self, cmd: Literal["wait_for"],
-                args: Mapping[str, Any] | None = ...) -> WaitResult: ...
+    def request(self, cmd: Literal["wait_for"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> WaitResult: ...
 
     @overload
-    def request(self, cmd: Literal["input"],
-                args: Mapping[str, Any] | None = ...) -> InputStatus: ...
+    def request(self, cmd: Literal["input"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> InputStatus: ...
 
     @overload
-    def request(self, cmd: Literal["press"],
-                args: Mapping[str, Any] | None = ...) -> InputStatus: ...
+    def request(self, cmd: Literal["press"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> InputStatus: ...
 
     @overload
-    def request(self, cmd: Literal["release"],
-                args: Mapping[str, Any] | None = ...) -> InputStatus: ...
+    def request(self, cmd: Literal["release"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> InputStatus: ...
 
     @overload
-    def request(self, cmd: Literal["move"],
-                args: Mapping[str, Any] | None = ...) -> MoveResult: ...
+    def request(self, cmd: Literal["move"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> MoveResult: ...
 
     @overload
-    def request(self, cmd: Literal["look"],
-                args: Mapping[str, Any] | None = ...) -> InputStatus: ...
+    def request(self, cmd: Literal["look"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> InputStatus: ...
 
     @overload
-    def request(self, cmd: Literal["bhop"],
-                args: Mapping[str, Any] | None = ...) -> BhopResult: ...
+    def request(self, cmd: Literal["bhop"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> BhopResult: ...
 
     @overload
-    def request(self, cmd: Literal["strafe"],
-                args: Mapping[str, Any] | None = ...) -> StrafeResult: ...
+    def request(self, cmd: Literal["strafe"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> StrafeResult: ...
 
     @overload
-    def request(self, cmd: Literal["aim"],
-                args: Mapping[str, Any] | None = ...) -> AimResult: ...
+    def request(self, cmd: Literal["aim"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> AimResult: ...
 
     @overload
-    def request(self, cmd: Literal["rage"],
-                args: Mapping[str, Any] | None = ...) -> RageResult: ...
+    def request(self, cmd: Literal["rage"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> RageResult: ...
 
     @overload
-    def request(self, cmd: Literal["heatmap"],
-                args: Mapping[str, Any] | None = ...) -> HeatmapResult: ...
+    def request(self, cmd: Literal["heatmap"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> HeatmapResult: ...
 
     @overload
-    def request(self, cmd: Literal["quit"], args: None = ...) -> dict[str, Any]: ...
+    def request(self, cmd: Literal["quit"], args: None = ...,
+                *, timeout: float | None = ...) -> dict[str, Any]: ...
 
     @overload
-    def request(self, cmd: str, args: Mapping[str, Any] | None = ...) -> Any: ...
+    def request(self, cmd: str, args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> Any: ...
 
-    def request(self, cmd: str, args: Mapping[str, Any] | None = None) -> Any:
-        """Send one request and return its ``result`` (or raise ControlError)."""
+    def request(self, cmd: str, args: Mapping[str, Any] | None = None, *,
+                timeout: float | None = None) -> Any:
+        """Send one request and return its ``result`` (or raise ControlError).
+
+        The request runs under a **deadline** (``timeout``, or the client's
+        :attr:`request_timeout`): the pipe's read is blocking and the payload
+        answers inline, so a payload that never answers must not block the
+        caller forever.  A request that runs out of time raises
+        :class:`ControlTimeout` and releases the channel.
+        """
         if self._pipe is None:
             raise ControlError("not connected")
+        budget = self.request_timeout if timeout is None else timeout
         request_id = next(self._ids)
         message: dict[str, Any] = {"id": request_id, "cmd": cmd}
         if args is not None:
             message["args"] = args
         self._write_all((json.dumps(message) + "\n").encode("utf-8"))
+        deadline = time.monotonic() + budget
         while True:
-            line = self._read_line()
+            line = self._read_line(deadline, budget)
             if not line:
                 continue
             try:
@@ -394,7 +583,7 @@ class Control:
             args["event"] = event
         if event_args:
             args["event_args"] = event_args
-        return self.request("wait_for", args)
+        return self.request("wait_for", args, timeout=self._wait_deadline(timeout))
 
     def wait_for_expr(self, expr: WaitExpr, timeout: float = 30.0) -> WaitResult:
         """Like :meth:`wait_for` but takes the expression object directly.
@@ -403,8 +592,18 @@ class Control:
         (``not`` is a Python keyword) and to reuse an expression object.
         """
         return self.request(
-            "wait_for", {"expr": expr, "timeout_ms": int(timeout * 1000)}
+            "wait_for", {"expr": expr, "timeout_ms": int(timeout * 1000)},
+            timeout=self._wait_deadline(timeout),
         )
+
+    def _wait_deadline(self, timeout: float) -> float:
+        """The wire deadline of a wait: its own timeout plus the round trip.
+
+        The payload answers a ``wait_for`` only after its own wait is over, so
+        the deadline has to be longer than the wait itself — otherwise the
+        client would give up on an answer that is still on its way.
+        """
+        return max(self.request_timeout, timeout + REQUEST_TIMEOUT_MARGIN)
 
     # --- input (engine button commands + setang) --------------------------
     def input(self, via: InputBackend | None = None) -> InputStatus:
@@ -426,12 +625,19 @@ class Control:
         `CreateMove` hook (``docs/re/client-dll.md`` §"Input path"); otherwise
         the engine's own ``+<button>`` console command is used. ``key`` is a
         friendly name (``"w"``, ``"space"``, ``"mouse1"``, ...) — the known
-        names are typed, and the engine's own button names are still accepted.
+        names are typed (:data:`~scripts.scenario.protocol.ButtonName`), and the
+        engine's own button names are still accepted.
 
         The console path accepts the **console-expressible** names only
         (:data:`~scripts.scenario.protocol.ButtonName`); the mask's own names
         (``moveleft``, ``moveright``, ``speed``, ``zoom``) need
         ``via="usercmd"``.
+
+        A name the engine has **no** action for is **refused** by the console
+        path (a :class:`ControlError`): it would otherwise issue an unknown
+        command (``+spcae``), which the engine answers with an error the
+        caller never sees — a silent no-op.  The usercmd path sends the name
+        to the payload, which knows the mask's own names and refuses the rest.
         """
         if via == "usercmd":
             name = key.lower()
@@ -459,6 +665,37 @@ class Control:
             return self.request("release", {"buttons": [key.lower()]})
         button = console_button(key)
         return self.exec(f"-{button}")
+
+    # --- the feature settings block ---------------------------------------
+    def settings_get(self, fields: Sequence[str] | None = None) -> dict[str, Any]:
+        """Read the feature settings block (the payload's ``settings`` command).
+
+        ``fields`` names the settings to read (the flat wire names, e.g.
+        ``"esp_box"``); without it the whole block comes back.  The answer is
+        the payload's own: ``{"values": {...}}`` — the live block, not a copy
+        of it.
+        """
+        args: dict[str, Any] = {}
+        if fields:
+            args["get"] = [str(name) for name in fields]
+        answer = self.request("settings", args)
+        return dict(answer) if isinstance(answer, dict) else {}
+
+    def settings_set(self, values: Mapping[str, SettingsValue]) -> dict[str, Any]:
+        """Write the feature settings block.
+
+        ``values`` maps a flat wire name to its new value: a **flag** takes a
+        bool (``{"esp_box": True}``) or a number, a number field a number, a
+        colour an array of numbers and a text a string — the kinds the
+        payload's ``write_field`` accepts.
+
+        The whole request is validated before anything is written, so a typo
+        in one key leaves the block untouched.  The answer is
+        ``{"changed": [...], "values": {...}}``: only the keys that actually
+        changed are listed.
+        """
+        answer = self.request("settings", {"set": dict(values)})
+        return dict(answer) if isinstance(answer, dict) else {}
 
     def move(self, *, forward: float = 0.0, side: float = 0.0, up: float = 0.0,
              clear: bool = False, quantize: bool = False, step: bool = False,

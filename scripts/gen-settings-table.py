@@ -19,10 +19,15 @@ Usage: gen-settings-table.py [--check] [WIRE_HPP] [OUT_HPP] [STAMP]
 
   --check   do not write; compare the generated text with OUT_HPP and fail
             (exit 1) when they differ. Used by the `settings-table` test.
+            The comparison is on the *text*, so it does not care whether the
+            file uses LF or CRLF.
 
 A parse failure is **fatal**: the script prints what it could not parse and
 exits non-zero. An empty table would silently make every settings name
 unknown, which is worse than no table at all.
+
+A rewrite keeps the line ending the file already has, so regenerating it does
+not turn a CRLF checkout into a "modified" file.
 """
 import re
 import sys
@@ -202,6 +207,22 @@ def render(fields: list[tuple[str, str, str, int, int, int]]) -> str:
     return HEADER_TEMPLATE.format(count=len(fields), entries=entries)
 
 
+def line_ending(path: Path) -> str:
+    """The line ending the file already uses (``"\r\n"`` or ``"\n"``).
+
+    A checkout on Windows has CRLF, and a regeneration that wrote LF would
+    leave the file showing as modified in every working tree (the content is
+    the same, but the bytes are not).  The rewrite therefore keeps the
+    ending the file already has; the *check* compares the text, so it is
+    indifferent to the ending either way.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return "\n"
+    return "\r\n" if b"\r\n" in data else "\n"
+
+
 def main(argv: list[str]) -> int:
     root = Path(__file__).resolve().parent.parent
     args = list(argv)
@@ -252,7 +273,7 @@ def main(argv: list[str]) -> int:
     except OSError:
         current = None
     if current != generated:
-        out.write_text(generated, encoding="utf-8", newline="\n")
+        out.write_text(generated, encoding="utf-8", newline=line_ending(out))
     if stamp:
         stamp.parent.mkdir(parents=True, exist_ok=True)
         stamp.touch()

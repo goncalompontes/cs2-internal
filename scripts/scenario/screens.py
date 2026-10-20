@@ -73,8 +73,8 @@ that matches wins — is the order of the :class:`Screen` enum (and the order
                      newer than the last round start, while the level is still up.
 5.  ``TEAM_SELECT``  level up, no team yet (input ignored; ``jointeam`` moves on).
 6.  ``SPECTATOR``    level up, spectating.
-7.  ``WARMUP``       in a team, before the round structure starts.
-8.  ``DEAD``         in a team, not alive — input ignored until respawn.
+7.  ``DEAD``         in a team, not alive — input ignored until respawn.
+8.  ``WARMUP``       in a team, before the round structure starts.
 9.  ``FREEZE``       round started, freeze period — input ignored until it ends.
 10. ``HALF_TIME``    the match is between the halves (``m_gamePhase == 4``).
 11. ``OVERTIME``     the match is in overtime (``m_nOvertimePlaying``).
@@ -88,10 +88,11 @@ that matches wins — is the order of the :class:`Screen` enum (and the order
 Why the order is what it is
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-* **The player fact beats the round fact.** ``DEAD`` (8) sits *before* the
-  round-level screens (freeze, round end, planted): a dead player ignores every
-  input, so "the bomb is down" is not what a scenario needs to know first. The
-  bomb is still reported as a *fact* (``rules.bomb_planted``) and in the notes.
+* **The player fact beats the round fact.** ``DEAD`` (7) sits *before* the
+  round-level screens (freeze, round end, planted) **and before the warmup**
+  (8): a dead player ignores every input, so "the bomb is down" — or "the
+  warmup is running" — is not what a scenario needs to know first. The bomb is
+  still reported as a *fact* (``rules.bomb_planted``) and in the notes.
 * **The match fact beats the round fact.** ``HALF_TIME``/``OVERTIME``/``PAUSED``
   (10-12) sit before ``ROUND_END`` (13): ``m_iRoundWinStatus`` is *not* reset
   between the halves, so at the halftime the last round's winner is still set —
@@ -153,8 +154,8 @@ class Screen(str, enum.Enum):
     DISCONNECTED = "disconnected"
     TEAM_SELECT = "team-select"
     SPECTATOR = "spectator"
-    WARMUP = "warmup"
     DEAD = "dead"
+    WARMUP = "warmup"
     FREEZE = "freeze"
     HALF_TIME = "half-time"
     OVERTIME = "overtime"
@@ -244,7 +245,7 @@ PENDING_PAYLOAD_FIELDS: dict[str, str] = {
 #: screen, the load in flight and the disconnected client. The machine uses it
 #: to tell "the map loaded" from "the map is still loading".
 IN_LEVEL: tuple[Screen, ...] = (
-    Screen.TEAM_SELECT, Screen.SPECTATOR, Screen.WARMUP, Screen.DEAD,
+    Screen.TEAM_SELECT, Screen.SPECTATOR, Screen.DEAD, Screen.WARMUP,
     Screen.FREEZE, Screen.HALF_TIME, Screen.OVERTIME, Screen.PAUSED,
     Screen.ROUND_END, Screen.DEFUSING, Screen.PLANTED, Screen.BUY_TIME,
     Screen.LIVE,
@@ -514,12 +515,12 @@ class GameState:
         return f"{self.screen} does not allow {cap}"
 
     def can(self, capability: Can | str) -> bool:
-        cap = Can(capability)
+        cap = self._capability_name(capability)
         allowed, _ = self._capability(cap)
         return allowed
 
     def why(self, capability: Can | str) -> str:
-        cap = Can(capability)
+        cap = self._capability_name(capability)
         allowed, reason = self._capability(cap)
         return ("ok: " if allowed else "blocked: ") + reason
 
@@ -527,6 +528,21 @@ class GameState:
         """Raise :class:`SessionError` unless ``capability`` is available."""
         if not self.can(capability):
             raise SessionError(f"cannot {capability}: {self.why(capability)} — {self.summary()}")
+
+    def _capability_name(self, capability: Can | str) -> Can:
+        """The capability, or a :class:`SessionError` that names the mistake.
+
+        A name the enum does not know is a **caller's** mistake, not an
+        internal error: the module's own error says what was asked for and
+        what is on offer, so a typo does not come out as a raw ``ValueError``
+        from the enum's constructor.
+        """
+        try:
+            return Can(capability)
+        except ValueError:
+            known = sorted(str(cap) for cap in Can)
+            raise SessionError(
+                f"unknown capability {capability!r} (known: {known})") from None
 
     def summary(self) -> str:
         """A one-line description for failures and logs."""
@@ -786,11 +802,14 @@ def deduce(raw: StateSnapshotDict, events: Iterable[str | None] = (),
     win_status = int(rules.get("round_win_status") or 0)
     phase = int(rules.get("game_phase") or 0)
 
-    if warmup:
-        return GameState(Screen.WARMUP, raw, event_names, ("warmup period",))
     if not alive:
+        # The player fact beats the round facts: a dead player ignores every
+        # input, so "the warmup is running" (or "the bomb is down") is not
+        # what a scenario needs to know first.
         return GameState(Screen.DEAD, raw, event_names,
                          (f"life_state={local.get('life_state') if local else 0}",))
+    if warmup:
+        return GameState(Screen.WARMUP, raw, event_names, ("warmup period",))
     if freeze:
         return GameState(Screen.FREEZE, raw, event_names, ("freeze period",))
     if phase == GAME_PHASE_HALF_TIME:

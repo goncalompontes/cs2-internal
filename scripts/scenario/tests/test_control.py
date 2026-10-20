@@ -18,12 +18,14 @@ import json
 import pathlib
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from typing import Any, Sequence
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from scenario.control import BUTTONS, Control, ControlError  # noqa: E402
+from scenario.control import BUTTONS, Control, ControlError, ControlTimeout  # noqa: E402
 from scenario.protocol import ProtocolError  # noqa: E402
 
 
@@ -62,6 +64,32 @@ class FakePipe:
 
     def close(self) -> None:
         self.closed = True
+
+
+class SilentPipe:
+    """A pipe that accepts the request and never answers.
+
+    This is the shape of the failure the deadline exists for: the payload
+    took the request and never wrote an answer back.  The read blocks until
+    the pipe is closed (that is what releases the reader).
+    """
+
+    def __init__(self) -> None:
+        self.written = bytearray()
+        self.closed = False
+        self._released = threading.Event()
+
+    def read(self, size: int = -1) -> bytes:
+        self._released.wait()
+        return b""
+
+    def write(self, data: bytes | memoryview) -> int:
+        self.written.extend(bytes(memoryview(data)))
+        return len(memoryview(data))
+
+    def close(self) -> None:
+        self.closed = True
+        self._released.set()
 
 
 def answer(request_id: int = 1, result: Any = None, *, ok: bool = True,
@@ -212,6 +240,69 @@ class TestErrorPaths(unittest.TestCase):
         self.assertIn("closed", str(raised.exception))
 
 
+class TestRequestDeadline(unittest.TestCase):
+    """A request must not wait for an answer that never comes.
+
+    The pipe's read is blocking and the payload answers a command *inline* on
+    its one service thread, so a payload that never answers would block the
+    caller — and every caller behind it — forever.  The deadline turns that
+    into an error, and the channel is released so the next call can
+    reconnect.
+    """
+
+    def _silent(self, timeout: float = 0.5) -> tuple[Control, SilentPipe]:
+        control = Control("fake-pipe", request_timeout=timeout)
+        pipe = SilentPipe()
+        control._pipe = pipe
+        return control, pipe
+
+    def test_a_payload_that_never_answers_times_out(self) -> None:
+        control, _ = self._silent(0.2)
+        started = time.monotonic()
+        with self.assertRaises(ControlTimeout) as raised:
+            control.request("ping")
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertIn("did not answer", str(raised.exception))
+
+    def test_the_timeout_names_the_budget(self) -> None:
+        control, _ = self._silent(0.2)
+        with self.assertRaises(ControlTimeout) as raised:
+            control.request("ping")
+        self.assertIn("0.2s", str(raised.exception))
+
+    def test_the_channel_is_released_after_a_timeout(self) -> None:
+        """The payload's pipe takes one client: a stuck handle must go."""
+        control, pipe = self._silent(0.2)
+        with self.assertRaises(ControlTimeout):
+            control.request("ping")
+        self.assertTrue(pipe.closed)
+        self.assertIsNone(control._pipe)
+
+    def test_the_next_call_reconnects(self) -> None:
+        """After a timeout the client is *not* connected — so it may reconnect."""
+        control, _ = self._silent(0.2)
+        with self.assertRaises(ControlTimeout):
+            control.request("ping")
+        with self.assertRaises(ControlError) as raised:
+            control.request("ping")
+        self.assertIn("not connected", str(raised.exception))
+
+    def test_an_explicit_timeout_wins_over_the_default(self) -> None:
+        control, _ = self._silent(30.0)
+        with self.assertRaises(ControlTimeout) as raised:
+            control.request("ping", timeout=0.2)
+        self.assertIn("0.2s", str(raised.exception))
+
+    def test_a_wait_gets_a_longer_deadline_than_its_own_timeout(self) -> None:
+        """The answer comes after the payload's wait — the deadline knows it."""
+        control, pipe = connected([answer(1, {"matched": True, "snapshot": None})])
+        control.request_timeout = 0.2
+        control.wait_for(timeout=5.0)
+        # The wait did not time out: the deadline was longer than the wait.
+        self.assertEqual(json.loads(bytes(pipe.written).decode("utf-8"))["cmd"],
+                         "wait_for")
+
+
 class TestConnection(unittest.TestCase):
     """The connection lifecycle."""
 
@@ -310,6 +401,54 @@ class TestButtonTable(unittest.TestCase):
     def test_an_unknown_name_is_passed_through(self) -> None:
         """The engine's own button names are accepted as they are."""
         self.assertNotIn("+use_hack", BUTTONS)
+
+    def test_a_typo_is_refused_and_never_reaches_the_console(self) -> None:
+        """The console path must not issue an unknown ``+<garbage>`` command.
+
+        The engine answers an unknown command with an error the caller never
+        sees, so the press would be a silent no-op.
+        """
+        control, pipe = connected([answer(1, {"queued": True})])
+        with self.assertRaises(ControlError):
+            control.press("spcae")
+        self.assertEqual(bytes(pipe.written), b"")
+
+    def test_a_known_alias_reaches_the_console(self) -> None:
+        control, pipe = connected([answer(1, {"queued": True})])
+        result = control.press("space")
+        self.assertEqual(result["button"], "jump")
+        self.assertIn(b'"line": "+jump"', bytes(pipe.written))
+
+    def test_a_usercmd_only_name_needs_the_usercmd_path(self) -> None:
+        """``moveleft`` has no console command: the mask path is the only one."""
+        control, pipe = connected([answer(1, {"buttons_set": 1, "buttons_clear": 0})])
+        with self.assertRaises(ControlError):
+            control.press("moveleft")
+        self.assertEqual(bytes(pipe.written), b"")
+
+
+class TestSettings(unittest.TestCase):
+    """The feature settings block (the ``settings`` command)."""
+
+    def test_the_read_asks_for_the_named_fields(self) -> None:
+        control, pipe = connected([answer(1, {"values": {"esp_box": 1}})])
+        control.settings_get(["esp_box"])
+        request = sent(pipe)[0]
+        self.assertEqual(request["cmd"], "settings")
+        self.assertEqual(request["args"]["get"], ["esp_box"])
+
+    def test_the_read_without_fields_asks_for_everything(self) -> None:
+        control, pipe = connected([answer(1, {"values": {"esp_box": 1}})])
+        control.settings_get()
+        self.assertNotIn("get", sent(pipe)[0]["args"])
+
+    def test_a_flag_may_be_written_as_a_bool(self) -> None:
+        """The payload's ``write_field`` reads a flag's ``true``/``false``."""
+        control, pipe = connected([answer(1, {"changed": ["esp_box"]})])
+        control.settings_set({"esp_box": True})
+        request = sent(pipe)[0]
+        self.assertEqual(request["cmd"], "settings")
+        self.assertEqual(request["args"]["set"], {"esp_box": True})
 
 
 class TestValidation(unittest.TestCase):

@@ -21,7 +21,7 @@ from .awaiting import (
     wait_on_ground,
     wait_round_started,
 )
-from .control import DEFAULT_PIPE, Control, ControlError
+from .control import DEFAULT_PIPE, Control, ControlError, ControlTimeout
 from .mcp import TOOLS as MCP_TOOLS
 from .mcp import Session as McpSession
 from .mcp import schema_for, validate_arguments
@@ -40,6 +40,7 @@ from .protocol import (
     PressResult,
     ProtocolError,
     RageMode,
+    SettingsValue,
     StateSnapshotDict,
     TeamName,
     UsercmdButtonName,
@@ -73,6 +74,7 @@ __all__ = [
     "Can",
     "Control",
     "ControlError",
+    "ControlTimeout",
     "ControlTransport",
     "EventsResult",
     "ExecResult",
@@ -91,6 +93,7 @@ __all__ = [
     "RageMode",
     "Screen",
     "SessionError",
+    "SettingsValue",
     "StateSnapshotDict",
     "TeamName",
     "Transition",

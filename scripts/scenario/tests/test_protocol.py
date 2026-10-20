@@ -27,11 +27,13 @@ from scenario.protocol import (  # noqa: E402
     ControlError,
     ControlTransport,
     ProtocolError,
+    SettingsValue,
     UsercmdButtonName,
     WaitExpr,
     validate_ping,
     validate_snapshot,
 )
+from scenario.session import Game  # noqa: E402
 
 
 def player(**overrides: Any) -> dict[str, Any]:
@@ -143,7 +145,8 @@ class _FixedControl(Control):
         self.answer = answer
         self.calls: list[tuple[str, Any]] = []
 
-    def request(self, cmd: str, args: Any = None) -> Any:
+    def request(self, cmd: str, args: Any = None, *,
+                timeout: float | None = None) -> Any:
         self.calls.append((cmd, args))
         return self.answer
 
@@ -278,6 +281,19 @@ class TestTransport(unittest.TestCase):
         control: ControlTransport = Control()
         self.assertIsInstance(control, ControlTransport)
 
+    def test_the_game_facade_satisfies_the_transport_protocol(self) -> None:
+        """``Game`` is a ``ControlTransport`` too — and this is the *static* check.
+
+        A runtime ``isinstance`` against a ``runtime_checkable`` protocol only
+        proves that the *attributes* are there, never that the signatures
+        match.  The assignment below is what mypy checks: it compares the two
+        signatures member by member, so a ``Game.look`` without the
+        ``timeout`` parameter (or a narrowed ``event_args``) is a type error
+        here rather than a surprise at runtime.
+        """
+        game: ControlTransport = Game(Control())
+        self.assertIsInstance(game, ControlTransport)
+
     def test_the_protocol_covers_the_command_surface(self) -> None:
         """Every member of the protocol is a method of ``Control``."""
         control = Control()
@@ -300,6 +316,18 @@ class TestButtonNames(unittest.TestCase):
         self.assertEqual(BUTTONS["w"], "forward")
         self.assertEqual(BUTTONS["space"], "jump")
         self.assertEqual(BUTTONS["mouse1"], "attack")
+
+    def test_every_alias_is_a_known_name(self) -> None:
+        """The runner's own aliases are part of the advertised set.
+
+        The tool's schema is built from these names, so an alias that is not
+        in the set would be *refused* at the boundary — ``cs2_press(key="up")``
+        is legal and must stay legal.
+        """
+        known = set(get_args(ButtonName))
+        for alias in BUTTONS:
+            with self.subTest(alias=alias):
+                self.assertIn(alias, known)
 
     def test_the_typed_names_agree_with_the_console_table(self) -> None:
         """Every console name is an engine action; the usercmd-only ones are not.
@@ -327,10 +355,33 @@ class TestButtonNames(unittest.TestCase):
                 with self.assertRaises(ControlError):
                     console_button(name)
 
+    def test_the_console_path_rejects_a_typo(self) -> None:
+        """A typo is refused — it must not become a ``+<garbage>`` command.
+
+        The engine answers an unknown command with an error nobody sees, so
+        the command would be a silent no-op: the button would simply not be
+        pressed.
+        """
+        for typo in ("spcae", "totally-not-a-button", "moveleft"):
+            with self.subTest(typo=typo):
+                with self.assertRaises(ControlError):
+                    console_button(typo)
+
+
+class TestSettingsValue(unittest.TestCase):
+    def test_the_value_kinds_are_the_payloads_ones(self) -> None:
+        """A flag takes a **bool** (the payload's ``write_field`` reads it)."""
+        kinds = set(get_args(SettingsValue))
+        self.assertIn(bool, kinds)
+        self.assertIn(int, kinds)
+        self.assertIn(float, kinds)
+        self.assertIn(str, kinds)
+        self.assertIn(list[int], kinds)
+
 
 class TestPredicateGrammar(unittest.TestCase):
     def test_the_expression_has_the_servers_keys(self) -> None:
-        """The server's grammar is 12 kinds; an unknown key is an error there."""
+        """The server's grammar is 11 kinds; an unknown key is an error there."""
         self.assertEqual(
             set(WaitExpr.__annotations__),
             {"in_map", "local_alive", "on_ground", "playable", "players_gte",

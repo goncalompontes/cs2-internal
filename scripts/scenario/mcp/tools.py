@@ -12,12 +12,20 @@ reaches the tool boundary.  A tool whose arguments do not match the schema is
 rejected by the server **before** the request reaches the game, and the
 argument models are built from the same ``Literal`` aliases the payload's
 grammar uses (:mod:`scenario.protocol`), so a typo in a button name or a
-screen name is a type error rather than a silent no-op.
+screen name is refused at the boundary rather than reaching the game.
+
+The button names are the clearest case: ``cs2_press`` advertises an **enum**
+of every name the console and the button mask know (the runner's aliases and
+the engine's own actions), so ``"spcae"`` is refused before it can become the
+console command ``+spcae`` — a command the engine answers with an error
+nobody sees, i.e. a silent no-op.
 
 The two tools that change the game (``cs2_launch`` and ``cs2_inject``) say so
 in their description and require an explicit ``confirm`` — the MCP client is
 an agent acting for a user, and "start the game" / "inject a DLL" are not
-things an agent should do by accident.
+things an agent should do by accident.  ``cs2_exec`` is the escape hatch for
+the console, and the commands that would end the game are refused there (see
+:data:`DESTRUCTIVE_CONSOLE_COMMANDS`).
 """
 
 from __future__ import annotations
@@ -27,7 +35,14 @@ from typing import Any, Callable, Mapping, Required, Sequence, TypedDict
 
 from .. import screens
 from ..control import Control
-from ..protocol import AimObjective, ButtonName, InputBackend, WaitExpr
+from ..protocol import (
+    AimObjective,
+    ButtonName,
+    InputBackend,
+    SettingsValue,
+    UsercmdButtonName,
+    WaitExpr,
+)
 from ..scenarios import SCENARIOS
 from ..screens import Screen
 from ..session import CS2_TASK, SessionError
@@ -35,10 +50,17 @@ from .schema import schema_for
 from .session import Session
 
 __all__ = [
+    "DESTRUCTIVE_CONSOLE_COMMANDS",
     "TOOLS",
     "Tool",
     "tool_definitions",
 ]
+
+
+#: The console commands ``cs2_exec`` refuses: they end the game (or the
+#: session), which is exactly what the server promises never to do.  The
+#: engine's own ``quit`` is one of them.
+DESTRUCTIVE_CONSOLE_COMMANDS: frozenset[str] = frozenset({"quit", "exit"})
 
 
 # --- the argument models ---------------------------------------------------
@@ -102,7 +124,11 @@ class MoveArgs(TypedDict, total=False):
 class PressArgs(TypedDict, total=False):
     """``cs2_press``: one button (held for ``hold`` seconds, then released)."""
 
-    key: Required[ButtonName | str]
+    #: The button name: the runner's aliases (``w``, ``space``, ``mouse1``,
+    #: ...) and the engine's own actions (``forward``, ``jump``, ...).  The
+    #: mask-only names (``moveleft``, ``moveright``, ``speed``, ``zoom``)
+    #: need ``via="usercmd"``; the console path refuses them.
+    key: Required[ButtonName | UsercmdButtonName]
     hold: float
     via: InputBackend | None
 
@@ -110,7 +136,7 @@ class PressArgs(TypedDict, total=False):
 class ReleaseArgs(TypedDict, total=False):
     """``cs2_release``: one button that was held."""
 
-    key: Required[ButtonName | str]
+    key: Required[ButtonName | UsercmdButtonName]
     via: InputBackend | None
 
 
@@ -177,7 +203,10 @@ class SettingsGetArgs(TypedDict, total=False):
 class SettingsSetArgs(TypedDict):
     """``cs2_settings_set``: write the feature settings block."""
 
-    values: dict[str, int | float | list[int] | str]
+    #: The value kinds the payload's ``write_field`` accepts: a **flag**
+    #: takes a bool (``{"esp_box": true}``) or a number, a number field a
+    #: number, a colour an array of numbers and a text a string.
+    values: dict[str, SettingsValue]
 
 
 class RunScenarioArgs(TypedDict, total=False):
@@ -281,6 +310,7 @@ def _tool_screen(args: Mapping[str, Any], session: Session) -> Any:
 def _tool_ensure(args: Mapping[str, Any], session: Session) -> Any:
     """Drive the game into the requested screen."""
     target = Screen(str(args["target"]))
+    budget = float(args.get("timeout", 120.0))
 
     def action(game: Any) -> Any:
         machine = screens.Machine(
@@ -292,7 +322,7 @@ def _tool_ensure(args: Mapping[str, Any], session: Session) -> Any:
         )
         state = machine.ensure(
             target,
-            timeout=float(args.get("timeout", 120.0)),
+            timeout=budget,
             load_budget=float(args.get("load_budget", 60.0)),
             join_team=int(args.get("join_team", 2)),
             verify_movable=bool(args.get("verify_movable", False)),
@@ -302,13 +332,36 @@ def _tool_ensure(args: Mapping[str, Any], session: Session) -> Any:
         report["steps"] = [entry["action"] for entry in machine.log]
         return report
 
-    return session.run(action)
+    # The call's own deadline is the tool's timeout plus the margin the
+    # transitions need: the call must not be cut short while the machine is
+    # still driving the game into the screen.
+    return session.run(action, timeout=budget + 60.0)
 
 
 def _tool_exec(args: Mapping[str, Any], session: Session) -> Any:
     """Queue one console line."""
     line = str(args["line"])
+    _refuse_destructive(line)
     return session.call(lambda control: control.exec(line))
+
+
+def _refuse_destructive(line: str) -> None:
+    """Refuse a console line that would end the game.
+
+    The server promises that it never kills the game (``cs2_launch`` and
+    ``cs2_inject`` are the only tools that change it), and the engine's own
+    ``quit`` is a console command: without this gate ``cs2_exec`` would be
+    the third way to end the game, and the promise would be a lie.  A console
+    line may carry several commands (``a; b``), so every word of it is
+    checked.
+    """
+    for part in line.replace(";", " ").split():
+        command = part.lstrip("+").lower()
+        if command in DESTRUCTIVE_CONSOLE_COMMANDS:
+            raise SessionError(
+                f"cs2_exec refuses {command!r}: it would end the game, and this "
+                "server never kills the game"
+            )
 
 
 def _tool_look(args: Mapping[str, Any], session: Session) -> Any:
@@ -407,16 +460,13 @@ def _tool_wait_for(args: Mapping[str, Any], session: Session) -> Any:
 def _tool_settings_get(args: Mapping[str, Any], session: Session) -> Any:
     """Read the feature settings block."""
     fields = args.get("fields") or []
-    request: dict[str, Any] = {}
-    if fields:
-        request["get"] = [str(name) for name in fields]
-    return session.call(lambda control: control.request("settings", request))
+    return session.call(lambda control: control.settings_get([str(name) for name in fields]))
 
 
 def _tool_settings_set(args: Mapping[str, Any], session: Session) -> Any:
     """Write the feature settings block."""
     values = dict(args["values"])
-    return session.call(lambda control: control.request("settings", {"set": values}))
+    return session.call(lambda control: control.settings_set(values))
 
 
 def _tool_list_scenarios(args: Mapping[str, Any], session: Session) -> Any:
@@ -541,7 +591,9 @@ TOOLS: tuple[Tool, ...] = (
             "'jointeam 2', 'mp_restartgame 1'). The line is queued, not run "
             "synchronously — the effect shows up in the next state read. This "
             "is the escape hatch for anything the typed tools do not cover. "
-            "Needs the game to be running."
+            "The commands that would end the game ('quit', 'exit') are "
+            "refused: this server never kills the game. Needs the game to be "
+            "running."
         ),
         shape=ExecArgs,
         handler=_tool_exec,
@@ -576,7 +628,11 @@ TOOLS: tuple[Tool, ...] = (
             "the button is released again after that many seconds; with hold=0 "
             "it stays held until cs2_release. via='usercmd' writes the "
             "command's button mask through the payload's hook instead of the "
-            "engine's console command. Needs the game to be running."
+            "engine's console command. The key must be one of the known "
+            "button names (the runner's aliases and the engine's own "
+            "actions); a name the engine has no action for is refused rather "
+            "than sent as an unknown console command. Needs the game to be "
+            "running."
         ),
         shape=PressArgs,
         handler=_tool_press,
@@ -635,7 +691,10 @@ TOOLS: tuple[Tool, ...] = (
             "local_alive, on_ground, playable (bools), players_gte, "
             "alive_gte, local_hp_gte (ints), team ('T'/'CT'), and the "
             "combinators all/any/not. With no predicate it waits for the "
-            "local player to exist. Needs the game to be running."
+            "local player to exist. The keys are checked here down to four "
+            "levels of nesting; a key deeper than that is refused by the "
+            "payload (which reports it as an error), not by this tool. "
+            "Needs the game to be running."
         ),
         shape=WaitForArgs,
         handler=_tool_wait_for,
@@ -656,12 +715,14 @@ TOOLS: tuple[Tool, ...] = (
         name="cs2_settings_set",
         description=(
             "Write the feature settings block: a name -> value object "
-            "('esp_box': 1, 'movement_thirdperson_distance': 64). The whole "
-            "request is validated before anything is written, so a typo in one "
-            "key leaves the block untouched. A value that does not change is "
-            "not published, and the answer lists the keys that actually "
-            "changed. Use cs2_settings_get to learn the names. Needs the game "
-            "to be running."
+            "('esp_box': 1, 'esp_box': true, 'movement_thirdperson_distance': "
+            "64). A switch takes a boolean (true/false) or a number, a "
+            "number field a number, a colour a list of four numbers and a "
+            "text a string. The whole request is validated before anything "
+            "is written, so a typo in one key leaves the block untouched. A "
+            "value that does not change is not published, and the answer "
+            "lists the keys that actually changed. Use cs2_settings_get to "
+            "learn the names. Needs the game to be running."
         ),
         shape=SettingsSetArgs,
         handler=_tool_settings_set,

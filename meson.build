@@ -232,6 +232,11 @@ settings_table_dep = declare_dependency(
 # The table must never be stale: the check fails when the file on disk differs
 # from a fresh generation. The build does not rewrite the file, so the file the
 # test compares against is the checked-in one.
+#
+# The generator's own unit test (`scenario-settings-table`) checks the *same*
+# thing without the build: it drives the generator against a **copy** in a
+# temporary directory, so it fails even in a run that regenerates the file
+# first — the bug the check below could not catch on its own.
 test('settings-table', gen_settings_table, args : ['--check'])
 
 # Control-channel core (ADR-0020): the platform-independent parts of
@@ -493,6 +498,7 @@ if python.found()
     ['heatmap', 'test_heatmap'],
     ['registry', 'test_registry'],
     ['mcp', 'test_mcp'],
+    ['settings-table', 'test_settings_table'],
   ]
   foreach suite : scenario_suites
     test('scenario-' + suite[0], python,
