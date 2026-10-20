@@ -202,7 +202,7 @@ auto from_wire_settings(const cs2::overlay::wire::Settings& settings) -> Config 
   config.movement.auto_strafe = settings.auto_strafe != 0;
   config.movement.bhop = settings.bhop != 0;
   config.movement.strafe_mode =
-      clamp_enum(settings.movement_strafe_mode, 2, StrafeMode::camera_relative);
+      clamp_enum(settings.movement_strafe_mode, 2, StrafeMode::directional);
   config.movement.strafe_ignore_keys = settings.movement_strafe_ignore_keys != 0;
   config.movement.strafe_wishspeed =
       clamp_value(settings.movement_strafe_wishspeed, 0.0F, k_movement_strafe_wishspeed_max);

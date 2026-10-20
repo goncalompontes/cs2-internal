@@ -91,7 +91,7 @@ void test_goal_is_the_backward_key() {
 }
 
 void test_goal_wraps() {
-  // The headings are normalised into (-180, 180].
+  // The headings are normalised into [-180, 180).
   assert(nearly(goal_of(button::k_back, 170.0F), -10.0F));
   assert(nearly(goal_of(button::k_moveleft, 170.0F), -100.0F));
   assert(nearly(goal_of(button::k_moveright, 170.0F), 80.0F));
@@ -216,6 +216,105 @@ void test_optimal_theta() {
   }
 }
 
+// The normalised angle is in `[-180, 180)`: 180 degrees normalises to -180.
+void test_normalize_angle_range() {
+  assert(nearly(cs2::control::normalize_angle(180.0F), -180.0F));
+  assert(nearly(cs2::control::normalize_angle(-180.0F), -180.0F));
+  assert(nearly(cs2::control::normalize_angle(190.0F), -170.0F));
+  assert(nearly(cs2::control::normalize_angle(0.0F), 0.0F));
+  assert(nearly(cs2::control::normalize_angle(360.0F), 0.0F));
+}
+
+// --- the legacy mode ---------------------------------------------------------
+
+// The **old** rule, verbatim: the side follows the sign of the goal's offset
+// from the velocity heading.
+//
+//   `delta = normalize_angle(goal - vel_yaw)`
+//   `side  = (delta >= 0) ? +1 : -1`
+//   `wish_yaw = normalize_angle(vel_yaw + side * theta)`
+auto old_side(float goal_yaw, float vel_yaw) -> int {
+  const float delta = cs2::control::normalize_angle(goal_yaw - vel_yaw);
+  return delta >= 0.0F ? 1 : -1;
+}
+
+// The legacy mode restores the old behaviour **exactly**.
+//
+// The regression: the legacy modes (the camera-relative goal and
+// `strafe_ignore_keys`) were pushed through the new `plan()`, so the dead zone
+// and the hysteresis still applied and the side could differ from the old
+// rule — 509 of 2596 sampled decisions, every one of them inside the dead
+// zone.
+void test_legacy_mode_is_the_old_rule() {
+  // The legacy goal knows `W` and `S` (and nothing else).
+  const StrafeIntent intents[] = {
+      {.forward = 1.0F, .right = 0.0F},   // W
+      {.forward = -1.0F, .right = 0.0F},  // S
+      {.forward = 0.0F, .right = 0.0F},   // no key: the camera's forward
+  };
+  int differences = 0;
+  int samples = 0;
+  for (int view = -180; view < 180; view += 5) {
+    for (int vel = -180; vel < 180; vel += 5) {
+      for (const int previous_side : {-1, 1}) {
+        for (const StrafeIntent& intent : intents) {
+          const float view_yaw = static_cast<float>(view);
+          const float vel_yaw = static_cast<float>(vel);
+          const StrafePlan legacy =
+              cs2::control::legacy_plan(intent, view_yaw, vel_yaw, 250.0F, 46.875F, 30.0F);
+          // The legacy rule **is** the old rule, in every single case.
+          assert(legacy.side == old_side(legacy.goal_yaw, vel_yaw));
+          // There is no dead zone and no hysteresis: the decision is always
+          // decisive.
+          assert(legacy.decisive);
+          // The wish is the old wish.
+          assert(nearly(legacy.wish_yaw,
+                        cs2::control::normalize_angle(vel_yaw + static_cast<float>(legacy.side) *
+                                                                    legacy.theta)));
+
+          // The new rule would differ inside the dead zone, so the check
+          // above is not vacuous: the difference is real and the legacy mode
+          // has to be a path of its own.
+          const StrafePlan current =
+              cs2::control::plan(intent, view_yaw, vel_yaw, 250.0F, 46.875F, 30.0F, previous_side);
+          if (current.side != legacy.side) {
+            ++differences;
+          }
+          ++samples;
+        }
+      }
+    }
+  }
+  assert(samples > 2000);
+  // The dead zone really does change the decision in a good share of the
+  // samples: this sweep measures 1521 of 31104 (the reviewer measured 509 of
+  // 2596 with a coarser one), so the check above is not vacuous.
+  assert(differences > samples / 50);
+  assert(differences < samples);
+}
+
+// The legacy goal is the old goal: the camera's forward, or 180 degrees behind
+// it when `S` is held.
+void test_legacy_goal_is_the_old_goal() {
+  for (int view = -180; view < 180; view += 5) {
+    const float view_yaw = static_cast<float>(view);
+    // `W` (and no key at all): the camera's forward.
+    const float forward = cs2::control::normalize_angle(view_yaw);
+    const StrafePlan with_w =
+        cs2::control::legacy_plan(cs2::control::legacy_intent_from_buttons(button::k_forward),
+                                  view_yaw, 0.0F, 250.0F, 46.875F, 30.0F);
+    assert(nearly(with_w.goal_yaw, forward));
+    const StrafePlan without = cs2::control::legacy_plan(
+        cs2::control::legacy_intent_from_buttons(0), view_yaw, 0.0F, 250.0F, 46.875F, 30.0F);
+    assert(nearly(without.goal_yaw, forward));
+    // `S`: 180 degrees behind the camera.
+    const StrafePlan with_s =
+        cs2::control::legacy_plan(cs2::control::legacy_intent_from_buttons(button::k_back),
+                                  view_yaw, 0.0F, 250.0F, 46.875F, 30.0F);
+    assert(nearly(with_s.goal_yaw, cs2::control::normalize_angle(view_yaw + 180.0F)));
+  }
+}
+
 }  // namespace
 
 auto main() -> int {
@@ -231,6 +330,9 @@ auto main() -> int {
   test_side_is_stable_across_ticks();
   test_wish_is_perpendicular_to_the_velocity();
   test_optimal_theta();
+  test_normalize_angle_range();
+  test_legacy_mode_is_the_old_rule();
+  test_legacy_goal_is_the_old_goal();
   std::puts("control-strafe: ok");
   return 0;
 }
