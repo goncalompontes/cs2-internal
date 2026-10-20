@@ -201,7 +201,44 @@ Everything else is ready: the material system (`CMaterialSystem2` vtable
 **Also:** the two inline hooks now install only when the feature is **on** and
 carry a thread-local re-entrancy guard. Keep that property for every new hook.
 
-### 5.3 The neverlose mining — the report is written, the follow-up is not
+### 5.3 The neverlose deep reversal — the next session's biggest task
+
+The neverlose module is the **most valuable source we have**: a shipped product
+with every feature we want and more. The prior session already reversed its
+**first-party surface** (12 subsystems, **890 functions**, with a *corrected*
+deobfuscation pass — `gproj11`; the earlier `gproj3`/`gproj10` carry 9222 bytes
+of possibly-corrupted patches, so prefer the `_v2` corpora). What it did **not**
+do is the three hard parts, and the spec for them is
+**`docs/orchestration/spec-t17-neverlose-deep.md`**:
+
+| Route | What it buys us |
+|---|---|
+| **A — the renderer's per-pass constant buffers** | the four DXBC families (Tracer / Impact / Trajectory / **Polygon** — the player model, i.e. their chams). The CB layouts, the hull record (`{position_radius, parent_growth, appearance}`), `hull_color` / `global_alpha` / the per-pass opacities, and **whether the draw is depth-tested** — the one question our chams need. Our chams are *refused* today (`payload/features/src/chams.cpp`, `k_draw_hook_target_verified = false`) because the hook target is wrong. |
+| **B — the hook bindings** | seven functions have **zero** static references and are reached only through runtime-registered hooks — including **their movement handler** (`212c37beb50`, the auto-strafe). Knowing *what drives it* is worth more to us than its body. |
+| **C — the protection layer** | the reflective loader (the header rebuild, the version-gated ntdll unwind-registration routine, the build table), the **encrypted-at-rest `.enc1`** (16.5 MB, entropy ≥ 8.00, no static decryption loop — so a **runtime dump** is the only way), the integrity and anti-tamper machinery, the HWID / hardware-monitoring collection, and the **server-side** feature delivery (a CJSON feature list — which explains why some of their features are not in the client binary at all). |
+| **D — the maths** | their rage cluster (the damage field, the hit chance, the spread model) and their movement command builder, against ours. |
+
+**The scope note in the spec is deliberate:** the *evasion* side (how the module
+avoids VAC, and what anti-cheat-evasion measures it performs) is **not** a
+deliverable, and nothing from it may become an evasion feature here. What the
+task delivers is the **architecture** — how a shipped product loads itself,
+protects its own code and delivers features — because that informs our own
+loader (`payload/loader/`) and our own integrity story. The plan is to document
+what the binary does, not to design a bypass and not to port detection-evading
+mechanisms.
+
+**On the box:** `ssh pontes@100.104.244.127`, work in `/var/tmp/rea-work/`.
+**Tailscale SSH asks for a one-time browser check** the first time — the prompt
+prints a `https://login.tailscale.com/a/…` URL. That is expected, not a fault.
+
+**On other sources.** The neverlose dump is the richest one, and the *legitimate*
+adjacent material is: the game's **own** anti-cheat binaries (`steamclient64.dll`
+and its VAC modules) and the **public academic RE/malware corpora** — cheat
+detection datasets and the anti-cheat research literature. I will not go
+acquiring other commercial products' binaries to reverse; where a public,
+legitimately-published analysis of a comparable product exists, cite it.
+
+### 5.4 The mining report
 
 `docs/research/neverlose-mining.md` answers the five questions with addresses.
 The two open threads:
@@ -220,7 +257,7 @@ Ranked in `docs/feature-wave.md` §6. The **triggerbot** is done; the rest:
 anti-aim (fake-lag/desync), hit logs + damage indicators, movement QoL
 (auto-crouch, ledge auto-jump), world-ESP volumes (smoke radius, molotov fire).
 
-### 5.5 The style sweep
+### 5.6 The style sweep
 
 All seven remaining clang-tidy groups are applied (one commit each, with the
 verify loop between them). Two checks are excluded with a documented reason
