@@ -40,6 +40,111 @@ elif host_machine.system() == 'windows'
   message('cs2-internal: cross Windows build (build machine: ' + build_machine.system() + ')')
 endif
 
+# --- The protection pass ----------------------------------------------------
+# The LLVM pass plugin that selects the functions to protect. It is a
+# build-time tool, not a project artifact, so it is built by CMake (see
+# tools/protect/README.md); this project only loads it.
+#
+# The flag is `/clang:-fpass-plugin=<dll>`: clang-cl ignores the plain
+# `-fpass-plugin=` spelling ("unknown argument ignored in clang-cl"), and the
+# `/clang:` prefix routes the option to the clang driver.
+#
+# The arguments have to be declared before the first target, so this block
+# sits above `subdir('loader')`.
+fs = import('fs')
+protect_enabled = get_option('protect')
+protect_plugin = get_option('protect_plugin')
+protect_build_depends = []
+protect_link_depends = []
+
+if protect_enabled
+  # The plugin is loaded with `/clang:-fpass-plugin=`, which only the clang
+  # driver understands: the *compiler* is what matters here, not the machine
+  # the build runs on (the repo cross-builds the payload from Linux with
+  # clang-cl, see toolchain/windows-msvc.ini).
+  if cpp.get_id() != 'clang-cl' and cpp.get_id() != 'clang'
+    error('the protection pass needs the clang-cl compiler: the plugin is loaded with ' +
+          '/clang:-fpass-plugin=..., which only the clang driver understands (this build ' +
+          'uses ' + cpp.get_id() + ')')
+  endif
+  if protect_plugin == ''
+    error('-Dprotect=true needs -Dprotect_plugin=<path to Cs2Protect.dll>')
+  endif
+  if not fs.is_absolute(protect_plugin)
+    error('the plugin path must be absolute: ' + protect_plugin)
+  endif
+  if ',' in protect_plugin
+    error('the plugin path must not contain a comma (it is one compiler argument): ' + protect_plugin)
+  endif
+  if ' ' in protect_plugin
+    error('the plugin path must not contain a space (it is one compiler argument): ' + protect_plugin)
+  endif
+
+  protect_tool = meson.current_source_dir() / '..' / 'tools' / 'protect'
+  protect_verify = find_program(protect_tool / 'verify_plugin.py')
+  protect_check = find_program(protect_tool / 'check_policy.py')
+  protect_plugin_file = files(protect_plugin)
+  protect_plugin_digest = fs.hash(protect_plugin_file, 'sha256')
+
+  # Ninja does not track a DLL that is only mentioned inside a compiler flag,
+  # so a plugin that changed after the configure step would leave stale
+  # objects behind -- a wrong-results failure mode with no error. The
+  # verification target turns that into a build failure, and the digest in the
+  # command line makes the objects rebuild once the configure step was
+  # repeated.
+  protect_stamp = custom_target('protect-plugin',
+    input : protect_plugin_file,
+    output : 'Cs2Protect.stamp',
+    command : [protect_verify,
+               '--plugin', '@INPUT@',
+               '--expected-sha256', protect_plugin_digest,
+               '--output', '@OUTPUT@'],
+    depend_files : protect_plugin_file,
+    build_by_default : true,
+  )
+  protect_build_depends = [protect_stamp]
+  protect_link_depends = [protect_plugin_file]
+
+  # The policy file is read by the plugin at compile time, from the
+  # environment. Its digest goes into the command line, so that a policy
+  # change (after a reconfigure) rebuilds the objects: the plugin has to run
+  # again to write the coverage of the new policy.
+  #
+  # A protected build without a policy protects nothing, and that is
+  # indistinguishable from an unprotected build -- so the configure step
+  # fails instead. (The plugin itself stays a no-op without a policy: it is
+  # the wiring that knows that `protect` is on.)
+  protect_policy_args = []
+  policy_probe = run_command(
+    find_program('python'), '-c',
+    'import os, sys; sys.stdout.write(os.environ.get("CS2_PROTECT_CONFIG", ""))',
+    check : false)
+  if policy_probe.returncode() != 0
+    error('-Dprotect=true needs CS2_PROTECT_CONFIG: the configure step could not read the environment')
+  endif
+  protect_policy = policy_probe.stdout().strip()
+  if protect_policy == ''
+    error('-Dprotect=true needs a policy file: set CS2_PROTECT_CONFIG=<path to a policy ' +
+          'JSON file> (see tools/protect/policy.example.json). A protected build without ' +
+          'a policy protects nothing, and that is indistinguishable from an unprotected one.')
+  endif
+  if not fs.exists(protect_policy)
+    error('the policy file does not exist: ' + protect_policy)
+  endif
+  protect_policy_digest = fs.hash(files(protect_policy), 'sha256')
+  protect_policy_args = [
+    '-DCS2_PROTECT_POLICY_SHA256=' + protect_policy_digest.substring(0, 16),
+  ]
+  protect_link_depends = protect_link_depends + [files(protect_policy)]
+
+  add_project_arguments(
+    '/clang:-fpass-plugin=' + protect_plugin.replace('\\', '/'),
+    '-DCS2_PROTECT_PLUGIN_SHA256=' + protect_plugin_digest.substring(0, 16),
+    language : 'cpp',
+  )
+  add_project_arguments(protect_policy_args, language : 'cpp')
+endif
+
 subdir('loader')
 
 # --- Generated SDK headers ------------------------------------------------
@@ -105,12 +210,31 @@ else
   subdir('features')
   subdir('control')
 
-  shared_library('payload',
+  # --- The protection pass --------------------------------------------------
+  # The plugin was loaded above (the flag is a project argument, so every
+  # translation unit of the payload gets it).
+  payload_lib = shared_library('payload',
     'src/payload_main.cpp',
     name_prefix : '',   # payload.dll, not libpayload.dll
     install : false,
     include_directories : loader_inc,
     link_with : loader_lib,
+    link_depends : protect_link_depends + protect_build_depends,
     dependencies : [sdk_dep, hooks_dep, game_dep, aim_dep, diag_dep, render_dep, features_dep,
                     control_dep, settings_table_dep])
+
+  if protect_enabled
+    # A pass sees one translation unit at a time, so it cannot know whether a
+    # policy entry matched *somewhere* in the build. The plugin records what
+    # each module decided; this check reads the records and fails the build
+    # when an entry matched nothing.
+    custom_target('protect-policy-check',
+      output : 'protect-policy-check.stamp',
+      command : [protect_check, '--output', '@OUTPUT@'],
+      depends : [payload_lib],
+      build_always_stale : true,
+      build_by_default : true,
+      console : true,
+    )
+  endif
 endif

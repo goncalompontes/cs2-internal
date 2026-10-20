@@ -40,8 +40,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #: The configuration file (the mypy section lives in it).
 CONFIG = REPO_ROOT / "pyproject.toml"
 
-#: What is checked by default: the whole scenario package.
+#: What is checked by default: the whole scenario package, and the Python of
+#: the protection pass (the policy checker and the plugin build script).
 PACKAGE = "scripts/scenario"
+TARGETS = [
+    PACKAGE,
+    "scripts/build-protect-plugin.py",
+    "tools/protect",
+]
 
 #: The automake "skip" code — the gate could not run, it did not fail.
 SKIP = 77
@@ -73,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
               "(pip install -r requirements-dev.txt)", file=sys.stderr)
         return SKIP
 
-    targets = arguments.targets or [PACKAGE]
+    targets = arguments.targets or TARGETS
     command = mypy_command(targets)
     print("typecheck: " + " ".join(command), file=sys.stderr)
     # The checker's own diagnostics are the report; its exit code is the

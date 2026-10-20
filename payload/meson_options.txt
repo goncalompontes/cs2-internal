@@ -1,0 +1,9 @@
+option('protect',
+  type: 'boolean',
+  value: false,
+  description: 'Apply the LLVM protection pass to the payload.')
+
+option('protect_plugin',
+  type: 'string',
+  value: '',
+  description: 'Path to Cs2Protect.dll (the LLVM pass plugin).')
