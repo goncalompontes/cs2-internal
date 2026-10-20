@@ -3,6 +3,34 @@
 Static analysis of build `25815307` (Windows depot) done with **Ghidra** (via
 REA, headless). Findings are recorded per subsystem.
 
+> ## ⚠️ Build delta — most addresses below are STALE for the live game
+>
+> The game was updated. The notes in this directory were derived from
+> `client.dll` **sha256 `44af2aa0d2c64f90d273444cb393b8b679094f0b02136dbdb89d4ec82a560008`**
+> (39 169 176 B, build `25815307`).
+>
+> The **live** `client.dll` is now
+> **sha256 `659940c1db362ed981d1df10637cec8c2a3d99409b77fc3b73e435e4649e36b0`**
+> (39 205 528 B) — a **different build**.
+>
+> **Every absolute VA in `client-dll.md`, `aim.md`, `engine2.md` and
+> `vphysics2.md` is stale for the live build.** Two exceptions:
+>
+> - [`occlusion.md`](occlusion.md) has already been re-derived on the new build
+>   and carries the old-VA → new-RVA mapping (e.g. `EntitiesInShape` old
+>   `0x181c322d0` → new RVA `0x9db220`).
+> - `docs/re/strafing.md` / `subtick.md` / `prediction.md` use **RVAs** and
+>   structural facts; the RVAs still need re-confirming.
+>
+> **Rule: do not use an address from these notes without re-verifying it on the
+> current build.** Re-derive with REA (the cache is warm for the live
+> `client.dll` — key `d565f0da…` — and for `materialsystem2.dll`, key
+> `603aece2…`).
+>
+> The current-build RE reports produced during the 2026-10-20 feature wave live
+> outside the repo (in the session temp dir) and should be folded in here when
+> the wave lands.
+
 - [`interface-system.md`](interface-system.md) — `CreateInterface` registration
 - [`schema-system.md`](schema-system.md) — schema system
 - [`client-dll.md`](client-dll.md) — entity system, local player, view matrix (WIP)

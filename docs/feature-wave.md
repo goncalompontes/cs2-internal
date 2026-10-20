@@ -1,0 +1,158 @@
+# Feature wave — plan of record (2026-10-20)
+
+> This is the plan for the feature wave that follows the ragebot fail-closed work
+> (commit `7906ce1`). It is the **plan of record**: the decisions below were taken
+> with the operator, and each item names the task that implements it and the
+> review that checks it.
+>
+> The wave is implemented by **sub-agents**, each with an explicit file
+> ownership, and each change is checked by a separate **adversarial** reviewer
+> agent before the next task starts on the same files.
+
+## 0. Decisions taken with the operator
+
+| Question | Decision |
+|---|---|
+| "Directional autostrafe: WASD dictates the wish direction" | The **WASD intent becomes the travel heading**; the wish is still the `AirAccelerate` optimum, pushed perpendicular to the velocity **on the side of that heading**. A/D no longer switches the feature off (it biases the heading); the legacy behaviour stays available behind a setting. |
+| Chams | **True 3D material chams** (a scene/material hook in `client.dll` + `materialsystem2.dll`), not an overlay approximation. |
+| Third person | **Force the game's camera** into third person (the `CViewRender` view struct), not merely "make the cheat work in 3rd person". |
+| Neverlose | The Linux machine with `/var/tmp/rea-work` will be made available; the reversal work continues against it. |
+
+## 1. The tasks
+
+| Id | Task | Owns | State |
+|---|---|---|---|
+| **T1** | Settings & config foundation: extend `wire::Settings` (v11 → v12), replace the flat `features::EspConfig` with a sectioned, typed `features::Config`, add a persistent config store, wire the one-shot config op | `overlay/include/cs2/overlay/wire.hpp`, `payload/features/*`, `overlay/src/renderer.cpp` | in progress |
+| **T2** | Menu overhaul: one shared menu builder for both renderers, a real keybind capture, the new sections, a config section | `overlay/include/cs2/overlay/menu_pages.hpp` (new), both `menu.cpp`s | pending |
+| **T3** | Directional autostrafe: the WASD travel heading, the side dead-zone with hysteresis, the legacy mode, a pure host-testable geometry module | `payload/control/*` | pending |
+| **T4** | ESP expansion: box styles, head box, skeleton, tracers, off-screen arrows, distance/scaling/filters, radar, sound ESP, grenade/C4/dropped-weapon ESP, per-element colours, **and the `filled_poly` rendering fix** | `payload/features/src/esp*`, `payload/render/*` | pending |
+| **T5** | Third person: force the camera via the `CViewRender` view struct | `payload/features/src/thirdperson.cpp` (new), `payload/game/*` | blocked on the RE |
+| **T6** | True 3D chams: a scene/material hook | `payload/features/src/chams.cpp` (new), `payload/game/*` | blocked on the RE |
+| **T7** | Neverlose mining (item 6) | — | blocked on the machine |
+| **T8** | The remaining clang-tidy sweep groups + the manual refactors | repo-wide | to run at the end of the wave |
+
+### Why the tasks are ordered this way
+
+`wire::Settings` is the **transport** for the menu → payload settings and is
+compiled into **two separately built binaries** (the payload and the Vulkan
+layer). Letting several tasks extend it in parallel would produce silent
+divergence, so exactly one task owns it and every other task consumes the
+fields it defines.
+
+## 2. The settings contract (T1)
+
+T1 appends the fields for the whole wave so that no later task has to touch the
+wire struct again:
+
+- **ESP** — box thickness/style, head box, skeleton, tracer, off-screen arrows,
+  glow, visible-only, distance, distance scaling, max distance, radar, sound,
+  grenades, C4, dropped weapons, the local player, spectators, teammates, the
+  maximum box scale, and the per-element colours.
+- **Movement** — the strafe mode (`off` / `camera-relative` / `directional`),
+  the "A/D stands down" switch, the wishspeed, the sub-tick count, and the third
+  person (enable, distance, angle, pivot height, FOV, shoulder side).
+- **Visuals** — chams (enable, mode, colour, visible-only, local player).
+- **Menu / config** — the menu key, the accent colour, the transparency, the
+  config op + token, and the config path.
+
+## 3. The review process
+
+Each task is followed by an **adversarial reviewer agent** whose brief is in
+`C:\Users\gpmpo\AppData\Local\Temp\opencode\reviewer-role.md`. The reviewer:
+
+- checks **spec conformance** (including silent omissions and unrequested
+  additions),
+- hunts **correctness** bugs (lost fields in a two-way conversion, off-by-one,
+  sign/axis errors, uninitialised reads, units, edge cases, thread safety,
+  idempotency of the input hook),
+- checks the **house style** (`docs/style-guide.md`),
+- **writes a hostile test** and proves the new logic can fail,
+- checks the **second-order effects** (the Vulkan-layer path, the control
+  channel, the scenario harness, the shared-memory wire format).
+
+The reviewer reports findings with `file:line`, a severity and a concrete failure
+scenario. It does **not** fix them; the implementer does, in a follow-up round.
+
+## 3.1 The RE inputs (and a build-delta warning)
+
+Two RE agents produced the inputs for T5 (third person) and T6 (chams). They ran
+**serially** — the REA MCP server has one bound target per session and the two
+agents were competing for the same Ghidra capacity, so one was stood down and
+resumed after the other finished. **Use REA's MCP tools; do not start a private
+`analyzeHeadless` project** — the REA project cache is warm for both targets.
+
+**The game was updated and the repo's RE notes are stale.** The notes in
+`docs/re/` were derived from `client.dll` `44af2aa0…` (build `25815307`); the
+live one is `659940c1…`. Only `docs/re/occlusion.md` has been re-derived. See
+the warning at the top of [`docs/re/README.md`](re/README.md) — **no address
+from those notes may be used without re-verifying it on the current build.**
+
+What the RE has already established for T6 (material system, `materialsystem2.dll`):
+
+- the interface is **`VMaterialSystem2_001`** (there is no `MaterialSystem`);
+  `CreateInterface` is at RVA `0x990e0`, the list head at `0x1556e8`, and the
+  `CMaterialSystem2` singleton at `0x163530` (vtable `0x12d920`);
+- `CreateMaterial` is **vtable slot 29** of `CMaterialSystem2`; `CMaterial2` is a
+  `0x7E0`-byte object with its vtable at `0x129ad0`;
+- the material's colour is a **hashed named parameter** (slots 21/22), not a
+  `SetColor` call;
+- `debug/DebugFlat` **does not exist** in any of the four modules — a
+  name-based flat-material lookup is unconfirmed;
+- the **model-draw path is still unidentified** (no `DrawModel` string and no
+  scene-system RTTI in this build) — this is the remaining blocker for T6.
+
+## 4. Worktree discipline
+
+Several agents work in parallel, so **each agent gets a git worktree** — its own
+directory, its own branch, its own build directories. (An earlier plan used one
+shared tree with several Meson build directories per slot; that still left the
+*source* files shared, which is the real hazard. Worktrees remove it: no two
+agents can touch the same file.)
+
+| Worktree | Branch | Task |
+|---|---|---|
+| `C:\Users\gpmpo\cs2-wt\t2` | `feat/t2-menu` | the menu overhaul |
+| `C:\Users\gpmpo\cs2-wt\t3` | `feat/t3-strafe` | the directional autostrafe |
+| `C:\Users\gpmpo\cs2-wt\t4` | `feat/t4-esp` | the ESP expansion |
+| `C:\Users\gpmpo\cs2-wt\rev` | `review/wave` | the adversarial reviews |
+
+`C:\Users\gpmpo\cs2-internal` is the **integration tree**: the orchestrator merges
+each task branch into `feat/occlusion-penetration` there, in dependency order, and
+runs the full verify loop on the merged result.
+
+Each worktree carries its own `build/`, `build-payload/`, `build-overlay/` and
+`build-injector/` (they are gitignored), so the agents never fight over ninja's
+state.
+
+## 5. The style sweep (T8)
+
+`scripts/clang-tidy-fix.py` runs one check group per commit. The sweep already
+ran `modernize-safe`, `modernize-types` and `trailing-return-type`; the
+remaining groups (`nodiscard`, `const`, `performance`, `readability`,
+`modernize-extra`, `readability-extra`, `misc-extra`) are deferred to the end of
+the wave so the new code is swept together with the old.
+
+The `trailing-return-type` group found a real break (the solver test's wall
+lambda: a deduced return type turned into a spelled-out
+`std::optional<OccluderCell>` moved the name lookup out of scope). **Every sweep
+group is verified with the full loop before it is committed** — the sweep
+aborts on the first failing group rather than committing a broken tree.
+
+## 6. Candidate follow-ups (item 5 — "other features you think are important")
+
+Ranked by (value ÷ effort) for this codebase, given what already exists. Each
+would be its own task with its own spec and review.
+
+| # | Feature | Why it fits here | Effort |
+|---|---|---|---|
+| 1 | **Triggerbot** — fires when the crosshair is over a target at a computed hit chance, with a delay/FOV/reaction-time model | The ragebot already computes a per-cell hit probability (`payload/aim`'s damage field). A trigger is the *safe* half of the same machinery: no angle is written, so it cannot break the shot model. It reuses the solver rather than duplicating it. | med |
+| 2 | **Anti-aim (fake-lag / desync / jitter)** — the movement side | Purely `CUserCmd` work, in the same module as the strafe and the bhop (`payload/control`). High value, self-contained, and it exercises the *silent* angle channel the repo already has. The Neverlose image has a fake-lag cluster (`NEXT_SESSION_PROMPT.md` §7.4) to compare against. | med |
+| 3 | **Hit log / damage indicators** — a killfeed with the hitbox hit, the damage and the distance | The payload already captures `player_hurt`, `player_death` and `weapon_fire` **with their arguments** (`payload/control/src/events.cpp`). This is nearly free and gives the operator the feedback loop the ragebot work is missing. | low |
+| 4 | **Movement QoL** — auto-crouch in combat, ledge auto-jump, silent jump, ground auto-strafe, auto-backstab | All in `payload/control`, all reusing the existing movement model and the `on_ground` / velocity reads. Each is a small, independently testable feature. | low-med |
+| 5 | **World-ESP completion** — smoke's *active* radius, molotov fire area, flashbang/HE blast radius, grenade trajectory preview | T4 adds the grenade/C4/weapon markers; the *volumes* (what the smoke actually blocks, where the molotov will burn) are the part that is actually useful in a round, and they need the projectile's radius and velocity. | med |
+| 6 | **Anti-flash / auto-look-away, auto-defuse, auto-pickup** | Trivial, and each is a small, well-scoped feature that needs no new engine access. | low each |
+
+**Deliberately not proposed:** anything whose purpose is to hide the payload from
+a third party (HWID spoofing, anti-cheat evasion, stream-proofing). That is
+outside the scope of a feature wave, and the repository's loader is already
+written for the operator's own use.
