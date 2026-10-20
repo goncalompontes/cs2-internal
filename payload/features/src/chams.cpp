@@ -110,9 +110,25 @@ inline constexpr std::uintptr_t k_render_component_view_models = 0x50;
   return (flag & 1U) != 0;
 }
 
+// The re-entrancy guard for the draw hook.
+//
+// The trampoline is the game's own prologue plus a jump back; if the prologue
+// were patched wrongly the trampoline would land **in this detour** again, and
+// the chain (detour -> original -> detour -> ...) would recurse until the stack
+// overflowed (0xc00000fd) and took the whole renderer with it. A thread-local
+// depth counter breaks the cycle: the re-entrant call returns without touching
+// the material, so the draw is dropped for that primitive instead of crashing
+// the game.
+thread_local int g_draw_depth = 0;
+
 void __fastcall draw_primitive_detour(void* desc, void* render_context, void* mesh_primitive,
                                       const void* material, const void* material_mode,
                                       void* draw_values, bool deferred, void* stats, void* layer) {
+  if (g_draw_depth > 0) {
+    // The trampoline came back here: this is the recursion, and it is broken
+    // here rather than a thousand frames later.
+    return;
+  }
   Chams* active = g_active;
   auto* original =
       active != nullptr ? reinterpret_cast<DrawPrimitiveFn>(active->original()) : nullptr;
@@ -121,8 +137,10 @@ void __fastcall draw_primitive_detour(void* desc, void* render_context, void* me
     // draw is dropped for this frame rather than crashing the renderer.
     return;
   }
+  g_draw_depth = 1;
   active->on_draw(desc, render_context, mesh_primitive, material, material_mode, draw_values,
                   deferred, stats, layer);
+  g_draw_depth = 0;
 }
 
 }  // namespace
@@ -162,6 +180,18 @@ void Chams::configure(const Config::Visuals& visuals) noexcept {
       break;
     case game::ColourAction::none:
       break;
+  }
+
+  // The hook follows the switch: it is installed when the chams are turned on
+  // and removed when they are turned off, so a disabled feature never patches
+  // the renderer's code.
+  if (visuals.chams) {
+    (void)install();
+  } else if (hook_.installed()) {
+    hook_.uninstall();
+    if (g_active == this) {
+      g_active = nullptr;
+    }
   }
 }
 
@@ -386,6 +416,14 @@ auto Chams::install() noexcept -> bool {
     return true;
   }
   if (install_failed_.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  // **A feature that is off must not patch the game's code.** The draw hook is an
+  // inline hook into the renderer's hot path; installing it while the chams are
+  // off buys nothing and risks the renderer (a mis-patched prologue is a crash
+  // in the game, not in us). The hook is installed when the operator turns the
+  // chams on, and removed when they turn them off.
+  if (!enabled_.load(std::memory_order_relaxed)) {
     return false;
   }
   const game::ModuleInfo scene = game::find_module("scenesystem.dll");

@@ -28,11 +28,28 @@ using CameraUpdateFn = std::uint64_t(__fastcall*)(void* input, int slot);
 // Skipping it would skip the game's camera update entirely.
 CameraUpdateFn g_original = nullptr;
 
+// The re-entrancy guard for the camera hook.
+//
+// The trampoline is the game's own prologue plus a jump back; if the prologue
+// were patched wrongly the trampoline would land **in this detour** again, and
+// the chain (detour -> original -> detour -> ...) would recurse until the stack
+// overflowed (0xc00000fd) and took the game with it. A thread-local depth
+// counter breaks the cycle: the re-entrant call returns without touching the
+// camera state, so the frame's camera update is dropped rather than crashing.
+thread_local int g_camera_depth = 0;
+
 std::uint64_t __fastcall camera_update_detour(void* input, int slot) {
+  if (g_camera_depth > 0) {
+    // The trampoline came back here: this is the recursion, and it is broken
+    // here rather than a thousand frames later.
+    return 0;
+  }
   ThirdPerson* active = g_active;
+  g_camera_depth = 1;
   if (active != nullptr) {
     active->on_camera_update(input, slot);
   }
+  g_camera_depth = 0;
   if (g_original != nullptr) {
     return g_original(input, slot);
   }
@@ -96,6 +113,19 @@ void ThirdPerson::configure(const game::ThirdPersonParams& params) noexcept {
   pivot_z_.store(params.pivot_z);
   fov_.store(params.fov);
   right_shoulder_.store(params.right_shoulder);
+
+  // The hook follows the switch: a feature that is off must not patch the
+  // game's code. The camera update is in the game's per-frame path, so an
+  // inline hook there is a crash risk for no benefit while the feature is off.
+  if (params.enabled) {
+    (void)install();
+  } else if (hook_.installed()) {
+    hook_.uninstall();
+    if (g_active == this) {
+      g_active = nullptr;
+    }
+    g_original = nullptr;
+  }
 }
 
 auto ThirdPerson::params() const noexcept -> game::ThirdPersonParams {
@@ -119,6 +149,13 @@ bool ThirdPerson::install() noexcept {
   }
   if (install_failed_.load()) {
     return false;  // the attempt already failed; do not retry it every frame
+  }
+  // **A feature that is off must not patch the game's code.** The camera
+  // update is in the game's per-frame path, so an inline hook there is a crash
+  // risk for no benefit while the feature is off. The hook is installed when the
+  // operator turns the camera on, and removed when they turn it off.
+  if (!enabled_.load(std::memory_order_relaxed)) {
+    return false;
   }
   // The camera block's offsets are build-specific, and so is the address of
   // the camera update itself: the hook is only installed on the build the
