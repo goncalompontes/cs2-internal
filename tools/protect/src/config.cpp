@@ -96,10 +96,10 @@ struct ScanResult {
         token.clear();
         break;
       case '{':
-        stack.push_back(Frame{true, true, {}});
+        stack.push_back(Frame{.is_object = true, .expects_key = true});
         break;
       case '[':
-        stack.push_back(Frame{false, false, {}});
+        stack.push_back(Frame{.is_object = false, .expects_key = false});
         break;
       case '}':
       case ']':
@@ -205,7 +205,7 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
   for (const auto& entry : object) {
     keys.emplace_back(entry.first.str());
   }
-  std::sort(keys.begin(), keys.end());
+  std::ranges::sort(keys);
   return keys;
 }
 
@@ -269,7 +269,7 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
       if (!entry) {
         return std::unexpected(entry.error());
       }
-      policy.protect.push_back(std::move(*entry));
+      policy.protect.emplace_back(std::move(*entry));
     }
   } else if (object->get("protect") != nullptr) {
     return std::unexpected(std::string("'protect' must be an array"));
@@ -281,7 +281,7 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
       if (!pattern.has_value()) {
         return std::unexpected(std::string("a 'deny' entry must be a string"));
       }
-      policy.deny.push_back(std::string(*pattern));
+      policy.deny.emplace_back(*pattern);
     }
   } else if (object->get("deny") != nullptr) {
     return std::unexpected(std::string("'deny' must be an array"));
@@ -312,7 +312,7 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
   if (const char* custom = std::getenv("CS2_PROTECT_COVERAGE"); custom != nullptr) {
     const std::string_view directory = trim(custom);
     if (!directory.empty()) {
-      return std::filesystem::path(std::string(directory));
+      return {std::string(directory)};
     }
   }
   std::filesystem::path root = ".";
@@ -331,12 +331,12 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
 
 [[nodiscard]] auto to_string(ProtectionLevel level) noexcept -> const char* {
   switch (level) {
-    case ProtectionLevel::call:
-      return "call";
     case ProtectionLevel::virtualized:
       return "virtualized";
+    case ProtectionLevel::call:
+    default:
+      return "call";
   }
-  return "call";
 }
 
 [[nodiscard]] auto to_string(SelectionSource source) noexcept -> const char* {
@@ -344,9 +344,9 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
     case SelectionSource::annotation:
       return "annotation";
     case SelectionSource::policy:
+    default:
       return "policy";
   }
-  return "policy";
 }
 
 auto parse_policy_text(std::string_view text) -> std::expected<Policy, ConfigError> {
@@ -406,7 +406,7 @@ auto load_config() -> std::expected<Config, ConfigError> {
     return config;
   }
 
-  std::ifstream file(policy_file, std::ios::binary);
+  const std::ifstream file(policy_file, std::ios::binary);
   if (!file) {
     return std::unexpected(ConfigError{
         std::string("CS2_PROTECT_CONFIG: cannot open the policy file '") + policy_file + "'"});

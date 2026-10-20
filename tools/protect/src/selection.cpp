@@ -1,5 +1,6 @@
 #include "selection.hpp"
 
+#include <array>
 #include <cctype>
 #include <optional>
 #include <set>
@@ -83,13 +84,14 @@ constexpr std::string_view k_protect_annotation = "cs2.protect";
 
 /// The calling conventions the MSVC demangler prints between the return type
 /// and the name.
-constexpr std::string_view k_calling_conventions[] = {
+constexpr std::array<std::string_view, 9> k_calling_conventions = {
     "__cdecl",   "__fastcall", "__thiscall",  "__vectorcall",     "__stdcall",
     "__clrcall", "__usercall", "__swiftcall", "__swiftasynccall",
 };
 
 /// The access labels the MSVC demangler prints in front of a member function.
-constexpr std::string_view k_access_labels[] = {"public: ", "private: ", "protected: "};
+constexpr std::array<std::string_view, 3> k_access_labels = {
+    "public: ", "private: ", "protected: "};
 
 /// Whether the text ends with the `operator` token.
 ///
@@ -180,8 +182,6 @@ constexpr std::string_view k_access_labels[] = {"public: ", "private: ", "protec
 
 [[nodiscard]] auto to_string(SkipReason reason) noexcept -> const char* {
   switch (reason) {
-    case SkipReason::not_annotated:
-      return "not_annotated";
     case SkipReason::denied:
       return "denied";
     case SkipReason::optnone:
@@ -192,8 +192,10 @@ constexpr std::string_view k_access_labels[] = {"public: ", "private: ", "protec
       return "declaration";
     case SkipReason::intrinsic:
       return "intrinsic";
+    case SkipReason::not_annotated:
+    default:
+      return "not_annotated";
   }
-  return "not_annotated";
 }
 
 [[nodiscard]] auto glob_match(std::string_view pattern, std::string_view text) noexcept -> bool {
@@ -389,7 +391,7 @@ void match_entry(PolicyMatch& match) {
 
 auto select_functions(const llvm::Module& module, const Config& config) -> SelectionResult {
   SelectionResult result;
-  const std::string module_id = module.getSourceFileName();
+  const std::string& module_id = module.getSourceFileName();
   const std::set<std::string> annotated = annotated_functions(module);
 
   if (config.policy) {
@@ -454,10 +456,10 @@ auto select_functions(const llvm::Module& module, const Config& config) -> Selec
     if (annotated.find(symbol) != annotated.end()) {
       selected = true;
       source = SelectionSource::annotation;
-    } else if (!named.empty()) {
+    } else if (!named.empty() && config.policy.has_value()) {
       selected = true;
       source = SelectionSource::policy;
-      level = config.policy->protect[named.front()].level;
+      level = config.policy.value().protect[named.front()].level;
     }
     if (!selected) {
       result.skipped.push_back(Skipped{symbol, qualified, SkipReason::not_annotated});
@@ -469,9 +471,9 @@ auto select_functions(const llvm::Module& module, const Config& config) -> Selec
     // the entry is *blocked*, not matched, and the build says so.
     const auto blocker = blocker_of(function);
     if (blocker.has_value()) {
-      result.skipped.push_back(Skipped{symbol, qualified, *blocker});
+      result.skipped.push_back(Skipped{symbol, qualified, blocker.value()});
       for (const std::size_t index : named) {
-        block_entry(result.policy_matches[index], *blocker);
+        block_entry(result.policy_matches[index], blocker.value());
       }
       continue;
     }
