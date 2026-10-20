@@ -3,10 +3,16 @@
 //
 // The settings block is a POD and the conversion is pure, so both can be
 // exercised natively (no game, no payload). The test is deliberately
-// *exhaustive*: the sentinel block below holds a distinct, legal value in
-// every field of `wire::Settings`, and the round trip has to come back
-// byte-identical. A field that the conversion forgets — in either direction —
-// changes a byte and fails the test.
+// *exhaustive* and *pairing-sensitive*:
+//
+// - the differential table below holds one case per field of `wire::Settings`:
+//   the wire field and the config field it feeds. Mutating exactly one wire
+//   field has to change exactly the config field named in the case, so a
+//   **consistent swap** of two fields — invisible to a round trip — is caught;
+// - the sentinel block is the default block with every case's sentinel
+//   applied, so the block and the table cannot drift apart, and the round trip
+//   has to come back byte-identical. A field that the conversion forgets — in
+//   either direction — changes a byte and fails the test.
 
 #include <cassert>
 #include <cmath>
@@ -15,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "cs2/features/config_store.hpp"
 #include "cs2/features/settings.hpp"
@@ -24,150 +31,203 @@ namespace {
 using cs2::features::Config;
 using cs2::overlay::wire::Settings;
 
-// The settings block with a distinct, legal value in **every** field.
+// A differential case: the wire field and the config field it feeds.
 //
-// Every value differs from the field's default (so a dropped field cannot hide
-// behind a zero) and stays inside the field's legal range (so the clamping in
-// `from_wire_settings` does not change it).
+// The wire setter writes a sentinel that differs from the field's default and
+// stays inside its legal range (so the clamping in `from_wire_settings` does
+// not change it). The config setter writes the value the conversion has to
+// produce.
+struct FieldCase {
+  const char* name;
+  void (*set_wire)(Settings&);
+  void (*set_config)(Config&);
+};
+
+// The cases. The arguments are parenthesised because a colour holds commas.
+#define CS2_FIELD(name, wire_set, config_set) \
+  {name, [](Settings& s) { wire_set; }, [](Config& c) { config_set; }}
+
+auto field_cases() -> std::vector<FieldCase> {
+  return {
+      // --- ESP: the elements ---
+      CS2_FIELD("esp.box", (s.box = 0), (c.esp.box = false)),
+      CS2_FIELD("esp.health_bar", (s.health_bar = 0), (c.esp.health_bar = false)),
+      CS2_FIELD("esp.ammo_bar", (s.ammo_bar = 0), (c.esp.ammo_bar = false)),
+      CS2_FIELD("esp.name", (s.name = 0), (c.esp.name = false)),
+      CS2_FIELD("esp.weapon", (s.weapon = 0), (c.esp.weapon = false)),
+      CS2_FIELD("esp.flags", (s.flags = 0), (c.esp.flags = false)),
+      CS2_FIELD("esp.only_enemies", (s.only_enemies = 0), (c.esp.only_enemies = false)),
+      CS2_FIELD("esp.show_dead", (s.show_dead = 1), (c.esp.show_dead = true)),
+      CS2_FIELD("esp.hitboxes", (s.hitboxes = 1), (c.esp.hitboxes = true)),
+      CS2_FIELD("esp.hitbox_mode", (s.hitbox_mode = 2),
+                (c.esp.hitbox_mode = cs2::features::HitboxMode::wireframe)),
+      CS2_FIELD("esp.hitbox_color_mode", (s.hitbox_color_mode = 1),
+                (c.esp.hitbox_custom_color = true)),
+      CS2_FIELD("esp.hitbox_color",
+                (s.hitbox_color[0] = 1, s.hitbox_color[1] = 2, s.hitbox_color[2] = 3,
+                 s.hitbox_color[3] = 4),
+                (c.esp.hitbox_color = cs2::features::Color{1, 2, 3, 4})),
+
+      // --- ESP: the added player elements ---
+      CS2_FIELD("esp.esp_box_thickness", (s.esp_box_thickness = 7), (c.esp.box_thickness = 7)),
+      CS2_FIELD("esp.esp_box_cornered", (s.esp_box_cornered = 1),
+                (c.esp.box_style = cs2::features::BoxStyle::corner)),
+      CS2_FIELD("esp.esp_head_box", (s.esp_head_box = 1), (c.esp.head_box = true)),
+      CS2_FIELD("esp.esp_skeleton", (s.esp_skeleton = 1), (c.esp.skeleton = true)),
+      CS2_FIELD("esp.esp_tracer", (s.esp_tracer = 1), (c.esp.tracer = true)),
+      CS2_FIELD("esp.esp_tracer_origin", (s.esp_tracer_origin = 1),
+                (c.esp.tracer_origin = cs2::features::TracerOrigin::eye)),
+      CS2_FIELD("esp.esp_offscreen", (s.esp_offscreen = 1), (c.esp.offscreen = true)),
+      CS2_FIELD("esp.esp_glow", (s.esp_glow = 1), (c.esp.glow = true)),
+      CS2_FIELD("esp.esp_visible_only", (s.esp_visible_only = 1), (c.esp.visible_only = true)),
+      CS2_FIELD("esp.esp_distance", (s.esp_distance = 1), (c.esp.distance = true)),
+      CS2_FIELD("esp.esp_scale_by_distance", (s.esp_scale_by_distance = 1),
+                (c.esp.scale_by_distance = true)),
+      CS2_FIELD("esp.esp_max_distance_m", (s.esp_max_distance_m = 33), (c.esp.max_distance_m = 33)),
+      CS2_FIELD("esp.esp_radar", (s.esp_radar = 1), (c.esp.radar = true)),
+      CS2_FIELD("esp.esp_sound", (s.esp_sound = 1), (c.esp.sound = true)),
+      CS2_FIELD("esp.esp_grenades", (s.esp_grenades = 1), (c.esp.grenades = true)),
+      CS2_FIELD("esp.esp_c4", (s.esp_c4 = 1), (c.esp.c4 = true)),
+      CS2_FIELD("esp.esp_weapons", (s.esp_weapons = 1), (c.esp.weapons = true)),
+      CS2_FIELD("esp.esp_local_player", (s.esp_local_player = 1), (c.esp.local_player = true)),
+      CS2_FIELD("esp.esp_show_spectators", (s.esp_show_spectators = 1),
+                (c.esp.show_spectators = true)),
+      CS2_FIELD("esp.esp_show_teammates", (s.esp_show_teammates = 1),
+                (c.esp.show_teammates = true)),
+      CS2_FIELD("esp.esp_max_box_scale", (s.esp_max_box_scale = 1.75F),
+                (c.esp.max_box_scale = 1.75F)),
+
+      // --- ESP: the colours ---
+      CS2_FIELD("esp.esp_color_enemy",
+                (s.esp_color_enemy[0] = 11, s.esp_color_enemy[1] = 12, s.esp_color_enemy[2] = 13,
+                 s.esp_color_enemy[3] = 14),
+                (c.esp.color_enemy = cs2::features::Color{11, 12, 13, 14})),
+      CS2_FIELD("esp.esp_color_team",
+                (s.esp_color_team[0] = 21, s.esp_color_team[1] = 22, s.esp_color_team[2] = 23,
+                 s.esp_color_team[3] = 24),
+                (c.esp.color_team = cs2::features::Color{21, 22, 23, 24})),
+      CS2_FIELD("esp.esp_color_box",
+                (s.esp_color_box[0] = 31, s.esp_color_box[1] = 32, s.esp_color_box[2] = 33,
+                 s.esp_color_box[3] = 34),
+                (c.esp.color_box = cs2::features::Color{31, 32, 33, 34})),
+      CS2_FIELD("esp.esp_color_skeleton",
+                (s.esp_color_skeleton[0] = 41, s.esp_color_skeleton[1] = 42,
+                 s.esp_color_skeleton[2] = 43, s.esp_color_skeleton[3] = 44),
+                (c.esp.color_skeleton = cs2::features::Color{41, 42, 43, 44})),
+      CS2_FIELD("esp.esp_color_tracer",
+                (s.esp_color_tracer[0] = 51, s.esp_color_tracer[1] = 52, s.esp_color_tracer[2] = 53,
+                 s.esp_color_tracer[3] = 54),
+                (c.esp.color_tracer = cs2::features::Color{51, 52, 53, 54})),
+      CS2_FIELD("esp.esp_color_offscreen",
+                (s.esp_color_offscreen[0] = 61, s.esp_color_offscreen[1] = 62,
+                 s.esp_color_offscreen[2] = 63, s.esp_color_offscreen[3] = 64),
+                (c.esp.color_offscreen = cs2::features::Color{61, 62, 63, 64})),
+      CS2_FIELD("esp.esp_color_sound",
+                (s.esp_color_sound[0] = 71, s.esp_color_sound[1] = 72, s.esp_color_sound[2] = 73,
+                 s.esp_color_sound[3] = 74),
+                (c.esp.color_sound = cs2::features::Color{71, 72, 73, 74})),
+      CS2_FIELD("esp.esp_color_grenade",
+                (s.esp_color_grenade[0] = 81, s.esp_color_grenade[1] = 82,
+                 s.esp_color_grenade[2] = 83, s.esp_color_grenade[3] = 84),
+                (c.esp.color_grenade = cs2::features::Color{81, 82, 83, 84})),
+      CS2_FIELD("esp.esp_color_c4",
+                (s.esp_color_c4[0] = 91, s.esp_color_c4[1] = 92, s.esp_color_c4[2] = 93,
+                 s.esp_color_c4[3] = 94),
+                (c.esp.color_c4 = cs2::features::Color{91, 92, 93, 94})),
+
+      // --- Movement ---
+      CS2_FIELD("movement.auto_strafe", (s.auto_strafe = 1), (c.movement.auto_strafe = true)),
+      CS2_FIELD("movement.bhop", (s.bhop = 1), (c.movement.bhop = true)),
+      CS2_FIELD("movement.movement_strafe_mode", (s.movement_strafe_mode = 2),
+                (c.movement.strafe_mode = cs2::features::StrafeMode::directional)),
+      CS2_FIELD("movement.movement_strafe_ignore_keys", (s.movement_strafe_ignore_keys = 1),
+                (c.movement.strafe_ignore_keys = true)),
+      CS2_FIELD("movement.movement_strafe_wishspeed", (s.movement_strafe_wishspeed = 250.0F),
+                (c.movement.strafe_wishspeed = 250.0F)),
+      CS2_FIELD("movement.movement_strafe_subticks", (s.movement_strafe_subticks = 8),
+                (c.movement.strafe_subticks = 8)),
+      CS2_FIELD("movement.movement_thirdperson", (s.movement_thirdperson = 1),
+                (c.movement.thirdperson = true)),
+      CS2_FIELD("movement.movement_thirdperson_distance",
+                (s.movement_thirdperson_distance = 320.0F),
+                (c.movement.thirdperson_distance = 320.0F)),
+      CS2_FIELD("movement.movement_thirdperson_angle", (s.movement_thirdperson_angle = 45.0F),
+                (c.movement.thirdperson_angle = 45.0F)),
+      CS2_FIELD("movement.movement_thirdperson_pivot_z", (s.movement_thirdperson_pivot_z = 12.5F),
+                (c.movement.thirdperson_pivot_z = 12.5F)),
+      CS2_FIELD("movement.movement_thirdperson_fov", (s.movement_thirdperson_fov = 90.0F),
+                (c.movement.thirdperson_fov = 90.0F)),
+      CS2_FIELD("movement.movement_thirdperson_side", (s.movement_thirdperson_side = 0),
+                (c.movement.thirdperson_side = cs2::features::ThirdPersonSide::left)),
+
+      // --- Ragebot ---
+      CS2_FIELD("rage.rage", (s.rage = 1), (c.rage.enabled = true)),
+      CS2_FIELD("rage.rage_key", (s.rage_key = 0x41), (c.rage.key = 0x41)),
+      CS2_FIELD("rage.rage_fire", (s.rage_fire = 1), (c.rage.fire = true)),
+      CS2_FIELD("rage.rage_objective", (s.rage_objective = 2), (c.rage.objective = 2)),
+      CS2_FIELD("rage.rage_hitbox", (s.rage_hitbox = 2), (c.rage.hitbox = 2)),
+      CS2_FIELD("rage.rage_fov", (s.rage_fov = 30.5F), (c.rage.fov = 30.5F)),
+      CS2_FIELD("rage.rage_min_damage", (s.rage_min_damage = 42.25F), (c.rage.min_damage = 42.25F)),
+      CS2_FIELD("rage.rage_min_hitchance", (s.rage_min_hitchance = 0.75F),
+                (c.rage.min_hitchance = 0.75F)),
+      CS2_FIELD("rage.rage_autostop", (s.rage_autostop = 2), (c.rage.autostop = 2)),
+      CS2_FIELD("rage.rage_autoscope", (s.rage_autoscope = 1), (c.rage.autoscope = 1)),
+      CS2_FIELD("rage.rage_autoreload", (s.rage_autoreload = 1), (c.rage.autoreload = 1)),
+      CS2_FIELD("rage.rage_only_visible", (s.rage_only_visible = 1), (c.rage.only_visible = 1)),
+      CS2_FIELD("rage.rage_mode", (s.rage_mode = 2), (c.rage.mode = 2)),
+      CS2_FIELD("rage.rage_per_weapon", (s.rage_per_weapon = 1), (c.rage.per_weapon = 1)),
+      CS2_FIELD("rage.rage_config_op", (s.rage_config_op = 3), (c.rage.config_op = 3)),
+      CS2_FIELD("rage.rage_config_token", (s.rage_config_token = 123456U),
+                (c.rage.config_token = 123456U)),
+      CS2_FIELD("rage.rage_weapon",
+                (std::memcpy(s.rage_weapon, "weapon_ak47", sizeof("weapon_ak47"))),
+                (std::memcpy(c.rage.weapon.data(), "weapon_ak47", sizeof("weapon_ak47")))),
+      CS2_FIELD("rage.rage_recoil", (s.rage_recoil = 1), (c.rage.recoil = 1)),
+      CS2_FIELD("rage.rage_stop_speed", (s.rage_stop_speed = 100.5F), (c.rage.stop_speed = 100.5F)),
+      CS2_FIELD("rage.rage_backtrack", (s.rage_backtrack = 1), (c.rage.backtrack = 1)),
+
+      // --- Visuals (chams) ---
+      CS2_FIELD("visuals.visuals_chams", (s.visuals_chams = 1), (c.visuals.chams = true)),
+      CS2_FIELD("visuals.visuals_chams_mode", (s.visuals_chams_mode = 2),
+                (c.visuals.chams_mode = cs2::features::ChamsMode::wireframe)),
+      CS2_FIELD("visuals.visuals_chams_visible", (s.visuals_chams_visible = 1),
+                (c.visuals.chams_visible = true)),
+      CS2_FIELD("visuals.visuals_chams_local", (s.visuals_chams_local = 1),
+                (c.visuals.chams_local = true)),
+      CS2_FIELD("visuals.visuals_chams_color",
+                (s.visuals_chams_color[0] = 101, s.visuals_chams_color[1] = 102,
+                 s.visuals_chams_color[2] = 103, s.visuals_chams_color[3] = 104),
+                (c.visuals.chams_color = cs2::features::Color{101, 102, 103, 104})),
+
+      // --- Menu / config ---
+      CS2_FIELD("menu.show_hud", (s.show_hud = 0), (c.menu.show_hud = false)),
+      CS2_FIELD("menu.menu_open", (s.menu_open = 1), (c.menu.open = true)),
+      CS2_FIELD("menu.menu_key", (s.menu_key = 0x41), (c.menu.key = 0x41)),
+      CS2_FIELD("menu.menu_accent",
+                (s.menu_accent[0] = 111, s.menu_accent[1] = 112, s.menu_accent[2] = 113,
+                 s.menu_accent[3] = 114),
+                (c.menu.accent = cs2::features::Color{111, 112, 113, 114})),
+      CS2_FIELD("menu.menu_transparency", (s.menu_transparency = 55), (c.menu.transparency = 55)),
+      CS2_FIELD("menu.menu_config_op", (s.menu_config_op = 2), (c.menu.config_op = 2)),
+      CS2_FIELD("menu.menu_config_token", (s.menu_config_token = 987654U),
+                (c.menu.config_token = 987654U)),
+      CS2_FIELD("menu.menu_config_path",
+                (std::snprintf(s.menu_config_path, sizeof(s.menu_config_path), "%s",
+                               "C:\\Users\\test\\cs2 config.cfg")),
+                (std::memcpy(c.menu.config_path.data(), "C:\\Users\\test\\cs2 config.cfg",
+                             sizeof("C:\\Users\\test\\cs2 config.cfg")))),
+  };
+}
+
+// The settings block with a sentinel in **every** field.
+//
+// The sentinels come from the differential table, so the block and the table
+// cannot drift apart.
 auto sentinel_settings() -> Settings {
-  Settings settings{};
-
-  // --- ESP: the elements ---
-  settings.box = 0;
-  settings.health_bar = 0;
-  settings.ammo_bar = 0;
-  settings.name = 0;
-  settings.weapon = 0;
-  settings.flags = 0;
-  settings.only_enemies = 0;
-  settings.show_dead = 1;
-  settings.hitboxes = 1;
-  settings.hitbox_mode = 2;
-  settings.hitbox_color_mode = 1;
-  settings.hitbox_color[0] = 1;
-  settings.hitbox_color[1] = 2;
-  settings.hitbox_color[2] = 3;
-  settings.hitbox_color[3] = 4;
-
-  // --- ESP: the added player elements ---
-  settings.esp_box_thickness = 7;
-  settings.esp_box_cornered = 1;
-  settings.esp_head_box = 1;
-  settings.esp_skeleton = 1;
-  settings.esp_tracer = 1;
-  settings.esp_tracer_origin = 1;
-  settings.esp_offscreen = 1;
-  settings.esp_glow = 1;
-  settings.esp_visible_only = 1;
-  settings.esp_distance = 1;
-  settings.esp_scale_by_distance = 1;
-  settings.esp_max_distance_m = 33;
-  settings.esp_radar = 1;
-  settings.esp_sound = 1;
-  settings.esp_grenades = 1;
-  settings.esp_c4 = 1;
-  settings.esp_weapons = 1;
-  settings.esp_local_player = 1;
-  settings.esp_show_spectators = 1;
-  settings.esp_show_teammates = 1;
-  settings.esp_max_box_scale = 1.75F;
-  settings.esp_color_enemy[0] = 11;
-  settings.esp_color_enemy[1] = 12;
-  settings.esp_color_enemy[2] = 13;
-  settings.esp_color_enemy[3] = 14;
-  settings.esp_color_team[0] = 21;
-  settings.esp_color_team[1] = 22;
-  settings.esp_color_team[2] = 23;
-  settings.esp_color_team[3] = 24;
-  settings.esp_color_box[0] = 31;
-  settings.esp_color_box[1] = 32;
-  settings.esp_color_box[2] = 33;
-  settings.esp_color_box[3] = 34;
-  settings.esp_color_skeleton[0] = 41;
-  settings.esp_color_skeleton[1] = 42;
-  settings.esp_color_skeleton[2] = 43;
-  settings.esp_color_skeleton[3] = 44;
-  settings.esp_color_tracer[0] = 51;
-  settings.esp_color_tracer[1] = 52;
-  settings.esp_color_tracer[2] = 53;
-  settings.esp_color_tracer[3] = 54;
-  settings.esp_color_offscreen[0] = 61;
-  settings.esp_color_offscreen[1] = 62;
-  settings.esp_color_offscreen[2] = 63;
-  settings.esp_color_offscreen[3] = 64;
-  settings.esp_color_sound[0] = 71;
-  settings.esp_color_sound[1] = 72;
-  settings.esp_color_sound[2] = 73;
-  settings.esp_color_sound[3] = 74;
-  settings.esp_color_grenade[0] = 81;
-  settings.esp_color_grenade[1] = 82;
-  settings.esp_color_grenade[2] = 83;
-  settings.esp_color_grenade[3] = 84;
-  settings.esp_color_c4[0] = 91;
-  settings.esp_color_c4[1] = 92;
-  settings.esp_color_c4[2] = 93;
-  settings.esp_color_c4[3] = 94;
-
-  // --- Movement ---
-  settings.auto_strafe = 1;
-  settings.bhop = 1;
-  settings.movement_strafe_mode = 2;
-  settings.movement_strafe_ignore_keys = 1;
-  settings.movement_strafe_wishspeed = 250.0F;
-  settings.movement_strafe_subticks = 8;
-  settings.movement_thirdperson = 1;
-  settings.movement_thirdperson_distance = 320.0F;
-  settings.movement_thirdperson_angle = 45.0F;
-  settings.movement_thirdperson_pivot_z = 12.5F;
-  settings.movement_thirdperson_fov = 90.0F;
-  settings.movement_thirdperson_side = 0;
-
-  // --- Ragebot ---
-  settings.rage = 1;
-  settings.rage_key = 0x41;
-  settings.rage_fire = 1;
-  settings.rage_objective = 2;
-  settings.rage_hitbox = 2;
-  settings.rage_fov = 30.5F;
-  settings.rage_min_damage = 42.25F;
-  settings.rage_min_hitchance = 0.75F;
-  settings.rage_autostop = 2;
-  settings.rage_autoscope = 1;
-  settings.rage_autoreload = 1;
-  settings.rage_only_visible = 1;
-  settings.rage_mode = 2;
-  settings.rage_per_weapon = 1;
-  settings.rage_config_op = 3;
-  settings.rage_config_token = 123456U;
-  std::memcpy(settings.rage_weapon, "weapon_ak47", sizeof("weapon_ak47"));
-  settings.rage_recoil = 1;
-  settings.rage_stop_speed = 100.5F;
-  settings.rage_backtrack = 1;
-
-  // --- Visuals (chams) ---
-  settings.visuals_chams = 1;
-  settings.visuals_chams_mode = 2;
-  settings.visuals_chams_visible = 1;
-  settings.visuals_chams_local = 1;
-  settings.visuals_chams_color[0] = 101;
-  settings.visuals_chams_color[1] = 102;
-  settings.visuals_chams_color[2] = 103;
-  settings.visuals_chams_color[3] = 104;
-
-  // --- Menu / config ---
-  settings.show_hud = 0;
-  settings.menu_open = 1;
-  settings.menu_key = 0x41;
-  settings.menu_accent[0] = 111;
-  settings.menu_accent[1] = 112;
-  settings.menu_accent[2] = 113;
-  settings.menu_accent[3] = 114;
-  settings.menu_transparency = 55;
-  settings.menu_config_op = 2;
-  settings.menu_config_token = 987654U;
-  std::snprintf(settings.menu_config_path, sizeof(settings.menu_config_path), "%s",
-                "C:\\Users\\test\\cs2 config.cfg");
-
+  Settings settings = cs2::overlay::wire::default_settings();
+  for (const FieldCase& entry : field_cases()) {
+    entry.set_wire(settings);
+  }
   return settings;
 }
 
@@ -201,6 +261,29 @@ auto test_wire_round_trip() -> void {
   assert(same_settings(original, restored));
 }
 
+// The conversion is **pairing-sensitive**: mutating exactly one wire field
+// changes exactly the config field it feeds.
+//
+// A round trip only proves `to ∘ from = id`, and a *consistent* swap of two
+// fields (in both directions) is invisible to it whenever the two sentinels
+// are equal — which is the case for every boolean. This test compares the
+// whole configuration after a one-field mutation, so a swap fails.
+auto test_field_pairing() -> void {
+  const Settings defaults = cs2::overlay::wire::default_settings();
+  const Config default_config = cs2::features::from_wire_settings(defaults);
+  for (const FieldCase& entry : field_cases()) {
+    Settings mutated = defaults;
+    entry.set_wire(mutated);
+    const Config actual = cs2::features::from_wire_settings(mutated);
+    Config expected = default_config;
+    entry.set_config(expected);
+    if (actual != expected) {
+      std::fprintf(stderr, "features-config: mis-paired wire field: %s\n", entry.name);
+    }
+    assert(actual == expected);
+  }
+}
+
 // The defaults of the typed config and the shared wire defaults agree, so the
 // payload and the Vulkan layer can never disagree about a fresh segment.
 auto test_defaults_agree() -> void {
@@ -208,7 +291,6 @@ auto test_defaults_agree() -> void {
   assert(same_settings(cs2::features::default_wire_settings(), shared));
   assert(same_settings(cs2::features::to_wire_settings(Config{}), shared));
 }
-
 // A corrupt or stale shared segment cannot push a value out of its range.
 auto test_clamping() -> void {
   Settings settings = cs2::overlay::wire::default_settings();
@@ -676,6 +758,7 @@ auto test_write_back_preserves_protocol_state() -> void {
 
 auto main() -> int {
   test_wire_round_trip();
+  test_field_pairing();
   test_defaults_agree();
   test_clamping();
   test_store_round_trip();
