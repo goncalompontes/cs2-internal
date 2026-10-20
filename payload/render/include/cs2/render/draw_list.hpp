@@ -85,6 +85,13 @@ struct DrawList {
   void poly(std::vector<std::pair<float, float>> points, Color color) {
     commands.push_back(FilledPoly{std::move(points), color});
   }
+  // A filled triangle: the off-screen arrow's head and the radar's "you are
+  // here" marker. The wire's only filled primitive is `filled_poly`, so a
+  // triangle is a three-point polygon (ADR-0016).
+  void triangle(float x0, float y0, float x1, float y1, float x2, float y2, Color color) {
+    commands.push_back(
+        FilledPoly{std::vector<std::pair<float, float>>{{x0, y0}, {x1, y1}, {x2, y2}}, color});
+  }
 
   void clear() { commands.clear(); }
   [[nodiscard]] bool empty() const noexcept { return commands.empty(); }

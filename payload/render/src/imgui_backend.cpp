@@ -1,10 +1,13 @@
 #include "cs2/render/imgui_backend.hpp"
 
+#include <array>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstddef>
 #include <type_traits>
 #include <variant>
+#include <vector>
 
 #if defined(_WIN32)
 #include <d3d11.h>
@@ -183,6 +186,34 @@ void ImGuiBackend::draw_commands(const DrawList& draw) {
                             item.value.c_str());
             }
             list->AddText(font, size, pos, to_u32(item.color), item.value.c_str());
+          } else if constexpr (std::is_same_v<T, FilledPoly>) {
+            // A filled convex polygon: the solid studio hitbox capsules, the
+            // radar's disc and the off-screen arrow's head.
+            //
+            // This branch used to be missing, so every `FilledPoly` was
+            // silently dropped on the D3D11 path — the Vulkan layer renders
+            // them (`overlay/src/renderer.cpp`), the payload did not.
+            const std::size_t count = item.points.size();
+            if (count < 3) {
+              return;  // a polygon needs at least a triangle
+            }
+            // The common case is small (a capsule hull is <= 32 points, the
+            // radar's disc 24), so it is filled from a stack buffer and the
+            // hot path stays allocation-free.
+            constexpr std::size_t k_inline_points = 64;
+            if (count <= k_inline_points) {
+              std::array<ImVec2, k_inline_points> points{};
+              for (std::size_t i = 0; i < count; ++i) {
+                points[i] = ImVec2(item.points[i].first, item.points[i].second);
+              }
+              list->AddConvexPolyFilled(points.data(), static_cast<int>(count), to_u32(item.color));
+              return;
+            }
+            std::vector<ImVec2> points(count);
+            for (std::size_t i = 0; i < count; ++i) {
+              points[i] = ImVec2(item.points[i].first, item.points[i].second);
+            }
+            list->AddConvexPolyFilled(points.data(), static_cast<int>(count), to_u32(item.color));
           }
         },
         command);
