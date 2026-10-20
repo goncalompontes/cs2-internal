@@ -196,7 +196,11 @@ void draw_offscreen_arrow(Frame& frame, const PlayerSnapshot& player,
   }
   const std::vector<std::pair<float, float>> triangle =
       esp_geometry::arrow_triangle(placement, k_arrow_size);
-  frame.out.poly(triangle, to_render(frame.config.esp.color_offscreen));
+  if (triangle.size() == 3) {
+    frame.out.triangle(triangle[0].first, triangle[0].second, triangle[1].first, triangle[1].second,
+                       triangle[2].first, triangle[2].second,
+                       to_render(frame.config.esp.color_offscreen));
+  }
   frame.out.text(placement.x + k_arrow_size + 2.0F, placement.y - k_text_height * 0.5F,
                  accent_color(frame.config, frame.snapshot, player), distance_text(player), false,
                  true);

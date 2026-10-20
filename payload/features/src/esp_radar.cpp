@@ -89,10 +89,9 @@ void build_radar(Frame& frame) {
                  k_radar_axis, 1.0F);
 
   // The local player, at the centre, pointing along the view direction.
-  frame.out.poly({{centre_x, centre_y - k_radar_self_size},
-                  {centre_x + k_radar_self_size * 0.8F, centre_y + k_radar_self_size * 0.6F},
-                  {centre_x - k_radar_self_size * 0.8F, centre_y + k_radar_self_size * 0.6F}},
-                 k_radar_self);
+  frame.out.triangle(centre_x, centre_y - k_radar_self_size, centre_x + k_radar_self_size * 0.8F,
+                     centre_y + k_radar_self_size * 0.6F, centre_x - k_radar_self_size * 0.8F,
+                     centre_y + k_radar_self_size * 0.6F, k_radar_self);
 
   // The other players, as dots coloured by team.
   for (const game::PlayerSnapshot& player : frame.snapshot.players) {
