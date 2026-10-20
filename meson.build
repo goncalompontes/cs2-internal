@@ -212,6 +212,24 @@ features_config_test = executable('features_config_test',
 )
 test('features-config', features_config_test)
 
+# The ESP's pure screen-space geometry and the hitbox-derived skeleton chain.
+# Both are dependency-free (no engine, no ImGui), so they are built natively
+# here and regression-tested: the ESP's maths cannot be checked in a live
+# game.
+features_esp_geometry_test = executable('features_esp_geometry_test',
+  files(
+    'payload/features/tests/test_esp_geometry.cpp',
+    'payload/features/src/esp_skeleton.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/features/include'),
+    include_directories('payload/features/src'),
+    include_directories('payload/game/include'),
+    include_directories('payload/render/include'),
+  ],
+)
+test('features-esp-geometry', features_esp_geometry_test)
+
 # --- Generated C++ SDK headers -------------------------------------------
 # Render payload/sdk/*.hpp from the calibration dumps in calibration/. The
 # generator is the Rust dumper, built on demand by scripts/gen-sdk.py. With

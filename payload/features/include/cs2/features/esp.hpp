@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 
+#include "cs2/features/esp_cache.hpp"
 #include "cs2/game/matrix.hpp"
 #include "cs2/game/snapshot.hpp"
 #include "cs2/render/draw_list.hpp"
@@ -246,6 +247,11 @@ struct Config {
 // should spell `Config`.
 using EspConfig = Config;
 
+// Copy a configuration colour into the render module's colour.
+[[nodiscard]] constexpr auto to_render(const Color& color) noexcept -> render::Color {
+  return render::Color{color.r, color.g, color.b, color.a};
+}
+
 // Per-build counters, for diagnostics/logging (never used for rendering).
 struct EspStats {
   int players = 0;
@@ -254,6 +260,14 @@ struct EspStats {
   int skipped_box = 0;    // a projected corner was behind the camera
   int skipped_small = 0;  // projected box was degenerate
   int drawn = 0;
+  // The expanded suite.
+  int arrows = 0;         // off-screen target arrows
+  int skeletons = 0;      // players with a skeleton drawn
+  int head_boxes = 0;     // head boxes drawn
+  int world_markers = 0;  // grenades / the bomb / dropped weapons
+  int sound_markers = 0;  // recent sounds drawn
+  int radar_dots = 0;     // the players on the radar
+  int entity_walks = 0;   // the entity-list walks performed
 };
 
 // Builds the screen-space ESP draw list from a snapshot + the world-to-screen
@@ -273,8 +287,26 @@ class Esp {
     return config_;
   }
 
+  // The out-of-module data sources (the studio hitboxes and the sound
+  // events). The owner of the `Esp` wires them; without them the head box
+  // and the skeleton fall back to the model reader and the sound ESP stays
+  // empty.
+  void set_providers(const EspProviders& providers) noexcept {
+    providers_ = providers;
+  }
+  [[nodiscard]] const EspProviders& providers() const noexcept {
+    return providers_;
+  }
+
  private:
   Config config_{};
+  EspProviders providers_{};
+  // The per-frame caches. `build` is const (the ESP is rebuilt in place every
+  // frame), so they are mutable; they belong to the instance, not to a
+  // global (ADR-0010).
+  mutable HitboxCache hitboxes_{};
+  mutable WorldCache world_{};
+  mutable SoundCache sounds_{};
 };
 
 }  // namespace cs2::features
