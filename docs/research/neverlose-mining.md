@@ -228,6 +228,23 @@ The **analog** is ±1.0 on both axes:
 > `strafe_geometry.hpp`'s `goal_for` / `Input::write_strafe_wish` need flipping.
 > Either way it is a **one-line** fix, and it is the single most consequential
 > thing in this note.
+>
+> > **Resolved 2026-10-20 — Neverlose is right.** The engine's own code was
+> > re-derived on the live build 25947352 (`client.dll` sha `659940c1…`): the
+> > view-frame basis function (`client.dll` RVA `0x173cb90`) returns its
+> > **second** vector as `(-sin yaw, +cos yaw)` — the forward vector rotated
+> > **+90°**, the player's **left** — and the engine's own input forms the
+> > lateral axis as `value("left") - value("right")` (RVA `0xb8f6e0`), so
+> > `IN_MOVELEFT` writes a **positive** side axis, exactly as Neverlose does.
+> > The field is the command's `leftmove` (the movement services' schema calls
+> > it `m_flCmdLeftMove`). Full derivation, addresses and the live check:
+> > **[`docs/re/strafe-sign.md`](../re/strafe-sign.md)**.
+> >
+> > Our repo's *goal* heading was never wrong (it had the basis and the sign
+> > both mirrored, which cancelled); our repo's **analog write** was not — it
+> > writes the side axis with the old sign and has to be flipped
+> > (`strafe-sign.md` §4.2). The convention now lives in one constant,
+> > `strafe_geometry.hpp`'s `k_engine_side_axis_positive_is_left`.
 
 ### 1.5 The one genuinely stealable trick: the ±1° tie-break
 
@@ -686,7 +703,7 @@ header, the runtime IAT reconstruction, the KUSER checksum family.
 | 4 | Whether it has a radar, and how it handles off-screen targets | The same plaintext scan; the 2D-primitive shader family's parameter list | **not found** |
 | 5 | The mapping from the classifier's "kind" codes (`0x31`, `0x37`, …) to features | The classifier returns small integers; the consumer that maps them to draw commands is not in the entity closure | **not found** |
 | 6 | The chams question *as the spec framed it* (a flat material + a material override) | The whole image, the import table, the 28 shader blobs' reflection data | **there is nothing to find** — the module does not use engine materials at all |
-| 7 | The exact `leftmove` sign convention of the engine (see the ⚠ in §1.4) | Neverlose's code gives one data point; it contradicts our repo. A **live** read of `cmd+0x30` / `CCSGOInput+0x274` while holding `A` settles it | **open — one live check** |
+| 7 | The exact `leftmove` sign convention of the engine (see the ⚠ in §1.4) | Neverlose's code gives one data point; it contradicts our repo. A **live** read of `cmd+0x30` / `CCSGOInput+0x274` while holding `A` settles it | **closed 2026-10-20** — the engine's basis is the **left** vector and its side axis is positive-**left**; Neverlose is right, our goal was right, our analog write was mirrored. See [`docs/re/strafe-sign.md`](../re/strafe-sign.md) |
 
 ---
 
