@@ -20,6 +20,7 @@
 // `model_publisher.cpp` (which includes the full `wire.hpp`).
 namespace cs2::overlay::wire {
 struct Settings;
+struct SettingsPatch;
 }
 
 #if defined(_WIN32)
@@ -88,6 +89,16 @@ class ModelPublisher {
   // The declaration is guarded like its private siblings: the definition only
   // exists in the Windows build.
   void publish_settings_block(const cs2::overlay::wire::Settings& settings) noexcept;
+
+  // Merge the fields a control-side change carries into the block in the
+  // shared segment, and return the block as it stands afterwards.
+  //
+  // The layer's menu owns the block in the Vulkan render mode, so a
+  // control-side change is **merged** into it: a whole-block replacement would
+  // clobber the layer's own edits (the layer writes the block from its own
+  // process, with its own widgets).
+  [[nodiscard]] auto merge_settings_block(const cs2::overlay::wire::SettingsPatch& patch) noexcept
+      -> cs2::overlay::wire::Settings;
 #endif
 
  private:

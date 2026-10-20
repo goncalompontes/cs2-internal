@@ -297,31 +297,38 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
   // block, and the write-back below assigns to it — the `const&` in the sink's
   // contract would be a lie.
   cs2::overlay::wire::Settings live = settings;
+  // The **clamped** view of the block, converted **once**: every numeric field
+  // is clamped into the range its feature was drawn for, so no consumer can be
+  // handed an out-of-range value by a control client's `settings set` (a
+  // `movement_thirdperson_distance` of 1e9 would otherwise go straight into
+  // the engine's camera-distance field). The features read the typed config
+  // from here, not the raw wire fields.
+  const cs2::features::Config config = cs2::features::from_wire_settings(live);
   // The owner published the block it owns: keep the control channel's copy in
   // step, so the `settings` command reads the same block the menu owns.
   runtime->live_settings.update(live);
-  runtime->control.set_movement_features(live.auto_strafe != 0, live.bhop != 0);
+  runtime->control.set_movement_features(config.movement.auto_strafe, config.movement.bhop);
   // The auto-strafe's own knobs: how the goal heading is derived (0 = off,
   // 1 = the camera's forward/back, 2 = the player's W/A/S/D), whether a held
   // `A`/`D` stands the feature down, the analog's wish speed (0 = keep the
   // current one) and the number of sub-tick `yaw_delta` steps (0 = the
   // camera-frame analog).
   runtime->control.set_strafe_features(
-      live.movement_strafe_mode, live.movement_strafe_ignore_keys != 0,
-      live.movement_strafe_wishspeed, live.movement_strafe_subticks);
+      static_cast<int>(config.movement.strafe_mode), config.movement.strafe_ignore_keys,
+      config.movement.strafe_wishspeed, config.movement.strafe_subticks);
   runtime->control.set_rage_features(
-      live.rage != 0, live.rage_key, live.rage_fire != 0, live.rage_objective, live.rage_hitbox,
-      live.rage_fov, live.rage_min_damage, live.rage_min_hitchance, live.rage_autostop,
-      live.rage_autoscope, live.rage_autoreload != 0, live.rage_only_visible != 0, live.rage_mode,
-      live.rage_per_weapon != 0, live.rage_weapon, live.rage_config_op, live.rage_config_token,
-      live.rage_recoil != 0, live.rage_stop_speed, live.rage_backtrack != 0);
+      config.rage.enabled, config.rage.key, config.rage.fire, config.rage.objective,
+      config.rage.hitbox, config.rage.fov, config.rage.min_damage, config.rage.min_hitchance,
+      config.rage.autostop, config.rage.autoscope, config.rage.autoreload != 0,
+      config.rage.only_visible != 0, config.rage.mode, config.rage.per_weapon != 0,
+      config.rage.weapon.data(), config.rage.config_op, config.rage.config_token,
+      config.rage.recoil != 0, config.rage.stop_speed, config.rage.backtrack != 0);
 
   // Publish where the settings file lives so the menu can show it (a read-only
   // display field). The path is only written when it actually changes, so the
   // publication never disturbs the menu's in-flight edits.
   if (cs2::features::publish_config_path(live)) {
-    std::memcpy(runtime->menu.settings().menu_config_path, live.menu_config_path,
-                sizeof(live.menu_config_path));
+    runtime->menu.set_config_path(live.menu_config_path);
 #if defined(_WIN32)
     // The Vulkan layer's menu reads the shared segment.
     runtime->publisher.publish_settings_block(live);
@@ -333,18 +340,18 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
   // shoulder and the field of view have no engine counterpart (the client has
   // no shoulder camera and the view setup's FOV field is unconfirmed).
   runtime->thirdperson.configure({
-      .enabled = settings.movement_thirdperson != 0,
-      .distance = settings.movement_thirdperson_distance,
-      .angle = settings.movement_thirdperson_angle,
-      .pivot_z = settings.movement_thirdperson_pivot_z,
-      .fov = settings.movement_thirdperson_fov,
-      .right_shoulder = settings.movement_thirdperson_side != 0,
+      .enabled = config.movement.thirdperson,
+      .distance = config.movement.thirdperson_distance,
+      .angle = config.movement.thirdperson_angle,
+      .pivot_z = config.movement.thirdperson_pivot_z,
+      .fov = config.movement.thirdperson_fov,
+      .right_shoulder = config.movement.thirdperson_side == cs2::features::ThirdPersonSide::right,
   });
 
   // The ESP's visibility toggles. The control service answers the ESP's
   // per-player visibility question, and the world-occlusion query behind that
   // answer only runs while one of the two is on.
-  runtime->control.set_esp_features(settings.esp_glow != 0, settings.esp_visible_only != 0);
+  runtime->control.set_esp_features(config.esp.glow, config.esp.visible_only);
 
   // The 3D chams: the switch, the mode and the two per-player switches. The
   // colour is passed on too, but the material system's parameter API is not
@@ -352,13 +359,11 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
   // `configure` says so).
   {
     features::Config::Visuals visuals;
-    visuals.chams = settings.visuals_chams != 0;
-    visuals.chams_mode = settings.visuals_chams_mode > 2
-                             ? features::ChamsMode::flat
-                             : static_cast<features::ChamsMode>(settings.visuals_chams_mode);
-    visuals.chams_visible = settings.visuals_chams_visible != 0;
-    visuals.chams_local = settings.visuals_chams_local != 0;
-    visuals.chams_color = features::Color::from_wire(settings.visuals_chams_color);
+    visuals.chams = config.visuals.chams;
+    visuals.chams_mode = config.visuals.chams_mode;
+    visuals.chams_visible = config.visuals.chams_visible;
+    visuals.chams_local = config.visuals.chams_local;
+    visuals.chams_color = config.visuals.chams_color;
     runtime->chams.configure(visuals);
   }
 
@@ -377,7 +382,7 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
   const cs2::features::ConfigOpOutcome outcome =
       cs2::features::apply_pending_op(runtime->config, live, runtime->config_op);
   if (outcome.changed) {
-    runtime->menu.settings() = outcome.block;
+    runtime->menu.replace_settings(outcome.block);
     runtime->overlay.set_esp_config(cs2::features::from_wire_settings(outcome.block));
     runtime->overlay.set_show_hud(outcome.block.show_hud != 0);
 #if defined(_WIN32)
@@ -404,18 +409,29 @@ void read_settings(void* context, cs2::overlay::wire::Settings& out) noexcept {
 
 // The write access: it goes **through the owner**, so the owner's next frame
 // does not overwrite the change (ADR-0021).
-void write_settings(void* context, const cs2::overlay::wire::Settings& in) noexcept {
+//
+// The write is a **field-wise merge**: the owner applies the changed fields to
+// its own block under its lock. A whole-block replacement would clobber the
+// changes the render thread made between the control channel's read and this
+// write (a lost update), and copying the 441-byte block between two threads
+// without a lock is a data race.
+void write_settings(void* context, const cs2::overlay::wire::SettingsPatch& patch) noexcept {
   auto* runtime = static_cast<Runtime*>(context);
+  cs2::overlay::wire::Settings merged{};
   if (runtime->layer_owns_settings.load()) {
     // The Vulkan layer's menu owns the block in the shared segment; the
-    // publisher writes it (the same seqlock the layer reads it with).
-    runtime->publisher.publish_settings_block(in);
+    // publisher merges the fields into it (the same seqlock the layer reads it
+    // with).
+    merged = runtime->publisher.merge_settings_block(patch);
   } else {
-    // The in-process menu owns the block; it hands it to the features on its
-    // next frame.
-    runtime->menu.settings() = in;
+    // The in-process menu owns the block; it merges the fields and hands the
+    // result to the features on its next frame.
+    merged = runtime->menu.merge_settings(patch);
   }
-  runtime->live_settings.update(in);
+  // The control channel's own copy follows the owner: it is the block the
+  // `settings` command reads, and the block the next request is merged
+  // against.
+  runtime->live_settings.update(merged);
 }
 
 // Whether the owner has published the block yet (the control channel must not

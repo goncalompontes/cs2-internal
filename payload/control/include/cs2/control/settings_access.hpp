@@ -34,11 +34,16 @@ struct CommandError {
 
 // --- The settings access ----------------------------------------------------
 
-// The reader copies the live block into `out`; the writer publishes `in` as
-// the new live block **through the owner**, so the owner's next frame does not
-// overwrite the change.
+// The reader copies the live block into `out`; the writer publishes the
+// changed **fields** to the owner, which merges them into its own block under
+// its lock.
+//
+// The write is a **field-wise merge**, not a whole-block replacement: the
+// owner (the menu) writes the same block from its own thread, so a
+// replacement would both race with it and clobber the fields the request did
+// not name — a lost update (ADR-0021).
 using SettingsReader = void (*)(void* context, cs2::overlay::wire::Settings& out);
-using SettingsWriter = void (*)(void* context, const cs2::overlay::wire::Settings& in);
+using SettingsWriter = void (*)(void* context, const cs2::overlay::wire::SettingsPatch& patch);
 // The readiness probe: whether the owner has published the block yet. A
 // control-side write must not touch a block the control channel has never
 // seen.
@@ -78,10 +83,11 @@ class SettingsAccess {
     }
   }
 
-  // Publish `in` as the live block. A no-op when no access is registered.
-  void write(const cs2::overlay::wire::Settings& in) const noexcept {
+  // Publish `patch` to the live block: the owner merges the changed fields
+  // into its own block. A no-op when no access is registered.
+  void write(const cs2::overlay::wire::SettingsPatch& patch) const noexcept {
     if (writer_ != nullptr) {
-      writer_(context_, in);
+      writer_(context_, patch);
     }
   }
 

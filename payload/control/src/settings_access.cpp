@@ -247,10 +247,26 @@ auto run_settings(const Json& args, SettingsAccess& access)
       changed.emplace_back(info->name);
     }
   }
-  if (!changed.empty()) {
-    // Only a real change is published: a set to the value the field already
-    // has leaves the owner's block alone.
-    access.write(updated);
+  if (set != nullptr) {
+    // The write is a **field-wise merge**: the owner applies the requested
+    // fields to its own block under its lock. A whole-block replacement would
+    // clobber the fields the owner changed between the read above and this
+    // write — a lost update — and copying the block between the two threads
+    // without a lock is a data race.
+    //
+    // Every **requested** field is written, not only the ones the `changed`
+    // list names: the block read above may already be stale (the owner may
+    // have changed the field since), and the client's intent has to win.
+    std::vector<std::size_t> offsets;
+    std::vector<std::size_t> sizes;
+    offsets.reserve(writes.size());
+    sizes.reserve(writes.size());
+    for (const auto& write : writes) {
+      offsets.push_back(write.first->offset);
+      sizes.push_back(write.first->size);
+    }
+    const wire::SettingsPatch patch{&updated, offsets.data(), sizes.data(), offsets.size()};
+    access.write(patch);
   }
 
   // The values the client asked for: the requested fields, the written

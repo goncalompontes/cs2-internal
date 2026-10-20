@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 #include "cs2/features/config_store.hpp"
@@ -283,14 +284,41 @@ std::intptr_t __stdcall Menu::window_proc(void* hwnd, unsigned message, std::siz
 #endif  // _WIN32
 
 void Menu::set_movement_defaults(bool auto_strafe, bool bhop) noexcept {
+  const std::lock_guard<std::mutex> lock(settings_mutex_);
   settings_.auto_strafe = auto_strafe ? 1 : 0;
   settings_.bhop = bhop ? 1 : 0;
 }
 
 void Menu::set_rage_defaults(bool on, int key, bool fire) noexcept {
+  const std::lock_guard<std::mutex> lock(settings_mutex_);
   settings_.rage = on ? 1 : 0;
   settings_.rage_key = static_cast<std::uint8_t>(key & 0xFF);
   settings_.rage_fire = fire ? 1 : 0;
+}
+
+auto Menu::settings_snapshot() const noexcept -> cs2::overlay::wire::Settings {
+  const std::lock_guard<std::mutex> lock(settings_mutex_);
+  return settings_;
+}
+
+auto Menu::merge_settings(const cs2::overlay::wire::SettingsPatch& patch) noexcept
+    -> cs2::overlay::wire::Settings {
+  const std::lock_guard<std::mutex> lock(settings_mutex_);
+  cs2::overlay::wire::apply_settings_patch(settings_, patch);
+  return settings_;
+}
+
+void Menu::replace_settings(const cs2::overlay::wire::Settings& values) noexcept {
+  const std::lock_guard<std::mutex> lock(settings_mutex_);
+  settings_ = values;
+}
+
+void Menu::set_config_path(const char* path) noexcept {
+  if (path == nullptr) {
+    return;
+  }
+  const std::lock_guard<std::mutex> lock(settings_mutex_);
+  std::memcpy(settings_.menu_config_path, path, sizeof(settings_.menu_config_path));
 }
 
 #if defined(_WIN32)
@@ -397,7 +425,8 @@ void Menu::poll_toggle(bool in_game) noexcept {
   // The toggle key is the menu's own setting (`wire::Settings::menu_key`).
   // Insert and Delete stay toggle keys as well, because many keyboards need
   // Fn for Insert — and the pre-T2 menu polled both.
-  const int key = settings_.menu_key != 0 ? static_cast<int>(settings_.menu_key) : VK_INSERT;
+  const std::uint8_t menu_key = settings_snapshot().menu_key;
+  const int key = menu_key != 0 ? static_cast<int>(menu_key) : VK_INSERT;
   const bool key_down = (GetAsyncKeyState(key) & 0x8000) != 0;
   const bool insert_down = key != VK_INSERT && (GetAsyncKeyState(VK_INSERT) & 0x8000) != 0;
   const bool delete_down = key != VK_DELETE && (GetAsyncKeyState(VK_DELETE) & 0x8000) != 0;
@@ -436,8 +465,7 @@ void Menu::tick(bool in_game, void* hwnd) noexcept {
     // it.
     cs2::features::Config config{};
     cs2::features::set_config_path(config);
-    std::memcpy(settings_.menu_config_path, config.menu.config_path.data(),
-                sizeof(settings_.menu_config_path));
+    set_config_path(config.menu.config_path.data());
     cs2::game::append_log(std::string("[cs2-menu] init (force_open=") +
                           (force_open_ ? "1" : "0") + ")");
   }
@@ -456,16 +484,23 @@ void Menu::tick(bool in_game, void* hwnd) noexcept {
     ClipCursor(nullptr);
     ImGui::GetIO().MouseDrawCursor = true;
   }
-  settings_.menu_open = open_ ? 1 : 0;
+  {
+    const std::lock_guard<std::mutex> lock(settings_mutex_);
+    settings_.menu_open = open_ ? 1 : 0;
+  }
 #endif
   apply();
 }
 
 void Menu::apply() noexcept {
-  overlay_->set_esp_config(from_wire_settings(settings_));
-  overlay_->set_show_hud(settings_.show_hud != 0);
+  // The block is copied out **under the lock**, and the sink runs outside it:
+  // the sink writes back into the menu (the config path, a loaded
+  // configuration), and a non-recursive lock would deadlock.
+  const cs2::overlay::wire::Settings block = settings_snapshot();
+  overlay_->set_esp_config(from_wire_settings(block));
+  overlay_->set_show_hud(block.show_hud != 0);
   if (settings_sink_ != nullptr) {
-    settings_sink_(settings_sink_context_, settings_);
+    settings_sink_(settings_sink_context_, block);
   }
 }
 
@@ -477,6 +512,10 @@ void Menu::draw() noexcept {
   // The pages, the widgets and the keybind capture are shared with the Vulkan
   // layer's menu (`cs2/overlay/menu_pages.hpp`); this file only owns the
   // window plumbing.
+  //
+  // The lock is held for the draw: the widgets write the block's fields, and
+  // the control thread may merge a change into the same block at any moment.
+  const std::lock_guard<std::mutex> lock(settings_mutex_);
   if (!cs2::overlay::menu::draw_menu(settings_, "in-process (DXGI Present hook)",
                                      cs2::overlay::menu::Renderer::payload)) {
     cs2::game::append_log("[cs2-menu] close: window close button");

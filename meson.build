@@ -276,6 +276,20 @@ control_input_test = executable('control_input_test',
 )
 test('control-input', control_input_test)
 
+# The settings **sink** (the payload's entry point) must hand the features the
+# clamped configuration: it used to read the wire fields directly, so a control
+# client's `settings set` could put an out-of-range value into the engine's
+# camera-distance field. The sink needs the game, so the check is a source
+# check.
+settings_sink_test = executable('settings_sink_test',
+  files(
+    'payload/tests/test_settings_sink.cpp',
+  ),
+)
+test('settings-sink', settings_sink_test,
+  args : [meson.current_source_dir()],
+)
+
 # The triggerbot's decision maths (the angle gate, the hitchance gate, the head
 # preference, the reaction delay and the "already firing" latch) — a pure
 # header, so the test compiles the header alone.

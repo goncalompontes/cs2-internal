@@ -200,15 +200,25 @@ void test_event_ring() {
 struct FakeSettings {
   cs2::overlay::wire::Settings block{};
   int writes = 0;
+  // When it is not negative, the fake owner changes this field right after the
+  // read — the menu's widgets run on the render thread, so the owner can
+  // change its block between the control channel's read and its write.
+  float distance_after_read = -1.0F;
 };
 
 void fake_read(void* context, cs2::overlay::wire::Settings& out) {
-  out = static_cast<const FakeSettings*>(context)->block;
+  auto* fake = static_cast<FakeSettings*>(context);
+  out = fake->block;
+  if (fake->distance_after_read >= 0.0F) {
+    fake->block.movement_thirdperson_distance = fake->distance_after_read;
+  }
 }
 
-void fake_write(void* context, const cs2::overlay::wire::Settings& in) {
+// The owner merges the changed fields into its own block: a whole-block
+// replacement would clobber the changes the owner made in between.
+void fake_write(void* context, const cs2::overlay::wire::SettingsPatch& patch) {
   auto* fake = static_cast<FakeSettings*>(context);
-  fake->block = in;
+  cs2::overlay::wire::apply_settings_patch(fake->block, patch);
   fake->writes += 1;
 }
 
@@ -348,13 +358,16 @@ void test_settings_command() {
   assert(fake.writes == 0);
   assert(fake.block.box == 1);
 
-  // A set to the value the field already has is not a change, and nothing is
-  // published to the owner.
+  // A set to the value the field already has is not a change. The request is
+  // still routed to the owner (the write is a field-wise merge, so the owner's
+  // block keeps every field the request did not name), but the owner's block
+  // does not change and the `changed` list stays empty.
   const auto same = run_settings(*Json::parse(R"({"set": {"box": 1}})"), access);
   assert(same.has_value());
   assert(same->wrote);
   assert(same->changed.empty());
-  assert(fake.writes == 0);
+  assert(fake.writes == 1);
+  assert(fake.block.box == 1);
 
   // A real change is listed, and the owner holds the new value.
   const auto changed = run_settings(
@@ -363,7 +376,7 @@ void test_settings_command() {
   assert(changed->changed.size() == 2);
   assert(changed->changed[0] == "box");
   assert(changed->changed[1] == "esp_color_enemy");
-  assert(fake.writes == 1);
+  assert(fake.writes == 2);
   assert(fake.block.box == 0);
   assert(fake.block.esp_color_enemy[0] == 255);
   assert(fake.block.esp_color_enemy[1] == 0);
@@ -404,6 +417,38 @@ void test_settings_command() {
   const auto empty_get = run_settings(*Json::parse(R"({"get": []})"), access);
   assert(empty_get.has_value());
   assert(empty_get->values.members().empty());
+}
+
+// The `settings` write is a **field-wise merge**, not a whole-block
+// replacement.
+//
+// The owner of the block (the overlay menu) writes it from its own thread, so
+// it can change a field between the control channel's read and its write. A
+// whole-block replacement would clobber that change — a lost update — and the
+// copy itself would be a data race (441 bytes of plain data, two writers).
+void test_the_settings_write_merges_the_fields() {
+  using cs2::control::Json;
+  using cs2::control::run_settings;
+  using cs2::control::SettingsAccess;
+
+  FakeSettings fake;
+  fake.block.box = 1;
+  fake.block.movement_thirdperson_distance = 64.0F;
+  // The owner changes the distance right after the control channel's read.
+  fake.distance_after_read = 128.0F;
+
+  SettingsAccess access;
+  access.set(&fake_read, &fake_write, &fake);
+
+  const auto outcome = run_settings(*Json::parse(R"({"set": {"box": 0}})"), access);
+  assert(outcome.has_value());
+  assert(outcome->changed.size() == 1);
+  assert(outcome->changed[0] == "box");
+  // The client's intent reached the owner ...
+  assert(fake.block.box == 0);
+  // ... and the change the owner made in between survived: a whole-block
+  // replacement would have put the stale 64 back.
+  assert(fake.block.movement_thirdperson_distance == 128.0F);
 }
 
 // The `batch` command: the failure isolation, the recursion guard and the
@@ -507,6 +552,7 @@ auto main() -> int {
   test_event_ring();
   test_settings_table_matches_the_struct();
   test_settings_command();
+  test_the_settings_write_merges_the_fields();
   test_batch_runner();
   test_log_tail();
   std::puts("control-core: ok");
