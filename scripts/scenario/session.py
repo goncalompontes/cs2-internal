@@ -15,9 +15,28 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
 from .control import DEFAULT_PIPE, Control, ControlError
+from .protocol import (
+    AimResult,
+    EventsResult,
+    ExecResult,
+    HeatmapResult,
+    InputStatus,
+    LookResult,
+    MoveResult,
+    NoclipResult,
+    PingResult,
+    PressResult,
+    RageResult,
+    ReleaseResult,
+    StateSnapshotDict,
+    WaitResult,
+)
+
+if TYPE_CHECKING:  # pragma: no cover - the import cycle (screens -> session)
+    from .screens import Can, GameState, Machine, Screen
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CS2_TASK = "CS2Launch"
@@ -148,77 +167,93 @@ def inject(dll: Path | None = None, process: str = PLAYER_PROCESS, pid: int | No
 
 # --- high-level session ---------------------------------------------------
 class Game:
-    """A connected control session (thin wrapper over :class:`Control`)."""
+    """A connected control session (thin wrapper over :class:`Control`).
+
+    The wrappers are typed with the wire types of :mod:`.protocol`: the payload
+    answers with a *validated* snapshot (``StateSnapshotDict``) and a validated
+    ping, so the old ``dict[str, Any]`` annotations were wrong — a ``TypedDict``
+    is not a ``dict[str, Any]`` to a type checker.
+
+    The class satisfies the ``ControlTransport`` protocol of :mod:`.protocol`
+    (the channel the state machine and the readiness layer program against);
+    ``tests/test_state_machine.py`` pins that with a runtime check.
+    """
 
     def __init__(self, control: Control) -> None:
         self.control = control
 
-    def ping(self) -> dict[str, Any]:
+    def request(self, cmd: str, args: Mapping[str, Any] | None = None) -> Any:
+        """One raw wire call — the escape hatch below the typed helpers."""
+        return self.control.request(cmd, args)
+
+    def ping(self) -> PingResult:
         return self.control.ping()
 
-    def state(self) -> dict[str, Any]:
+    def state(self) -> StateSnapshotDict:
         return self.control.state()
 
-    def exec(self, line: str) -> dict[str, Any]:
+    def exec(self, line: str) -> ExecResult:
         return self.control.exec(line)
 
     def wait_for(self, *, timeout: float = 30.0, event: str | None = None,
                  event_args: dict[str, Any] | None = None,
-                 **predicates: Any) -> dict[str, Any]:
+                 **predicates: Any) -> WaitResult:
         return self.control.wait_for(timeout=timeout, event=event, event_args=event_args,
                                      **predicates)
 
-    def events(self, limit: int = 64, subscribe: str | list[str] | None = None) -> dict[str, Any]:
+    def events(self, limit: int = 64,
+               subscribe: str | list[str] | None = None) -> EventsResult:
         """Recent game events: ``{count, events: [{name, seq, args}, ...]}``."""
         return self.control.events(limit=limit, subscribe=subscribe)
 
-    def press(self, key: str, hold: float = 0.0, via: str | None = None) -> dict[str, Any]:
+    def press(self, key: str, hold: float = 0.0,
+              via: str | None = None) -> PressResult:
         return self.control.press(key, hold=hold, via=via)
 
-    def release(self, key: str, via: str | None = None) -> dict[str, Any]:
+    def release(self, key: str, via: str | None = None) -> ReleaseResult:
         return self.control.release(key, via=via)
 
-    def input(self, via: str | None = None) -> dict[str, Any]:
+    def input(self, via: str | None = None) -> InputStatus:
         """Select/query the input backend (``"console"`` / ``"usercmd"``)."""
         return self.control.input(via=via)
 
     def buttons(self, *, press: Any = None, release: Any = None,
-                reset: bool = False) -> dict[str, Any]:
+                reset: bool = False) -> InputStatus:
         """Raw ``usercmd`` button overrides (names or a mask)."""
         return self.control.buttons(press=press, release=release, reset=reset)
 
-    def bhop(self, on: bool = True) -> dict[str, Any]:
+    def bhop(self, on: bool = True) -> InputStatus:
         """Enable the payload's auto-jump."""
         return self.control.bhop(on)
 
     def strafe(self, on: bool = True, *, wishspeed: float | None = None,
-               subtick: int | None = None) -> dict[str, Any]:
+               subtick: int | None = None) -> InputStatus:
         """Toggle the payload's auto-strafe (airborne only, silent)."""
         return self.control.strafe(on, wishspeed=wishspeed, subtick=subtick)
 
     def look(self, *, yaw: float | None = None, pitch: float | None = None,
              roll: float | None = None, via: str | None = None,
              command: bool = False, raw: bool = False,
-             step_yaw: float | None = None) -> dict[str, Any]:
+             step_yaw: float | None = None) -> LookResult:
         return self.control.look(yaw=yaw, pitch=pitch, roll=roll, via=via,
                                  command=command, raw=raw, step_yaw=step_yaw)
 
-    def aim(self, **kwargs: Any) -> dict[str, Any]:
+    def aim(self, **kwargs: Any) -> AimResult:
         """Ragebot diagnostic solve (``docs/ragebot.md``)."""
         return self.control.aim(**kwargs)
 
-    def rage(self, **kwargs: Any) -> dict[str, Any]:
+    def rage(self, **kwargs: Any) -> RageResult:
         """Configure the hold-key ragebot (``docs/ragebot.md``)."""
         return self.control.rage(**kwargs)
 
-    def heatmap(self, **kwargs: Any) -> dict[str, Any]:
+    def heatmap(self, **kwargs: Any) -> HeatmapResult:
         """The multi-target damage heatmap (``docs/ragebot.md``)."""
         return self.control.heatmap(**kwargs)
 
     def move(self, *, forward: float = 0.0, side: float = 0.0, up: float = 0.0,
              clear: bool = False, quantize: bool = False, step: bool = False,
-             raw_entry: bool = False) -> dict[str, Any]:
-        """Set the ``usercmd`` analog move (`forward`/`side`), or ``clear`` it.
+             raw_entry: bool = False) -> MoveResult:
+        """Set the ``usercmd`` analog move (`forward`/`side`), or `clear` it.
 
         ``quantize``/``step``/``raw_entry`` opt into the community ingredients of
         the movement write — see :meth:`Control.move`.
@@ -226,10 +261,10 @@ class Game:
         return self.control.move(forward=forward, side=side, up=up, clear=clear,
                                  quantize=quantize, step=step, raw_entry=raw_entry)
 
-    def noclip(self, enabled: bool = True) -> dict[str, Any]:
+    def noclip(self, enabled: bool = True) -> NoclipResult:
         return self.control.noclip(enabled)
 
-    def teleport(self, x: float, y: float, z: float | None = None) -> dict[str, Any]:
+    def teleport(self, x: float, y: float, z: float | None = None) -> ExecResult:
         return self.control.teleport(x, y, z)
 
     def players(self) -> list[dict[str, Any]]:
@@ -244,31 +279,32 @@ class Game:
     # `require()` asserts a capability with the *reason*, and `ensure()` drives
     # the documented transitions to reach a screen.
     def state_machine(self, *, map_name: str = "de_dust2",
-                      debug: bool = True):
+                      debug: bool = True) -> "Machine":
         """A :class:`~.screens.Machine` bound to this session."""
         from .screens import Machine
 
         return Machine(self, map_name=map_name, debug=debug)
 
-    def screen(self):
+    def screen(self) -> "Screen":
         """The current :class:`~.screens.Screen`."""
         from .awaiting import screen
 
         return screen(self)
 
-    def game_state(self):
+    def game_state(self) -> "GameState":
         """The deduced :class:`~.screens.GameState` (screen + capabilities)."""
         from .awaiting import state
 
         return state(self)
 
-    def require(self, capability):
+    def require(self, capability: "Can | str") -> "GameState":
         """Fail (with a reason) unless ``capability`` is available now."""
         from .awaiting import require
 
         return require(self, capability)
 
-    def ensure_screen(self, target, *, map_name: str = "de_dust2", **kwargs):
+    def ensure_screen(self, target: "Screen", *, map_name: str = "de_dust2",
+                      **kwargs: Any) -> "GameState":
         """Drive the machine into ``target`` (see `.screens.Machine.ensure`)."""
         from .awaiting import ensure
 
