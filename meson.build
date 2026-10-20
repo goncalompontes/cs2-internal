@@ -205,10 +205,19 @@ test('aim-penetration', aim_penetration_test)
 # would drift. `scripts/gen-settings-table.py` parses `wire.hpp` and writes the
 # table into the source tree (the same pattern as `scripts/gen-sdk.py`); it
 # fails loudly on a parse error rather than emitting an empty table.
+#
+# The table is **checked in** and the build **verifies** it: the target below
+# runs the generator in `--check` mode, so a table that no longer matches
+# `wire.hpp` fails the build instead of reaching a binary. (It used to rewrite
+# the file on every build, which made the `settings-table` test vacuous: the
+# test ran after the target had already regenerated the file, so it could never
+# fail -- and a **payload-only** build, which had no such target at all,
+# compiled against the stale table and wrote a neighbouring field's bytes.)
 gen_settings_table = find_program('scripts/gen-settings-table.py')
 settings_table = custom_target('settings-table',
   output : 'settings-table.stamp',
   command : [gen_settings_table,
+             '--check',
              meson.current_source_dir() / 'overlay' / 'include' / 'cs2' / 'overlay' / 'wire.hpp',
              meson.current_source_dir() / 'overlay' / 'include' / 'cs2' / 'overlay' / 'settings_table.hpp',
              '@OUTPUT@'],
@@ -221,8 +230,8 @@ settings_table_dep = declare_dependency(
 )
 
 # The table must never be stale: the check fails when the file on disk differs
-# from a fresh generation (the build above regenerates it, so this catches a
-# hand-edited table).
+# from a fresh generation. The build does not rewrite the file, so the file the
+# test compares against is the checked-in one.
 test('settings-table', gen_settings_table, args : ['--check'])
 
 # Control-channel core (ADR-0020): the platform-independent parts of
