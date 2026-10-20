@@ -1,0 +1,110 @@
+cmake_minimum_required(VERSION 3.20)
+project(Cs2Protect CXX)
+
+# The plugin needs LLVM's own CMake package: it includes LLVM headers and
+# links the LLVM component libraries. Meson has no usable LLVM dependency
+# (`dependency('llvm')` needs CMake on PATH anyway and buys nothing), which is
+# why this one tool of the repository is a CMake project. It is a *build-time
+# tool*, not a project artifact, so ADR-0003 (Meson + Ninja) governs the
+# project and the payload, not this glue.
+find_package(LLVM REQUIRED CONFIG)
+message(STATUS "LLVM ${LLVM_PACKAGE_VERSION} from ${LLVM_DIR}")
+
+list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+include(AddLLVM)
+
+# `add_llvm_pass_plugin` creates a MODULE library, and CMake's MODULE type is
+# not supported by the MSVC toolchain on Windows ("Loadable modules not
+# supported on this platform"). A Windows pass plugin therefore has to be a
+# SHARED library (a .dll) that exports `llvmGetPassPluginInfo`.
+add_library(Cs2Protect SHARED
+  src/plugin.cpp
+  src/config.cpp
+  src/selection.cpp
+  src/report.cpp
+)
+
+# --- The DIA SDK ------------------------------------------------------------
+# The official release's exported CMake targets hardcode the *build* machine's
+# DIA SDK path (".../Visual Studio/2022/Enterprise/DIA SDK/..."), which does
+# not exist here. CMake resolves an imported target's link interface when it
+# generates the link line, so the property itself has to be rewritten --
+# filtering the list we hand to target_link_libraries is not enough.
+get_filename_component(REAL_DIA_DIR "" ABSOLUTE)
+if(DEFINED ENV{VSINSTALLDIR} AND NOT "$ENV{VSINSTALLDIR}" STREQUAL "")
+  get_filename_component(REAL_DIA_DIR "$ENV{VSINSTALLDIR}/DIA SDK/lib/amd64" ABSOLUTE)
+else()
+  file(GLOB _dia_candidates
+    "C:/Program Files/Microsoft Visual Studio/*/DIA SDK/lib/amd64"
+    "C:/Program Files (x86)/Microsoft Visual Studio/*/DIA SDK/lib/amd64")
+  foreach(_candidate IN LISTS _dia_candidates)
+  if(EXISTS "${_candidate}/diaguids.lib")
+    set(REAL_DIA_DIR "${_candidate}")
+    break()
+  endif()
+  endforeach()
+endif()
+if(NOT EXISTS "${REAL_DIA_DIR}/diaguids.lib")
+  message(WARNING "the DIA SDK was not found (looked in '${REAL_DIA_DIR}'); "
+                  "the link may fail with 'diaguids.lib missing'")
+endif()
+
+get_property(_llvm_imported DIRECTORY PROPERTY IMPORTED_TARGETS)
+list(APPEND _llvm_imported LLVMDebugInfoPDB)
+foreach(_llvm_tgt IN LISTS _llvm_imported)
+  if(TARGET ${_llvm_tgt})
+    get_target_property(_libs ${_llvm_tgt} INTERFACE_LINK_LIBRARIES)
+    if(_libs AND NOT _libs MATCHES "-NOTFOUND$")
+      set(_new_libs "")
+      foreach(_l IN LISTS _libs)
+        if(_l MATCHES "DIA SDK")
+          if(EXISTS "${REAL_DIA_DIR}/diaguids.lib")
+            list(APPEND _new_libs "${REAL_DIA_DIR}/diaguids.lib")
+          endif()
+        else()
+          list(APPEND _new_libs "${_l}")
+        endif()
+      endforeach()
+      set_target_properties(${_llvm_tgt} PROPERTIES
+        INTERFACE_LINK_LIBRARIES "${_new_libs}")
+    endif()
+  endif()
+endforeach()
+get_target_property(_check LLVMDebugInfoPDB INTERFACE_LINK_LIBRARIES)
+message(STATUS "LLVMDebugInfoPDB interface after patch: ${_check}")
+
+# --- The LLVM libraries -----------------------------------------------------
+llvm_map_components_to_libnames(LLVM_LIBS
+  core support passes analysis transformutils irreader asmparser)
+set(LLVM_LIBS_FIXED "")
+foreach(_l IN LISTS LLVM_LIBS)
+  if(_l MATCHES "DIA SDK")
+    if(EXISTS "${REAL_DIA_DIR}/diaguids.lib")
+      list(APPEND LLVM_LIBS_FIXED "${REAL_DIA_DIR}/diaguids.lib")
+    endif()
+  else()
+    list(APPEND LLVM_LIBS_FIXED "${_l}")
+  endif()
+endforeach()
+target_link_libraries(Cs2Protect PRIVATE ${LLVM_LIBS_FIXED})
+
+set_target_properties(Cs2Protect PROPERTIES PREFIX "" OUTPUT_NAME "Cs2Protect")
+
+# --- The compile flags ------------------------------------------------------
+# The release LLVM is built without RTTI and with the static CRT, and the
+# compiler that loads the plugin (clang-cl) is built the same way: a plugin
+# with a different CRT would allocate and free across two heaps. clang-cl
+# spells the flags `/GR-` and `/MT`; the `-fno-rtti` and
+# `-fms-runtime-lib=static` spellings are rejected by clang-cl ("unknown
+# argument ignored in clang-cl").
+target_compile_features(Cs2Protect PRIVATE cxx_std_23)
+target_include_directories(Cs2Protect SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_compile_definitions(Cs2Protect PRIVATE ${LLVM_DEFINITIONS})
+separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND "${LLVM_DEFINITIONS}")
+target_compile_options(Cs2Protect PRIVATE ${LLVM_DEFINITIONS_LIST})
+
+if(MSVC)
+  target_compile_options(Cs2Protect PRIVATE /W4 /GR- /EHs-c- /MT)
+else()
+  target_compile_options(Cs2Protect PRIVATE -Wall -Wextra -fno-rtti)
+endif()

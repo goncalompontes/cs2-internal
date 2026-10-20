@@ -1,0 +1,10 @@
+{
+  "protect": [
+    "cs2::aim::solve",
+    { "symbol": "cs2::game::StateReader::*", "module": "state_reader.cpp", "level": "virtualized" }
+  ],
+  "deny": [
+    "cs2::loader::self_unmap"
+  ],
+  "seed": "0xA04252B187478C00A40BC6E8B04F1C9A"
+}
