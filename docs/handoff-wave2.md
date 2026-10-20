@@ -201,7 +201,68 @@ Everything else is ready: the material system (`CMaterialSystem2` vtable
 **Also:** the two inline hooks now install only when the feature is **on** and
 carry a thread-local re-entrancy guard. Keep that property for every new hook.
 
-### 5.3 The neverlose deep reversal — the next session's biggest task
+### 5.3 The neverlose deep reversal - **DONE** (it ran to completion)
+
+**It is already landed** - four reports, 1373 lines, in `docs/research/`:
+`neverlose-renderer.md`, `neverlose-hooks.md`, `neverlose-protection.md` and the
+index `neverlose-deep.md`. The headline results:
+
+- **Route A (the renderer)** - the 28 DXBC containers carry a `RDEF` chunk, so
+  the constant-buffer layouts are readable **straight out of the bytes**. The
+  parser was validated against a reference shader compiled with the OS's own
+  `d3dcompiler_47!D3DCompile` and reproduces it exactly. `PolygonConstants` is
+  20 fields: `hull_color` @80, `global_alpha` @104, the per-pass opacities
+  @160-168, and `points` @176 = 256 x a **48-byte** `HullPoint`
+  `{position_radius, parent_growth, appearance}`. **The colour is per-draw; the
+  per-hull colour is `HullPoint::appearance`.** The numeric depth state is
+  **not** recoverable statically (it lives in the PSO) - the mechanism is
+  identified, the value is not.
+- **Route B (the hooks)** - the prior session's "zero references" finding was a
+  **byte-scan artefact** (a scan cannot tell an opcode from a displacement). A
+  forward capstone sweep (13.8M instructions) shows **seven of the eight are
+  referenced**, five through one-instruction **tail-jump stubs** whose addresses
+  have **no** static reference of any form - so they are runtime-only entry
+  points. **Their per-tick handler that drives the auto-strafe is
+  `FUN_212c38c66b8`** (stub `0x212c38c65e4`), and there is a **keyed callback
+  registry** at `0x1bf01450`.
+- **Route C (the protection layer)** - the loader end to end, **all ten**
+  version-gated patterns decoded out of the image, and the finding that the
+  loader reads its own `SizeOfImage`/`SizeOfHeaders` from **inside the
+  encrypted region** - so it **cannot run from the static image** and the key is
+  runtime-derived. `.enc1` measures **9.159 bits/byte** with exactly one data
+  reference.
+- **Route D (the maths) - a useful negative:** their ragebot has **no hit-chance
+  model at all** (the weapon spread only picks a smoothing rank), so our
+  damage-field solver is strictly more advanced and there is **nothing to steal**
+  there. The stealable idea is their 16-step smoothing profile with a
+  **deterministic per-target seed**.
+
+**What this changes for us** (the report's own list): the chams become *one*
+constant buffer with a per-draw colour and a per-hull `appearance`; the strafe
+should assert **one write per user command**; hook targets must be hunted by
+**pattern** (a hook entry is a jump **into** the handler); the loader should
+fail loudly on an unknown configuration and consider a cheap self-integrity
+check; and **do not** build a hardware fingerprint. The caveat that matters:
+their feature list is **server-side**, so their binary is a **lower bound** on
+what the product does.
+
+### 5.4 The other public artifacts
+
+`docs/research/cheat-dump-inventory.md` is the inventory you asked for: three
+public CS2 **source** trees (Weave - the only feature-complete one, Fatality - a
+real base with no combat features, Plaguecheat - a 2026 recompiled tree whose
+feature set is not yet read), a complete **CS:GO** implementation whose
+material-override chams match our plan, three **MIT-licensed** CS2 sources (the
+only code we may legally copy), and a queue of binary dumps whose authenticity
+ranges from plausible to disputed.
+
+Nothing was downloaded or executed and no artifact is in the repository; every
+claim is a description, and the forum rows are marked `snippet-only` because the
+sites block automated fetches. The useful negative: **no public artifact
+contains a damage-field ragebot**, so our solver is genuinely ahead of
+everything public.
+
+### 5.5 The neverlose mining (the first, shallower pass)
 
 The neverlose module is the **most valuable source we have**: a shipped product
 with every feature we want and more. The prior session already reversed its
@@ -238,7 +299,7 @@ detection datasets and the anti-cheat research literature. I will not go
 acquiring other commercial products' binaries to reverse; where a public,
 legitimately-published analysis of a comparable product exists, cite it.
 
-### 5.4 The mining report
+### 5.6 The mining report
 
 `docs/research/neverlose-mining.md` answers the five questions with addresses.
 The two open threads:
@@ -251,13 +312,13 @@ The two open threads:
   **no dead zone and no hysteresis** (their side is the sign of three velocity
   components against zero, with a 0.2 activity gate).
 
-### 5.4 Item 5 — the remaining feature candidates
+### 5.7 Item 5 - the remaining feature candidates
 
 Ranked in `docs/feature-wave.md` §6. The **triggerbot** is done; the rest:
 anti-aim (fake-lag/desync), hit logs + damage indicators, movement QoL
 (auto-crouch, ledge auto-jump), world-ESP volumes (smoke radius, molotov fire).
 
-### 5.6 The style sweep
+### 5.8 The style sweep
 
 All seven remaining clang-tidy groups are applied (one commit each, with the
 verify loop between them). Two checks are excluded with a documented reason
