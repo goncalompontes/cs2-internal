@@ -192,6 +192,20 @@ control_core_test = executable('control_core_test',
 )
 test('control-core', control_core_test)
 
+# The auto-strafe's decision maths (the W/A/S/D travel heading, the side's
+# dead zone and hysteresis, and the `AirAccelerate` optimum) — a pure,
+# dependency-free header, built natively so the strafe's maths has a host
+# regression test (the module itself is header-only, so no source is listed).
+control_strafe_test = executable('control_strafe_test',
+  files(
+    'payload/control/tests/test_control_strafe.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+  ],
+)
+test('control-strafe', control_strafe_test)
+
 # The feature settings foundation: the wire <-> config conversion and the
 # config store's round trip. The settings block is a POD and the conversion is
 # pure, so the feature sources are built natively here (the payload itself

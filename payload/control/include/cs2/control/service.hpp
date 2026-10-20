@@ -46,6 +46,14 @@ class Service {
   // control commands set the same flags (the last writer wins).
   void set_movement_features(bool auto_strafe, bool bhop) noexcept;
 
+  // The auto-strafe's own knobs (the wire's `movement_strafe_*` bytes): how the
+  // goal heading is derived (`mode`: 0 = off, 1 = the camera's forward/back —
+  // the legacy goal, 2 = the player's W/A/S/D intent), whether a held `A`/`D`
+  // stands the feature down (`ignore_keys` — the legacy rule), the analog's
+  // wish speed (`wishspeed`, 0 keeps the current one) and the number of
+  // sub-tick `yaw_delta` steps (`subticks`, 0 = the camera-frame analog).
+  void set_strafe_features(int mode, bool ignore_keys, float wishspeed, int subticks) noexcept;
+
   // Drive the ragebot (`docs/ragebot.md`): the overlay menu's Ragebot tab and the
   // `rage` control command set the same state. `key` is a Win32 virtual-key code
   // (0 = none), held to trigger the solve. `autostop`/`autoscope` are modes

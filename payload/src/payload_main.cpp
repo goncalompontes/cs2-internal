@@ -185,6 +185,14 @@ auto parse_rage_env() noexcept -> RageConfig {
 void on_movement_settings(void* context, const cs2::overlay::wire::Settings& settings) noexcept {
   auto* runtime = static_cast<Runtime*>(context);
   runtime->control.set_movement_features(settings.auto_strafe != 0, settings.bhop != 0);
+  // The auto-strafe's own knobs: how the goal heading is derived (0 = off,
+  // 1 = the camera's forward/back, 2 = the player's W/A/S/D), whether a held
+  // `A`/`D` stands the feature down, the analog's wish speed (0 = keep the
+  // current one) and the number of sub-tick `yaw_delta` steps (0 = the
+  // camera-frame analog).
+  runtime->control.set_strafe_features(
+      settings.movement_strafe_mode, settings.movement_strafe_ignore_keys != 0,
+      settings.movement_strafe_wishspeed, settings.movement_strafe_subticks);
   runtime->control.set_rage_features(
       settings.rage != 0, settings.rage_key, settings.rage_fire != 0, settings.rage_objective,
       settings.rage_hitbox, settings.rage_fov, settings.rage_min_damage,
