@@ -214,6 +214,22 @@ control_strafe_test = executable('control_strafe_test',
 )
 test('control-strafe', control_strafe_test)
 
+# The ESP's out-of-module providers (the sound events and the per-player
+# visibility cache). Their host-testable parts are header-only, so the test
+# compiles the event ring next to them.
+control_sound_test = executable('control_sound_test',
+  files(
+    'payload/control/tests/test_control_sound.cpp',
+    'payload/control/src/event_ring.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+    include_directories('payload/game/include'),
+    include_directories('payload/aim/include'),
+  ],
+)
+test('control-sound', control_sound_test)
+
 # The feature settings foundation: the wire <-> config conversion and the
 # config store's round trip. The settings block is a POD and the conversion is
 # pure, so the feature sources are built natively here (the payload itself

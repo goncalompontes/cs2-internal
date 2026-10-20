@@ -13,6 +13,7 @@
 #include "cs2/diag/crash_handler.hpp"
 #include "cs2/diag/watchdog.hpp"
 #include "cs2/features/config_store.hpp"
+#include "cs2/features/esp.hpp"
 #include "cs2/features/game_present_hook.hpp"
 #include "cs2/features/menu.hpp"
 #include "cs2/features/model_publisher.hpp"
@@ -219,6 +220,11 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
       .right_shoulder = settings.movement_thirdperson_side != 0,
   });
 
+  // The ESP's visibility toggles. The control service answers the ESP's
+  // per-player visibility question, and the world-occlusion query behind that
+  // answer only runs while one of the two is on.
+  runtime->control.set_esp_features(settings.esp_glow != 0, settings.esp_visible_only != 0);
+
   // The menu's one-shot config op (save / load / reset the settings file). The op
   // runs **once per token** — the token bookkeeping lives in the store, so the
   // two callers of this sink (the menu and the publisher) cannot both fire it.
@@ -277,6 +283,47 @@ auto on_rage_target(void* context) noexcept -> int {
 // The overlay asks for the bhop prediction's position to draw the demo box.
 auto on_predicted_origin(void* context, float out[3]) noexcept -> bool {
   return static_cast<Runtime*>(context)->control.predicted_origin(out);
+}
+
+// The ESP's sound provider: the control module's sound events, mapped onto
+// the ESP's own event type.
+//
+// The control module cannot name the features module's provider types (its
+// Meson build declares no dependency on the features module — and the
+// features module cannot depend on the control module either, which is the
+// cycle the provider registry exists to break). The two shapes are therefore
+// adapted here, where both modules are visible.
+auto on_sounds(void* context, cs2::features::SoundEvent* out, int max) -> int {
+  if (out == nullptr || max <= 0) {
+    return 0;
+  }
+  auto* service = static_cast<cs2::control::Service*>(context);
+  cs2::control::SoundEvent events[32];
+  const int count = service->recent_sounds(events, max < 32 ? max : 32);
+  for (int i = 0; i < count; ++i) {
+    out[i] = cs2::features::SoundEvent{.player_index = events[i].player_index,
+                                       .radius = events[i].radius,
+                                       .sequence = events[i].sequence};
+  }
+  return count;
+}
+
+// The ESP's visibility provider: the control service's cached per-player
+// state, mapped onto the ESP's own enum. The state is `unknown` until the
+// game thread has published one (and whenever it is stale), and the ESP then
+// leaves the player alone.
+auto on_visibility(void* context, int player_index) -> cs2::features::Visibility {
+  const cs2::control::Visibility state =
+      static_cast<cs2::control::Service*>(context)->visibility(player_index);
+  switch (state) {
+    case cs2::control::Visibility::visible:
+      return cs2::features::Visibility::visible;
+    case cs2::control::Visibility::hidden:
+      return cs2::features::Visibility::hidden;
+    case cs2::control::Visibility::unknown:
+      break;
+  }
+  return cs2::features::Visibility::unknown;
 }
 
 }  // namespace
@@ -339,6 +386,15 @@ DWORD WINAPI install_thread(void*) {
     cs2::payload::runtime().overlay.set_predicted_origin_provider(
         &on_predicted_origin, &cs2::payload::runtime());
   }
+  // The ESP's sound and visibility providers: the data lives in the control
+  // module, which the features module cannot depend on, so the features
+  // module asks for it through these callbacks.
+  cs2::features::set_esp_providers({
+      .sounds = &on_sounds,
+      .sounds_context = &cs2::payload::runtime().control,
+      .visibility = &on_visibility,
+      .visibility_context = &cs2::payload::runtime().control,
+  });
   // The third-person camera: the game-thread hook (the client's per-frame
   // camera update) that re-asserts the switch every frame. It is refused on a
   // client build the offsets were not verified on; the console route then

@@ -30,6 +30,10 @@ struct EventEntry {
   static constexpr std::size_t k_max_args = 6;
 
   std::uint64_t seq = 0;  // 1-based; strictly increasing
+  // When the event was captured (the payload's millisecond clock). The sound
+  // provider turns it into the event's age, so a stale event is not offered
+  // as a fresh sound. 0 = the caller did not stamp it.
+  std::uint64_t time_ms = 0;
   char name[k_max_name_length + 1] = {};
   std::uint8_t arg_count = 0;
   EventArg args[k_max_args] = {};
@@ -51,12 +55,44 @@ class EventRing {
   auto push(std::string_view name, const EventArg* args, std::size_t arg_count) noexcept
       -> std::uint64_t;
 
+  // Append `name` and stamp it with the capture time (`time_ms`, the payload's
+  // millisecond clock — the same clock the event log dedupes with). The stamp
+  // is what lets a reader tell a fresh event from a stale one.
+  auto push(std::string_view name, const EventArg* args, std::size_t arg_count,
+            std::uint64_t time_ms) noexcept -> std::uint64_t;
+
   // Total number of events ever appended.
   [[nodiscard]] auto count() const noexcept -> std::uint64_t;
 
   // Copy up to `limit` of the most recent events, oldest first, into `out`.
   // Returns the number written (bounded by `k_capacity` and `limit`).
   auto recent(EventEntry* out, std::size_t limit) const noexcept -> std::size_t;
+
+  // Visit the retained events, oldest first, while the ring is locked. The
+  // visitor returns false to stop the walk; the number of visited events is
+  // returned. The lock is held for the whole walk, so the visitor must not
+  // call back into the ring (and must not throw: the walk is `noexcept`).
+  //
+  // This is how a reader consumes the events without copying them: the sound
+  // provider reduces the two events it cares about into a small buffer while
+  // the ring is locked, instead of copying 64 whole entries.
+  template <typename Visitor>
+  auto visit(Visitor&& visitor) const noexcept -> std::size_t {
+    lock();
+    const std::uint64_t total = count_.load(std::memory_order_relaxed);
+    const std::uint64_t first = oldest_locked(total);
+    const std::uint64_t retained = total - first + 1;
+    std::size_t visited = 0;
+    for (std::uint64_t i = 0; i < retained; ++i) {
+      const EventEntry& entry = entries_[(first - 1 + i) % k_capacity];
+      ++visited;
+      if (!visitor(entry)) {
+        break;
+      }
+    }
+    unlock();
+    return visited;
+  }
 
   // True when an event named `name` was appended at or after sequence `after`
   // and carries every `(key, value)` in `args`.

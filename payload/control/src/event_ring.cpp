@@ -31,11 +31,17 @@ auto EventRing::oldest_locked(std::uint64_t total) const noexcept -> std::uint64
 
 auto EventRing::push(std::string_view name, const EventArg* args, std::size_t arg_count) noexcept
     -> std::uint64_t {
+  return push(name, args, arg_count, 0);
+}
+
+auto EventRing::push(std::string_view name, const EventArg* args, std::size_t arg_count,
+                     std::uint64_t time_ms) noexcept -> std::uint64_t {
   lock();
   const std::uint64_t seq = count_.load(std::memory_order_relaxed) + 1;
   count_.store(seq, std::memory_order_relaxed);
   EventEntry& slot = entries_[(seq - 1) % k_capacity];
   slot.seq = seq;
+  slot.time_ms = time_ms;
   copy_cstr(slot.name, sizeof(slot.name), name);
   std::size_t stored = arg_count;
   if (stored > EventEntry::k_max_args) {

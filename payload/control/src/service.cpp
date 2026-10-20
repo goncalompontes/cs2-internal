@@ -34,6 +34,26 @@ Service::~Service() {
 
 namespace {
 
+// The payload's millisecond clock — the same clock the event log stamps the
+// captured events with, so the sound provider's ages are real.
+auto now_ms() noexcept -> std::uint64_t {
+#if defined(_WIN32)
+  return static_cast<std::uint64_t>(GetTickCount64());
+#else
+  return 0;
+#endif
+}
+
+// The sound markers the ESP keeps (its sound cache's capacity) and the age
+// beyond which a captured sound is no longer a marker.
+constexpr int k_max_sound_markers = 32;
+constexpr std::uint64_t k_sound_max_age_ms = 1000;
+
+// The visibility refresh's rate: the world-occlusion enumeration behind it is
+// the ragebot's, measured at ~1 ms (and worse at dense spots), so it runs a
+// few times a second — never per frame.
+constexpr std::uint64_t k_visibility_interval_ms = 250;
+
 // Microsecond wall clock for the ragebot instrumentation (`docs/ragebot-perf.md`).
 auto now_us() noexcept -> std::uint64_t {
   return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -1317,6 +1337,22 @@ void Service::on_game_thread() noexcept {
     occlusion_stats_ = query.stats;
   }
 
+  // The ESP's visibility: the per-player states, derived from the solids the
+  // enumeration just produced. The render thread only ever reads the cache.
+  if (visibility_enabled_.load(std::memory_order_relaxed) &&
+      visibility_wanted_.load(std::memory_order_relaxed)) {
+    game::Snapshot visibility_snapshot;
+    {
+      std::lock_guard<std::mutex> lock(snapshot_mutex_);
+      if (have_snapshot_.load(std::memory_order_relaxed)) {
+        visibility_snapshot = last_snapshot_;
+      }
+    }
+    if (visibility_snapshot.valid) {
+      refresh_visibility(visibility_snapshot);
+    }
+  }
+
   // The ragebot solve, on the **game thread** (this hook runs per simulated command), so
   // the aim belongs to the command being built — not to the render thread's frame. The
   // hitboxes are re-read inside the solve, so only the player list / eye / weapon come
@@ -1345,6 +1381,21 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     last_snapshot_ = snapshot;
     have_snapshot_.store(true, std::memory_order_relaxed);
   }
+  // The sound provider's player table (every player's entity index and
+  // origin). The snapshot's players are in entity-index order — the order the
+  // provider's slot -> player resolution relies on.
+  {
+    std::lock_guard<std::mutex> lock(sound_mutex_);
+    sound_player_count_ = 0;
+    for (const game::PlayerSnapshot& player : snapshot.players) {
+      if (sound_player_count_ >= k_max_sound_players) {
+        break;
+      }
+      sound_players_[static_cast<std::size_t>(sound_player_count_)] =
+          SoundPlayer{player.index, player.origin};
+      ++sound_player_count_;
+    }
+  }
   perf_.snapshot_frames.fetch_add(1, std::memory_order_relaxed);
   const bool rage_requested = rage_enabled_.load() || rage_force_.load();
   // Lag-record sampling is the heatmap's history and the backtrack poses. With backtrack
@@ -1364,6 +1415,20 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
     const std::uint64_t t = now_us();
     cache_occlusion_targets(snapshot);
     perf_.query_us.fetch_add(now_us() - t, std::memory_order_relaxed);
+  }
+  // The ESP's visibility: the world-occlusion enumeration behind it is the
+  // ragebot's (measured at ~1 ms, and worse at dense spots), so it is
+  // requested at a low rate — never per frame — and only while the ESP's
+  // visibility toggles are on. The request reuses the ragebot's own query
+  // box and its engine call; the states are derived from its solids.
+  if (visibility_enabled_.load(std::memory_order_relaxed)) {
+    const std::uint64_t now = now_ms();
+    const std::uint64_t last = visibility_query_ms_.load(std::memory_order_relaxed);
+    if (now >= last && now - last >= k_visibility_interval_ms) {
+      visibility_query_ms_.store(now, std::memory_order_relaxed);
+      occlusion_invoke_.store(true);
+      cache_occlusion_targets(snapshot);
+    }
   }
 }
 
@@ -1862,6 +1927,206 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
       rage_occlusion_query_complete_.load(std::memory_order_relaxed) ? "" : " occlusion-incomplete",
       rage_occlusion_candidates_complete_.load(std::memory_order_relaxed) ? "" : " occlusion-cap");
   return true;
+}
+
+// --- The ESP's out-of-module data providers --------------------------------
+
+void Service::ensure_sound_subscription() noexcept {
+  if (sound_subscribed_.load(std::memory_order_relaxed)) {
+    return;
+  }
+  // The two events the sound markers need. They are subscribed **lazily**:
+  // the footsteps are the game's highest-rate event, so subscribing them by
+  // default would flood the 64-entry ring for every user (and shrink the
+  // harness's event history) even when the sound ESP is never switched on.
+  // The provider is only called while the sound ESP is on, so the first call
+  // is the switch-on.
+  const std::int32_t footstep = events_.subscribe("player_footstep");
+  const std::int32_t sound = events_.subscribe("player_sound");
+  const bool footstep_ok = footstep >= 0 || footstep == EventLog::k_subscribe_already;
+  const bool sound_ok = sound >= 0 || sound == EventLog::k_subscribe_already;
+  // The hooks may not be installable yet (client.dll still loading): retry on
+  // the next call instead of giving up on the feature.
+  sound_subscribed_.store(footstep_ok && sound_ok, std::memory_order_relaxed);
+}
+
+auto Service::recent_sounds(SoundEvent* out, int max) noexcept -> int {
+  if (out == nullptr || max <= 0) {
+    return 0;
+  }
+  ensure_sound_subscription();
+
+  // 1. The captured sound events. The ring's lock is held for the walk and no
+  //    other lock is taken inside it, so the ring is never entered twice and
+  //    the lock order with the sound mutex below is fixed.
+  struct Captured {
+    int slot = -1;
+    float radius = 0.0F;
+    std::uint64_t sequence = 0;
+    std::uint64_t time_ms = 0;
+  };
+  Captured captured[k_max_sound_markers];
+  int captured_count = 0;
+  (void)events_.visit([&captured, &captured_count](const EventEntry& entry) noexcept -> bool {
+    const SoundFields fields = read_sound_fields(entry);
+    if (!fields.valid) {
+      return true;  // not a sound event
+    }
+    if (captured_count >= static_cast<int>(std::size(captured))) {
+      return false;  // the ESP's marker budget
+    }
+    captured[captured_count] = Captured{fields.slot, fields.radius, entry.seq, entry.time_ms};
+    ++captured_count;
+    return true;
+  });
+  if (captured_count == 0) {
+    return 0;
+  }
+
+  // 2. The positions: the players of the latest snapshot (a fixed-size table,
+  //    so no allocation and no copy of the snapshot's vectors).
+  const std::uint64_t now = now_ms();
+  int written = 0;
+  std::lock_guard<std::mutex> lock(sound_mutex_);
+  for (int i = 0; i < captured_count && written < max; ++i) {
+    const SoundPlayer* player =
+        resolve_sound_player(sound_players_.data(), sound_player_count_, captured[i].slot);
+    if (player == nullptr) {
+      continue;  // the slot names no player we know
+    }
+    const std::uint64_t age =
+        captured[i].time_ms > 0 && now >= captured[i].time_ms ? now - captured[i].time_ms : 0;
+    if (age > k_sound_max_age_ms) {
+      continue;  // too old to still be a marker
+    }
+    out[written] = SoundEvent{.player_index = player->index,
+                              .origin = player->origin,
+                              .radius = captured[i].radius,
+                              .age_ms = age,
+                              .sequence = captured[i].sequence};
+    ++written;
+  }
+  return written;
+}
+
+void Service::set_esp_features(bool glow, bool visible_only) noexcept {
+  const bool enabled = glow || visible_only;
+  visibility_enabled_.store(enabled, std::memory_order_relaxed);
+  if (!enabled) {
+    // The toggles are off: the states would be stale anyway, so drop them.
+    std::lock_guard<std::mutex> lock(visibility_mutex_);
+    visibility_.clear();
+  }
+}
+
+auto Service::visibility(int player_index) const noexcept -> Visibility {
+  if (!visibility_enabled_.load(std::memory_order_relaxed)) {
+    return Visibility::unknown;  // the toggles are off: there is nothing to answer
+  }
+  // The ask arms the world query behind the answer.
+  visibility_wanted_.store(true, std::memory_order_relaxed);
+  std::lock_guard<std::mutex> lock(visibility_mutex_);
+  return visibility_.get(player_index, now_ms());
+}
+
+void Service::refresh_visibility(const game::Snapshot& snapshot) noexcept {
+  if (!snapshot.valid || !snapshot.local.has_value()) {
+    return;
+  }
+  const std::uint64_t now = now_ms();
+  const std::uint64_t last = visibility_publish_ms_.load(std::memory_order_relaxed);
+  if (now < last || now - last < k_visibility_interval_ms) {
+    return;  // the low-rate gate
+  }
+  visibility_publish_ms_.store(now, std::memory_order_relaxed);
+
+  // The eye the enumeration used (the same snapshot the solids belong to).
+  game::Vec3 eye{};
+  {
+    std::lock_guard<std::mutex> lock(occlusion_mutex_);
+    eye = occlusion_eye_;
+  }
+
+  // The rays: the eye to every living player's head.
+  struct Ray {
+    game::Vec3 direction{};
+    float distance = 0.0F;
+    game::Vec3 lo{};
+    game::Vec3 hi{};
+    int index = -1;
+  };
+  Ray rays[k_max_visibility_players];
+  int ray_count = 0;
+  for (const game::PlayerSnapshot& player : snapshot.players) {
+    if (player.is_local || !player.alive || ray_count >= k_max_visibility_players) {
+      continue;
+    }
+    const game::Vec3 to = player.eye_origin - eye;
+    const float distance = game::length(to);
+    if (distance <= 1.0F) {
+      continue;
+    }
+    Ray& ray = rays[ray_count++];
+    ray.direction = game::normalized(to);
+    ray.distance = distance;
+    ray.lo = eye;
+    ray.hi = player.eye_origin;
+    ray.index = player.index;
+  }
+  if (ray_count == 0) {
+    return;
+  }
+
+  // The solids: the enumeration's hulls — the very set the ragebot projects.
+  // A hull tagged for another player can still cross this line of sight (the
+  // eye→target pyramids share the eye), so every hull is tested.
+  std::array<bool, k_max_visibility_players> hidden{};
+  aim::OccluderCell cell;  // reused: the ray test reads the planes / the BVH
+  {
+    std::lock_guard<std::mutex> lock(occlusion_mutex_);
+    for (const OcclusionHull& hull : occlusion_hulls_) {
+      // The cell carries what the ray test reads: a polytope's inward
+      // half-spaces, the analytic sphere / capsule, and the mesh's BVH
+      // (shared, so the triangle soup is not copied). It is built once per
+      // solid and reused for every ray.
+      cell.kind = hull.kind;
+      cell.planes = hull.planes;
+      cell.mesh_bvh = hull.mesh_bvh;
+      cell.a = hull.a;
+      cell.b = hull.b;
+      cell.radius = hull.radius;
+      if (hull.kind == aim::SolidKind::mesh && hull.mesh_bvh == nullptr) {
+        cell.triangles = hull.triangles;  // no BVH: the ray test scans the soup
+      }
+      for (int i = 0; i < ray_count; ++i) {
+        if (hidden[static_cast<std::size_t>(i)]) {
+          continue;
+        }
+        const Ray& ray = rays[static_cast<std::size_t>(i)];
+        // The broad phase: the solid's world AABB against the segment's.
+        if (hull.has_bounds && !(hull.bounds_max.x >= ray.lo.x && hull.bounds_min.x <= ray.hi.x &&
+                                 hull.bounds_max.y >= ray.lo.y && hull.bounds_min.y <= ray.hi.y &&
+                                 hull.bounds_max.z >= ray.lo.z && hull.bounds_min.z <= ray.hi.z)) {
+          continue;  // cannot lie between the eye and the player
+        }
+        const auto span = cell.ray_span(eye, ray.direction);
+        if (!span.has_value()) {
+          continue;
+        }
+        if (span->exit > 0.0F && span->entry < ray.distance) {
+          hidden[static_cast<std::size_t>(i)] = true;
+        }
+      }
+    }
+  }
+
+  // Publish the states (the render thread only ever reads them).
+  std::lock_guard<std::mutex> lock(visibility_mutex_);
+  for (int i = 0; i < ray_count; ++i) {
+    visibility_.publish(
+        rays[static_cast<std::size_t>(i)].index,
+        hidden[static_cast<std::size_t>(i)] ? Visibility::hidden : Visibility::visible, now);
+  }
 }
 
 void Service::do_aim(const Json& args, Json& out) noexcept {

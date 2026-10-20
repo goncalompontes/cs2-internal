@@ -8,10 +8,15 @@
 // It is self-healing: `state`/`wait_for` re-attach the snapshot reader when the
 // client module moves (game restart / level change).
 
+#include <array>
 #include <atomic>
+#include <charconv>
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "cs2/aim/heatmap.hpp"
 #include "cs2/aim/records.hpp"
@@ -25,6 +30,189 @@
 #include "cs2/game/state_reader.hpp"
 
 namespace cs2::control {
+
+// A player's visibility state.
+//
+// The features module has its own spelling of the same three states
+// (`cs2::features::Visibility`); the control module cannot include that
+// header (its build declares no dependency on the features module), so the
+// payload's registration maps the two.
+enum class Visibility : std::uint8_t {
+  unknown = 0,  // not known: the ESP treats the player as visible
+  visible = 1,
+  hidden = 2,
+};
+
+// One captured sound event, positioned in the world.
+//
+// `player_index` is the snapshot's player index (the key the ESP looks the
+// player up with), `origin` the sounding player's position when the event was
+// seen and `radius` the sound's own radius (0 for a footstep, which carries
+// none). `sequence` is the event's sequence number, which the ESP uses to
+// spot the events it has not seen yet.
+struct SoundEvent {
+  int player_index = -1;
+  game::Vec3 origin{};
+  float radius = 0.0F;
+  std::uint64_t age_ms = 0;
+  std::uint64_t sequence = 0;
+};
+
+// The sound fields of one captured event.
+//
+// `player_footstep` carries only `userid` (the game's **player slot**);
+// `player_sound` carries the `radius` as well. The ring stores the values as
+// strings, so they are parsed here — no allocation.
+struct SoundFields {
+  int slot = -1;  // the event's `userid`
+  float radius = 0.0F;
+  bool valid = false;  // the entry is a sound event with a usable `userid`
+};
+
+// The sound fields of a captured event, or an invalid result.
+[[nodiscard]] inline auto read_sound_fields(const EventEntry& entry) noexcept -> SoundFields {
+  SoundFields fields;
+  const std::string_view name(entry.name);
+  if (name != "player_footstep" && name != "player_sound") {
+    return fields;
+  }
+  for (std::size_t i = 0; i < entry.arg_count; ++i) {
+    const std::string_view key(entry.args[i].key);
+    const std::string_view value(entry.args[i].value);
+    if (key == "userid") {
+      int slot = -1;
+      const auto result = std::from_chars(value.data(), value.data() + value.size(), slot);
+      if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
+        return fields;  // an unusable userid: the event cannot be placed
+      }
+      fields.slot = slot;
+    } else if (key == "radius") {
+      float radius = 0.0F;
+      const auto result = std::from_chars(value.data(), value.data() + value.size(), radius);
+      if (result.ec == std::errc{}) {
+        fields.radius = radius;
+      }
+    }
+  }
+  fields.valid = fields.slot >= 0;
+  return fields;
+}
+
+// A player the sound provider can place a marker on.
+struct SoundPlayer {
+  int index = -1;       // the snapshot's entity index (the ESP's lookup key)
+  game::Vec3 origin{};  // the player's world origin (the feet)
+};
+
+// The player a sound event came from, or null.
+//
+// The event's `userid` is the game's **player slot** (0..63 — the engine's
+// `GetPlayerIndex` returns the slot), while the snapshot keys its players by
+// the controller's **entity index** (the identity list's index, which runs
+// into the hundreds). The payload has no slot -> entity table (the engine's
+// own slot table is not exposed to it), so the slot is resolved by its
+// **rank** in the snapshot's player list: the client creates the player
+// controllers in the server's slot order, so the rank over the players is
+// the slot.
+//
+// An exact match on the entity index is the fallback (it is right when the
+// game's slot and the controller's entity index agree).
+//
+// The position is an approximation either way: it is the player's position
+// when the event was *seen*, not when the sound was made.
+[[nodiscard]] inline auto resolve_sound_player(const SoundPlayer* players, int count,
+                                               int slot) noexcept -> const SoundPlayer* {
+  if (players == nullptr || slot < 0) {
+    return nullptr;
+  }
+  if (slot < count) {
+    return &players[slot];  // the rank (the client creates the controllers in slot order)
+  }
+  for (int i = 0; i < count; ++i) {
+    if (players[i].index == slot) {
+      return &players[i];  // the exact match
+    }
+  }
+  return nullptr;
+}
+
+// The per-player visibility cache.
+//
+// The ESP's provider reads it from the render thread; the game thread
+// publishes the states it derived from the world-occlusion query. The cache
+// is what makes the feature cheap: the query behind it runs at a low rate
+// (2-4 Hz) on the game thread, never per frame.
+class VisibilityCache {
+ public:
+  // The players the cache can hold (a match has at most 64).
+  static constexpr int k_capacity = 64;
+  // A state older than this is stale: the provider answers `unknown` rather
+  // than a state the world may have changed since.
+  static constexpr std::uint64_t k_ttl_ms = 1000;
+
+  // The state of `player_index` at `now_ms`: `unknown` when it was never
+  // published, when it is `unknown`, or when the published state is stale.
+  [[nodiscard]] auto get(int player_index, std::uint64_t now_ms) const noexcept -> Visibility {
+    for (const Entry& entry : entries_) {
+      if (entry.player_index != player_index) {
+        continue;
+      }
+      if (entry.state == Visibility::unknown) {
+        return Visibility::unknown;
+      }
+      if (now_ms < entry.stamp_ms || now_ms - entry.stamp_ms > k_ttl_ms) {
+        return Visibility::unknown;  // stale: fail closed
+      }
+      return entry.state;
+    }
+    return Visibility::unknown;
+  }
+
+  // Publish `player_index`'s state, stamped at `now_ms`.
+  void publish(int player_index, Visibility state, std::uint64_t now_ms) noexcept {
+    for (Entry& entry : entries_) {
+      if (entry.player_index == player_index) {
+        entry.state = state;
+        entry.stamp_ms = now_ms;
+        return;
+      }
+    }
+    // A free slot first, then the oldest state (the cache is bounded and the
+    // players come and go).
+    Entry* target = nullptr;
+    for (Entry& entry : entries_) {
+      if (entry.state == Visibility::unknown) {
+        target = &entry;
+        break;
+      }
+      if (target == nullptr || entry.stamp_ms < target->stamp_ms) {
+        target = &entry;
+      }
+    }
+    if (target == nullptr) {
+      return;
+    }
+    target->player_index = player_index;
+    target->state = state;
+    target->stamp_ms = now_ms;
+  }
+
+  // Forget every state (the world changed: a new round, a new map).
+  void clear() noexcept {
+    for (Entry& entry : entries_) {
+      entry = Entry{};
+    }
+  }
+
+ private:
+  struct Entry {
+    int player_index = -1;
+    Visibility state = Visibility::unknown;
+    std::uint64_t stamp_ms = 0;
+  };
+
+  std::array<Entry, k_capacity> entries_{};
+};
 
 class Service {
  public:
@@ -97,6 +285,40 @@ class Service {
     return input_.predicted_origin(out);
   }
 
+  // --- The ESP's out-of-module data providers ------------------------------
+  //
+  // The features module cannot reach the control module's event ring or the
+  // engine's world solids, so the ESP asks for them through the provider
+  // callbacks (`cs2::features::EspProviders`). The control module cannot name
+  // the features module's provider types either (its Meson build declares no
+  // dependency on the features module), so the types above are the control
+  // module's own spelling of the answers and the payload's registration maps
+  // the two.
+
+  // The recent sound events (the footstep markers), oldest first. Returns the
+  // number written (<= `max`).
+  //
+  // The cost is one call per ESP refresh (~30 Hz), not per frame, and it
+  // allocates nothing: the ring's events are reduced into a small stack
+  // buffer while the ring's lock is held, and the players are read from a
+  // fixed-size table the snapshot refresh fills.
+  auto recent_sounds(SoundEvent* out, int max) noexcept -> int;
+
+  // A player's visibility state: `unknown` when it is not known. The ESP
+  // leaves an unknown player alone — it never hides a player it cannot judge
+  // and never fires the glow on a guess.
+  //
+  // The answer comes from a cache the game thread fills at a low rate (2-4
+  // Hz) from the world-occlusion enumeration; this call is a cache read, so
+  // it is safe to make it per drawn player per frame.
+  [[nodiscard]] auto visibility(int player_index) const noexcept -> Visibility;
+
+  // The ESP's visibility toggles (the glow and the visible-only filter). The
+  // world-occlusion query behind the visibility state is the expensive part
+  // (the ragebot's, measured at ~1 ms and worse at dense spots), so it only
+  // runs while one of the two is on.
+  void set_esp_features(bool glow, bool visible_only) noexcept;
+
  private:
 #if defined(_WIN32)
   static unsigned long __stdcall thread_entry(void* self) noexcept;
@@ -140,6 +362,14 @@ class Service {
   // Cache the eye + nearest enemy for the game-thread query (runs on the payload's
   // publish thread — no engine call here).
   void cache_occlusion_targets(const game::Snapshot& snapshot) noexcept;
+  // The ESP's visibility: the per-player states, derived from the solids the
+  // occlusion enumeration produced. Runs on the game thread (the render thread
+  // only reads the cache), at a low rate.
+  void refresh_visibility(const game::Snapshot& snapshot) noexcept;
+  // Subscribe the two sound events the ESP's markers need (lazily: the
+  // footsteps are the game's highest-rate event, so they are only captured
+  // once the sound ESP is actually used).
+  void ensure_sound_subscription() noexcept;
   // Perform the enumeration on the game's main thread (the CreateMove hook), which
   // — unlike the publish thread — has the game's TLS, so tier0's allocator works.
   void on_game_thread() noexcept;
@@ -329,6 +559,30 @@ class Service {
   std::mutex snapshot_mutex_;
   game::Snapshot last_snapshot_;
   std::atomic<bool> have_snapshot_{false};
+  // The ESP's visibility cache. The provider reads it from the render thread;
+  // the game thread publishes the states it derived from the world solids.
+  mutable std::mutex visibility_mutex_;
+  VisibilityCache visibility_{};
+  // The ESP asked for a visibility state (the world query is armed) and the
+  // visibility toggles are on (the query may run at all). `mutable`: the
+  // provider is a const read, but the ask arms the query.
+  mutable std::atomic<bool> visibility_wanted_{false};
+  std::atomic<bool> visibility_enabled_{false};
+  // The low-rate gate: when the world query was last requested for the
+  // visibility, and when the states were last published.
+  std::atomic<std::uint64_t> visibility_query_ms_{0};
+  std::atomic<std::uint64_t> visibility_publish_ms_{0};
+  // The sound provider's player table: the entity index and the world origin
+  // of every player in the latest snapshot. A fixed array, so the provider's
+  // hot path never touches the snapshot's vectors (and never allocates).
+  static constexpr int k_max_sound_players = 64;
+  // The players the visibility refresh traces a ray to (the same bound).
+  static constexpr int k_max_visibility_players = 64;
+  std::mutex sound_mutex_;
+  std::array<SoundPlayer, k_max_sound_players> sound_players_{};
+  int sound_player_count_ = 0;
+  // The sound events are subscribed on the first provider call.
+  std::atomic<bool> sound_subscribed_{false};
   Channel channel_;
   Console console_;
   EventLog events_;
