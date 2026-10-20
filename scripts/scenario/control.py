@@ -9,6 +9,13 @@ JSON, one object per line::
 
 Commands: ``ping``, ``state``, ``exec``, ``events``, ``wait_for``, ``input``,
 ``press``, ``release``, ``bhop``, ``quit`` (see ``docs/control-harness.md``).
+
+The wire shapes live in :mod:`scenario.protocol`; this module is the typed
+client for them. Every helper answers with the exact type of the payload's
+answer, so a renamed field is a type error here instead of a ``KeyError``
+three frames away. The one thing static types cannot cover — the payload being
+a *separately built* binary — is covered by the runtime validator in the same
+module, which :meth:`Control.state` and :meth:`Control.ping` run.
 """
 
 from __future__ import annotations
@@ -17,13 +24,52 @@ import itertools
 import json
 import os
 import time
-from typing import Any
+from typing import Any, Literal, Mapping, Sequence, Unpack, overload
+
+from .protocol import (
+    AimObjective,
+    AimResult,
+    AngleDict,
+    BhopResult,
+    ButtonName,
+    ControlError,
+    EventsResult,
+    ExecResult,
+    HeatmapEnum,
+    HeatmapPen,
+    HeatmapResult,
+    InputBackend,
+    InputStatus,
+    LookResult,
+    MoveResult,
+    NoclipResult,
+    PingResult,
+    PressResult,
+    ProtocolError,
+    RageResult,
+    ReleaseResult,
+    StateSnapshotDict,
+    StrafeResult,
+    WaitExpr,
+    WaitResult,
+    validate_ping,
+    validate_snapshot,
+)
+
+__all__ = [
+    "BUTTONS",
+    "DEFAULT_PIPE",
+    "Control",
+    "ControlError",
+    "ProtocolError",
+]
 
 
 def _angle_delta(a: float, b: float) -> float:
     """Shortest absolute difference between two angles, in degrees."""
     delta = abs((a - b + 180.0) % 360.0 - 180.0)
     return delta
+
 
 DEFAULT_PIPE = r"\\.\pipe\cs2-internal-control"
 
@@ -33,7 +79,11 @@ DEFAULT_PIPE = r"\\.\pipe\cs2-internal-control"
 # `+<button>` command until the matching `-<button>` is the engine's own button
 # state, so this is exact and build-independent (no offsets, no hooks).
 #   buttons: https://developer.valvesoftware.com/wiki/Button_commands
-BUTTONS = {
+#
+# The values are the engine's own button names, so they are typed: a typo in the
+# table is a type error, and the known names are checked against the payload's
+# own list (`ButtonName`).
+BUTTONS: Mapping[str, ButtonName] = {
     # movement
     "w": "forward",
     "s": "back",
@@ -60,10 +110,6 @@ BUTTONS = {
     "up": "lookup",
     "down": "lookdown",
 }
-
-
-class ControlError(RuntimeError):
-    """The channel is unusable, or the payload rejected a request."""
 
 
 class Control:
@@ -127,7 +173,75 @@ class Control:
                 raise ControlError("control channel closed while writing")
             view = view[written:]
 
-    def request(self, cmd: str, args: dict[str, Any] | None = None) -> Any:
+    # --- the wire call ----------------------------------------------------
+    # The overloads are the command surface: each command answers with its own
+    # type, so the helpers below are precise without a cast. The last overload
+    # keeps the generic escape hatch for a command this client does not know.
+    @overload
+    def request(self, cmd: Literal["ping"], args: None = ...) -> PingResult: ...
+
+    @overload
+    def request(self, cmd: Literal["state"], args: None = ...) -> StateSnapshotDict: ...
+
+    @overload
+    def request(self, cmd: Literal["exec"],
+                args: Mapping[str, Any] | None = ...) -> ExecResult: ...
+
+    @overload
+    def request(self, cmd: Literal["events"],
+                args: Mapping[str, Any] | None = ...) -> EventsResult: ...
+
+    @overload
+    def request(self, cmd: Literal["wait_for"],
+                args: Mapping[str, Any] | None = ...) -> WaitResult: ...
+
+    @overload
+    def request(self, cmd: Literal["input"],
+                args: Mapping[str, Any] | None = ...) -> InputStatus: ...
+
+    @overload
+    def request(self, cmd: Literal["press"],
+                args: Mapping[str, Any] | None = ...) -> InputStatus: ...
+
+    @overload
+    def request(self, cmd: Literal["release"],
+                args: Mapping[str, Any] | None = ...) -> InputStatus: ...
+
+    @overload
+    def request(self, cmd: Literal["move"],
+                args: Mapping[str, Any] | None = ...) -> MoveResult: ...
+
+    @overload
+    def request(self, cmd: Literal["look"],
+                args: Mapping[str, Any] | None = ...) -> InputStatus: ...
+
+    @overload
+    def request(self, cmd: Literal["bhop"],
+                args: Mapping[str, Any] | None = ...) -> BhopResult: ...
+
+    @overload
+    def request(self, cmd: Literal["strafe"],
+                args: Mapping[str, Any] | None = ...) -> StrafeResult: ...
+
+    @overload
+    def request(self, cmd: Literal["aim"],
+                args: Mapping[str, Any] | None = ...) -> AimResult: ...
+
+    @overload
+    def request(self, cmd: Literal["rage"],
+                args: Mapping[str, Any] | None = ...) -> RageResult: ...
+
+    @overload
+    def request(self, cmd: Literal["heatmap"],
+                args: Mapping[str, Any] | None = ...) -> HeatmapResult: ...
+
+    @overload
+    def request(self, cmd: Literal["quit"], args: None = ...) -> dict[str, Any]: ...
+
+    @overload
+    def request(self, cmd: str, args: Mapping[str, Any] | None = ...) -> Any: ...
+
+    def request(self, cmd: str, args: Mapping[str, Any] | None = None) -> Any:
         """Send one request and return its ``result`` (or raise ControlError)."""
         if self._pipe is None:
             raise ControlError("not connected")
@@ -151,19 +265,28 @@ class Control:
             return response.get("result")
 
     # --- commands ---------------------------------------------------------
-    def ping(self) -> dict[str, Any]:
-        """Liveness + readiness: ``{pong, pid, exec_ready, state_ready, events_ready}``."""
-        return self.request("ping")
+    def ping(self) -> PingResult:
+        """Liveness + readiness: ``{pong, pid, exec_ready, state_ready, events_ready}``.
 
-    def state(self) -> dict[str, Any]:
-        """The current snapshot: ``{valid, in_map, local, players}``."""
-        return self.request("state")
+        The answer is validated: a payload that does not know the fields this
+        client reads is a skew, and the client must hear about it now.
+        """
+        return validate_ping(self.request("ping"))
 
-    def exec(self, line: str) -> dict[str, Any]:
+    def state(self) -> StateSnapshotDict:
+        """The current snapshot: ``{valid, in_map, local, players}``.
+
+        Validated for the same reason as :meth:`ping`: the snapshot is what
+        every scenario reads, so a missing field has to fail here and not in
+        the scenario that happens to read it.
+        """
+        return validate_snapshot(self.request("state"))
+
+    def exec(self, line: str) -> ExecResult:
         """Queue a (``;``-separated) console line in the engine's Cbuf."""
         return self.request("exec", {"line": line})
 
-    def events(self, limit: int = 64, subscribe: str | list[str] | None = None) -> dict[str, Any]:
+    def events(self, limit: int = 64, subscribe: str | list[str] | None = None) -> EventsResult:
         """Recent game events captured by the payload listener.
 
         Returns ``{count, events: [{"name": ..., "seq": ...}, ...]}``, oldest
@@ -177,8 +300,8 @@ class Control:
         return self.request("events", args)
 
     def wait_for(self, *, timeout: float = 30.0, event: str | None = None,
-                 event_args: dict[str, Any] | None = None,
-                 **predicates: Any) -> dict[str, Any]:
+                 event_args: Mapping[str, Any] | None = None,
+                 **predicates: Unpack[WaitExpr]) -> WaitResult:
         """Wait until ``predicates`` hold and (if given) ``event`` has fired.
 
         ``predicates`` is the structured expression described in
@@ -190,6 +313,10 @@ class Control:
         payload watches it on demand. ``event_args`` additionally requires the
         event to carry those field values, e.g.
         ``wait_for(event="player_death", event_args={"headshot": True})``.
+
+        The predicate keys are the server's grammar (an unknown key is a hard
+        error there), so they are typed; ``not`` is a Python keyword and cannot
+        be spelled as a keyword argument — use :meth:`wait_for_expr` for it.
         """
         args: dict[str, Any] = {"timeout_ms": int(timeout * 1000)}
         if predicates:
@@ -202,14 +329,18 @@ class Control:
             args["event_args"] = event_args
         return self.request("wait_for", args)
 
-    def wait_for_expr(self, expr: dict[str, Any], timeout: float = 30.0) -> dict[str, Any]:
-        """Like :meth:`wait_for` but takes the expression object directly."""
+    def wait_for_expr(self, expr: WaitExpr, timeout: float = 30.0) -> WaitResult:
+        """Like :meth:`wait_for` but takes the expression object directly.
+
+        This is the typed way to spell the predicates the keyword form cannot
+        (``not`` is a Python keyword) and to reuse an expression object.
+        """
         return self.request(
             "wait_for", {"expr": expr, "timeout_ms": int(timeout * 1000)}
         )
 
     # --- input (engine button commands + setang) --------------------------
-    def input(self, via: str | None = None) -> dict[str, Any]:
+    def input(self, via: InputBackend | None = None) -> InputStatus:
         """Select/query the input backend (``"console"`` or ``"usercmd"``).
 
         Returns the backend + hook status: ``{backend, ready, hooked, slot,
@@ -220,13 +351,15 @@ class Control:
             args["via"] = via
         return self.request("input", args)
 
-    def press(self, key: str, hold: float = 0.0, via: str | None = None) -> dict[str, Any]:
+    def press(self, key: ButtonName | str, hold: float = 0.0,
+              via: InputBackend | None = None) -> PressResult:
         """Hold a key/button; with ``hold`` seconds, release it again.
 
         ``via="usercmd"`` writes the command's button mask through the payload's
         `CreateMove` hook (``docs/re/client-dll.md`` §"Input path"); otherwise
         the engine's own ``+<button>`` console command is used. ``key`` is a
-        friendly name (``"w"``, ``"space"``, ``"mouse1"``, ...).
+        friendly name (``"w"``, ``"space"``, ``"mouse1"``, ...) — the known
+        names are typed, and the engine's own button names are still accepted.
         """
         if via == "usercmd":
             name = key.lower()
@@ -242,8 +375,13 @@ class Control:
             self.exec(f"-{button}")
         return {"button": button, "held": hold <= 0}
 
-    def release(self, key: str, via: str | None = None) -> dict[str, Any]:
-        """Release a button previously held with :meth:`press`."""
+    def release(self, key: ButtonName | str, via: InputBackend | None = None) -> ReleaseResult:
+        """Release a button previously held with :meth:`press`.
+
+        The two backends answer differently: the console path releases the
+        engine's button and answers with the ``exec`` acknowledgement, the
+        ``usercmd`` path with the payload's input status.
+        """
         if via == "usercmd":
             return self.request("release", {"buttons": [key.lower()]})
         button = BUTTONS.get(key.lower(), key)
@@ -251,7 +389,7 @@ class Control:
 
     def move(self, *, forward: float = 0.0, side: float = 0.0, up: float = 0.0,
              clear: bool = False, quantize: bool = False, step: bool = False,
-             raw_entry: bool = False) -> dict[str, Any]:
+             raw_entry: bool = False) -> MoveResult:
         """Set the ``usercmd`` analog move (raw input axes + command + buttons).
 
         The payload writes the raw analog axes on ``CCSGOInput`` (``+0x270``) —
@@ -289,8 +427,9 @@ class Control:
                 args["raw_entry"] = True
         return self.request("move", args)
 
-    def buttons(self, *, press: Any = None, release: Any = None,
-                reset: bool = False) -> dict[str, Any]:
+    def buttons(self, *, press: ButtonName | Sequence[ButtonName] | int | None = None,
+                release: ButtonName | Sequence[ButtonName] | int | None = None,
+                reset: bool = False) -> InputStatus:
         """Raw ``usercmd`` button overrides (a name, array of names, or mask)."""
         if reset:
             self.request("press", {"reset": True})
@@ -300,12 +439,12 @@ class Control:
             self.request("press", {"buttons": press})
         return self.input()
 
-    def bhop(self, on: bool = True) -> dict[str, Any]:
+    def bhop(self, on: bool = True) -> BhopResult:
         """Enable the payload's auto-jump (force ``IN_JUMP`` while grounded)."""
         return self.request("bhop", {"on": bool(on)})
 
     def strafe(self, on: bool = True, *, wishspeed: float | None = None,
-               subtick: int | None = None) -> dict[str, Any]:
+               subtick: int | None = None) -> StrafeResult:
         """Toggle the payload's **auto-strafe** (airborne only, silent).
 
         While airborne and above ~25 units/s the payload takes the goal heading from
@@ -335,13 +474,13 @@ class Control:
             args["subtick"] = subtick
         return self.request("strafe", args)
 
-    def aim(self, *, target: int | None = None, objective: str | None = None,
+    def aim(self, *, target: int | None = None, objective: AimObjective | None = None,
             sigma: float | None = None, damage: float | None = None,
             range_modifier: float | None = None, penetration: float | None = None,
             headshot: float | None = None, write: bool | None = None,
             seed: int | None = None, sequence: int | None = None,
             spread: float | None = None, inaccuracy: float | None = None,
-            pellets: int | None = None, cone: float | None = None) -> dict[str, Any]:
+            pellets: int | None = None, cone: float | None = None) -> AimResult:
         """Ragebot solve (``docs/ragebot.md``).
 
         Solves the damage field for the nearest enemy (or the one at entity index
@@ -386,11 +525,11 @@ class Control:
 
     def rage(self, *, on: bool | None = None, key: int | None = None,
              fire: bool | None = None, force: bool | None = None,
-             objective: str | None = None, damage: float | None = None,
+             objective: AimObjective | None = None, damage: float | None = None,
              headshot: float | None = None,
              range_modifier: float | None = None, hitbox: int | None = None,
              fov: float | None = None, min_damage: float | None = None,
-             min_hitchance: float | None = None, backtrack: bool | None = None) -> dict[str, Any]:
+             min_hitchance: float | None = None, backtrack: bool | None = None) -> RageResult:
         """Configure the hold-key ragebot (``docs/ragebot.md``).
 
         ``on`` enables the feature; ``key`` is the Win32 virtual-key code held to
@@ -440,10 +579,10 @@ class Control:
                 max_unlag: float | None = None, interp: float | None = None,
                 damage: float | None = None,
                 range_modifier: float | None = None, penetration: float | None = None,
-                headshot: float | None = None, pen: str | None = None,
+                headshot: float | None = None, pen: HeatmapPen | None = None,
                 pen_mod: float | None = None, dmg_mod: float | None = None,
                 max_pen: int | None = None, material: int | None = None,
-                grate: bool | None = None, enum: str | None = None) -> dict[str, Any]:
+                grate: bool | None = None, enum: HeatmapEnum | None = None) -> HeatmapResult:
         """The multi-target damage heatmap (``docs/ragebot.md``).
 
         Projects every enemy's hitboxes — and their sampled lag records — into one
@@ -514,8 +653,8 @@ class Control:
 
     def look(self, *, yaw: float | None = None, pitch: float | None = None,
              roll: float | None = None, timeout: float = 5.0,
-             via: str | None = None, command: bool = False, raw: bool = False,
-             step_yaw: float | None = None) -> dict[str, Any]:
+             via: InputBackend | None = None, command: bool = False, raw: bool = False,
+             step_yaw: float | None = None) -> LookResult:
         """Aim the view.
 
         Default: the engine ``setang`` command (needs ``sv_cheats 1``), blocking
@@ -537,13 +676,13 @@ class Control:
         if current is None:
             raise ControlError("look requires an in-game local player")
         angles = current["eye_angles"]
-        target = {
+        target: LookResult = {
             "pitch": angles["pitch"] if pitch is None else pitch,
             "yaw": angles["yaw"] if yaw is None else yaw,
             "roll": angles["roll"] if roll is None else roll,
         }
         if via == "usercmd":
-            request = dict(target)
+            request: dict[str, Any] = dict(target)
             if command:
                 request["command"] = True
             if raw:
@@ -558,7 +697,7 @@ class Control:
 
     def wait_look(self, *, yaw: float | None = None, pitch: float | None = None,
                   roll: float | None = None, tolerance: float = 1.5,
-                  timeout: float = 5.0) -> dict[str, Any]:
+                  timeout: float = 5.0) -> AngleDict:
         """Wait until the local eye angles reach the given values.
 
         The comparison shortens to the **shortest angle** (``(-180, 180]``), so a
@@ -572,8 +711,13 @@ class Control:
             local = self.state().get("local")
             if local is not None:
                 angles = local["eye_angles"]
+                # The angles are read by name (the wanted components are a
+                # tuple of pairs), so they are copied into a plain mapping
+                # first: a typed dict cannot be indexed with a computed key.
+                current = {"yaw": angles["yaw"], "pitch": angles["pitch"],
+                           "roll": angles["roll"]}
                 wanted = (("yaw", yaw), ("pitch", pitch), ("roll", roll))
-                if all(want is None or _angle_delta(angles[name], want) <= tolerance
+                if all(want is None or _angle_delta(current[name], want) <= tolerance
                        for name, want in wanted):
                     return angles
             if time.monotonic() >= deadline:
@@ -582,12 +726,12 @@ class Control:
                 )
             time.sleep(0.1)
 
-    def noclip(self, enabled: bool = True) -> dict[str, Any]:
+    def noclip(self, enabled: bool = True) -> NoclipResult:
         """Toggle noclip (needs ``sv_cheats 1``) — handy for positioning."""
         self.exec("noclip 1" if enabled else "noclip 0")
         return {"noclip": enabled}
 
-    def teleport(self, x: float, y: float, z: float | None = None) -> dict[str, Any]:
+    def teleport(self, x: float, y: float, z: float | None = None) -> ExecResult:
         """Teleport the local player (``setpos``; needs ``sv_cheats 1``)."""
         line = f"setpos {x:.3f} {y:.3f}" + ("" if z is None else f" {z:.3f}")
         return self.exec(line)

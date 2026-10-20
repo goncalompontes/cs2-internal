@@ -1,0 +1,1038 @@
+"""The wire contract of the payload's control channel (typed).
+
+The payload inside ``cs2.exe`` answers the scenario runner over the named pipe
+with plain JSON, and nothing in that JSON is checked at runtime: a renamed
+field is a ``KeyError`` three frames away, and a mistyped argument is an error
+raised by the *other* side of the pipe. This module is the single home for the
+wire types — one ``TypedDict`` per command's answer, the ``Literal``s for the
+constrained strings, the recursive predicate expression of ``wait_for`` and the
+``ControlTransport`` protocol the higher layers program against.
+
+Two rules shape it:
+
+* **The payload is the ground truth.** Every shape here mirrors
+  ``payload/control/src/service.cpp`` (the ``do_*`` handlers) and
+  ``payload/control/src/snapshot_json.cpp``; each type's docstring names the
+  handler it mirrors, so a drift is a one-line fix.
+* **Static types describe one build; the validator covers the rest.** The
+  payload is a *separately built binary*, so a newer one may answer with a field
+  this client does not know and an older one may omit a field it needs.
+  :func:`validate_snapshot` and :func:`validate_ping` check the required keys at
+  runtime and raise :class:`ProtocolError` — loudly and early, instead of three
+  frames later. Extra keys are **accepted**: a newer payload may add fields, and
+  that is not an error.
+
+The module imports nothing from the rest of the package (the MCP server and the
+tests use it on their own) and nothing outside the standard library.
+"""
+
+from __future__ import annotations
+
+import types
+from typing import (
+    Any,
+    Literal,
+    Mapping,
+    NotRequired,
+    Protocol,
+    Required,
+    TypedDict,
+    Union,
+    Unpack,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+    runtime_checkable,
+)
+
+__all__ = [
+    "AimObjective",
+    "AimResult",
+    "AngleDict",
+    "BasisDict",
+    "BhopResult",
+    "ButtonName",
+    "CompoundDict",
+    "ControlError",
+    "ControlTransport",
+    "EventsResult",
+    "ExecResult",
+    "GameEventDict",
+    "HeatmapCellDict",
+    "HeatmapEnum",
+    "HeatmapPen",
+    "HeatmapResult",
+    "HeatmapTargetDict",
+    "HeatmapWeaponDict",
+    "HitboxDict",
+    "InputBackend",
+    "InputStatus",
+    "LevelSnapshotDict",
+    "LookResult",
+    "MoveResult",
+    "MoveSampleDict",
+    "NoclipResult",
+    "PingResult",
+    "PlayerSnapshotDict",
+    "PressResult",
+    "ProtocolError",
+    "RageMode",
+    "RagePerfDict",
+    "RageResult",
+    "ReleaseResult",
+    "RulesSnapshotDict",
+    "StateSnapshotDict",
+    "StepProbeDict",
+    "StrafeResult",
+    "TeamName",
+    "Vec3Dict",
+    "WallsDict",
+    "WaitExpr",
+    "WaitResult",
+    "validate_ping",
+    "validate_snapshot",
+]
+
+
+# --- errors ----------------------------------------------------------------
+class ControlError(RuntimeError):
+    """The channel is unusable, or the payload rejected a request.
+
+    It lives here (and not in ``control.py``) so that the wire types can raise
+    it without importing the transport — the validator is part of the contract,
+    not of the client.
+    """
+
+
+class ProtocolError(ControlError):
+    """The payload answered with a shape this client does not understand.
+
+    A static type describes *one* build's expectations; the payload is a
+    separately built binary. This is the runtime half of that gap: the client
+    fails at the boundary, naming the offending key, instead of three frames
+    later with a ``KeyError`` (or, worse, silently reading a wrong value).
+    """
+
+
+# --- the constrained strings ------------------------------------------------
+#: The input backends the payload knows (``Service::do_input``).
+InputBackend = Literal["console", "usercmd"]
+
+#: The ragebot solve objectives (``Service::do_aim``).
+AimObjective = Literal["damage", "hitchance", "expected", "pellets"]
+
+#: The penetration models the heatmap can be valued with (``Service::do_heatmap``).
+HeatmapPen = Literal["simple", "engine"]
+
+#: The occluder enumeration modes (a diagnostic; ``Service::do_heatmap``).
+HeatmapEnum = Literal["pyramid", "box", "both"]
+
+#: The ragebot's trigger modes (``Service::do_rage``: hold / always / toggle).
+#: The payload's ``rage`` command takes them as a name or as 0/1/2; the
+#: runner's ``rage()`` helper does not expose the argument (yet).
+RageMode = Literal["hold", "always", "toggle"]
+
+#: The team names the ``wait_for`` predicate accepts (``Predicate::from_json``:
+#: ``"T"``/``"t"``/``2`` and ``"CT"``/``"ct"``/``3``; the server also reads the
+#: *strings* ``"2"``/``"3"``, which the type does not spell out).
+TeamName = Literal["T", "CT", "t", "ct", 2, 3]
+
+#: The button names the payload's button mask understands, plus the two
+#: console-only view commands: the mask's own names are
+#: ``payload/control/src/input.cpp``'s ``k_named_bits``, and ``lookup`` /
+#: ``lookdown`` are the engine's console commands the runner's ``BUTTONS`` table
+#: maps ``up`` / ``down`` to (the console path drives ``+lookup``, the mask has
+#: no such bit).
+ButtonName = Literal[
+    "attack", "mouse1", "jump", "space", "duck", "crouch", "ctrl",
+    "forward", "w", "back", "s", "use", "e", "left", "right",
+    "moveleft", "a", "moveright", "d", "attack2", "mouse2",
+    "run", "reload", "r", "speed", "shift", "walk", "zoom",
+    "lookup", "lookdown",
+]
+
+
+# --- the snapshot (payload/control/src/snapshot_json.cpp) --------------------
+class Vec3Dict(TypedDict):
+    """A world vector (``to_json(const game::Vec3&)``)."""
+
+    x: float
+    y: float
+    z: float
+
+
+class AngleDict(TypedDict):
+    """The engine's own view angles (``to_json(const game::Angle&)``)."""
+
+    pitch: float
+    yaw: float
+    roll: float
+
+
+class PlayerSnapshotDict(TypedDict):
+    """One player (``player_to_json`` in ``snapshot_json.cpp``).
+
+    Every key is always present: the payload writes the whole block, so a
+    missing key means a payload/client skew, not a quiet player.
+    """
+
+    index: int
+    name: str
+    weapon: str
+    team: int
+    connected: int
+    health: int
+    max_health: int
+    armor: int
+    life_state: int
+    on_ground: bool
+    flags: int
+    clip: int
+    reserve: int
+    ping: int
+    money: int
+    flash: float
+    alive: bool
+    is_local: bool
+    helmet: bool
+    defuser: bool
+    scoped: bool
+    defusing: bool
+    in_buy_zone: bool
+    has_bomb: bool
+    origin: Vec3Dict
+    eye_origin: Vec3Dict
+    velocity: Vec3Dict
+    eye_angles: AngleDict
+    distance: float
+    simulation_time: float
+    tick_base: int
+
+
+class RulesSnapshotDict(TypedDict):
+    """The round rules (``to_json(const game::RulesSnapshot&)``)."""
+
+    loaded: bool
+    match_started: bool
+    freeze: bool
+    warmup: bool
+    game_restart: bool
+    bomb_planted: bool
+    bomb_dropped: bool
+    t_cant_buy: bool
+    ct_cant_buy: bool
+    game_phase: int
+    round_time: int
+    freeze_time: int
+    round_win_status: int
+    round_win_reason: int
+    total_rounds_played: int
+    match_start_time: float
+    round_start_time: float
+    restart_round_time: float
+    game_start_time: float
+    warmup_period_start: float
+    time_until_next_phase: float
+
+
+class LevelSnapshotDict(TypedDict):
+    """The level probe (``to_json(const game::LevelSnapshot&)``).
+
+    ``up`` is the *main-screen* signal (the level's rules-proxy entity exists —
+    true at the main menu too, so it is a fact and not the rule; the rule is
+    derived in ``screens.py``).
+    """
+
+    up: bool
+    proxy: str
+    rules_global: bool
+    identities: int
+    local_connected: int
+
+
+class StateSnapshotDict(TypedDict):
+    """The whole ``state`` answer (``to_json(const game::Snapshot&)``).
+
+    ``local`` is ``None`` when there is no local player (the main menu); the
+    payload writes a JSON ``null`` there, never a missing key.
+    """
+
+    valid: bool
+    in_map: bool
+    local_pawn: float
+    level: LevelSnapshotDict
+    rules: RulesSnapshotDict
+    local: PlayerSnapshotDict | None
+    players: list[PlayerSnapshotDict]
+
+
+# --- the small, closed answers ---------------------------------------------
+class GameEventDict(TypedDict):
+    """One captured game event (``EventLog::recent``).
+
+    Every argument value is a **string** on the wire: the payload captures the
+    game's own formatted arguments, so a JSON scalar matches by its text.
+    """
+
+    name: str
+    seq: int
+    args: dict[str, str]
+
+
+class PingResult(TypedDict):
+    """The liveness + readiness answer (``Service::ping_result``)."""
+
+    pong: bool
+    pid: int
+    uptime_ms: int
+    exec_ready: bool
+    events_ready: bool
+    events_subscribed: int
+    events_dispatch_calls: int
+    input_ready: bool
+    input_hooked: bool
+    input_backend: str
+    state_ready: bool
+    #: The command-surface version. The payload answers it only once it knows
+    #: the version, so it is optional here (an older payload omits it).
+    protocol: NotRequired[int]
+
+
+class ExecResult(TypedDict):
+    """The ``exec`` answer (``Service::do_exec``): the line was queued."""
+
+    queued: bool
+
+
+class EventsResult(TypedDict):
+    """The ``events`` answer (``Service::do_events``)."""
+
+    count: int
+    subscribe: dict[str, list[str]]
+    events: list[GameEventDict]
+    #: The "since" cursor (the sequence number the next poll may pass). The
+    #: payload answers it only once it keeps the cursor, so it is optional.
+    last_seq: NotRequired[int]
+
+
+class WaitResult(TypedDict):
+    """The ``wait_for`` answer (``Service::do_wait_for``).
+
+    ``snapshot`` is ``None`` when the wait timed out before a readable state
+    existed (the payload writes a JSON ``null``).
+    """
+
+    matched: bool
+    snapshot: StateSnapshotDict | None
+
+
+class NoclipResult(TypedDict):
+    """The runner's own answer to ``noclip`` (the console line was queued)."""
+
+    noclip: bool
+
+
+# --- the wide diagnostic answers --------------------------------------------
+class InputStatus(TypedDict, total=False):
+    """The input backend's status block (``Service::input_status``).
+
+    Seven commands answer with it (``input``, ``press``, ``release``, ``move``,
+    ``look``, ``bhop``, ``strafe``); it is ~90 keys wide and it grows with every
+    new probe, so it is ``total=False``: the client reads the fields it cares
+    about instead of the type demanding the whole block.
+    """
+
+    backend: str
+    ready: bool
+    hooked: bool
+    slot: int
+    slot5: int
+    calls5: int
+    buttons_set: int
+    buttons_clear: int
+    bhop: bool
+    predict: bool
+    move: bool
+    move_quantize: bool
+    move_step: bool
+    move_raw_entry: bool
+    move_forward: float
+    move_side: float
+    move_up: float
+    angles: bool
+    angle_pitch: float
+    angle_yaw: float
+    angle_roll: float
+    command_angles: bool
+    command_angle_yaw: float
+    command_angle_writes: int
+    raw_angles: bool
+    raw_angle_writes: int
+    step_yaw: float
+    step_yaw_enabled: bool
+    strafe: bool
+    strafe_airborne: bool
+    strafe_speed: float
+    strafe_delta: float
+    strafe_goal: float
+    strafe_wish: float
+    strafe_rot: float
+    strafe_side: int
+    strafe_steps: int
+    strafe_reason: int
+    strafe_clamped: bool
+    strafe_wishspeed: float
+    strafe_subticks: int
+    strafe_mode: int
+    strafe_ignore_keys: bool
+    strafe_intent_f: float
+    strafe_intent_l: float
+    strafe_side_locked: bool
+    strafe_side_last: int
+    strafe_deadzone_deg: float
+    strafe_writes: int
+    strafe_raw_writes: int
+    bhop_presses: int
+    bhop_writes: int
+    bhop_landed_tick: int
+    bhop_landed_frac: float
+    bhop_build: int
+    bhop_age: int
+    bhop_tick_base: int
+    bhop_client_tick: int
+    bhop_cmd_number: int
+    bhop_mode: int
+    bhop_when: float
+    bhop_a: int
+    bhop_b: int
+    bhop_skipped: int
+    bhop_holding_ticks: int
+    bhop_air_ticks: int
+    input_local_pawn: int
+    predict_ready: bool
+    predict_runs: int
+    predicted_landing_tick: int
+    predicted_landing_frac: float
+    predicted_landing_delta: float
+    calls: int
+    writes: int
+    angle_writes: int
+    move_writes: int
+    raw_writes: int
+    entry_writes: int
+    step_writes: int
+    last_cmd: str
+    cmd_words: list[str]
+    base: str
+    base_words: list[str]
+    base_has_bits: str
+    base_move: MoveSampleDict
+    raw_move: MoveSampleDict
+    entry_move: MoveSampleDict
+    steps: int
+    step_dump: list[StepProbeDict]
+
+
+class MoveSampleDict(TypedDict):
+    """One decoded movement probe (``Service::input_status``'s ``move_json``)."""
+
+    valid: bool
+    forward: float
+    side: float
+    up: float
+
+
+class StepProbeDict(TypedDict):
+    """One captured sub-tick step (``Service::input_status``'s ``step_dump``)."""
+
+    when: float
+    forward: float
+    left: float
+    button: str
+    pressed: bool
+
+
+#: ``move`` answers with the input-status block (``Service::do_move``), so the
+#: type is shared rather than copied.
+MoveResult = InputStatus
+
+#: ``bhop`` answers with the input-status block (``Service::do_bhop``).
+BhopResult = InputStatus
+
+#: ``strafe`` answers with the input-status block (``Service::do_strafe``).
+StrafeResult = InputStatus
+
+
+class LookResult(TypedDict):
+    """The angles the runner aimed at — **its** answer, not the payload's.
+
+    The payload's ``look`` command answers with the input-status block; the
+    runner's helper answers with the angles it aimed at (the console path
+    waits for them, the ``usercmd`` path writes them).
+    """
+
+    pitch: float
+    yaw: float
+    roll: float
+
+
+class PressResult(TypedDict):
+    """The **runner's** answer to ``press`` — not the payload's.
+
+    The console path drives the engine's own ``+<button>`` command and reports
+    the button it drove; the ``usercmd`` path reports the same plus the backend
+    it used.
+    """
+
+    button: str
+    held: bool
+    via: NotRequired[InputBackend]
+
+
+#: ``release`` answers with one of two objects: the console path returns the
+#: ``exec`` acknowledgement, the ``usercmd`` path the payload's input status.
+ReleaseResult = Union[ExecResult, InputStatus]
+
+
+class HitboxDict(TypedDict):
+    """One studio hitbox of the target pawn (``Service::do_aim``)."""
+
+    bone: int
+    mesh: int
+    group: int
+    shape: int
+    name: str
+    radius: float
+    min_x: float
+    min_y: float
+    min_z: float
+    max_x: float
+    max_y: float
+    max_z: float
+    a_x: float
+    a_y: float
+    a_z: float
+    b_x: float
+    b_y: float
+    b_z: float
+    bone_x: float
+    bone_y: float
+    bone_z: float
+    quat_x: float
+    quat_y: float
+    quat_z: float
+    quat_w: float
+    world_x: float
+    world_y: float
+    world_z: float
+
+
+class AimResult(TypedDict):
+    """The ragebot solve (``Service::do_aim``).
+
+    The payload answers with an error instead of a result when there is no
+    hittable target, so every key is always present when the answer is there.
+    """
+
+    valid: bool
+    yaw: float
+    pitch: float
+    value: float
+    hitchance: float
+    cone: float
+    weapon_spread: float
+    weapon_inaccuracy: float
+    cells: int
+    aim_u: float
+    aim_v: float
+    wrote_view: bool
+    hitboxes: list[HitboxDict]
+    hitcount: int
+    weapon_damage: float
+    weapon_headshot: float
+    weapon_range_modifier: float
+    weapon_penetration: float
+
+
+class RagePerfDict(TypedDict, total=False):
+    """The ragebot's instrumentation (``Service::do_rage``'s ``perf``)."""
+
+    frames: int
+    snapshot_frames: int
+    total_us: float
+    last_us: float
+    max_us: float
+    sample_us: float
+    query_us: float
+    build_us: float
+    project_us: float
+    solve_us: float
+    backtrack_us: float
+    solve_project_us: float
+    solve_occlude_us: float
+    solve_argmax_us: float
+    solve_calls: int
+    candidates: int
+    hitboxes: int
+    occluders: int
+    poses: int
+    cells: int
+
+
+class RageResult(TypedDict, total=False):
+    """The hold-key ragebot's state (``Service::do_rage``).
+
+    Wide and growing (the instrumentation block alone is ~20 keys), so
+    ``total=False``: the client reads the fields it cares about.
+    """
+
+    enabled: bool
+    key: int
+    fire: bool
+    force: bool
+    active: bool
+    target: int
+    hitbox: int
+    solves: int
+    writes: int
+    shots: int
+    occluders: int
+    occlusion_query_complete: bool
+    occlusion_query_issues: int
+    backtracks: int
+    record: int
+    objective: int
+    hitbox_mode: int
+    fov: float
+    min_damage: float
+    min_hitchance: float
+    autostop: int
+    autoscope: int
+    autoreload: bool
+    only_visible: bool
+    recoil: bool
+    backtrack: bool
+    stop_speed: float
+    visible: bool
+    stops: int
+    mode: int
+    per_weapon: bool
+    weapon: str
+    profiles: int
+    perf: RagePerfDict
+
+
+class BasisDict(TypedDict):
+    """The chart's basis (``Service::do_heatmap``)."""
+
+    forward: Vec3Dict
+    right: Vec3Dict
+    up: Vec3Dict
+
+
+class HeatmapWeaponDict(TypedDict):
+    """The weapon model the chart was valued with."""
+
+    damage: float
+    headshot: float
+    range_modifier: float
+    penetration: float
+
+
+class HeatmapTargetDict(TypedDict):
+    """One charted enemy (``Service::do_heatmap``'s ``targets``)."""
+
+    index: int
+    name: str
+    team: int
+    health: int
+    distance: float
+    origin: Vec3Dict
+    records: int
+
+
+class HeatmapCellDict(TypedDict):
+    """One tagged silhouette cell (``Service::do_heatmap``'s ``cells``)."""
+
+    poly: list[list[float]]
+    value: float
+    base_value: float
+    target: int
+    hitgroup: int
+    record: int
+    age: float
+
+
+class CompoundDict(TypedDict, total=False):
+    """The compound-shape probe (``Service::do_heatmap``'s ``walls.compound``)."""
+
+    address: str
+    instances: int
+    meshes: int
+    hulls: int
+    g100: int
+    g110: int
+    g120: int
+
+
+class WallsDict(TypedDict, total=False):
+    """The occlusion report (``Service::do_heatmap``'s ``walls``).
+
+    A diagnostic blob of ~50 keys that grows with every RE probe, so
+    ``total=False``.
+    """
+
+    enabled: bool
+    called: bool
+    ok: bool
+    faulted: bool
+    query_complete: bool
+    incomplete_reasons: list[str]
+    records: int
+    bodies: int
+    shapes: int
+    hulls: int
+    type_counts: list[int]
+    iface: str
+    world: str
+    filter: str
+    filter_vtable: str
+    filter_custom: bool
+    filter_mask: int
+    filter_group: int
+    filter_flags: int
+    mesh_clusters: int
+    enum_box_kept: int
+    enum_pyramid_kept: int
+    enum_outside_box: int
+    enum_box_only_between: int
+    enum_targets: int
+    enum_target_max_distance: float
+    occluders: int
+    penetration_model: str
+    occlusion_candidates_complete: bool
+    max_penetrations: int
+    pen_mod: float
+    dmg_mod: float
+    surface_array: str
+    surface_index: int
+    surface_distance: float
+    surface_material: int
+    surface_hits: int
+    material_token: str
+    material_float: float
+    material_records: int
+    compound: CompoundDict
+    excluded_records: int
+    world_cache_body: str
+    world_cache_hulls: int
+    world_box_kept: int
+    world_box_rejected: int
+    hulls_no_planes: int
+    record_handles: list[str]
+    occluder_polygons: list[list[list[float]]]
+
+
+class HeatmapResult(TypedDict, total=False):
+    """The multi-target damage heatmap (``Service::do_heatmap``).
+
+    Wide (the chart carries a cell per silhouette) and growing, so
+    ``total=False``.
+    """
+
+    valid: bool
+    eye: Vec3Dict
+    basis: BasisDict
+    fov: float
+    extent: float
+    view_yaw: float
+    view_pitch: float
+    weapon: HeatmapWeaponDict
+    sampling: bool
+    history: int
+    capacity: int
+    tick_base: int
+    rewind_tick: int
+    max_unlag: float
+    interp: float
+    window_ticks: int
+    walls: WallsDict
+    targets: list[HeatmapTargetDict]
+    cell_count: int
+    cells: list[HeatmapCellDict]
+
+
+# --- the `wait_for` predicate DSL -------------------------------------------
+# The server's grammar is 12 kinds (``payload/control/src/predicate.cpp``):
+# ``in_map``, ``local_alive``, ``on_ground``, ``playable`` (bool);
+# ``players_gte``, ``alive_gte``, ``local_hp_gte`` (int); ``team`` (a team name
+# or number); ``all`` / ``any`` (a list of predicates); ``not`` (a predicate).
+# An unknown key is a hard error on the server, so the type is closed.
+#
+# The functional syntax is not a style choice: ``not`` is a Python keyword, so
+# the class syntax cannot spell that key at all.
+WaitExpr = TypedDict(
+    "WaitExpr",
+    {
+        "in_map": bool,
+        "local_alive": bool,
+        "on_ground": bool,
+        "playable": bool,
+        "players_gte": int,
+        "alive_gte": int,
+        "local_hp_gte": int,
+        "team": TeamName,
+        "all": list["WaitExpr"],
+        "any": list["WaitExpr"],
+        "not": "WaitExpr",
+    },
+    total=False,
+)
+
+
+# --- the transport ----------------------------------------------------------
+@runtime_checkable
+class ControlTransport(Protocol):
+    """What the state machine and the readiness layer need from a channel.
+
+    The higher layers (``screens.Machine``, ``awaiting``) program against this
+    protocol, not against the concrete :class:`~scenario.control.Control`, so a
+    fake channel can be substituted in a test. ``Control`` satisfies it.
+    """
+
+    def request(self, cmd: str, args: Mapping[str, Any] | None = ...) -> Any:
+        """One raw wire call — the escape hatch below the typed helpers."""
+        ...
+
+    def state(self) -> StateSnapshotDict:
+        """The current snapshot."""
+        ...
+
+    def events(self, limit: int = ..., subscribe: str | list[str] | None = ...) -> EventsResult:
+        """The recent game events."""
+        ...
+
+    def wait_for(self, *, timeout: float = ..., event: str | None = ...,
+                 event_args: Mapping[str, Any] | None = ...,
+                 **predicates: Unpack[WaitExpr]) -> WaitResult:
+        """Wait for the predicates (and the optional event) to hold."""
+        ...
+
+    def exec(self, line: str) -> ExecResult:
+        """Queue a console line."""
+        ...
+
+    def press(self, key: str, hold: float = ...,
+              via: InputBackend | None = ...) -> PressResult:
+        """Hold a button."""
+        ...
+
+    def release(self, key: str, via: InputBackend | None = ...) -> ReleaseResult:
+        """Release a button (the two backends answer differently)."""
+        ...
+
+    def move(self, *, forward: float = ..., side: float = ..., up: float = ...,
+             clear: bool = ..., quantize: bool = ..., step: bool = ...,
+             raw_entry: bool = ...) -> MoveResult:
+        """Set the analog move axes."""
+        ...
+
+    def look(self, *, yaw: float | None = ..., pitch: float | None = ...,
+             roll: float | None = ..., timeout: float = ...,
+             via: InputBackend | None = ..., command: bool = ..., raw: bool = ...,
+             step_yaw: float | None = ...) -> LookResult:
+        """Aim the view."""
+        ...
+
+
+# --- the runtime validator --------------------------------------------------
+#: The cached, resolved annotations of every ``TypedDict`` the validator walks.
+_HINT_CACHE: dict[type, dict[str, Any]] = {}
+
+
+def _hints(shape: type) -> dict[str, Any]:
+    """The resolved annotations of a ``TypedDict`` (cached).
+
+    ``get_type_hints`` is slow (it evaluates every annotation) and the state is
+    polled, so the result is kept.
+    """
+    cached = _HINT_CACHE.get(shape)
+    if cached is None:
+        cached = get_type_hints(shape, include_extras=True)
+        _HINT_CACHE[shape] = cached
+    return cached
+
+
+def _is_shape(hint: object) -> bool:
+    """Whether a hint is a ``TypedDict`` (the shape of one wire object)."""
+    return isinstance(hint, type) and hasattr(hint, "__required_keys__")
+
+
+def _required_keys(shape: type) -> set[str]:
+    """The keys the client insists on.
+
+    ``__required_keys__`` is the starting point, but under
+    ``from __future__ import annotations`` the ``NotRequired`` wrapper survives
+    only as a string, so the runtime cannot see it — the resolved annotations
+    are consulted as well and win.
+    """
+    required = set(shape.__required_keys__)
+    for key, hint in _hints(shape).items():
+        origin = get_origin(hint)
+        if origin is NotRequired:
+            required.discard(key)
+        elif origin is Required:
+            required.add(key)
+    return required
+
+
+def _describe(hint: object) -> str:
+    """A short, human name of an expected type (for the error message)."""
+    origin = get_origin(hint)
+    if origin is Union or origin is types.UnionType:
+        return " or ".join(_describe(arg) for arg in get_args(hint))
+    if origin is list:
+        args = get_args(hint)
+        return "a list of " + (_describe(args[0]) if args else "values")
+    if origin is dict:
+        return "an object"
+    if hint is bool:
+        return "a bool"
+    if hint is int:
+        return "an int"
+    if hint is float:
+        return "a number"
+    if hint is str:
+        return "a string"
+    if hint is type(None):
+        return "null"
+    if _is_shape(hint):
+        return "an object"
+    return str(hint)
+
+
+def _actual(value: object) -> str:
+    """The name of a value's type (for the error message)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a bool"
+    if isinstance(value, int):
+        return "an int"
+    if isinstance(value, float):
+        return "a number"
+    if isinstance(value, str):
+        return "a string"
+    if isinstance(value, Mapping):
+        return "an object"
+    if isinstance(value, list):
+        return "a list"
+    return type(value).__name__
+
+
+def _check(value: object, hint: object, path: str) -> None:
+    """Raise :class:`ProtocolError` unless ``value`` matches ``hint``."""
+    origin = get_origin(hint)
+    if origin is Required:
+        # ``Required[int]`` is the annotation of an optional-in-the-class key
+        # the client still insists on.
+        args = get_args(hint)
+        _check(value, args[0] if args else Any, path)
+        return
+    if origin is None:
+        if hint is bool:
+            if not isinstance(value, bool):
+                raise ProtocolError(f"{path}: expected a bool, got {_actual(value)}")
+        elif hint is int:
+            # A bool is an int in Python, but not on the wire.
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ProtocolError(f"{path}: expected an int, got {_actual(value)}")
+        elif hint is float:
+            # The payload prints a whole double as an integer (``json.cpp``),
+            # so a float field arrives as an int when it has no fraction.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ProtocolError(f"{path}: expected a number, got {_actual(value)}")
+        elif hint is str:
+            if not isinstance(value, str):
+                raise ProtocolError(f"{path}: expected a string, got {_actual(value)}")
+        elif hint is Any:
+            pass
+        elif _is_shape(hint):
+            _check_shape(value, hint, path)
+        return
+    if origin is Union or origin is types.UnionType:
+        first_error: ProtocolError | None = None
+        for arg in get_args(hint):
+            if arg is type(None):
+                if value is None:
+                    return
+                continue
+            try:
+                _check(value, arg, path)
+                return
+            except ProtocolError as error:
+                # Keep the first (most precise) complaint: for ``X | None`` it
+                # names the offending key inside ``X``.
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
+        raise ProtocolError(f"{path}: expected {_describe(hint)}, got {_actual(value)}")
+    if origin is list:
+        if not isinstance(value, list):
+            raise ProtocolError(f"{path}: expected a list, got {_actual(value)}")
+        args = get_args(hint)
+        item_hint = args[0] if args else Any
+        for index, item in enumerate(value):
+            _check(item, item_hint, f"{path}[{index}]")
+        return
+    if origin is dict:
+        if not isinstance(value, Mapping):
+            raise ProtocolError(f"{path}: expected an object, got {_actual(value)}")
+        args = get_args(hint)
+        value_hint = args[1] if len(args) == 2 else Any
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ProtocolError(f"{path}: expected a string key, got {_actual(key)}")
+            _check(item, value_hint, f"{path}.{key}")
+        return
+
+
+def _check_shape(value: object, shape: type, path: str) -> None:
+    """Check one ``TypedDict`` value: the required keys, and nothing else.
+
+    Extra keys are **accepted** — a newer payload may answer with fields this
+    client does not know, and that is not an error.
+    """
+    if not isinstance(value, Mapping):
+        raise ProtocolError(f"{path}: expected an object, got {_actual(value)}")
+    hints = _hints(shape)
+    for key in sorted(_required_keys(shape)):
+        if key not in value:
+            raise ProtocolError(
+                f"{path}: missing required key '{key}' (the payload does not know "
+                "this field - rebuild it and re-inject once)"
+            )
+        _check(value[key], hints[key], f"{path}.{key}")
+
+
+def validate_snapshot(raw: Mapping[str, Any]) -> StateSnapshotDict:
+    """Check a ``state`` answer against :class:`StateSnapshotDict`.
+
+    Raises :class:`ProtocolError` naming the missing or mistyped key; extra
+    keys are accepted (a newer payload may add fields).
+    """
+    _check_shape(raw, StateSnapshotDict, "state")
+    return cast(StateSnapshotDict, raw)
+
+
+def validate_ping(raw: Mapping[str, Any]) -> PingResult:
+    """Check a ``ping`` answer against :class:`PingResult`.
+
+    Raises :class:`ProtocolError` naming the missing or mistyped key; extra
+    keys are accepted (a newer payload may add fields — the command-surface
+    version among them).
+    """
+    _check_shape(raw, PingResult, "ping")
+    return cast(PingResult, raw)
