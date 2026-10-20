@@ -1344,8 +1344,8 @@ void Input::bhop_tick(void* cmd, std::uint8_t* base, std::uint64_t buttons) noex
   int landed_tick = 0;
   float landed_frac = 0.0F;
   if (!cs2::game::read(jump + k_modern_jump_landed_tick_offset, landed_tick) ||
-      !cs2::game::read(jump + k_modern_jump_landed_frac_offset, landed_frac) ||
-      landed_tick == 0 || !(landed_frac >= 0.0F && landed_frac <= 1.0F)) {
+      !cs2::game::read(jump + k_modern_jump_landed_frac_offset, landed_frac) || landed_tick == 0 ||
+      landed_frac < 0.0F || landed_frac > 1.0F) {
     bhop_active_number_ = 0;
     bhop_active_landed_ = 0;
     return;

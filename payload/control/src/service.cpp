@@ -1874,8 +1874,8 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     const std::lock_guard<std::mutex> lock(occlusion_mutex_);
     for (const OcclusionHull& hull : occlusion_hulls_) {
       if (hull.has_bounds &&
-          !(hull.bounds_max.x >= lo.x && hull.bounds_min.x <= hi.x && hull.bounds_max.y >= lo.y &&
-            hull.bounds_min.y <= hi.y && hull.bounds_max.z >= lo.z && hull.bounds_min.z <= hi.z)) {
+          (hull.bounds_max.x < lo.x || hull.bounds_min.x > hi.x || hull.bounds_max.y < lo.y ||
+           hull.bounds_min.y > hi.y || hull.bounds_max.z < lo.z || hull.bounds_min.z > hi.z)) {
         continue;  // cannot lie between the eye and the candidates
       }
       std::optional<aim::OccluderCell> cell;
@@ -2337,9 +2337,9 @@ void Service::refresh_visibility(const game::Snapshot& snapshot) noexcept {
         }
         const Ray& ray = rays[static_cast<std::size_t>(i)];
         // The broad phase: the solid's world AABB against the segment's.
-        if (hull.has_bounds && !(hull.bounds_max.x >= ray.lo.x && hull.bounds_min.x <= ray.hi.x &&
-                                 hull.bounds_max.y >= ray.lo.y && hull.bounds_min.y <= ray.hi.y &&
-                                 hull.bounds_max.z >= ray.lo.z && hull.bounds_min.z <= ray.hi.z)) {
+        if (hull.has_bounds && (hull.bounds_max.x < ray.lo.x || hull.bounds_min.x > ray.hi.x ||
+                                hull.bounds_max.y < ray.lo.y || hull.bounds_min.y > ray.hi.y ||
+                                hull.bounds_max.z < ray.lo.z || hull.bounds_min.z > ray.hi.z)) {
           continue;  // cannot lie between the eye and the player
         }
         const auto span = cell.ray_span(eye, ray.direction);

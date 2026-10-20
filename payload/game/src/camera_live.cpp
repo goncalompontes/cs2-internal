@@ -164,14 +164,11 @@ auto write_third_person_state(const ThirdPersonParams& params, float pitch, floa
   // page fails the write instead of faulting.
   const std::int32_t mode = 0;
   const std::uint8_t switch_on = 1;
-  if (!write_bytes(block + k_distance_offset, &params.distance, sizeof(float)) ||
-      !write_bytes(block + k_pitch_offset, &pitch, sizeof(float)) ||
-      !write_bytes(block + k_yaw_offset, &yaw, sizeof(float)) ||
-      !write_bytes(block + k_mode_offset, &mode, sizeof(std::int32_t)) ||
-      !write_bytes(block + k_switch_offset, &switch_on, sizeof(std::uint8_t))) {
-    return false;
-  }
-  return true;
+  return !(!write_bytes(block + k_distance_offset, &params.distance, sizeof(float)) ||
+           !write_bytes(block + k_pitch_offset, &pitch, sizeof(float)) ||
+           !write_bytes(block + k_yaw_offset, &yaw, sizeof(float)) ||
+           !write_bytes(block + k_mode_offset, &mode, sizeof(std::int32_t)) ||
+           !write_bytes(block + k_switch_offset, &switch_on, sizeof(std::uint8_t)));
 }
 
 auto clear_third_person_switch() noexcept -> bool {

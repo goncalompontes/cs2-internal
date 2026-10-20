@@ -185,7 +185,7 @@ auto outline_on_screen(const std::vector<game::Vec2>& outline, float width, floa
     min_y = (std::min)(min_y, point.y);
     max_y = (std::max)(max_y, point.y);
   }
-  return !(max_x < 0.0F || min_x > width || max_y < 0.0F || min_y > height);
+  return max_x >= 0.0F && min_x <= width && max_y >= 0.0F && min_y <= height;
 }
 
 // A zero-radius capsule is a segment: draw its axis.
