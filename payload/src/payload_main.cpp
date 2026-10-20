@@ -494,10 +494,18 @@ DWORD WINAPI install_thread(void*) {
         false /*backtrack: off by default*/);
     cs2::payload::runtime().publisher.set_rage_defaults(rage.enabled, rage.key, rage.fire);
     cs2::payload::runtime().menu.set_rage_defaults(rage.enabled, rage.key, rage.fire);
-    cs2::payload::runtime().publisher.set_settings_sink(&on_movement_settings,
-                                                        &cs2::payload::runtime());
-    cs2::payload::runtime().menu.set_settings_sink(&on_movement_settings,
-                                                   &cs2::payload::runtime());
+    // The in-process menu's settings sink: the features follow the **menu's**
+    // block every frame.
+    //
+    // The shared segment's block belongs to the Vulkan layer's menu, and the
+    // publisher only pushes it when the layer owns the settings (the
+    // render-mode block below): **only the owner's block reaches the
+    // features**. The two blocks disagree — the segment's copy is never
+    // refreshed from the payload's menu — so pushing both of them would write
+    // the strafe's settings twice per frame, from two threads, with different
+    // values: the last writer would win and the user's choice would
+    // flip-flop.
+    cs2::payload::runtime().menu.set_settings_sink(&on_movement_settings, &cs2::payload::runtime());
     // The control channel's access to the live settings block (ADR-0021): the
     // same block the menu owns, read and written through its owner.
     cs2::payload::runtime().control.set_settings_access(
@@ -557,7 +565,16 @@ DWORD WINAPI install_thread(void*) {
     }
     // The settings block's owner follows the render mode (ADR-0021): the
     // in-process menu owns it, and in the layer modes the shared segment does.
-    cs2::payload::runtime().layer_owns_settings.store(mode != RenderMode::present);
+    // The render mode can still fall back from the in-process renderer to the
+    // layer, so the flag is set from the mode that was actually installed.
+    const bool layer_owns = mode != RenderMode::present;
+    cs2::payload::runtime().layer_owns_settings.store(layer_owns);
+    if (layer_owns) {
+      // The shared segment owns the block: the features follow the segment's
+      // copy, and the publisher is the only thing that pushes it.
+      cs2::payload::runtime().publisher.set_settings_sink(&on_movement_settings,
+                                                          &cs2::payload::runtime());
+    }
   }
   return 0;
 }

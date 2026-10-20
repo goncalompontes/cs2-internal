@@ -493,6 +493,11 @@ auto Input::velocity(float& x, float& y) const noexcept -> bool {
 // decisive tick is kept. Holding `W` alone puts the goal exactly on the
 // velocity heading, and the tie-break there would flip the curve every tick.
 //
+// The **legacy** modes (the camera-relative goal, or `strafe_ignore_keys`)
+// take the old decision instead: the side follows the sign of the goal's
+// offset from the velocity heading, with no dead zone and no hysteresis, so
+// they restore the old behaviour exactly.
+//
 // The maths is in `strafe_geometry.hpp` (pure, host-tested); this function only
 // reads the engine and hands it over. Nothing writes a view angle, so neither
 // the camera nor the pawn's eye angles move (`write_strafe_wish` documents the
@@ -572,6 +577,7 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   if (legacy && (buttons & side_bits) != 0) {
     strafe_reason_.store(7);
     strafe_airborne_.store(false);
+    strafe_side_last_.store(0);
     return;
   }
   // The legacy goal ignores the lateral keys (and lets `S` win over `W`).
@@ -591,8 +597,16 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   const float accel_tick = wishspeed * k_strafe_airaccelerate * k_tick_interval;
 
   const auto vel_yaw = heading_of(vx, vy);
-  const StrafePlan decision = plan(goal_intent, view_yaw, vel_yaw, speed, accel_tick, cap,
-                                   strafe_side_last_.load(), k_strafe_side_deadzone_deg);
+  // The legacy modes take the **old** decision: the side follows the sign of
+  // the goal's offset from the velocity heading, with no dead zone and no
+  // hysteresis. The dead zone and the hysteresis belong to the new WASD goal
+  // (where `W` alone puts the goal exactly on the velocity heading); in the
+  // legacy modes they would change the old behaviour, which the spec requires
+  // them to restore exactly.
+  const StrafePlan decision =
+      legacy ? legacy_plan(goal_intent, view_yaw, vel_yaw, speed, accel_tick, cap)
+             : plan(goal_intent, view_yaw, vel_yaw, speed, accel_tick, cap,
+                    strafe_side_last_.load(), k_strafe_side_deadzone_deg);
   strafe_goal_.store(decision.goal_yaw);
   strafe_side_.store(decision.side);
   strafe_side_locked_.store(decision.decisive ? 0 : 1);

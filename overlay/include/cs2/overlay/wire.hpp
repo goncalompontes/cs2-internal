@@ -348,7 +348,7 @@ inline void write_settings(Shared& shared, const Settings& in) noexcept {
 // `features-config` asserts that the two stay in step.
 //
 // The new elements are **conservative**: every added ESP element, the
-// third-person camera and the chams are off, the menu key is Insert (0x2E) and
+// third-person camera and the chams are off, the menu key is Insert (0x2D) and
 // the auto-strafe is camera-relative (1).
 [[nodiscard]] constexpr auto default_settings() noexcept -> Settings {
   Settings settings{};
@@ -470,7 +470,7 @@ inline void write_settings(Shared& shared, const Settings& in) noexcept {
   settings.visuals_chams_color[3] = 160;
   // --- Menu ---
   settings.menu_open = 0;
-  settings.menu_key = 0x2E;  // Insert
+  settings.menu_key = 0x2D;  // Insert
   settings.menu_accent[0] = 90;
   settings.menu_accent[1] = 160;
   settings.menu_accent[2] = 255;
@@ -493,7 +493,7 @@ inline void write_settings(Shared& shared, const Settings& in) noexcept {
 // and the Vulkan layer); recompute it and say so in the commit. The failure is
 // deliberate: a default that moves without the constant moving would let the
 // two binaries disagree about what the block's checksum is.
-inline constexpr uint32_t k_default_settings_checksum = 3884274149U;
+inline constexpr uint32_t k_default_settings_checksum = 3909154372U;
 
 static_assert(settings_checksum(default_settings()) == k_default_settings_checksum,
               "the settings checksum changed: the payload and the layer must agree on it");

@@ -328,7 +328,7 @@ auto test_clamping() -> void {
   assert(config.esp.box_style == cs2::features::BoxStyle::straight);
   assert(config.esp.tracer_origin == cs2::features::TracerOrigin::screen_bottom);
   assert(config.esp.max_distance_m == 250);
-  assert(config.movement.strafe_mode == cs2::features::StrafeMode::camera_relative);
+  assert(config.movement.strafe_mode == cs2::features::StrafeMode::directional);
   assert(config.movement.strafe_wishspeed == 3200.0F);
   assert(config.movement.thirdperson_distance == 512.0F);
   assert(config.movement.thirdperson_angle == 360.0F);

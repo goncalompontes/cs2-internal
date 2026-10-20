@@ -26,12 +26,12 @@
 // here and **only** here: a page that is added twice is a page that drifts.
 
 #include <atomic>
+#include <cfloat>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 
 #include "imgui.h"
 
@@ -55,8 +55,29 @@ inline constexpr float k_min_height = 380.0F;
 inline constexpr const char* k_product_name = "cs2-internal";
 // The build's version, shown in the header bar and on the About page.
 inline constexpr const char* k_build_info = "0.1.0";
+// The branch the build came from, shown on the About page.
+//
+// The build systems define `CS2_BUILD_BRANCH`; a build that does not say so
+// rather than claim a branch it does not know.
+#if defined(CS2_BUILD_BRANCH)
+inline constexpr const char* k_build_branch = CS2_BUILD_BRANCH;
+#else
+inline constexpr const char* k_build_branch = "unknown";
+#endif
 // The menu window's title. The "##" keeps it out of ImGui's window list.
 inline constexpr const char* k_window_title = "cs2-internal##cs2-menu";
+// The most sub-tick slices the auto-strafe accepts (`k_strafe_max_steps` in
+// the control module). The slider must not offer a value the payload clamps
+// away behind the user's back.
+inline constexpr int k_max_strafe_subticks = 16;
+// The length of a path buffer: the wire's path field is `MAX_PATH` wide, and
+// the header's own buffers are that wide too.
+//
+// **Nothing in this header allocates.** The header is compiled into the
+// manually mapped payload (no CRT heap) *and* into the Vulkan layer, where an
+// allocation failure would abort the game, so every path lives in a fixed
+// buffer.
+inline constexpr std::size_t k_max_path = 260;
 
 // --- The shared UI state ----------------------------------------------------
 //
@@ -83,14 +104,15 @@ struct WindowGeometry {
 // The menu's UI state.
 struct UiState {
   WindowGeometry geometry{};
-  bool geometry_loaded = false;   // the persisted geometry was read
-  bool geometry_applied = false;  // the geometry was pushed to ImGui
-  bool geometry_dirty = false;    // the geometry changed and is not written yet
-  unsigned save_timer = 0;        // frames until the geometry is written
-  int section = 0;                // the sidebar's selection
-  std::string published_path;     // the settings path the block carried
+  bool geometry_loaded = false;       // the persisted geometry was read
+  bool geometry_applied = false;      // the geometry was pushed to ImGui
+  bool geometry_dirty = false;        // the geometry changed and is not written yet
+  unsigned save_timer = 0;            // frames until the geometry is written
+  int section = 0;                    // the sidebar's selection
+  char published_path[k_max_path]{};  // the settings path the block carried
   std::size_t published_length = 0;
-  std::string config_path;  // the settings file's path (the effective one)
+  char config_path[k_max_path]{};  // the effective settings path
+  std::size_t config_length = 0;
 };
 
 [[nodiscard]] inline auto ui_state() noexcept -> UiState& {
@@ -119,6 +141,12 @@ struct KeybindCapture {
   std::atomic<bool> has_result{false};    // a captured key waits to be read
   std::atomic<std::uint8_t> result{0};    // the captured key (0 = cleared)
   std::atomic<std::uint32_t> epoch{0};    // bumped on every captured key
+  // The key the capture swallowed: its character and its key release must not
+  // reach ImGui either, or a text field would see a key the game never got.
+  std::atomic<std::uint8_t> captured_key{0};
+  // A captured key's character is still to come (Windows sends the key down,
+  // then the character, then the key up).
+  std::atomic<bool> character_pending{false};
 };
 
 [[nodiscard]] inline auto keybind_capture() noexcept -> KeybindCapture& {
@@ -136,8 +164,16 @@ inline void arm_capture(std::uintptr_t target) noexcept {
 }
 
 // Cancel the capture: the binding keeps the value it had.
+//
+// The pending result goes with it: a key captured just before the menu
+// closed must not be applied when the menu reopens.
 inline void cancel_capture() noexcept {
-  keybind_capture().armed.store(false, std::memory_order_release);
+  KeybindCapture& capture = keybind_capture();
+  capture.armed.store(false, std::memory_order_release);
+  capture.has_result.store(false, std::memory_order_release);
+  capture.target.store(0, std::memory_order_relaxed);
+  capture.captured_key.store(0, std::memory_order_relaxed);
+  capture.character_pending.store(false, std::memory_order_release);
 }
 
 // True while a keybind widget waits for a key.
@@ -159,6 +195,10 @@ inline void cancel_capture() noexcept {
 // Returns true when the capture consumed the key: **the caller must not let
 // the game see it** — the capture is the reason the key does not leak into
 // the game while the menu is open. Escape and Delete clear the binding.
+//
+// A consumed key also takes its character and its key release with it: the
+// key never went down in ImGui's queue, so neither may its text nor its
+// release reach it.
 [[nodiscard]] inline auto capture_key(std::uint8_t key) noexcept -> bool {
   KeybindCapture& capture = keybind_capture();
   if (!capture.armed.load(std::memory_order_acquire)) {
@@ -171,6 +211,8 @@ inline void cancel_capture() noexcept {
   capture.result.store(clears ? static_cast<std::uint8_t>(0) : key, std::memory_order_relaxed);
   capture.has_result.store(true, std::memory_order_release);
   capture.epoch.fetch_add(1U, std::memory_order_acq_rel);
+  capture.captured_key.store(key, std::memory_order_relaxed);
+  capture.character_pending.store(true, std::memory_order_release);
   return true;
 }
 
@@ -198,15 +240,22 @@ struct NamedKey {
   const char* name;
 };
 
+// The names of the keys that have one.
+//
+// The mouse buttons follow the **physical** button, not the virtual-key code:
+// the capture turns `WM_XBUTTONDOWN` into `0x05`/`0x06` (the fourth and the
+// fifth button), so `0x05` is "Mouse 4" and `0x06` is "Mouse 5" — the
+// convention the pre-T2 menu used. `0x04` is the middle button, and `0x03` is
+// `VK_CANCEL`, which is not a mouse button at all.
 inline constexpr NamedKey k_named_keys[] = {
-    {0x01, "Mouse 1"},    {0x02, "Mouse 2"},    {0x03, "Mouse 3"},     {0x04, "Mouse 4"},
-    {0x05, "Mouse 5"},    {0x06, "Mouse 6"},    {0x08, "Backspace"},   {0x09, "Tab"},
-    {0x0D, "Enter"},      {0x14, "Caps Lock"},  {0x1B, "Escape"},      {0x20, "Space"},
-    {0x21, "Page Up"},    {0x22, "Page Down"},  {0x23, "End"},         {0x24, "Home"},
-    {0x25, "Left"},       {0x26, "Up"},         {0x27, "Right"},       {0x28, "Down"},
-    {0x2D, "Insert"},     {0x2E, "Delete"},     {0x5B, "Left Super"},  {0x5C, "Right Super"},
-    {0x5D, "Menu"},       {0xA0, "Left Shift"}, {0xA1, "Right Shift"}, {0xA2, "Left Ctrl"},
-    {0xA3, "Right Ctrl"}, {0xA4, "Left Alt"},   {0xA5, "Right Alt"},
+    {0x01, "Mouse 1"},    {0x02, "Mouse 2"},     {0x04, "Middle Mouse"}, {0x05, "Mouse 4"},
+    {0x06, "Mouse 5"},    {0x08, "Backspace"},   {0x09, "Tab"},          {0x0D, "Enter"},
+    {0x14, "Caps Lock"},  {0x1B, "Escape"},      {0x20, "Space"},        {0x21, "Page Up"},
+    {0x22, "Page Down"},  {0x23, "End"},         {0x24, "Home"},         {0x25, "Left"},
+    {0x26, "Up"},         {0x27, "Right"},       {0x28, "Down"},         {0x2D, "Insert"},
+    {0x2E, "Delete"},     {0x5B, "Left Super"},  {0x5C, "Right Super"},  {0x5D, "Menu"},
+    {0xA0, "Left Shift"}, {0xA1, "Right Shift"}, {0xA2, "Left Ctrl"},    {0xA3, "Right Ctrl"},
+    {0xA4, "Left Alt"},   {0xA5, "Right Alt"},
 };
 
 // The name of a virtual-key code ("X", "Left Alt", "Mouse 4", "None").
@@ -263,7 +312,7 @@ inline constexpr NamedKey k_named_keys[] = {
       return ImGuiKey_LeftCtrl;
     case 0x12:
       return ImGuiKey_LeftAlt;
-    case 0x1B:
+    case k_key_escape:
       return ImGuiKey_Escape;
     case 0x20:
       return ImGuiKey_Space;
@@ -283,9 +332,9 @@ inline constexpr NamedKey k_named_keys[] = {
       return ImGuiKey_RightArrow;
     case 0x28:
       return ImGuiKey_DownArrow;
-    case 0x2D:
+    case k_key_insert:
       return ImGuiKey_Insert;
-    case 0x2E:
+    case k_key_delete:
       return ImGuiKey_Delete;
     default:
       return ImGuiKey_None;
@@ -305,8 +354,79 @@ inline void feed_key(ImGuiIO& io, std::uint8_t key, bool down) noexcept {
   io.AddKeyEvent(mapped, down);
 }
 
+// The symbol a digit key produces with Shift held (the US layout).
+[[nodiscard]] inline auto shifted_digit(std::uint8_t key) noexcept -> std::uint16_t {
+  static constexpr std::uint16_t k_shifted[] = {
+      ')', '!', '@', '#', '$', '%', '^', '&', '*', '(',
+  };
+  const std::size_t index = static_cast<std::size_t>(key) - 0x30U;
+  return index < sizeof(k_shifted) / sizeof(k_shifted[0]) ? k_shifted[index] : 0;
+}
+
+// True when `character` is the text the key produced.
+//
+// The capture swallows a key press, but Windows still sends the key's
+// character: it would land in whatever text field has the focus. A character
+// carries no key code, so the match is by the key's own text: a letter (in
+// either case), a digit (or the symbol a shifted digit key produces) or the
+// space bar.
+[[nodiscard]] inline auto character_matches_key(std::uint16_t character, std::uint8_t key) noexcept
+    -> bool {
+  if (character < 0x20 || character > 0x7E) {
+    return false;  // not a printable ASCII character
+  }
+  if (key >= 0x41 && key <= 0x5A) {
+    const auto upper = static_cast<std::uint16_t>(key);
+    return character == upper || character == upper + 0x20;
+  }
+  if (key >= 0x30 && key <= 0x39) {
+    return character == key || character == shifted_digit(key);
+  }
+  return key == 0x20 && character == 0x20;
+}
+
+// Feed a key press to ImGui, unless the capture swallowed it.
+//
+// Returns true when the capture took the key: **the caller must not let the
+// game see it** either.
+[[nodiscard]] inline auto feed_key_down(ImGuiIO& io, std::uint8_t key) noexcept -> bool {
+  if (capture_key(key)) {
+    return true;
+  }
+  // A key the capture did not take closes the window in which a captured
+  // key's character could still arrive.
+  keybind_capture().character_pending.store(false, std::memory_order_release);
+  feed_key(io, key, true);
+  return false;
+}
+
+// Feed a key release to ImGui, unless the capture swallowed the key's press.
+//
+// A key the capture took never went down in ImGui's queue, so its release
+// must not arrive alone: ImGui would remember the key as stuck.
+inline void feed_key_up(ImGuiIO& io, std::uint8_t key) noexcept {
+  KeybindCapture& capture = keybind_capture();
+  if (capture.captured_key.load(std::memory_order_acquire) == key && key != 0) {
+    capture.captured_key.store(0, std::memory_order_relaxed);
+    capture.character_pending.store(false, std::memory_order_release);
+    return;
+  }
+  feed_key(io, key, false);
+}
+
 // Feed the character a key produced to ImGui (the text fields need it).
+//
+// The character of a key the capture swallowed is dropped: the key never
+// reached the text field, so its text must not either.
 inline void feed_character(ImGuiIO& io, std::uint16_t character) noexcept {
+  KeybindCapture& capture = keybind_capture();
+  if (capture.character_pending.load(std::memory_order_acquire)) {
+    capture.character_pending.store(false, std::memory_order_release);
+    const std::uint8_t captured = capture.captured_key.load(std::memory_order_relaxed);
+    if (character_matches_key(character, captured)) {
+      return;  // the character of a swallowed key
+    }
+  }
   if (character < 0x20 || character == 0x7F) {
     return;  // a control character: the key event carries it
   }
@@ -471,17 +591,96 @@ inline void text_input(const char* label, char* buffer, std::size_t size) noexce
   return pressed;
 }
 
+// --- The one-shot config op -------------------------------------------------
+
+// The renderer that owns the settings block.
+//
+// The two renderers are the payload's in-process menu
+// (`payload/features/src/menu.cpp`) and the Vulkan layer's fallback
+// (`overlay/src/menu.cpp`). They edit **different** blocks (the payload's own
+// copy and the shared segment's), but the payload carries the one-shot config
+// op out for both of them, so the op's token has to be unique across the
+// renderers: a plain counter would let one renderer's op swallow the other's
+// (the payload would see the same token twice and skip the second one).
+enum class Renderer : std::uint8_t {
+  payload = 0,  // the in-process menu
+  layer = 1,    // the Vulkan layer's menu
+};
+
+// Raise a one-shot config op (save / load / reset) on the block this renderer
+// owns.
+//
+// The token's low bit carries the renderer and the counter moves in steps of
+// two, so the payload's tokens are even and the layer's are odd: the two can
+// never be the same value, and the payload's op bookkeeping cannot mistake one
+// renderer's op for the other's.
+inline void request_config_op(wire::Settings& settings, std::uint8_t op,
+                              Renderer renderer) noexcept {
+  const std::uint32_t source = static_cast<std::uint32_t>(renderer) & 1U;
+  settings.menu_config_op = op;
+  settings.menu_config_token = ((settings.menu_config_token & ~1U) | source) + 2U;
+}
+
+// Raise a one-shot ragebot op (save to / load from / delete a weapon profile,
+// save the profile file, load the profile file) on the block this renderer
+// owns.
+//
+// The token carries the renderer, exactly as the config op's does: the two
+// renderers edit different blocks and the payload carries the op out for
+// both of them, so their tokens must not collide.
+inline void request_rage_config_op(wire::Settings& settings, std::uint8_t op,
+                                   Renderer renderer) noexcept {
+  const std::uint32_t source = static_cast<std::uint32_t>(renderer) & 1U;
+  settings.rage_config_op = op;
+  settings.rage_config_token = ((settings.rage_config_token & ~1U) | source) + 2U;
+}
+
 // --- The settings file and the window's geometry ----------------------------
+
+// Copy `text` into `out` (at most `size` bytes, always NUL-terminated).
+//
+// Returns the length, or 0 when the text does not fit: a path that does not
+// fit is **refused**, never truncated to a different file.
+[[nodiscard]] inline auto copy_path(char* out, std::size_t size, const char* text) noexcept
+    -> std::size_t {
+  if (out == nullptr || size == 0 || text == nullptr) {
+    return 0;
+  }
+  const std::size_t length = std::strlen(text);
+  if (length >= size) {
+    out[0] = '\0';
+    return 0;
+  }
+  std::memcpy(out, text, length + 1);
+  return length;
+}
+
+// Join a directory and a file name into `out` ("<directory>\<name>").
+[[nodiscard]] inline auto join_path(char* out, std::size_t size, const char* directory,
+                                    const char* name) noexcept -> std::size_t {
+  if (out == nullptr || size == 0 || directory == nullptr || name == nullptr) {
+    return 0;
+  }
+  const int written = std::snprintf(out, size, "%s\\%s", directory, name);
+  if (written <= 0 || static_cast<std::size_t>(written) >= size) {
+    out[0] = '\0';
+    return 0;
+  }
+  return static_cast<std::size_t>(written);
+}
 
 // The settings file's path: the one the payload published, or the documented
 // default when the block carries none.
 //
-// The layer's copy of the block can predate the payload's publication, so the
-// menu falls back to the default location (`%LOCALAPPDATA%\cs2-internal\
-// cs2-config.cfg` — the same one `cs2::features::default_config_path()`
-// returns).
-[[nodiscard]] inline auto config_path(const wire::Settings& settings) noexcept
-    -> const std::string& {
+// The fallback resolves the path **exactly** as the payload's store does
+// (`cs2::features::default_config_path`): `CS2_PAYLOAD_CONFIG`, then
+// `CS2_PAYLOAD_DIR`, then `LOCALAPPDATA`, then `TEMP`, the last two under
+// `cs2-internal`. The menu's path and the store's path have to be the same
+// file, or the menu shows a path the payload does not use.
+//
+// The returned buffer belongs to the shared UI state and stays valid until
+// the next call.
+[[nodiscard]] inline auto config_path(const wire::Settings& settings) noexcept -> const char* {
   UiState& state = ui_state();
   const char* const published = settings.menu_config_path;
   std::size_t count = 0;
@@ -489,25 +688,40 @@ inline void text_input(const char* label, char* buffer, std::size_t size) noexce
     ++count;
   }
   if (count != state.published_length ||
-      (count != 0 && std::memcmp(state.published_path.data(), published, count) != 0)) {
+      (count != 0 && std::memcmp(state.published_path, published, count) != 0)) {
     state.published_length = count;
-    state.published_path.assign(published, count);
-    state.config_path.clear();  // recomputed below
+    std::memcpy(state.published_path, published, count);
+    state.published_path[count] = '\0';
+    state.config_length = 0;  // recomputed below
+    state.config_path[0] = '\0';
   }
-  if (!state.config_path.empty()) {
+  if (state.config_length != 0) {
     return state.config_path;
   }
-  if (!state.published_path.empty()) {
-    state.config_path = state.published_path;
+  if (state.published_length != 0) {
+    state.config_length = copy_path(state.config_path, k_max_path, state.published_path);
     return state.config_path;
   }
   if (const char* const override_path = std::getenv("CS2_PAYLOAD_CONFIG");
       override_path != nullptr && override_path[0] != '\0') {
-    state.config_path.assign(override_path);
-  } else if (const char* const base = std::getenv("LOCALAPPDATA");
-             base != nullptr && base[0] != '\0') {
-    state.config_path.assign(base);
-    state.config_path += "\\cs2-internal\\cs2-config.cfg";
+    state.config_length = copy_path(state.config_path, k_max_path, override_path);
+    return state.config_path;
+  }
+  if (const char* const override_dir = std::getenv("CS2_PAYLOAD_DIR");
+      override_dir != nullptr && override_dir[0] != '\0') {
+    state.config_length = join_path(state.config_path, k_max_path, override_dir, "cs2-config.cfg");
+    return state.config_path;
+  }
+  const char* base = std::getenv("LOCALAPPDATA");
+  if (base == nullptr || base[0] == '\0') {
+    base = std::getenv("TEMP");
+  }
+  if (base != nullptr && base[0] != '\0') {
+    char directory[k_max_path] = {};
+    const int written = std::snprintf(directory, sizeof(directory), "%s\\cs2-internal", base);
+    if (written > 0 && static_cast<std::size_t>(written) < sizeof(directory)) {
+      state.config_length = join_path(state.config_path, k_max_path, directory, "cs2-config.cfg");
+    }
   }
   return state.config_path;
 }
@@ -518,13 +732,33 @@ inline void text_input(const char* label, char* buffer, std::size_t size) noexce
 // The settings block has no geometry fields (`wire.hpp` belongs to the
 // settings workstream), so the geometry lives here and is written next to the
 // settings file.
-[[nodiscard]] inline auto geometry_path(const wire::Settings& settings) noexcept -> std::string {
-  const std::string& config = config_path(settings);
-  const auto slash = config.find_last_of("/\\");
-  if (slash == std::string::npos) {
-    return {};
+//
+// The path is written into `out` (at most `size` bytes); false when it cannot
+// be resolved.
+[[nodiscard]] inline auto geometry_path(const wire::Settings& settings, char* out,
+                                        std::size_t size) noexcept -> bool {
+  if (out == nullptr || size == 0) {
+    return false;
   }
-  return config.substr(0, slash + 1) + "menu-window.cfg";
+  out[0] = '\0';
+  const char* const config = config_path(settings);
+  const char* slash = nullptr;
+  for (const char* cursor = config; *cursor != '\0'; ++cursor) {
+    if (*cursor == '/' || *cursor == '\\') {
+      slash = cursor;
+    }
+  }
+  if (slash == nullptr) {
+    return false;
+  }
+  const std::size_t prefix = static_cast<std::size_t>(slash - config) + 1;
+  const int written =
+      std::snprintf(out, size, "%.*smenu-window.cfg", static_cast<int>(prefix), config);
+  if (written <= 0 || static_cast<std::size_t>(written) >= size) {
+    out[0] = '\0';
+    return false;
+  }
+  return true;
 }
 
 // Read the persisted geometry. A missing or unreadable file keeps the
@@ -535,11 +769,11 @@ inline void load_geometry(const wire::Settings& settings) noexcept {
     return;
   }
   state.geometry_loaded = true;
-  const std::string path = geometry_path(settings);
-  if (path.empty()) {
+  char path[k_max_path] = {};
+  if (!geometry_path(settings, path, sizeof(path))) {
     return;
   }
-  std::FILE* const file = std::fopen(path.c_str(), "rb");
+  std::FILE* const file = std::fopen(path, "rb");
   if (file == nullptr) {
     return;
   }
@@ -558,12 +792,12 @@ inline void load_geometry(const wire::Settings& settings) noexcept {
 // Write the geometry. The file is a convenience, not a requirement: a failed
 // write is ignored.
 inline void save_geometry(const wire::Settings& settings) noexcept {
-  const std::string path = geometry_path(settings);
-  if (path.empty()) {
+  char path[k_max_path] = {};
+  if (!geometry_path(settings, path, sizeof(path))) {
     return;
   }
   const WindowGeometry& geometry = ui_state().geometry;
-  std::FILE* const file = std::fopen(path.c_str(), "wb");
+  std::FILE* const file = std::fopen(path, "wb");
   if (file == nullptr) {
     return;
   }
@@ -680,7 +914,7 @@ inline void draw_world(wire::Settings& settings) noexcept {
 }
 
 // The Ragebot page: the aim solver and its assists.
-inline void draw_ragebot(wire::Settings& settings) noexcept {
+inline void draw_ragebot(wire::Settings& settings, Renderer renderer) noexcept {
   toggle("Ragebot", settings.rage);
   // The trigger (`docs/ragebot.md`): hold the key, always on, or toggle it.
   static const char* const k_trigger_modes[] = {"Hold key", "Always on", "Toggle key"};
@@ -720,28 +954,23 @@ inline void draw_ragebot(wire::Settings& settings) noexcept {
   text_input("Weapon key", settings.rage_weapon, sizeof(settings.rage_weapon));
   control_row("Profile");
   if (button("Save", 58.0F)) {
-    settings.rage_config_op = 1;
-    ++settings.rage_config_token;
+    request_rage_config_op(settings, 1, renderer);
   }
   ImGui::SameLine();
   if (button("Load", 58.0F)) {
-    settings.rage_config_op = 2;
-    ++settings.rage_config_token;
+    request_rage_config_op(settings, 2, renderer);
   }
   ImGui::SameLine();
   if (button("Delete", 58.0F)) {
-    settings.rage_config_op = 5;
-    ++settings.rage_config_token;
+    request_rage_config_op(settings, 5, renderer);
   }
   control_row("File");
   if (button("Save file", 80.0F)) {
-    settings.rage_config_op = 3;
-    ++settings.rage_config_token;
+    request_rage_config_op(settings, 3, renderer);
   }
   ImGui::SameLine();
   if (button("Load file", 80.0F)) {
-    settings.rage_config_op = 4;
-    ++settings.rage_config_token;
+    request_rage_config_op(settings, 4, renderer);
   }
 }
 
@@ -752,7 +981,7 @@ inline void draw_movement(wire::Settings& settings) noexcept {
   static const char* const k_strafe_modes[] = {"Off", "Camera-relative", "Directional"};
   combo("Mode", settings.movement_strafe_mode, k_strafe_modes, 3);
   slider_float("Wish speed", settings.movement_strafe_wishspeed, 0.0F, 3200.0F, "%.0f u/s");
-  slider_int("Sub-ticks", settings.movement_strafe_subticks, 0, 255);
+  slider_int("Sub-ticks", settings.movement_strafe_subticks, 0, k_max_strafe_subticks);
   toggle("A/D stands down", settings.movement_strafe_ignore_keys);
 
   ImGui::SeparatorText("Bunnyhop");
@@ -783,7 +1012,7 @@ inline void draw_visuals(wire::Settings& settings) noexcept {
   color("Accent", settings.menu_accent);
   slider_int("Transparency", settings.menu_transparency, 0, 100);
   toggle("Debug HUD", settings.show_hud);
-  ImGui::TextDisabled("Insert also toggles the menu.");
+  ImGui::TextDisabled("Insert or Delete also toggles the menu.");
 }
 
 // The Config page: the settings file and its one-shot op protocol.
@@ -791,30 +1020,31 @@ inline void draw_visuals(wire::Settings& settings) noexcept {
 // The buttons only *ask*: the op code and the token travel in the settings
 // block and the payload carries the op out (ADR-0021), so the file is written
 // by the one owner of the configuration.
-inline void draw_config(wire::Settings& settings) noexcept {
-  const std::string& path = config_path(settings);
+//
+// `renderer` is the renderer that raised the op: the token carries it, so the
+// payload's op bookkeeping cannot mistake this renderer's op for the other
+// renderer's (the two edit different blocks).
+inline void draw_config(wire::Settings& settings, Renderer renderer) noexcept {
+  const char* const path = config_path(settings);
   ImGui::TextUnformatted("Settings file");
-  if (path.empty()) {
+  if (path[0] == '\0') {
     ImGui::TextDisabled("the payload has not published a path");
   } else {
-    ImGui::TextWrapped("%s", path.c_str());
+    ImGui::TextWrapped("%s", path);
   }
 
   ImGui::SeparatorText("Actions");
   control_row("File");
   if (button("Save", 58.0F)) {
-    settings.menu_config_op = 1;
-    ++settings.menu_config_token;
+    request_config_op(settings, 1, renderer);
   }
   ImGui::SameLine();
   if (button("Load", 58.0F)) {
-    settings.menu_config_op = 2;
-    ++settings.menu_config_token;
+    request_config_op(settings, 2, renderer);
   }
   ImGui::SameLine();
   if (button("Reset", 58.0F)) {
-    settings.menu_config_op = 3;
-    ++settings.menu_config_token;
+    request_config_op(settings, 3, renderer);
   }
   ImGui::TextDisabled("The payload writes the file; the menu only asks.");
 }
@@ -823,6 +1053,7 @@ inline void draw_config(wire::Settings& settings) noexcept {
 inline void draw_about(const char* renderer_label) noexcept {
   ImGui::TextUnformatted(k_product_name);
   ImGui::TextDisabled("build %s", k_build_info);
+  ImGui::TextDisabled("branch %s", k_build_branch);
   if (renderer_label != nullptr) {
     ImGui::TextDisabled("renderer: %s", renderer_label);
   }
@@ -840,8 +1071,10 @@ inline void draw_about(const char* renderer_label) noexcept {
 // the footer.
 //
 // `renderer_label` names the renderer that draws the menu (the About page
-// shows it); it may be null.
-inline void draw_pages(wire::Settings& settings, const char* renderer_label = nullptr) noexcept {
+// shows it); it may be null. `renderer` is that renderer's identity: the
+// config op's token carries it.
+inline void draw_pages(wire::Settings& settings, const char* renderer_label = nullptr,
+                       Renderer renderer = Renderer::payload) noexcept {
   UiState& state = ui_state();
   if (state.section < 0 || state.section >= k_section_count) {
     state.section = 0;
@@ -893,7 +1126,7 @@ inline void draw_pages(wire::Settings& settings, const char* renderer_label = nu
         draw_world(settings);
         break;
       case Section::ragebot:
-        draw_ragebot(settings);
+        draw_ragebot(settings, renderer);
         break;
       case Section::movement:
         draw_movement(settings);
@@ -902,7 +1135,7 @@ inline void draw_pages(wire::Settings& settings, const char* renderer_label = nu
         draw_visuals(settings);
         break;
       case Section::config:
-        draw_config(settings);
+        draw_config(settings, renderer);
         break;
       case Section::about:
         draw_about(renderer_label);
@@ -919,8 +1152,8 @@ inline void draw_pages(wire::Settings& settings, const char* renderer_label = nu
 // Draw the whole menu: the window around the content.
 //
 // Returns false when the user closed the window with its close button.
-[[nodiscard]] inline auto draw_menu(wire::Settings& settings,
-                                    const char* renderer_label = nullptr) noexcept -> bool {
+[[nodiscard]] inline auto draw_menu(wire::Settings& settings, const char* renderer_label = nullptr,
+                                    Renderer renderer = Renderer::payload) noexcept -> bool {
   UiState& state = ui_state();
   load_geometry(settings);
 
@@ -931,7 +1164,19 @@ inline void draw_pages(wire::Settings& settings, const char* renderer_label = nu
     ImGui::SetNextWindowSize(ImVec2(state.geometry.width, state.geometry.height), ImGuiCond_Always);
     state.geometry_applied = true;
   }
-  ImGui::SetNextWindowSizeConstraints(ImVec2(k_min_width, k_min_height), ImVec2(0.0F, 0.0F));
+  // The window is at least the minimum and at most the screen.
+  //
+  // Dear ImGui reads the second argument as a **real** maximum
+  // (`ImClamp(size, min, max)` in `imgui.cpp`), so "no maximum" is `FLT_MAX`:
+  // a zero maximum clamps the window to `ImClamp(size, 520, 0) == 0` and then
+  // to ImGui's 32x32 floor, which hides the whole menu.
+  // The window is at least the minimum and at most the screen.
+  //
+  // Dear ImGui reads the second argument as a **real** maximum
+  // (`ImClamp(size, min, max)` in `imgui.cpp`), so "no maximum" is `FLT_MAX`:
+  // a zero maximum clamps the window to `ImClamp(size, 520, 0) == 0` and then
+  // to ImGui's 32x32 floor, which hides the whole menu.
+  ImGui::SetNextWindowSizeConstraints(ImVec2(k_min_width, k_min_height), ImVec2(FLT_MAX, FLT_MAX));
 
   // The accent and the transparency are the menu's own settings.
   const ImVec4 accent = ImVec4(static_cast<float>(settings.menu_accent[0]) / 255.0F,
@@ -948,7 +1193,7 @@ inline void draw_pages(wire::Settings& settings, const char* renderer_label = nu
   ImGui::PushStyleColor(ImGuiCol_SliderGrab, accent);
   ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, accent);
   if (ImGui::Begin(k_window_title, &open, ImGuiWindowFlags_NoSavedSettings)) {
-    draw_pages(settings, renderer_label);
+    draw_pages(settings, renderer_label, renderer);
     // The window's geometry follows the window (the user may have moved or
     // resized it).
     const ImVec2 size = ImGui::GetWindowSize();

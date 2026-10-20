@@ -110,7 +110,7 @@ struct StrafePlan {
   bool decisive{false};  // false when the dead zone kept the previous side
 };
 
-//: Shortest signed difference `a - b` in degrees, in `(-180, 180]`.
+//: Shortest signed difference `a - b` in degrees, in `[-180, 180)`.
 [[nodiscard]] inline auto normalize_angle(float value) noexcept -> float {
   auto wrapped = std::fmod(value + 180.0F, 360.0F);
   if (wrapped < 0.0F) {
@@ -193,6 +193,12 @@ struct StrafePlan {
                     k_strafe_max_theta_deg);
 }
 
+// The wish heading for a side: the velocity's heading plus the side's
+// `theta*`.
+[[nodiscard]] inline auto wish_for(float vel_yaw, int side, float theta) noexcept -> float {
+  return normalize_angle(vel_yaw + static_cast<float>(side) * theta);
+}
+
 // The whole decision for one tick.
 //
 // The wish is pushed **perpendicular** to the velocity, on the side that turns
@@ -222,7 +228,33 @@ struct StrafePlan {
     result.decisive = false;
   }
   result.theta = optimal_theta(speed, accel_per_tick, cap);
-  result.wish_yaw = normalize_angle(vel_yaw + static_cast<float>(result.side) * result.theta);
+  result.wish_yaw = wish_for(vel_yaw, result.side, result.theta);
+  return result;
+}
+
+// The **legacy** decision: the side follows the sign of the goal's offset from
+// the velocity heading, with **no** dead zone and **no** hysteresis.
+//
+// The pre-T3 code was unconditionally `side = (delta >= 0) ? +1 : -1`. The
+// dead zone and the hysteresis exist only for the new WASD goal (where `W`
+// alone puts the goal exactly on the velocity heading and the tie-break there
+// would flip the curve every tick); applying them in the legacy modes would
+// change the old behaviour, so the legacy path must not apply them.
+//
+// The legacy modes are the camera-relative goal and `strafe_ignore_keys` (the
+// spec: "`movement_strafe_ignore_keys == 1` must restore exactly the old
+// behaviour").
+[[nodiscard]] inline auto legacy_plan(const StrafeIntent& intent, float view_yaw, float vel_yaw,
+                                      float speed, float accel_per_tick, float cap) noexcept
+    -> StrafePlan {
+  StrafePlan result{};
+  result.goal_yaw = goal_for(intent, view_yaw);
+  const float delta = normalize_angle(result.goal_yaw - vel_yaw);
+  result.side = delta >= 0.0F ? 1 : -1;
+  // The legacy rule always decides: there is no dead zone to hold the side.
+  result.decisive = true;
+  result.theta = optimal_theta(speed, accel_per_tick, cap);
+  result.wish_yaw = wish_for(vel_yaw, result.side, result.theta);
   return result;
 }
 

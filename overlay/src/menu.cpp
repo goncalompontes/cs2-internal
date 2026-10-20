@@ -200,20 +200,17 @@ LRESULT CALLBACK hooked_wndproc(HWND window, UINT message, WPARAM wparam, LPARAM
       break;
     }
     case WM_KEYDOWN:
-    case WM_SYSKEYDOWN: {
-      const auto key = static_cast<std::uint8_t>(wparam);
+    case WM_SYSKEYDOWN:
       // A keybind capture owns the keyboard while it is armed: the key is
-      // consumed here, so it never reaches the game.
-      if (capture_key(key)) {
-        break;
-      }
-      // The menu's text fields and its keyboard navigation need the key.
-      feed_key(io, key, true);
+      // consumed here, so it never reaches the game — and it never reaches
+      // ImGui either, or the text field the user is editing would see a key
+      // the game never got. The menu's text fields and its keyboard
+      // navigation need the keys the capture did not take.
+      (void)feed_key_down(io, static_cast<std::uint8_t>(wparam));
       break;
-    }
     case WM_KEYUP:
     case WM_SYSKEYUP:
-      feed_key(io, static_cast<std::uint8_t>(wparam), false);
+      feed_key_up(io, static_cast<std::uint8_t>(wparam));
       break;
     case WM_CHAR:
       feed_character(io, static_cast<std::uint16_t>(lparam));
@@ -283,11 +280,13 @@ void poll_toggle(bool in_game, const wire::Settings& settings) {
     }
   }
   // The toggle key is the menu's own setting (`wire::Settings::menu_key`).
-  // Insert stays a second toggle key, because many keyboards need Fn for it.
+  // Insert and Delete stay toggle keys as well, because many keyboards need
+  // Fn for Insert — and the pre-T2 menu polled both.
   const int key = settings.menu_key != 0 ? static_cast<int>(settings.menu_key) : VK_INSERT;
   const bool key_down = (GetAsyncKeyState(key) & 0x8000) != 0;
   const bool insert_down = key != VK_INSERT && (GetAsyncKeyState(VK_INSERT) & 0x8000) != 0;
-  const bool down = key_down || insert_down;
+  const bool delete_down = key != VK_DELETE && (GetAsyncKeyState(VK_DELETE) & 0x8000) != 0;
+  const bool down = key_down || insert_down || delete_down;
   // A keybind capture owns the keyboard while it is armed, and for the frame in
   // which it took a key: the menu must not toggle at the same time (the
   // capture's key press would otherwise close the menu behind the user's back).
@@ -337,7 +336,7 @@ void frame(wire::Settings& settings, bool in_game) noexcept {
     // The pages, the widgets and the keybind capture are shared with the
     // payload's in-process menu (`cs2/overlay/menu_pages.hpp`); this file only
     // owns the window plumbing.
-    if (!draw_menu(settings, "Vulkan implicit layer")) {
+    if (!draw_menu(settings, "Vulkan implicit layer", Renderer::layer)) {
       set_menu_open(false);
     }
   }
