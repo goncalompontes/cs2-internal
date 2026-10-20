@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from .. import awaiting
+from ..protocol import PlayerSnapshotDict
 from ..session import Game, SessionError
 
 # The proxy head box sits at z in [64, 72] above the feet; the damage optimum is
@@ -25,11 +26,11 @@ YAW_TOLERANCE = 4.0
 PITCH_TOLERANCE = 6.0
 
 
-def _yaw_to(eye: dict[str, float], point: dict[str, float]) -> float:
+def _yaw_to(eye: Mapping[str, Any], point: Mapping[str, Any]) -> float:
     return math.degrees(math.atan2(point["y"] - eye["y"], point["x"] - eye["x"]))
 
 
-def _pitch_to(eye: dict[str, float], point: dict[str, float]) -> float:
+def _pitch_to(eye: Mapping[str, Any], point: Mapping[str, Any]) -> float:
     dx = point["x"] - eye["x"]
     dy = point["y"] - eye["y"]
     dz = point["z"] - eye["z"]
@@ -57,7 +58,9 @@ def _add_bot(game: Game, command: str, expected: int, timeout: float = 25.0) -> 
     raise SessionError(f"{command!r} did not raise the player count to {expected}")
 
 
-def _find_enemy(game: Game) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+def _find_enemy(game: Game) -> tuple[PlayerSnapshotDict | None,
+                                    PlayerSnapshotDict | None]:
+    """The first living enemy and the local player (the wire shapes)."""
     local = game.local()
     if local is None:
         return None, None
@@ -89,7 +92,7 @@ def run(game: Game, *, map_name: str = "de_dust2", bots: int = 2,
         if enemy is not None:
             break
         time.sleep(0.5)
-    if enemy is None:
+    if enemy is None or local is None:
         raise SessionError(f"no live enemy bot; players={game.players()}")
 
     # Face the enemy (yaw), level pitch, so it is in front of the eye.
@@ -102,6 +105,8 @@ def run(game: Game, *, map_name: str = "de_dust2", bots: int = 2,
 
     # The expected direction to the enemy's head, from the *current* eye.
     local = game.local()
+    if local is None:
+        raise SessionError("the local player vanished")
     eye = local["eye_origin"]
     head = {"x": enemy["origin"]["x"], "y": enemy["origin"]["y"],
             "z": enemy["origin"]["z"] + HEAD_UNITS}

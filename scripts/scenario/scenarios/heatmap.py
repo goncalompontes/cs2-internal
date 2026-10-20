@@ -14,25 +14,28 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from .. import awaiting
 from ..heatmap import render
+from ..protocol import PlayerSnapshotDict
 from ..session import REPO_ROOT, Game, SessionError
 
 
-def _yaw_to(eye: dict[str, float], point: dict[str, float]) -> float:
+def _yaw_to(eye: Mapping[str, Any], point: Mapping[str, Any]) -> float:
     return math.degrees(math.atan2(point["y"] - eye["y"], point["x"] - eye["x"]))
 
 
-def _pitch_to(eye: dict[str, float], point: dict[str, float]) -> float:
+def _pitch_to(eye: Mapping[str, Any], point: Mapping[str, Any]) -> float:
     dx = point["x"] - eye["x"]
     dy = point["y"] - eye["y"]
     dz = point["z"] - eye["z"]
     return -math.degrees(math.atan2(dz, math.hypot(dx, dy)))
 
 
-def _nearest_enemy(game: Game) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+def _nearest_enemy(game: Game) -> tuple[PlayerSnapshotDict | None,
+                                       PlayerSnapshotDict | None]:
+    """The nearest living enemy and the local player (the wire shapes)."""
     local = game.local()
     if local is None:
         return None, None

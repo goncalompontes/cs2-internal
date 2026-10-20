@@ -27,7 +27,10 @@ def run(game: Game, *, yaw: float = YAW, pitch: float = PITCH,
     awaiting.ensure_live_round(game, map_name=map_name)
 
     applied = game.look(yaw=yaw, pitch=pitch)
-    angles = game.local()["eye_angles"]
+    local = game.local()
+    if local is None:
+        raise SessionError("no local player")
+    angles = local["eye_angles"]
     if abs(angles["yaw"] - applied["yaw"]) > 1.5 or abs(angles["pitch"] - applied["pitch"]) > 1.5:
         raise SessionError(f"look did not apply: wanted {applied}, got {angles}")
 

@@ -32,7 +32,9 @@ from ..session import Game, SessionError
 
 def _float_of(word: str) -> float:
     """Decode a hex qword from the payload's probe as a little-endian float."""
-    return struct.unpack("<f", struct.pack("<I", int(word, 16) & 0xFFFFFFFF))[0]
+    packed = struct.pack("<I", int(word, 16) & 0xFFFFFFFF)
+    (value,) = struct.unpack("<f", packed)
+    return float(value)
 
 
 def run(game: Game, *, x: float, y: float, z: float | None = None,
@@ -48,7 +50,9 @@ def run(game: Game, *, x: float, y: float, z: float | None = None,
     next_log = start
     try:
         while True:
-            local = game.local() or {}
+            local = game.local()
+            if local is None:
+                raise SessionError(f"no local player: {awaiting.round_state(game)}")
             origin = local.get("origin")
             angles = local.get("eye_angles")
             if origin is None or angles is None:

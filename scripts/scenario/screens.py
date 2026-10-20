@@ -134,6 +134,7 @@ from .protocol import (
     PlayerSnapshotDict,
     RulesSnapshotDict,
     StateSnapshotDict,
+    Vec3Dict,
 )
 from .session import Game, SessionError
 
@@ -333,11 +334,13 @@ class GameState:
 
     @property
     def level(self) -> LevelSnapshotDict:
-        return self.raw.get("level") or {}
+        """The level probe block (the payload always writes it)."""
+        return self.raw["level"]
 
     @property
     def rules(self) -> RulesSnapshotDict:
-        return self.raw.get("rules") or {}
+        """The round rules block (the payload always writes it)."""
+        return self.raw["rules"]
 
     @property
     def local(self) -> PlayerSnapshotDict | None:
@@ -346,23 +349,28 @@ class GameState:
 
     @property
     def team(self) -> int:
-        return int((self.local or {}).get("team") or 0)
+        local = self.local
+        return int(local.get("team") or 0) if local else 0
 
     @property
     def alive(self) -> bool:
-        return bool((self.local or {}).get("alive"))
+        local = self.local
+        return bool(local.get("alive")) if local else False
 
     @property
     def life_state(self) -> int:
-        return int((self.local or {}).get("life_state") or 0)
+        local = self.local
+        return int(local.get("life_state") or 0) if local else 0
 
     @property
     def on_ground(self) -> bool:
-        return bool((self.local or {}).get("on_ground"))
+        local = self.local
+        return bool(local.get("on_ground")) if local else False
 
     @property
-    def origin(self) -> dict[str, float] | None:
-        return (self.local or {}).get("origin")
+    def origin(self) -> Vec3Dict | None:
+        local = self.local
+        return local.get("origin") if local else None
 
     @property
     def players(self) -> int:
@@ -371,8 +379,9 @@ class GameState:
     @property
     def in_real_map(self) -> bool:
         """A real level with the local player spawned in it."""
-        origin = self.origin or {}
-        nonzero = any(origin.get(axis, 0.0) for axis in ("x", "y", "z"))
+        origin = self.origin
+        nonzero = (any(origin.get(axis, 0.0) for axis in ("x", "y", "z"))
+                   if origin else False)
         return bool(self.in_game and (nonzero or self.team in (T, CT)))
 
     @property
@@ -395,17 +404,20 @@ class GameState:
     @property
     def defusing(self) -> bool:
         """Whether the local player is defusing the bomb."""
-        return bool((self.local or {}).get("defusing"))
+        local = self.local
+        return bool(local.get("defusing")) if local else False
 
     @property
     def has_bomb(self) -> bool:
         """Whether the local player carries the C4."""
-        return bool((self.local or {}).get("has_bomb"))
+        local = self.local
+        return bool(local.get("has_bomb")) if local else False
 
     @property
     def defuser(self) -> bool:
         """Whether the local player carries a defuser."""
-        return bool((self.local or {}).get("defuser"))
+        local = self.local
+        return bool(local.get("defuser")) if local else False
 
     @property
     def game_phase(self) -> int:
@@ -576,7 +588,7 @@ class GameState:
         }
 
 
-def _buy_window_open(rules: dict[str, Any], team: int) -> bool:
+def _buy_window_open(rules: RulesSnapshotDict, team: int) -> bool:
     """Whether ``team``'s buy window is still open (rules-driven).
 
     The buy window is per team: ``m_bTCantBuy`` / ``m_bCTCantBuy`` close one
@@ -589,26 +601,28 @@ def _buy_window_open(rules: dict[str, Any], team: int) -> bool:
     return False
 
 
-def _level_settled_up(raw: dict[str, Any]) -> bool:
+def _level_settled_up(raw: StateSnapshotDict) -> bool:
     """Whether the *strong* level signals say a level is up.
 
     The weak signal — "a game event happened" — is deliberately left out: it
     stays true after the level is gone (the event ring keeps the last 64
     events), so it cannot tell "a level is up" from "a level *was* up".
     """
-    local = raw.get("local") or {}
-    origin = local.get("origin") or {}
-    if any(origin.get(axis, 0.0) for axis in ("x", "y", "z")):
-        return True
-    if int(local.get("team") or 0) in (T, CT):
-        return True
-    rules = raw.get("rules") or {}
+    local = raw.get("local")
+    if local:
+        origin = local.get("origin")
+        if origin is not None and any(origin.get(axis, 0.0)
+                                      for axis in ("x", "y", "z")):
+            return True
+        if int(local.get("team") or 0) in (T, CT):
+            return True
+    rules = raw["rules"]
     return bool(rules.get("match_started")
                 or float(rules.get("game_start_time") or 0.0) > 0.0
                 or int(rules.get("total_rounds_played") or 0) > 0)
 
 
-def _level_up(raw: dict[str, Any], events: Iterable[str] = ()) -> bool:
+def _level_up(raw: StateSnapshotDict, events: Iterable[str] = ()) -> bool:
     """Whether a level is up — **the main-screen rule** (measured 2026-10-15).
 
     Everything that looks like a level signal fails at the main menu, so the rule
@@ -642,7 +656,7 @@ def _level_up(raw: dict[str, Any], events: Iterable[str] = ()) -> bool:
     `CBasePlayerController::m_iConnected` is 0 on this build even in-game. See
     `docs/re/client-dll.md` §"Am I in a game?".
     """
-    local = raw.get("local") or {}
+    local = raw.get("local")
     if not raw.get("valid") or not local:
         return False
     if _level_settled_up(raw):
@@ -680,7 +694,7 @@ def _disconnected(events: tuple[str, ...]) -> bool:
 
 
 # --- deduction ------------------------------------------------------------
-def deduce(raw: StateSnapshotDict, events: Iterable[str] = (),
+def deduce(raw: StateSnapshotDict, events: Iterable[str | None] = (),
            *, loading: bool = False) -> GameState:
     """Reduce a payload ``state`` snapshot to a :class:`GameState`.
 
@@ -707,8 +721,11 @@ def deduce(raw: StateSnapshotDict, events: Iterable[str] = (),
     ``loading`` is the machine's own knowledge: it is set while the machine
     waits for a map it asked for, which is the only way to tell "a level is
     loading" from "the client is at the main menu" (both look like no level).
+
+    ``events`` may carry ``None`` for an event without a name: the names that
+    are missing cannot name a screen, so they are dropped here.
     """
-    event_names = tuple(events)  # oldest -> newest (the payload's order)
+    event_names = tuple(name for name in events if name is not None)
 
     if loading and not _level_up(raw, event_names):
         # A map load is in flight: the teardown cleared the local state, so the
@@ -733,15 +750,18 @@ def deduce(raw: StateSnapshotDict, events: Iterable[str] = (),
                          ("no readable local state — engine booting or level "
                           "teardown; do not exec",))
 
+    local = raw.get("local")
     if not _level_up(raw, event_names):
         notes = ["main screen (no level)"]
-        if raw.get("rules", {}).get("loaded"):
+        if raw["rules"].get("loaded"):
             notes.append("game_rules global readable — the menu object, not a level")
-        if (raw.get("level") or {}).get("up"):
+        level = raw.get("level")
+        if level is not None and level.get("up"):
             notes.append("rules-proxy entity exists — the menu world has one too")
-        local = raw.get("local") or {}
         if local:
-            notes.append(f"local placeholder (origin {(local.get('origin') or {}).get('x', 0):.0f},"
+            origin = local.get("origin")
+            x = origin.get("x", 0) if origin else 0
+            notes.append(f"local placeholder (origin {x:.0f},"
                          f" team {local.get('team')}, weapon '{local.get('weapon')}')")
         return GameState(Screen.NOT_IN_GAME, raw, event_names, tuple(notes))
 
@@ -752,16 +772,15 @@ def deduce(raw: StateSnapshotDict, events: Iterable[str] = (),
         return GameState(Screen.DISCONNECTED, raw, event_names,
                          ("the client lost the server",))
 
-    team = int((raw.get("local") or {}).get("team") or 0)
+    team = int(local.get("team") or 0) if local else NO_TEAM
     if team == NO_TEAM:
         return GameState(Screen.TEAM_SELECT, raw, event_names,
                          ("level up, no team yet",))
     if team == SPECTATOR_TEAM:
         return GameState(Screen.SPECTATOR, raw, event_names, ("team=1",))
 
-    rules = raw.get("rules") or {}
-    local = raw.get("local") or {}
-    alive = bool(local.get("alive"))
+    rules = raw["rules"]
+    alive = bool(local.get("alive")) if local else False
     warmup = bool(rules.get("warmup"))
     freeze = bool(rules.get("freeze"))
     win_status = int(rules.get("round_win_status") or 0)
@@ -771,7 +790,7 @@ def deduce(raw: StateSnapshotDict, events: Iterable[str] = (),
         return GameState(Screen.WARMUP, raw, event_names, ("warmup period",))
     if not alive:
         return GameState(Screen.DEAD, raw, event_names,
-                         (f"life_state={local.get('life_state')}",))
+                         (f"life_state={local.get('life_state') if local else 0}",))
     if freeze:
         return GameState(Screen.FREEZE, raw, event_names, ("freeze period",))
     if phase == GAME_PHASE_HALF_TIME:
@@ -793,11 +812,11 @@ def deduce(raw: StateSnapshotDict, events: Iterable[str] = (),
         return GameState(Screen.ROUND_END, raw, event_names,
                          (f"winner set (m_iRoundWinStatus={win_status})"
                           if win_status != 0 else "round_end event",))
-    if bool(local.get("defusing")):
+    defusing = bool(local.get("defusing")) if local else False
+    if defusing:
         return GameState(Screen.DEFUSING, raw, event_names, ("the local player is defusing",))
     if bool(rules.get("bomb_planted")):
         return GameState(Screen.PLANTED, raw, event_names, ("the bomb is planted",))
-    team = int(local.get("team") or 0)
     if _buy_window_open(rules, team):
         return GameState(Screen.BUY_TIME, raw, event_names,
                          ("the buy window is still open",))

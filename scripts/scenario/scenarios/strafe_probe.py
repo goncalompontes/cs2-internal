@@ -69,7 +69,7 @@ def _reset_camera(game: Game, yaw: float) -> dict[str, Any]:
     return {"eye_yaw": eye, "on_reference": delta < 2.0}
 
 
-def _walk(game: Game, home: dict[str, float], *, hold: float,
+def _walk(game: Game, home: dict[str, float] | None, *, hold: float,
           spin: float | None = None, console: bool = False,
           command: bool = False) -> dict[str, Any]:
     """One measured walk from the pinned spot; returns displacement + direction."""
@@ -133,8 +133,11 @@ def run(game: Game, *, map_name: str = "de_dust2", hold: float = HOLD,
     awaiting.ensure_live_round(game, map_name=map_name, verify_movable=False)
     game.exec(f"sv_subtick_movement_view_angles {1 if subtick_angles else 0}")
 
+    home: dict[str, float] | None
     if x is not None and y is not None:
-        home = {"x": float(x), "y": float(y), "z": z}
+        home = {"x": float(x), "y": float(y)}
+        if z is not None:
+            home["z"] = z
         awaiting.recenter(game, home)
     else:
         home = awaiting.origin(game)
@@ -188,13 +191,14 @@ def run(game: Game, *, map_name: str = "de_dust2", hold: float = HOLD,
         game.move(clear=True)
         game.exec("sv_subtick_movement_view_angles 1")
 
-    straight = (cases.get("usercmd") or {}).get("dir_yaw")
+    straight: float | None = (cases.get("usercmd") or {}).get("dir_yaw")
 
     def _turn(name: str) -> float | None:
         case = cases.get(name) or {}
-        if case.get("dir_yaw") is None or straight is None:
+        turn: float | None = case.get("dir_yaw")
+        if turn is None or straight is None:
             return None
-        return round(abs((case["dir_yaw"] - straight + 180.0) % 360.0 - 180.0), 1)
+        return round(abs((turn - straight + 180.0) % 360.0 - 180.0), 1)
 
     def _silent(name: str) -> bool | None:
         """Turned the walk *without* turning the pawn's eye angles.

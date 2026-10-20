@@ -167,8 +167,8 @@ def deduce_raw(raw: Mapping[str, Any], events: Iterable[str] = (),
 def drop(raw: StateSnapshotDict, block: str, key: str) -> None:
     """Remove a key from one block of a snapshot, in place.
 
-    The *pending* fields (the ones the payload does not send yet) are not part
-    of the wire contract, so they cannot be removed through the typed shape —
+    The *pending* fields (the ones the payload does not send yet) are optional
+    in the wire contract, so they cannot be removed through the typed shape —
     at runtime the block is a plain dict.
     """
     cast(dict[str, Any], raw)[block].pop(key, None)

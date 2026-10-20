@@ -46,6 +46,11 @@ files = ["scripts/scenario"]
 # type is checked, `Any` is not allowed to leak silently and equality is
 # checked strictly. It is green today (see `scripts/typecheck.py`), so it is
 # the configuration — not a weaker approximation of it.
+#
+# The **whole** package is checked under it: no module is exempted from a
+# check. A module that cannot satisfy the checker is fixed, not relaxed —
+# the only override left below is for a third-party package that ships no
+# type information at all.
 strict = true
 # The report names the file, the line and the error code: the gate's output is
 # read by humans and by CI alike.
@@ -64,71 +69,3 @@ warn_unreachable = true
 [[tool.mypy.overrides]]
 module = ["mcp.*"]
 ignore_missing_imports = true
-
-# --- the modules that pre-date the gate ------------------------------------
-# The typing gate landed after these modules were written, and they carry a
-# number of pre-existing errors that the gate must not hide *and* must not
-# block on: they are outside the gate's ownership, so the exact error codes
-# they trip are relaxed here — and **only** those codes. Every other check
-# (`union-attr`, `index`, `assignment`, `attr-defined`, `no-untyped-def`,
-# ...) stays live for these modules, so a *new* defect is still caught.
-#
-# The residual list (file, count, codes) is in the S6 report; each entry below
-# names the module and the codes it trips today.
-
-# `screens.py` reads the raw snapshot defensively (`raw.get(...) or {}`): the
-# payload always writes the whole block, but the module tolerates a partial
-# one, and the `TypedDict` cannot express "present or absent".
-[[tool.mypy.overrides]]
-module = ["scenario.screens"]
-disable_error_code = ["arg-type", "call-overload", "no-any-return",
-                      "return-value", "var-annotated"]
-
-# `session.py`'s façade takes the backend as a plain `str` (the caller's
-# convenience) and hands it to the typed `Control`; its `players()`/`local()`
-# still advertise the old `dict[str, Any]` shape.
-[[tool.mypy.overrides]]
-module = ["scenario.session"]
-disable_error_code = ["arg-type", "no-any-return", "return-value"]
-
-# `awaiting.py` reads the same defensive snapshot shapes as `screens.py`.
-[[tool.mypy.overrides]]
-module = ["scenario.awaiting"]
-disable_error_code = ["arg-type", "assignment", "index", "return-value",
-                      "var-annotated"]
-
-# `protocol.py`'s validator walks the `TypedDict` shapes reflectively (the
-# required-key computation needs `__required_keys__`, which is not on
-# `type`).
-[[tool.mypy.overrides]]
-module = ["scenario.protocol"]
-disable_error_code = ["arg-type", "attr-defined"]
-
-# `heatmap.py` renders into a `bytearray` and reuses a few names for
-# different shapes (a pixel triple and a chart coordinate).
-[[tool.mypy.overrides]]
-module = ["scenario.heatmap"]
-disable_error_code = ["assignment", "index"]
-
-# The MCP bridge projects the wire types onto JSON Schema by reflection.
-[[tool.mypy.overrides]]
-module = ["scenario.mcp.schema"]
-disable_error_code = ["arg-type"]
-
-# The MCP server duplicates the real stdout for the protocol and reconfigures
-# it — `TextIO` does not declare `reconfigure`.
-[[tool.mypy.overrides]]
-module = ["scenario.mcp.server"]
-disable_error_code = ["attr-defined"]
-
-# The MCP tool catalogue dispatches through a dynamic table.
-[[tool.mypy.overrides]]
-module = ["scenario.mcp.tools"]
-disable_error_code = ["operator"]
-
-# The scenarios read the raw snapshot (they are the "live" half of the
-# package, where the defensive shapes of the snapshot are the point).
-[[tool.mypy.overrides]]
-module = ["scenario.scenarios.*"]
-disable_error_code = ["arg-type", "assignment", "call-overload", "index",
-                      "no-any-return"]

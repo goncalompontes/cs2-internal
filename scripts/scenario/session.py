@@ -23,11 +23,13 @@ from .protocol import (
     EventsResult,
     ExecResult,
     HeatmapResult,
+    InputBackend,
     InputStatus,
     LookResult,
     MoveResult,
     NoclipResult,
     PingResult,
+    PlayerSnapshotDict,
     PressResult,
     RageResult,
     ReleaseResult,
@@ -76,9 +78,10 @@ def process_manifest(process: str = PLAYER_PROCESS) -> dict[str, Any] | None:
     if result.returncode != 0:
         return None
     try:
-        return json.loads(result.stdout)
+        manifest: dict[str, Any] = json.loads(result.stdout)
     except json.JSONDecodeError as error:
         raise SessionError(f"bad dumper manifest: {error}") from error
+    return manifest
 
 
 def wait_for_process(timeout: float = 180.0, interval: float = 1.0) -> dict[str, Any]:
@@ -207,13 +210,13 @@ class Game:
         return self.control.events(limit=limit, subscribe=subscribe)
 
     def press(self, key: str, hold: float = 0.0,
-              via: str | None = None) -> PressResult:
+              via: InputBackend | None = None) -> PressResult:
         return self.control.press(key, hold=hold, via=via)
 
-    def release(self, key: str, via: str | None = None) -> ReleaseResult:
+    def release(self, key: str, via: InputBackend | None = None) -> ReleaseResult:
         return self.control.release(key, via=via)
 
-    def input(self, via: str | None = None) -> InputStatus:
+    def input(self, via: InputBackend | None = None) -> InputStatus:
         """Select/query the input backend (``"console"`` / ``"usercmd"``)."""
         return self.control.input(via=via)
 
@@ -232,7 +235,7 @@ class Game:
         return self.control.strafe(on, wishspeed=wishspeed, subtick=subtick)
 
     def look(self, *, yaw: float | None = None, pitch: float | None = None,
-             roll: float | None = None, via: str | None = None,
+             roll: float | None = None, via: InputBackend | None = None,
              command: bool = False, raw: bool = False,
              step_yaw: float | None = None) -> LookResult:
         return self.control.look(yaw=yaw, pitch=pitch, roll=roll, via=via,
@@ -267,10 +270,12 @@ class Game:
     def teleport(self, x: float, y: float, z: float | None = None) -> ExecResult:
         return self.control.teleport(x, y, z)
 
-    def players(self) -> list[dict[str, Any]]:
+    def players(self) -> list[PlayerSnapshotDict]:
+        """The snapshot's player blocks (the wire shape, not a plain dict)."""
         return self.state().get("players", [])
 
-    def local(self) -> dict[str, Any] | None:
+    def local(self) -> PlayerSnapshotDict | None:
+        """The local player block (``None`` when there is none)."""
         return self.state().get("local")
 
     # --- screen state machine (see `.screens`) ----------------------------
@@ -318,7 +323,7 @@ class Game:
 
         return ensure_map(self, map_name=map_name, timeout=timeout)
 
-    def ensure_live_round(self, **kwargs: Any) -> None:
+    def ensure_live_round(self, **kwargs: Any) -> "GameState":
         from .awaiting import ensure_live_round
 
         return ensure_live_round(self, **kwargs)

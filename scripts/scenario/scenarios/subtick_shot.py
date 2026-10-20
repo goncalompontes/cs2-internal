@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from .. import awaiting
+from ..protocol import PlayerSnapshotDict
 from ..session import Game, SessionError
 
 YAW_OFFSET = 45.0
@@ -29,7 +30,7 @@ HOLD_SECONDS = 0.8
 CAMERA_TOLERANCE = 2.0
 
 
-def _aim_angles(eye: dict[str, float], target: dict[str, float]) -> tuple[float, float]:
+def _aim_angles(eye: Mapping[str, Any], target: Mapping[str, Any]) -> tuple[float, float]:
     """Source-convention ``(pitch, yaw)`` from ``eye`` to ``target``."""
     dx = target["x"] - eye["x"]
     dy = target["y"] - eye["y"]
@@ -39,11 +40,11 @@ def _aim_angles(eye: dict[str, float], target: dict[str, float]) -> tuple[float,
     return pitch, yaw
 
 
-def _closest_enemy(game: Game, local: dict[str, Any]) -> dict[str, Any] | None:
+def _closest_enemy(game: Game, local: dict[str, Any]) -> PlayerSnapshotDict | None:
     eye = local.get("eye_origin")
     if eye is None:
         return None
-    best = None
+    best: PlayerSnapshotDict | None = None
     best_d = math.inf
     for player in game.players():
         if player.get("is_local") or not player.get("alive"):
@@ -77,7 +78,7 @@ def run(game: Game, *, yaw_offset: float = YAW_OFFSET, hold: float = HOLD_SECOND
     game.exec("bot_stop 1")
     game.exec("weapon_accuracy_nospread 1")
 
-    local = game.local() or {}
+    local = awaiting.local(game)
     if _closest_enemy(game, local) is None:  # no enemy bot yet -> add one
         # Friendly fire is off in a casual match, so the bot must be an enemy.
         game.exec("bot_add_t" if local.get("team") == 3 else "bot_add_ct")
@@ -87,7 +88,7 @@ def run(game: Game, *, yaw_offset: float = YAW_OFFSET, hold: float = HOLD_SECOND
 
     game.exec("bot_place")  # put a bot directly in front of the camera
 
-    local = game.local() or {}
+    local = awaiting.local(game)
     target = _closest_enemy(game, local)
     if target is None or local.get("eye_origin") is None:
         raise SessionError(f"no enemy bot to shoot at: {local}")
@@ -106,7 +107,7 @@ def run(game: Game, *, yaw_offset: float = YAW_OFFSET, hold: float = HOLD_SECOND
 
     # 1. Camera looks away from the bot.
     camera = game.look(yaw=yaw + yaw_offset, pitch=pitch)
-    camera_before = (game.local() or {}).get("eye_angles")
+    camera_before = awaiting.local(game).get("eye_angles")
 
     # 2. Silent aim back at the bot (sub-tick angles; the camera must not follow).
     game.look(yaw=yaw, pitch=pitch, via="usercmd")
@@ -121,7 +122,7 @@ def run(game: Game, *, yaw_offset: float = YAW_OFFSET, hold: float = HOLD_SECOND
     time.sleep(0.2)
 
     after = game.input()
-    camera_after = (game.local() or {}).get("eye_angles")
+    camera_after = awaiting.local(game).get("eye_angles")
     health_after = next(
         (p.get("health") for p in game.players() if p.get("name") == target.get("name")), None)
 

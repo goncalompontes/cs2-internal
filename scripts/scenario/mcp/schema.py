@@ -43,7 +43,7 @@ from __future__ import annotations
 import enum
 import types
 import typing
-from typing import Any, Literal, Mapping, get_args, get_origin, get_type_hints
+from typing import Any, Literal, Mapping, TypeGuard, get_args, get_origin, get_type_hints
 
 __all__ = [
     "MAX_EXPANSION_DEPTH",
@@ -73,8 +73,13 @@ def _hints(shape: type) -> dict[str, Any]:
     return cached
 
 
-def _is_typed_dict(hint: object) -> bool:
-    """Whether a hint is a ``TypedDict`` (the shape of one wire object)."""
+def _is_typed_dict(hint: object) -> TypeGuard[type]:
+    """Whether a hint is a ``TypedDict`` (the shape of one wire object).
+
+    The guard narrows the hint to a **class**, which is what the schema
+    builders need: they read the class attributes (the resolved annotations,
+    the required keys) that only a class has.
+    """
     return isinstance(hint, type) and hasattr(hint, "__required_keys__")
 
 

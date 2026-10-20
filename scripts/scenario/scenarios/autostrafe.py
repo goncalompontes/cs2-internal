@@ -86,8 +86,7 @@ def run(game: Game, *, watch: float = WATCH, min_gain: float = MIN_GAIN,
     # Phase 2: observe the feature while the player is in the air.
     deadline = time.monotonic() + watch
     while time.monotonic() < deadline:
-        state = game.state()
-        local = state.get("local") or {}
+        local = awaiting.local(game)
         velocity = local.get("velocity") or {}
         speeds.append(math.hypot(velocity.get("x", 0.0), velocity.get("y", 0.0)))
         if not local.get("on_ground", True):
