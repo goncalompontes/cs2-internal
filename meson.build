@@ -426,5 +426,56 @@ if get_option('sdk_gen')
   test('sdk-consumer', sdk_consumer)
 endif
 
+# --- The Python scenario suite ---------------------------------------------
+# The scenario library (`scripts/scenario`) is the Python half of the control
+# harness (ADR-0020) and it has its own test suite. The suite is pure logic --
+# no game, no payload, no network -- so it belongs to the same `meson test`
+# run as the C++ host tests, one test per suite (the shape the C++ side uses:
+# each suite is registered separately, so a failure names the area).
+#
+# A machine without Python (or without the optional MCP SDK) must not break
+# the build:
+#   * the interpreter is optional -- without it the suites are not registered
+#     at all, and the configure says so;
+#   * a suite that cannot import what it needs exits with the automake "skip"
+#     code (77), which Meson reports as SKIP rather than FAIL.
+python = find_program('python', 'python3', required : false)
+if python.found()
+  scenario_runner = meson.current_source_dir() / 'scripts' / 'scenario' / 'tests' / 'run_suite.py'
+  # [the test's name, the suite's module] -- one test per suite.
+  scenario_suites = [
+    ['protocol', 'test_protocol'],
+    ['screens', 'test_screens'],
+    ['state-machine', 'test_state_machine'],
+    ['state', 'test_state'],
+    ['control', 'test_control'],
+    ['awaiting', 'test_awaiting'],
+    ['session', 'test_session'],
+    ['settings', 'test_settings'],
+    ['heatmap', 'test_heatmap'],
+    ['registry', 'test_registry'],
+    ['mcp', 'test_mcp'],
+  ]
+  foreach suite : scenario_suites
+    test('scenario-' + suite[0], python,
+      args : [scenario_runner, suite[1]],
+      workdir : meson.current_source_dir(),
+      timeout : 300,
+    )
+  endforeach
+
+  # The type gate: mypy over the scenario package (`scripts/typecheck.py`).
+  # It exits non-zero on a type error, and with the "skip" code when the
+  # checker is not installed -- so it is a gate on a machine that has the
+  # dev dependencies and a no-op on a machine that has not.
+  test('scenario-typecheck', python,
+    args : [meson.current_source_dir() / 'scripts' / 'typecheck.py'],
+    workdir : meson.current_source_dir(),
+    timeout : 900,
+  )
+else
+  message('python not found: the scenario test suites are skipped')
+endif
+
 # Quick self-check so `meson test` is meaningful from day one.
 test('host-probe', host_probe)
