@@ -121,6 +121,33 @@ inline constexpr std::uintptr_t k_render_component_view_models = 0x50;
 // the game.
 thread_local int g_draw_depth = 0;
 
+// Is the draw hook's **target** verified?
+//
+// The address the hook patches was derived from an MSVC RTTI *lambda* type:
+// `DrawPrimitive@CAnimatableSceneObjectDesc@@QEAAXPEAVIRenderContext@@PEAUCMeshDrawPrimitive_t@@PEBVIMaterial2@@PEAVIMaterialMode@@AEAUDrawValues_t@@_NAEAUScSceneSystemPerFrameStats_t@@PEAVIScSceneLayer@@`.
+//
+// Decoded, that is a **member** function: `Q` public, `E` 64-bit, `A` __cdecl,
+// `A` near, `A` unqualified, `X` void, then `this` plus
+// `IRenderContext*`, `CMeshDrawPrimitive_t*`, `const IMaterial2*`,
+// `IMaterialMode*`, `DrawValues_t&`, `bool`, `SceneSystemPerFrameStats_t&`,
+// `ISceneLayer*`.
+//
+// But the type it came from is the type of a **lambda**, and a lambda's
+// `operator()` is **static**: it takes the eight arguments and has **no
+// `this`**. The detour below assumes the member function's shape, so patching
+// the lambda's `operator()` shifts the whole argument list by one: the callee
+// receives the material pointer where it expects the mesh pointer and
+// dereferences it. The live test produced exactly that - an access violation
+// (0xc0000005) on a read of a garbage address, with the fault inside the
+// renderer.
+//
+// So the target must be re-derived from the class's **own vtable**
+// (`CAnimatableSceneObjectDesc` at `scenesystem.dll + 0x5E5C90`, whose slot 1
+// holds the virtual that calls the draw) before the hook can be trusted. Until
+// then the chams are refused rather than crashing the game, and this constant
+// is the single switch that turns them back on.
+inline constexpr bool k_draw_hook_target_verified = false;
+
 void __fastcall draw_primitive_detour(void* desc, void* render_context, void* mesh_primitive,
                                       const void* material, const void* material_mode,
                                       void* draw_values, bool deferred, void* stats, void* layer) {
@@ -424,6 +451,28 @@ auto Chams::install() noexcept -> bool {
   // in the game, not in us). The hook is installed when the operator turns the
   // chams on, and removed when they turn them off.
   if (!enabled_.load(std::memory_order_relaxed)) {
+    return false;
+  }
+  // **The hook target is not verified.** The address came from an RTTI *lambda*
+  // type: `DrawPrimitive@CAnimatableSceneObjectDesc@@QEAAXPEAVIRenderContext@@…`. A
+  // lambda's `operator()` takes **eight** parameters and has **no `this`**, while
+  // the member function it mirrors takes the `this` plus the same eight. The
+  // detour below assumes the member function's shape, so patching the lambda's
+  // `operator()` shifts the whole argument list: the callee receives the
+  // material pointer where it expects the mesh pointer and dereferences it.
+  // That is exactly the access violation the live test produced (a read of a
+  // garbage address with the fault inside the renderer).
+  //
+  // So the hook is **refused** until the target is re-derived from the class's
+  // own vtable. The chams stay off and say so; the rest of the feature (the
+  // material, the colour, the decision) is ready for it.
+  if (!k_draw_hook_target_verified) {
+    install_failed_.store(true, std::memory_order_relaxed);
+    game::append_log(
+        "[cs2-features] chams: the draw hook is disabled - the target address "
+        "was taken from an RTTI lambda type and does not carry the member "
+        "function's 'this'; the target must be re-derived from the class's own "
+        "vtable before the chams can be hooked");
     return false;
   }
   const game::ModuleInfo scene = game::find_module("scenesystem.dll");
