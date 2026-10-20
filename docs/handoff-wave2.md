@@ -377,7 +377,7 @@ the bots hold still), joins a team and adds the bots.
   `git worktree remove <path>` (and `git branch -d <branch>`) when you want the
   space back. **Do not `worktree remove --force` one that still has a junction
   inside it** — see §4.1.
-- The host suite is **42/42**, the Python suite **389**, mypy **0 errors**.
+- The host suite is **42/42**, the Python suite **387**, mypy **0 errors**.
 - The payload, the overlay and the injector all build.
 
 ## 8. The one thing to do first
