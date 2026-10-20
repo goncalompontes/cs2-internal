@@ -299,6 +299,12 @@ def main(argv: list[str] | None = None) -> int:
 
     stream, diverted = _protocol_stream()
     _reconfigure(sys.stdin)
+    # The schema fallbacks are reported, never silently emitted: an operator
+    # has to know that a schema is looser than the model behind it.
+    problems: list[str] = []
+    tool_definitions(problems)
+    for problem in problems:
+        print(f"[cs2-mcp] schema fallback: {problem}", file=sys.stderr)
     server = Server()
     try:
         return serve(stream, sys.stdin, server)

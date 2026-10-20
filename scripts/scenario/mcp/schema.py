@@ -111,7 +111,7 @@ def schema_for(shape: type, *, problems: list[str] | None = None,
         raise TypeError(f"{shape!r} is not a TypedDict")
     if depth >= MAX_EXPANSION_DEPTH:
         # A recursive shape: say "an object" rather than expanding forever.
-        _report(problems, f"{shape.__name__}: the shape is recursive — expanded to "
+        _report(problems, f"{shape.__name__}: the shape is recursive - expanded to "
                           f"depth {MAX_EXPANSION_DEPTH}, the nested form is 'an object'")
         return {"type": "object"}
     hints = _hints(shape)
