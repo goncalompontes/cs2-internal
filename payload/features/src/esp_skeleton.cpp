@@ -29,7 +29,7 @@ using esp_skeleton::Segment;
 }
 
 [[nodiscard]] auto segment(const BonePoint& from, const BonePoint& to) noexcept -> Segment {
-  return Segment{from.x, from.y, from.z, to.x, to.y, to.z};
+  return Segment{.ax = from.x, .ay = from.y, .az = from.z, .bx = to.x, .by = to.y, .bz = to.z};
 }
 
 }  // namespace
@@ -287,8 +287,10 @@ void draw_skeleton(render::DrawList& out, const game::Matrix4x4& view, float wid
     });
   }
   for (const esp_skeleton::Segment& bone : esp_skeleton::build_chain(points)) {
-    const auto a = view.project(game::Vec3{bone.ax, bone.ay, bone.az}, width, height);
-    const auto b = view.project(game::Vec3{bone.bx, bone.by, bone.bz}, width, height);
+    const auto a =
+        view.project(game::Vec3{.x = bone.ax, .y = bone.ay, .z = bone.az}, width, height);
+    const auto b =
+        view.project(game::Vec3{.x = bone.bx, .y = bone.by, .z = bone.bz}, width, height);
     if (!a.has_value() || !b.has_value()) {
       continue;  // the segment is behind the camera
     }

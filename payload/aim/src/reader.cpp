@@ -378,7 +378,7 @@ auto read_solver_hitboxes(std::uintptr_t pawn, const WeaponProfile& weapon) -> s
     }
     Hitbox hitbox;
     hitbox.is_capsule = true;
-    hitbox.capsule = Capsule{box.world_a, box.world_b, box.radius};
+    hitbox.capsule = Capsule{.a = box.world_a, .b = box.world_b, .radius = box.radius};
     hitbox.group = box.group;
     hitbox.bone = box.bone;
     hitbox.multiplier = box.group == k_hitgroup_head ? weapon.headshot_multiplier : 1.0F;

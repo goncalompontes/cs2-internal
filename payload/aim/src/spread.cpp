@@ -161,8 +161,8 @@ auto pellet_offsets(std::int32_t random_seed, float spread, float inaccuracy, in
     if (pattern == SpreadPattern::revolver) {
       r1 = 1.0F - r1 * r1;
     }
-    offsets.push_back(Vec2{spread * r1 * std::cos(a1) + inaccuracy * r2 * std::cos(a2),
-                           spread * r1 * std::sin(a1) + inaccuracy * r2 * std::sin(a2)});
+    offsets.push_back(Vec2{.x = spread * r1 * std::cos(a1) + inaccuracy * r2 * std::cos(a2),
+                           .y = spread * r1 * std::sin(a1) + inaccuracy * r2 * std::sin(a2)});
   }
   return offsets;
 }

@@ -95,7 +95,10 @@ void test_ring_walk() {
     if (!fields.valid) {
       return true;
     }
-    found[count] = Found{fields.slot, fields.radius, entry.seq, entry.time_ms};
+    found[count] = Found{.slot = fields.slot,
+                         .radius = fields.radius,
+                         .sequence = entry.seq,
+                         .time_ms = entry.time_ms};
     ++count;
     return true;
   });
@@ -116,8 +119,8 @@ void test_ring_walk() {
 // slot; the snapshot keys its players by the entity index).
 void test_player_resolution() {
   const cs2::control::SoundPlayer players[] = {
-      {100, {1.0F, 2.0F, 3.0F}},
-      {200, {4.0F, 5.0F, 6.0F}},
+      {.index = 100, .origin = {.x = 1.0F, .y = 2.0F, .z = 3.0F}},
+      {.index = 200, .origin = {.x = 4.0F, .y = 5.0F, .z = 6.0F}},
   };
   // The rank: the slot is the player's rank in the snapshot's list.
   const auto* const ranked = cs2::control::resolve_sound_player(players, 2, 1);

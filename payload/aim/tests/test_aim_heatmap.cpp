@@ -27,8 +27,9 @@ auto near(float a, float b, float tolerance = 1e-2F) -> bool {
 auto head_capsule(float x, float z) -> cs2::aim::Hitbox {
   cs2::aim::Hitbox hitbox;
   hitbox.is_capsule = true;
-  hitbox.capsule = cs2::aim::Capsule{cs2::game::Vec3{x, 0.0F, z}, cs2::game::Vec3{x, 0.0F, z + 4.0F},
-                                     4.0F};
+  hitbox.capsule = cs2::aim::Capsule{.a = cs2::game::Vec3{.x = x, .y = 0.0F, .z = z},
+                                     .b = cs2::game::Vec3{.x = x, .y = 0.0F, .z = z + 4.0F},
+                                     .radius = 4.0F};
   hitbox.group = 1;
   hitbox.multiplier = 4.0F;
   return hitbox;
@@ -45,9 +46,9 @@ auto main() -> int {
   using cs2::aim::Vec3;
   using cs2::aim::WeaponProfile;
 
-  const Basis basis{.forward = Vec3{1.0F, 0.0F, 0.0F},
-                    .right = Vec3{0.0F, 1.0F, 0.0F},
-                    .up = Vec3{0.0F, 0.0F, 1.0F}};
+  const Basis basis{.forward = Vec3{.x = 1.0F, .y = 0.0F, .z = 0.0F},
+                    .right = Vec3{.x = 0.0F, .y = 1.0F, .z = 0.0F},
+                    .up = Vec3{.x = 0.0F, .y = 0.0F, .z = 1.0F}};
   const WeaponProfile weapon{.damage = 100.0F, .range_modifier = 0.98F};
 
   // --- one target, one pose ------------------------------------------------
@@ -151,7 +152,8 @@ auto main() -> int {
     HeatmapOptions options;
     options.weapon = weapon;
     // Keep only the half-plane u <= 0 — the wall hides the right half.
-    options.occluders.push_back(cs2::aim::Occluder{cs2::game::Vec2{1.0F, 0.0F}, 0.0F});
+    options.occluders.push_back(
+        cs2::aim::Occluder{.normal = cs2::game::Vec2{.x = 1.0F, .y = 0.0F}, .offset = 0.0F});
     const auto map = cs2::aim::build_heatmap(Vec3{}, basis, 1.0F, poses, options);
     for (const auto& cell : map.cells) {
       for (const auto& p : cell.polygon.points) {

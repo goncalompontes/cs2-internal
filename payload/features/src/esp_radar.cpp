@@ -24,10 +24,10 @@ constexpr RadarPosition k_radar_position = RadarPosition::bottom_left;
 
 // The radar's own colours. The player's dots use the enemy/team accent, so
 // they follow the settings.
-constexpr render::Color k_radar_background{0, 0, 0, 90};
-constexpr render::Color k_radar_ring{255, 255, 255, 80};
-constexpr render::Color k_radar_axis{255, 255, 255, 55};
-constexpr render::Color k_radar_self{255, 255, 255, 235};
+constexpr render::Color k_radar_background{.r = 0, .g = 0, .b = 0, .a = 90};
+constexpr render::Color k_radar_ring{.r = 255, .g = 255, .b = 255, .a = 80};
+constexpr render::Color k_radar_axis{.r = 255, .g = 255, .b = 255, .a = 55};
+constexpr render::Color k_radar_self{.r = 255, .g = 255, .b = 255, .a = 235};
 
 // The local player's marker: a small triangle pointing up (the view
 // direction).

@@ -202,8 +202,8 @@ void test_config_path_matches_the_store() {
     const char* value;
   };
   const Case cases[] = {
-      {"CS2_PAYLOAD_CONFIG", config.string().c_str()},
-      {"CS2_PAYLOAD_DIR", override_dir.string().c_str()},
+      {.variable = "CS2_PAYLOAD_CONFIG", .value = config.string().c_str()},
+      {.variable = "CS2_PAYLOAD_DIR", .value = override_dir.string().c_str()},
   };
   for (const Case& entry : cases) {
     // The published path is dropped, so the fallback is resolved.

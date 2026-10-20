@@ -235,7 +235,7 @@ struct MassGradient {
     scaled.points.clear();
     scaled.points.reserve(cell.polygon.points.size());
     for (const Vec2& p : cell.polygon.points) {
-      scaled.points.push_back(Vec2{(p.x - aim.x) / sigma_u, (p.y - aim.y) / sigma_v});
+      scaled.points.push_back(Vec2{.x = (p.x - aim.x) / sigma_u, .y = (p.y - aim.y) / sigma_v});
     }
     if (!within_mass_cutoff(scaled)) {
       continue;  // its mass is below the Gaussian tail bound (see `k_mass_cutoff`)
@@ -314,8 +314,8 @@ template <typename Evaluate>
     // 8 halvings take the step to 1/256 of its start, well below the aim resolution; 12
     // was overkill and every extra probe is a full field evaluation.
     for (int line = 0; line < 8; ++line) {
-      const Vec2 candidate{aim.x + static_cast<float>(step * gradient.gx / norm),
-                           aim.y + static_cast<float>(step * gradient.gy / norm)};
+      const Vec2 candidate{.x = aim.x + static_cast<float>(step * gradient.gx / norm),
+                           .y = aim.y + static_cast<float>(step * gradient.gy / norm)};
       const double value = evaluate(candidate);
       if (value > best_value + 1.0e-9) {
         aim = candidate;
@@ -345,7 +345,8 @@ void DamageField::add(const Polygon& polygon, float value, float base) {
   if (polygon.empty() || value <= 0.0F) {
     return;
   }
-  cells.push_back(Cell{polygon, value, base >= 0.0F ? base : value});
+  cells.push_back(
+      Cell{.polygon = polygon, .value = value, .base_value = base >= 0.0F ? base : value});
   grid_.cell_count = 0;  // the index is stale
 }
 
@@ -551,7 +552,7 @@ auto DamageField::hit_probability_exact(const Vec2& aim, float sigma_u,
     scaled.points.clear();
     scaled.points.reserve(cell.polygon.points.size());
     for (const Vec2& p : cell.polygon.points) {
-      scaled.points.push_back(Vec2{(p.x - aim.x) / sigma_u, (p.y - aim.y) / sigma_v});
+      scaled.points.push_back(Vec2{.x = (p.x - aim.x) / sigma_u, .y = (p.y - aim.y) / sigma_v});
     }
     if (!within_mass_cutoff(scaled)) {
       continue;  // below the Gaussian tail bound (see `k_mass_cutoff`)
@@ -575,7 +576,7 @@ auto DamageField::expected_exact(const Vec2& aim, float sigma_u, float sigma_v) 
     scaled.points.clear();
     scaled.points.reserve(cell.polygon.points.size());
     for (const Vec2& p : cell.polygon.points) {
-      scaled.points.push_back(Vec2{(p.x - aim.x) / sigma_u, (p.y - aim.y) / sigma_v});
+      scaled.points.push_back(Vec2{.x = (p.x - aim.x) / sigma_u, .y = (p.y - aim.y) / sigma_v});
     }
     if (!within_mass_cutoff(scaled)) {
       continue;  // below the Gaussian tail bound (see `k_mass_cutoff`)
@@ -652,7 +653,7 @@ auto DamageField::argmax_pellets(std::span<const Vec2> offsets) const -> Vec2 {
     for (const Vec2& anchor : anchors) {
       candidates.push_back(anchor);
       for (const Vec2& offset : offsets) {
-        candidates.push_back(Vec2{anchor.x - offset.x, anchor.y - offset.y});
+        candidates.push_back(Vec2{.x = anchor.x - offset.x, .y = anchor.y - offset.y});
       }
     }
   }
@@ -762,7 +763,8 @@ auto DamageField::bounds() const noexcept -> Polygon {
       max_y = std::max(max_y, p.y);
     }
   }
-  box.points = {Vec2{min_x, min_y}, Vec2{max_x, min_y}, Vec2{max_x, max_y}, Vec2{min_x, max_y}};
+  box.points = {Vec2{.x = min_x, .y = min_y}, Vec2{.x = max_x, .y = min_y},
+                Vec2{.x = max_x, .y = max_y}, Vec2{.x = min_x, .y = max_y}};
   return box;
 }
 

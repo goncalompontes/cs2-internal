@@ -25,8 +25,8 @@ using HalfPlane = ConvexClipEdge;
     if (len <= k_epsilon) {
       continue;
     }
-    const Vec2 normal{e.y / len, -e.x / len};
-    edges.push_back(HalfPlane{normal, game::dot(normal, a)});
+    const Vec2 normal{.x = e.y / len, .y = -e.x / len};
+    edges.push_back(HalfPlane{.normal = normal, .offset = game::dot(normal, a)});
   }
   return edges;
 }
@@ -57,7 +57,7 @@ using HalfPlane = ConvexClipEdge;
   if (t_exit < 0.0F) {
     return std::nullopt;  // entirely behind the eye
   }
-  return RaySpan{std::max(-b - s, 0.0F), t_exit};
+  return RaySpan{.entry = std::max(-b - s, 0.0F), .exit = t_exit};
 }
 
 // Where the ray is inside the *infinite* cylinder of `radius` about the axis through
@@ -103,7 +103,7 @@ using HalfPlane = ConvexClipEdge;
   if (t_enter > t_exit) {
     return std::nullopt;
   }
-  return RaySpan{t_enter, t_exit};
+  return RaySpan{.entry = t_enter, .exit = t_exit};
 }
 
 // The ray interval inside a capsule (`a`-`b` thickened by `radius`). A capsule is the
@@ -132,7 +132,7 @@ using HalfPlane = ConvexClipEdge;
   if (!hit || exit < 0.0F) {
     return std::nullopt;
   }
-  return RaySpan{std::max(entry, 0.0F), exit};
+  return RaySpan{.entry = std::max(entry, 0.0F), .exit = exit};
 }
 
 // Möller–Trumbore ray/triangle intersection; the ray distance when it hits the
@@ -188,7 +188,7 @@ using HalfPlane = ConvexClipEdge;
   if (t0 >= 1.0e30F) {
     return std::nullopt;
   }
-  return RaySpan{t0, t1 >= 1.0e30F ? t0 : t1};
+  return RaySpan{.entry = t0, .exit = t1 >= 1.0e30F ? t0 : t1};
 }
 
 // Distance from `p` to an axis-aligned box (`mn`,`mx`) — 0 inside.
@@ -246,7 +246,7 @@ constexpr std::uint32_t k_mesh_leaf = 8;  // triangles per BVH leaf
 }
 
 [[nodiscard]] auto mesh_centroid(const Vec3& mn, const Vec3& mx) noexcept -> Vec3 {
-  return Vec3{(mn.x + mx.x) * 0.5F, (mn.y + mx.y) * 0.5F, (mn.z + mx.z) * 0.5F};
+  return Vec3{.x = (mn.x + mx.x) * 0.5F, .y = (mn.y + mx.y) * 0.5F, .z = (mn.z + mx.z) * 0.5F};
 }
 
 // Recursive median-split build. Returns the node's index; its left child is `index + 1`.
@@ -373,7 +373,7 @@ auto OccluderCell::ray_span(const Vec3& eye, const Vec3& direction) const noexce
   if (t_exit < 0.0F) {
     return std::nullopt;  // entirely behind the eye
   }
-  return RaySpan{std::max(t_enter, 0.0F), t_exit};
+  return RaySpan{.entry = std::max(t_enter, 0.0F), .exit = t_exit};
 }
 
 auto OccluderCell::lower_bound_distance(const Vec3& eye) const noexcept -> float {
@@ -457,7 +457,7 @@ auto ray_mesh_bvh(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction)
   if (!ray_aabb(eye, direction, bvh.nodes[0].min, bvh.nodes[0].max, tnear, tfar)) {
     return std::nullopt;
   }
-  stack[depth++] = Entry{0, tnear};
+  stack[depth++] = Entry{.node = 0, .tnear = tnear};
   while (depth > 0) {
     const Entry current = stack[--depth];
     if (current.tnear > t1) {
@@ -489,22 +489,22 @@ auto ray_mesh_bvh(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction)
     const bool rhit = ray_aabb(eye, direction, bvh.nodes[right].min, bvh.nodes[right].max, rt, rf);
     if (lhit && rhit) {
       if (lt <= rt) {
-        stack[depth++] = Entry{right, rt};
-        stack[depth++] = Entry{left, lt};
+        stack[depth++] = Entry{.node = right, .tnear = rt};
+        stack[depth++] = Entry{.node = left, .tnear = lt};
       } else {
-        stack[depth++] = Entry{left, lt};
-        stack[depth++] = Entry{right, rt};
+        stack[depth++] = Entry{.node = left, .tnear = lt};
+        stack[depth++] = Entry{.node = right, .tnear = rt};
       }
     } else if (lhit) {
-      stack[depth++] = Entry{left, lt};
+      stack[depth++] = Entry{.node = left, .tnear = lt};
     } else if (rhit) {
-      stack[depth++] = Entry{right, rt};
+      stack[depth++] = Entry{.node = right, .tnear = rt};
     }
   }
   if (t0 >= 1.0e30F) {
     return std::nullopt;
   }
-  return RaySpan{t0, t1 >= 1.0e30F ? t0 : t1};
+  return RaySpan{.entry = t0, .exit = t1 >= 1.0e30F ? t0 : t1};
 }
 
 auto project_occluder(const Vec3& eye, const Basis& basis,
@@ -567,8 +567,8 @@ auto project_occluder(const Vec3& eye, const Basis& basis,
   cell.vertices = world_vertices;
   cell.planes.reserve(planes.size());
   for (const OccluderPlane& plane : planes) {
-    cell.planes.push_back(flip_planes ? OccluderPlane{plane.normal * -1.0F, -plane.dist}
-                                      : plane);
+    cell.planes.push_back(
+        flip_planes ? OccluderPlane{.normal = plane.normal * -1.0F, .dist = -plane.dist} : plane);
   }
   cell.surface_modifier = surface_modifier;
   return cell;
@@ -719,7 +719,7 @@ auto convex_hull_3d(std::span<const Vec3> points) -> std::vector<OccluderPlane> 
           }
         }
         if (!duplicate) {
-          planes.push_back(OccluderPlane{normal, dist});
+          planes.push_back(OccluderPlane{.normal = normal, .dist = dist});
         }
       }
     }

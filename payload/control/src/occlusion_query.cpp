@@ -416,11 +416,14 @@ struct BodyTransform {
     const float y = quat[1];
     const float z = quat[2];
     const float w = quat[3];
-    const Vec3 rotated{
-        (1 - 2 * (y * y + z * z)) * v.x + 2 * (x * y - z * w) * v.y + 2 * (x * z + y * w) * v.z,
-        2 * (x * y + z * w) * v.x + (1 - 2 * (x * x + z * z)) * v.y + 2 * (y * z - x * w) * v.z,
-        2 * (x * z - y * w) * v.x + 2 * (y * z + x * w) * v.y + (1 - 2 * (x * x + y * y)) * v.z};
-    return Vec3{rotated.x + position.x, rotated.y + position.y, rotated.z + position.z};
+    const Vec3 rotated{.x = (1 - 2 * (y * y + z * z)) * v.x + 2 * (x * y - z * w) * v.y +
+                            2 * (x * z + y * w) * v.z,
+                       .y = 2 * (x * y + z * w) * v.x + (1 - 2 * (x * x + z * z)) * v.y +
+                            2 * (y * z - x * w) * v.z,
+                       .z = 2 * (x * z - y * w) * v.x + 2 * (y * z + x * w) * v.y +
+                            (1 - 2 * (x * x + y * y)) * v.z};
+    return Vec3{
+        .x = rotated.x + position.x, .y = rotated.y + position.y, .z = rotated.z + position.z};
   }
 
   // A body transform that is the identity (`v_world == v_local`), so geometry stored
@@ -464,7 +467,7 @@ auto read_transform(std::uintptr_t object, BodyTransform& out) -> bool {
   if (!cs2::diag::call_guarded(&invoke_transform, &call)) {
     return false;
   }
-  out.position = Vec3{raw[0], raw[1], raw[2]};
+  out.position = Vec3{.x = raw[0], .y = raw[1], .z = raw[2]};
   out.quat[0] = raw[4];
   out.quat[1] = raw[5];
   out.quat[2] = raw[6];
@@ -519,7 +522,7 @@ auto parse_hull(std::uintptr_t hull, const BodyTransform& transform,
         mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
         break;
       }
-      planes.push_back(cs2::aim::OccluderPlane{raw.normal, raw.dist});
+      planes.push_back(cs2::aim::OccluderPlane{.normal = raw.normal, .dist = raw.dist});
     }
   }
   if (planes.empty() && points.size() >= 4) {
@@ -571,7 +574,7 @@ auto emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_i
     int end = 0;
   };
   std::vector<Range> stack;
-  stack.push_back(Range{0, static_cast<int>(tris.size())});
+  stack.push_back(Range{.begin = 0, .end = static_cast<int>(tris.size())});
   int emitted = 0;
   bool complete = true;
   while (!stack.empty() && emitted < k_max_mesh_clusters) {
@@ -606,10 +609,11 @@ auto emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_i
       // convex hull (a superset — the mesh is inside its own bounds), so the broad phase is
       // unchanged while the projection drops from thousands of points to eight. The exact
       // thickness still comes from `ray_span` over `triangles`/`mesh_bvh`.
-      solid.vertices = {Vec3{mn.x, mn.y, mn.z}, Vec3{mx.x, mn.y, mn.z},
-                        Vec3{mx.x, mx.y, mn.z}, Vec3{mn.x, mx.y, mn.z},
-                        Vec3{mn.x, mn.y, mx.z}, Vec3{mx.x, mn.y, mx.z},
-                        Vec3{mx.x, mx.y, mx.z}, Vec3{mn.x, mx.y, mx.z}};
+      solid.vertices = {
+          Vec3{.x = mn.x, .y = mn.y, .z = mn.z}, Vec3{.x = mx.x, .y = mn.y, .z = mn.z},
+          Vec3{.x = mx.x, .y = mx.y, .z = mn.z}, Vec3{.x = mn.x, .y = mx.y, .z = mn.z},
+          Vec3{.x = mn.x, .y = mn.y, .z = mx.z}, Vec3{.x = mx.x, .y = mn.y, .z = mx.z},
+          Vec3{.x = mx.x, .y = mx.y, .z = mx.z}, Vec3{.x = mn.x, .y = mx.y, .z = mx.z}};
       // Build the triangle BVH once, here (the clusters are cached per level), so
       // `ray_span` is O(log n) rather than O(triangles) (`docs/ragebot-perf.md` §3.7).
       solid.mesh_bvh =
@@ -663,8 +667,8 @@ auto emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_i
       complete = false;
       continue;  // degenerate split; drop the range rather than loop forever
     }
-    stack.push_back(Range{range.begin, pivot_index});
-    stack.push_back(Range{pivot_index, range.end});
+    stack.push_back(Range{.begin = range.begin, .end = pivot_index});
+    stack.push_back(Range{.begin = pivot_index, .end = range.end});
   }
   return complete && stack.empty();
 }
@@ -701,7 +705,7 @@ auto parse_mesh(std::uintptr_t mesh, const Vec3& scale, const BodyTransform& tra
     return false;
   }
   for (Vec3& point : points) {
-    const Vec3 scaled{point.x * scale.x, point.y * scale.y, point.z * scale.z};
+    const Vec3 scaled{.x = point.x * scale.x, .y = point.y * scale.y, .z = point.z * scale.z};
     point = transform.apply(scaled);
   }
   std::vector<std::int32_t> tri_indices(static_cast<std::size_t>(tri_count) * 3);
@@ -807,7 +811,7 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
         mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
         return false;
       }
-      Vec3 scale{1.0F, 1.0F, 1.0F};
+      Vec3 scale{.x = 1.0F, .y = 1.0F, .z = 1.0F};
       if (!cs2::game::read(shape + k_shape_mesh_scale, scale)) {
         mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
       }
@@ -861,7 +865,7 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
       if (cs2::game::read(compound + k_compound_mesh_count, mesh_count) && mesh_count > 0 &&
           mesh_count <= k_max_compound_parts &&
           cs2::game::read(compound + k_compound_mesh_block, mesh_block) && mesh_block >= 0x10000) {
-        const Vec3 scale{1.0F, 1.0F, 1.0F};
+        const Vec3 scale{.x = 1.0F, .y = 1.0F, .z = 1.0F};
         for (std::int32_t i = 0; i < mesh_count; ++i) {
           if (parse_mesh(mesh_block + static_cast<std::uintptr_t>(i) * k_compound_mesh_stride,
                          scale, transform, out, surface, stats)) {
@@ -935,17 +939,19 @@ WorldHullCache g_world_cache;
 // whose `vertices` are empty.
 void hull_bounds(const OcclusionHull& hull, Vec3& mn, Vec3& mx) {
   if (hull.kind == cs2::aim::SolidKind::sphere) {
-    const Vec3 r{hull.radius, hull.radius, hull.radius};
+    const Vec3 r{.x = hull.radius, .y = hull.radius, .z = hull.radius};
     mn = hull.a - r;
     mx = hull.a + r;
     return;
   }
   if (hull.kind == cs2::aim::SolidKind::capsule) {
     const float r = hull.radius;
-    mn = Vec3{std::min(hull.a.x, hull.b.x) - r, std::min(hull.a.y, hull.b.y) - r,
-              std::min(hull.a.z, hull.b.z) - r};
-    mx = Vec3{std::max(hull.a.x, hull.b.x) + r, std::max(hull.a.y, hull.b.y) + r,
-              std::max(hull.a.z, hull.b.z) + r};
+    mn = Vec3{.x = std::min(hull.a.x, hull.b.x) - r,
+              .y = std::min(hull.a.y, hull.b.y) - r,
+              .z = std::min(hull.a.z, hull.b.z) - r};
+    mx = Vec3{.x = std::max(hull.a.x, hull.b.x) + r,
+              .y = std::max(hull.a.y, hull.b.y) + r,
+              .z = std::max(hull.a.z, hull.b.z) + r};
     return;
   }
   if (hull.vertices.empty() && !hull.has_bounds) {
@@ -1119,7 +1125,7 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
         // Diagnostic: run the single-AABB query on the same tick. The AABB volume
         // contains the pyramid union, so every pyramid hull must also be in the AABB set.
         std::vector<int> box_hits;
-        g_world_bvh.query(cs2::aim::Aabb{lo, hi}, box_hits);
+        g_world_bvh.query(cs2::aim::Aabb{.min = lo, .max = hi}, box_hits);
         std::sort(box_hits.begin(), box_hits.end());
         stats->enum_box_kept += static_cast<int>(box_hits.size());
         stats->enum_pyramid_kept += static_cast<int>(hits.size());
@@ -1138,8 +1144,8 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
           Vec3 hhi{};
           hull_bounds(g_world_cache.hulls[index], hlo, hhi);
           for (int t = 0; t < target_count; ++t) {
-            if (cs2::aim::AabbBvh::aabb_intersects_pyramid(eye, targets[t],
-                                                           cs2::aim::Aabb{hlo, hhi})) {
+            if (cs2::aim::AabbBvh::aabb_intersects_pyramid(
+                    eye, targets[t], cs2::aim::Aabb{.min = hlo, .max = hhi})) {
               ++stats->enum_box_only_between;
               break;
             }
@@ -1147,7 +1153,7 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
         }
       }
     } else {
-      g_world_bvh.query(cs2::aim::Aabb{lo, hi}, hits);
+      g_world_bvh.query(cs2::aim::Aabb{.min = lo, .max = hi}, hits);
     }
     for (const int index : hits) {
       const int owner_target = owner.empty() ? -1 : owner[static_cast<std::size_t>(index)];
@@ -1334,10 +1340,10 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
   }
   stats->enum_targets = target_count;
   for (int i = 0; i < target_count; ++i) {
-    const Vec3 centre{(targets[i].min.x + targets[i].max.x) * 0.5F,
-                      (targets[i].min.y + targets[i].max.y) * 0.5F,
-                      (targets[i].min.z + targets[i].max.z) * 0.5F};
-    const Vec3 delta{centre.x - from.x, centre.y - from.y, centre.z - from.z};
+    const Vec3 centre{.x = (targets[i].min.x + targets[i].max.x) * 0.5F,
+                      .y = (targets[i].min.y + targets[i].max.y) * 0.5F,
+                      .z = (targets[i].min.z + targets[i].max.z) * 0.5F};
+    const Vec3 delta{.x = centre.x - from.x, .y = centre.y - from.y, .z = centre.z - from.z};
     const float distance = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
     stats->enum_target_max_distance = std::max(stats->enum_target_max_distance, distance);
   }
@@ -1455,8 +1461,8 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
   // angles — so the enumerated solid set is stable while the player looks around.
   // Which solids actually occlude is decided per cell by depth in `build_heatmap`.
   constexpr float margin = 8.0F;
-  const Vec3 lo{box_min.x - margin, box_min.y - margin, box_min.z - margin};
-  const Vec3 hi{box_max.x + margin, box_max.y + margin, box_max.z + margin};
+  const Vec3 lo{.x = box_min.x - margin, .y = box_min.y - margin, .z = box_min.z - margin};
+  const Vec3 hi{.x = box_max.x + margin, .y = box_max.y + margin, .z = box_max.z + margin};
   do_query(lo, hi, true);
 
   if (stats != nullptr) {

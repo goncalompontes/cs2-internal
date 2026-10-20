@@ -40,7 +40,7 @@ auto main() -> int {
   // --- chart projection round-trip ----------------------------------------
   const Basis basis = Basis::world();
   {
-    const auto p = basis.project(Vec3{10.0F, 1.0F, 2.0F});
+    const auto p = basis.project(Vec3{.x = 10.0F, .y = 1.0F, .z = 2.0F});
     expect(p.has_value(), "a direction projects");
     if (p.has_value()) {
       // Absolute world yaw/pitch (radians): u = atan2(y, x), v = asin(z / |d|).
@@ -50,20 +50,24 @@ auto main() -> int {
       expect(near(back.x, 10.0F / std::sqrt(105.0F), 1e-4F), "unproject round-trip x");
     }
     // The chart is absolute, so a direction behind the eye still has yaw/pitch.
-    const auto behind = basis.project(Vec3{-1.0F, 0.0F, 0.0F});
+    const auto behind = basis.project(Vec3{.x = -1.0F, .y = 0.0F, .z = 0.0F});
     expect(behind.has_value() && near(std::fabs(behind->x), 3.14159265F, 1e-3F),
            "a behind direction projects to yaw ~ pi");
   }
 
   // --- convex hull ---------------------------------------------------------
-  const Vec2 square[] = {{0.0F, 0.0F}, {1.0F, 0.0F}, {1.0F, 1.0F}, {0.0F, 1.0F}, {0.5F, 0.5F}};
+  const Vec2 square[] = {{.x = 0.0F, .y = 0.0F},
+                         {.x = 1.0F, .y = 0.0F},
+                         {.x = 1.0F, .y = 1.0F},
+                         {.x = 0.0F, .y = 1.0F},
+                         {.x = 0.5F, .y = 0.5F}};
   {
     const Polygon hull = cs2::aim::convex_hull(square);
     expect(hull.points.size() == 4, "hull drops the interior point");
     expect(near(cs2::aim::polygon_area(hull), 1.0F), "hull area");
-    expect(near2(cs2::aim::polygon_centroid(hull), Vec2{0.5F, 0.5F}), "hull centroid");
-    expect(cs2::aim::polygon_contains(hull, Vec2{0.5F, 0.5F}), "hull contains centre");
-    expect(!cs2::aim::polygon_contains(hull, Vec2{1.5F, 0.5F}), "hull excludes outside");
+    expect(near2(cs2::aim::polygon_centroid(hull), Vec2{.x = 0.5F, .y = 0.5F}), "hull centroid");
+    expect(cs2::aim::polygon_contains(hull, Vec2{.x = 0.5F, .y = 0.5F}), "hull contains centre");
+    expect(!cs2::aim::polygon_contains(hull, Vec2{.x = 1.5F, .y = 0.5F}), "hull excludes outside");
     // CCW winding (positive area) is required by the edge normals below.
     expect(cs2::aim::polygon_area(hull) > 0.0F, "hull is counter-clockwise");
   }
@@ -71,36 +75,45 @@ auto main() -> int {
   // --- clipping ------------------------------------------------------------
   {
     const Polygon hull = cs2::aim::convex_hull(square);
-    const Polygon clipped = cs2::aim::clip_half_plane(hull, Vec2{1.0F, 0.0F}, 0.5F);
+    const Polygon clipped = cs2::aim::clip_half_plane(hull, Vec2{.x = 1.0F, .y = 0.0F}, 0.5F);
     expect(near(cs2::aim::polygon_area(clipped), 0.5F), "clip keeps the near half");
   }
 
   // --- optima --------------------------------------------------------------
   {
     const Polygon hull = cs2::aim::convex_hull(square);
-    expect(near2(cs2::aim::nearest_point(hull), Vec2{0.0F, 0.0F}), "nearest point is the near corner");
+    expect(near2(cs2::aim::nearest_point(hull), Vec2{.x = 0.0F, .y = 0.0F}),
+           "nearest point is the near corner");
 
     // A square offset away from the origin: the nearest point is its near edge.
-    const Vec2 offset[] = {{2.0F, -1.0F}, {4.0F, -1.0F}, {4.0F, 1.0F}, {2.0F, 1.0F}};
+    const Vec2 offset[] = {{.x = 2.0F, .y = -1.0F},
+                           {.x = 4.0F, .y = -1.0F},
+                           {.x = 4.0F, .y = 1.0F},
+                           {.x = 2.0F, .y = 1.0F}};
     const Polygon away = cs2::aim::convex_hull(offset);
-    expect(near2(cs2::aim::nearest_point(away), Vec2{2.0F, 0.0F}), "nearest point on the near edge");
+    expect(near2(cs2::aim::nearest_point(away), Vec2{.x = 2.0F, .y = 0.0F}),
+           "nearest point on the near edge");
 
     const Vec2 centre = cs2::aim::chebyshev_center(hull);
-    expect(near2(centre, Vec2{0.5F, 0.5F}), "chebyshev centre of the unit square");
+    expect(near2(centre, Vec2{.x = 0.5F, .y = 0.5F}), "chebyshev centre of the unit square");
   }
 
   // --- OBB projection ------------------------------------------------------
   {
-    const Obb ahead{.center = Vec3{10.0F, 0.0F, 0.0F}, .half = Vec3{1.0F, 1.0F, 1.0F}};
+    const Obb ahead{.center = Vec3{.x = 10.0F, .y = 0.0F, .z = 0.0F},
+                    .half = Vec3{.x = 1.0F, .y = 1.0F, .z = 1.0F}};
     const Polygon poly = cs2::aim::project_obb(Vec3{}, ahead, basis);
     expect(poly.points.size() == 4, "head-on box projects to a quad");
-    expect(near2(cs2::aim::polygon_centroid(poly), Vec2{0.0F, 0.0F}), "box centroid at the aim");
-    expect(cs2::aim::polygon_contains(poly, Vec2{0.0F, 0.0F}), "box silhouette covers the aim");
+    expect(near2(cs2::aim::polygon_centroid(poly), Vec2{.x = 0.0F, .y = 0.0F}),
+           "box centroid at the aim");
+    expect(cs2::aim::polygon_contains(poly, Vec2{.x = 0.0F, .y = 0.0F}),
+           "box silhouette covers the aim");
     // Near face at x=9, half-extent 1 -> angular half-size 1/9.
     expect(near(poly.points.size() == 4 ? cs2::aim::polygon_area(poly) : 0.0F, 4.0F / 81.0F, 2e-3F),
            "head-on box area");
 
-    const Obb behind{.center = Vec3{-10.0F, 0.0F, 0.0F}, .half = Vec3{1.0F, 1.0F, 1.0F}};
+    const Obb behind{.center = Vec3{.x = -10.0F, .y = 0.0F, .z = 0.0F},
+                     .half = Vec3{.x = 1.0F, .y = 1.0F, .z = 1.0F}};
     const Polygon behind_poly = cs2::aim::project_obb(Vec3{}, behind, basis);
     expect(!behind_poly.empty(), "a box behind the eye still projects (absolute chart)");
     float max_yaw = 0.0F;
@@ -115,7 +128,10 @@ auto main() -> int {
     // A silhouette whose projected points straddle the seam (a target due west) must
     // stay one contiguous polygon, not a chart-wide hull. Points at u = +-3.13 about
     // a reference of pi (the west direction).
-    const Vec2 straddle[] = {{3.13F, -0.01F}, {3.13F, 0.01F}, {-3.13F, 0.01F}, {-3.13F, -0.01F}};
+    const Vec2 straddle[] = {{.x = 3.13F, .y = -0.01F},
+                             {.x = 3.13F, .y = 0.01F},
+                             {.x = -3.13F, .y = 0.01F},
+                             {.x = -3.13F, .y = -0.01F}};
     const Polygon wide = cs2::aim::convex_hull(straddle);
     expect(cs2::aim::polygon_area(wide) > 0.1F, "a raw hull across the seam is chart-wide");
     const Polygon tight = cs2::aim::convex_hull_unwrapped(straddle, 3.14159265F);
@@ -132,7 +148,7 @@ auto main() -> int {
     const float r = 1.0F;
     const float dist = 10.0F;
     for (const float pitch : {0.0F, 1.047F}) {  // 0 and 60 degrees
-      const Vec3 centre{dist * std::cos(pitch), 0.0F, dist * std::sin(pitch)};
+      const Vec3 centre{.x = dist * std::cos(pitch), .y = 0.0F, .z = dist * std::sin(pitch)};
       const Polygon poly = cs2::aim::project_sphere(Vec3{}, centre, r, basis, 64);
       expect(!poly.empty(), "steep sphere projects");
       float min_u = 0.0F;
@@ -158,9 +174,11 @@ auto main() -> int {
 
   // --- sphere projection ---------------------------------------------------
   {
-    const Polygon head = cs2::aim::project_sphere(Vec3{}, Vec3{10.0F, 0.0F, 0.0F}, 1.0F, basis);
+    const Polygon head =
+        cs2::aim::project_sphere(Vec3{}, Vec3{.x = 10.0F, .y = 0.0F, .z = 0.0F}, 1.0F, basis);
     expect(!head.empty(), "sphere projects");
-    expect(near2(cs2::aim::polygon_centroid(head), Vec2{0.0F, 0.0F}), "sphere centred on the aim");
+    expect(near2(cs2::aim::polygon_centroid(head), Vec2{.x = 0.0F, .y = 0.0F}),
+           "sphere centred on the aim");
     const float rho = std::tan(std::asin(0.1F));
     expect(near(cs2::aim::polygon_area(head), 3.14159265F * rho * rho, 3e-3F), "sphere area");
   }

@@ -27,9 +27,9 @@ auto rotate(const BoneTransform& bone, const Vec3& v) noexcept -> Vec3 {
   const float ty = 2.0F * (qz * v.x - qx * v.z);
   const float tz = 2.0F * (qx * v.y - qy * v.x);
   return Vec3{
-      v.x + qw * tx + (qy * tz - qz * ty),
-      v.y + qw * ty + (qz * tx - qx * tz),
-      v.z + qw * tz + (qx * ty - qy * tx),
+      .x = v.x + qw * tx + (qy * tz - qz * ty),
+      .y = v.y + qw * ty + (qz * tx - qx * tz),
+      .z = v.z + qw * tz + (qx * ty - qy * tx),
   };
 }
 
@@ -44,8 +44,12 @@ auto capsule_from_bone(const BoneTransform& bone, const Vec3& local_mins, const 
 
 auto aabb_obb(const Vec3& mins, const Vec3& maxs) noexcept -> Obb {
   return Obb{
-      .center = Vec3{(mins.x + maxs.x) * 0.5F, (mins.y + maxs.y) * 0.5F, (mins.z + maxs.z) * 0.5F},
-      .half = Vec3{(maxs.x - mins.x) * 0.5F, (maxs.y - mins.y) * 0.5F, (maxs.z - mins.z) * 0.5F},
+      .center = Vec3{.x = (mins.x + maxs.x) * 0.5F,
+                     .y = (mins.y + maxs.y) * 0.5F,
+                     .z = (mins.z + maxs.z) * 0.5F},
+      .half = Vec3{.x = (maxs.x - mins.x) * 0.5F,
+                   .y = (maxs.y - mins.y) * 0.5F,
+                   .z = (maxs.z - mins.z) * 0.5F},
   };
 }
 
@@ -62,13 +66,13 @@ auto split_player_bounds(const Vec3& mins, const Vec3& maxs, float head_height,
   // its own (far) edge and miss the real head. A cube of `head` units centred on
   // the body's x/y keeps the aim on the head.
   const Hitbox head_box{
-      .box = Obb{.center = Vec3{mid_x, mid_y, maxs.z - half},
-                 .half = Vec3{half, half, half}},
+      .box = Obb{.center = Vec3{.x = mid_x, .y = mid_y, .z = maxs.z - half},
+                 .half = Vec3{.x = half, .y = half, .z = half}},
       .multiplier = head_multiplier,
       .group = 1,
   };
   const Hitbox body_box{
-      .box = aabb_obb(mins, Vec3{maxs.x, maxs.y, maxs.z - head}),
+      .box = aabb_obb(mins, Vec3{.x = maxs.x, .y = maxs.y, .z = maxs.z - head}),
       .multiplier = body_multiplier,
       .group = 2,
   };
@@ -78,13 +82,13 @@ auto split_player_bounds(const Vec3& mins, const Vec3& maxs, float head_height,
 auto split_player_at_head(const Vec3& mins, const Vec3& maxs, const Vec3& eye, float head_half,
                           float head_multiplier, float body_multiplier) -> std::array<Hitbox, 2> {
   const Hitbox head_box{
-      .box = Obb{.center = eye, .half = Vec3{head_half, head_half, head_half}},
+      .box = Obb{.center = eye, .half = Vec3{.x = head_half, .y = head_half, .z = head_half}},
       .multiplier = head_multiplier,
       .group = 1,
   };
   const float body_top = std::max(mins.z, eye.z - head_half);
   const Hitbox body_box{
-      .box = aabb_obb(mins, Vec3{maxs.x, maxs.y, body_top}),
+      .box = aabb_obb(mins, Vec3{.x = maxs.x, .y = maxs.y, .z = body_top}),
       .multiplier = body_multiplier,
       .group = 2,
   };

@@ -114,54 +114,58 @@ auto main() -> int {
 
     // An alive enemy is chamsed.
     {
-      const ChamsEntity enemy{2 /*T*/, 0, false, false};
+      const ChamsEntity enemy{
+          .team = 2 /*T*/, .life_state = 0, .is_local = false, .is_viewmodel = false};
       expect(cs2::game::wants_chams(enemy, policy), "an alive enemy is chamsed");
     }
     // A dead player is not.
     {
-      const ChamsEntity dead{2, 1, false, false};
+      const ChamsEntity dead{.team = 2, .life_state = 1, .is_local = false, .is_viewmodel = false};
       expect(!cs2::game::wants_chams(dead, policy), "a dead player is not chamsed");
     }
     // The view model is never chamsed.
     {
-      const ChamsEntity viewmodel{2, 0, false, true};
+      const ChamsEntity viewmodel{
+          .team = 2, .life_state = 0, .is_local = false, .is_viewmodel = true};
       expect(!cs2::game::wants_chams(viewmodel, policy), "the view model is never chamsed");
     }
     // A teammate is not, with "only enemies" on.
     {
-      const ChamsEntity teammate{3, 0, false, false};
+      const ChamsEntity teammate{
+          .team = 3, .life_state = 0, .is_local = false, .is_viewmodel = false};
       expect(!cs2::game::wants_chams(teammate, policy), "a teammate is not chamsed");
     }
     // ... and is, with "only enemies" off.
     {
       ChamsPolicy teammates = policy;
       teammates.only_enemies = false;
-      const ChamsEntity teammate{3, 0, false, false};
+      const ChamsEntity teammate{
+          .team = 3, .life_state = 0, .is_local = false, .is_viewmodel = false};
       expect(cs2::game::wants_chams(teammate, teammates),
              "a teammate is chamsed without "
              "'only enemies'");
     }
     // The local player is not, unless asked for.
     {
-      const ChamsEntity local{3, 0, true, false};
+      const ChamsEntity local{.team = 3, .life_state = 0, .is_local = true, .is_viewmodel = false};
       expect(!cs2::game::wants_chams(local, policy), "the local player is not chamsed");
     }
     {
       ChamsPolicy with_local = policy;
       with_local.include_local = true;
-      const ChamsEntity local{3, 0, true, false};
+      const ChamsEntity local{.team = 3, .life_state = 0, .is_local = true, .is_viewmodel = false};
       expect(cs2::game::wants_chams(local, with_local), "the local player is chamsed on request");
     }
     // A prop (not a player) is not.
     {
-      const ChamsEntity prop{0, 0, false, false};
+      const ChamsEntity prop{.team = 0, .life_state = 0, .is_local = false, .is_viewmodel = false};
       expect(!cs2::game::wants_chams(prop, policy), "a prop is not chamsed");
     }
     // Nothing is chamsed while the feature is off.
     {
       ChamsPolicy off = policy;
       off.enabled = false;
-      const ChamsEntity enemy{2, 0, false, false};
+      const ChamsEntity enemy{.team = 2, .life_state = 0, .is_local = false, .is_viewmodel = false};
       expect(!cs2::game::wants_chams(enemy, off), "nothing is chamsed while the feature is off");
     }
     // The local player is never chamsed through the view-model path, whatever
@@ -169,7 +173,8 @@ auto main() -> int {
     {
       ChamsPolicy with_local = policy;
       with_local.include_local = true;
-      const ChamsEntity local_viewmodel{3, 0, true, true};
+      const ChamsEntity local_viewmodel{
+          .team = 3, .life_state = 0, .is_local = true, .is_viewmodel = true};
       expect(!cs2::game::wants_chams(local_viewmodel, with_local),
              "the view model is not chamsed even with the local player included");
     }

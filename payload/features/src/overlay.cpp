@@ -74,12 +74,14 @@ auto format_float(double value) -> std::string {
 auto hitbox_color(const Config& config, int group, bool active) -> render::Color {
   if (config.esp.hitbox_custom_color) {
     const Color& color = config.esp.hitbox_color;
-    return render::Color{color.r, color.g, color.b, color.a};
+    return render::Color{.r = color.r, .g = color.g, .b = color.b, .a = color.a};
   }
   if (group == 1) {  // HITGROUP_HEAD
-    return active ? render::Color{255, 70, 70, 235} : render::Color{255, 96, 96, 150};
+    return active ? render::Color{.r = 255, .g = 70, .b = 70, .a = 235}
+                  : render::Color{.r = 255, .g = 96, .b = 96, .a = 150};
   }
-  return active ? render::Color{90, 255, 130, 190} : render::Color{90, 210, 140, 95};
+  return active ? render::Color{.r = 90, .g = 255, .b = 130, .a = 190}
+                : render::Color{.r = 90, .g = 210, .b = 140, .a = 95};
 }
 
 // A screen-space convex hull (Andrew's monotone chain). Collinear points are
@@ -137,8 +139,9 @@ void project_sphere_outline(const game::Matrix4x4& view, float width, float heig
   // `radius*cos_a` (Pythagoras on the tangent cone from the eye to the sphere).
   const game::Vec3 circle_center = center - axis * (radius * sin_a);
   const float circle_radius = radius * cos_a;
-  const game::Vec3 reference =
-      std::fabs(axis.z) < 0.9F ? game::Vec3{0.0F, 0.0F, 1.0F} : game::Vec3{1.0F, 0.0F, 0.0F};
+  const game::Vec3 reference = std::fabs(axis.z) < 0.9F
+                                   ? game::Vec3{.x = 0.0F, .y = 0.0F, .z = 1.0F}
+                                   : game::Vec3{.x = 1.0F, .y = 0.0F, .z = 0.0F};
   const game::Vec3 u = game::normalized(game::cross(axis, reference));
   const game::Vec3 v = game::cross(axis, u);
   constexpr float k_tau = 6.28318530717958648F;
@@ -252,12 +255,12 @@ void capsule_rings(const game::Vec3& a, const game::Vec3& b, float radius,
   game::Vec3 axis = b - a;
   game::Vec3 end = b;
   if (game::length(axis) < 1e-4F) {
-    end = a + game::Vec3{0.0F, 0.0F, 1.0F};  // degenerate: a unit-length capsule
+    end = a + game::Vec3{.x = 0.0F, .y = 0.0F, .z = 1.0F};  // degenerate: a unit-length capsule
     axis = end - a;
   }
   const game::Vec3 n = game::normalized(axis);
-  const game::Vec3 reference =
-      std::fabs(n.z) < 0.9F ? game::Vec3{0.0F, 0.0F, 1.0F} : game::Vec3{1.0F, 0.0F, 0.0F};
+  const game::Vec3 reference = std::fabs(n.z) < 0.9F ? game::Vec3{.x = 0.0F, .y = 0.0F, .z = 1.0F}
+                                                     : game::Vec3{.x = 1.0F, .y = 0.0F, .z = 0.0F};
   const game::Vec3 u = game::normalized(game::cross(n, reference));
   const game::Vec3 v = game::cross(n, u);
   const auto make_ring = [&](const game::Vec3& center, float ring_radius,
@@ -268,7 +271,8 @@ void capsule_rings(const game::Vec3& a, const game::Vec3& b, float radius,
       const float theta = 2.0F * k_pi * static_cast<float>(i) / static_cast<float>(k_wire_segments);
       const game::Vec3 position =
           center + (u * std::cos(theta) + v * std::sin(theta)) * ring_radius;
-      points.push_back(CapsuleSample{position, game::normalized(position - sphere)});
+      points.push_back(
+          CapsuleSample{.position = position, .normal = game::normalized(position - sphere)});
     }
     return points;
   };
@@ -310,7 +314,9 @@ void draw_capsule_wire(render::DrawList& out, const game::Matrix4x4& view, float
       return static_cast<std::uint8_t>(static_cast<float>(base) * scale);
     };
     out.line(pa->x, pa->y, pb->x, pb->y,
-             render::Color{channel(color.r), channel(color.g), channel(color.b), color.a}, 1.0F);
+             render::Color{
+                 .r = channel(color.r), .g = channel(color.g), .b = channel(color.b), .a = color.a},
+             1.0F);
   };
 
   for (const std::vector<CapsuleSample>& ring : rings) {
@@ -466,7 +472,7 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
     if (rage_status_provider_(rage_status_context_, status, sizeof(status))) {
       render::HudSection section;
       section.title = "rage";
-      section.lines.push_back(render::HudLine{"state", status});
+      section.lines.push_back(render::HudLine{.label = "state", .value = status});
       model_.hud.sections.push_back(std::move(section));
     }
   }

@@ -44,8 +44,8 @@ auto read_published_view(const CameraEngine& engine, int slot) noexcept -> Camer
   if (!read_at(engine, address, values, sizeof(values))) {
     return state;
   }
-  state.origin = Vec3{values[0], values[1], values[2]};
-  state.angles = Angle{values[3], values[4], values[5]};
+  state.origin = Vec3{.x = values[0], .y = values[1], .z = values[2]};
+  state.angles = Angle{.pitch = values[3], .yaw = values[4], .roll = values[5]};
   state.valid = true;
   return state;
 }
@@ -62,7 +62,7 @@ auto read_view_setup_origin(const CameraEngine& engine, int slot) noexcept -> Ve
   if (!read_at(engine, setup + k_view_origin_offset, values, sizeof(values))) {
     return {};
   }
-  return Vec3{values[0], values[1], values[2]};
+  return Vec3{.x = values[0], .y = values[1], .z = values[2]};
 }
 
 auto read_view_setup_fov(const CameraEngine& engine, int slot) noexcept -> FovCandidates {

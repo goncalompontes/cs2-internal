@@ -9,8 +9,9 @@ namespace {
 constexpr int k_leaf_size = 8;
 
 [[nodiscard]] auto box_centroid(const Aabb& box) noexcept -> Vec3 {
-  return Vec3{(box.min.x + box.max.x) * 0.5F, (box.min.y + box.max.y) * 0.5F,
-              (box.min.z + box.max.z) * 0.5F};
+  return Vec3{.x = (box.min.x + box.max.x) * 0.5F,
+              .y = (box.min.y + box.max.y) * 0.5F,
+              .z = (box.min.z + box.max.z) * 0.5F};
 }
 
 }  // namespace
@@ -123,9 +124,11 @@ auto build_pyramid_planes(const Vec3& eye, const Aabb& box, PyramidPlane* planes
     -> int {
   const Vec3 lo = box.min;
   const Vec3 hi = box.max;
-  const Vec3 points[9] = {{eye.x, eye.y, eye.z}, {lo.x, lo.y, lo.z}, {hi.x, lo.y, lo.z},
-                          {hi.x, hi.y, lo.z},    {lo.x, hi.y, lo.z}, {lo.x, lo.y, hi.z},
-                          {hi.x, lo.y, hi.z},    {hi.x, hi.y, hi.z}, {lo.x, hi.y, hi.z}};
+  const Vec3 points[9] = {{.x = eye.x, .y = eye.y, .z = eye.z}, {.x = lo.x, .y = lo.y, .z = lo.z},
+                          {.x = hi.x, .y = lo.y, .z = lo.z},    {.x = hi.x, .y = hi.y, .z = lo.z},
+                          {.x = lo.x, .y = hi.y, .z = lo.z},    {.x = lo.x, .y = lo.y, .z = hi.z},
+                          {.x = hi.x, .y = lo.y, .z = hi.z},    {.x = hi.x, .y = hi.y, .z = hi.z},
+                          {.x = lo.x, .y = hi.y, .z = hi.z}};
   int plane_count = 0;
   for (int i = 0; i < 9 && plane_count < max_planes; ++i) {
     for (int j = i + 1; j < 9 && plane_count < max_planes; ++j) {
@@ -167,7 +170,7 @@ auto build_pyramid_planes(const Vec3& eye, const Aabb& box, PyramidPlane* planes
           }
         }
         if (!duplicate) {
-          planes[plane_count++] = PyramidPlane{normal, dist};
+          planes[plane_count++] = PyramidPlane{.normal = normal, .dist = dist};
         }
       }
     }
@@ -181,9 +184,9 @@ auto build_pyramid_planes(const Vec3& eye, const Aabb& box, PyramidPlane* planes
 auto outside_any_plane(const PyramidPlane* planes, int count, const Aabb& bounds) -> bool {
   for (int i = 0; i < count; ++i) {
     const PyramidPlane& plane = planes[i];
-    const Vec3 nearest{plane.normal.x > 0.0F ? bounds.min.x : bounds.max.x,
-                       plane.normal.y > 0.0F ? bounds.min.y : bounds.max.y,
-                       plane.normal.z > 0.0F ? bounds.min.z : bounds.max.z};
+    const Vec3 nearest{.x = plane.normal.x > 0.0F ? bounds.min.x : bounds.max.x,
+                       .y = plane.normal.y > 0.0F ? bounds.min.y : bounds.max.y,
+                       .z = plane.normal.z > 0.0F ? bounds.min.z : bounds.max.z};
     if (game::dot(plane.normal, nearest) > plane.dist + 1e-2F) {
       return true;
     }

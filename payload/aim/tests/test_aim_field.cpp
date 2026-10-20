@@ -24,7 +24,7 @@ auto near(float a, float b, float tolerance = 1e-3F) -> bool {
 
 auto square(float x0, float y0, float x1, float y1) -> cs2::aim::Polygon {
   cs2::aim::Polygon poly;
-  poly.points = {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
+  poly.points = {{.x = x0, .y = y0}, {.x = x1, .y = y0}, {.x = x1, .y = y1}, {.x = x0, .y = y1}};
   return poly;
 }
 
@@ -40,9 +40,9 @@ auto main() -> int {
   field.add(square(-0.10F, -0.10F, 0.02F, 0.10F), 10.0F);
 
   expect(!field.empty(), "field is non-empty");
-  expect(near(field.value_at(Vec2{0.05F, 0.0F}), 100.0F), "head value");
-  expect(near(field.value_at(Vec2{-0.05F, 0.0F}), 10.0F), "body value");
-  expect(near(field.value_at(Vec2{0.5F, 0.5F}), 0.0F), "outside value");
+  expect(near(field.value_at(Vec2{.x = 0.05F, .y = 0.0F}), 100.0F), "head value");
+  expect(near(field.value_at(Vec2{.x = -0.05F, .y = 0.0F}), 10.0F), "body value");
+  expect(near(field.value_at(Vec2{.x = 0.5F, .y = 0.5F}), 0.0F), "outside value");
 
   // Damage optimum: the head cell's Chebyshev centre (the value is constant across the
   // cell, so the most robust point is the right choice; it must not depend on the
@@ -58,15 +58,16 @@ auto main() -> int {
   // Clipping: keep x <= 0.045 -> the head survives (narrower), the body too.
   {
     DamageField clipped = field;
-    clipped.clip(Vec2{1.0F, 0.0F}, 0.045F);
-    expect(near(clipped.value_at(Vec2{0.042F, 0.0F}), 100.0F), "clip keeps the head sliver");
+    clipped.clip(Vec2{.x = 1.0F, .y = 0.0F}, 0.045F);
+    expect(near(clipped.value_at(Vec2{.x = 0.042F, .y = 0.0F}), 100.0F),
+           "clip keeps the head sliver");
   }
   // Keep x <= 0.03 -> the head vanishes, the body is best.
   {
     DamageField clipped = field;
-    clipped.clip(Vec2{1.0F, 0.0F}, 0.03F);
-    expect(near(clipped.value_at(Vec2{0.042F, 0.0F}), 0.0F), "clip removes the head");
-    expect(near(clipped.value_at(Vec2{-0.05F, 0.0F}), 10.0F), "clip keeps the body");
+    clipped.clip(Vec2{.x = 1.0F, .y = 0.0F}, 0.03F);
+    expect(near(clipped.value_at(Vec2{.x = 0.042F, .y = 0.0F}), 0.0F), "clip removes the head");
+    expect(near(clipped.value_at(Vec2{.x = -0.05F, .y = 0.0F}), 10.0F), "clip keeps the body");
     // The body is now the only cell; its Chebyshev centre is the optimum.
     expect(near(clipped.argmax_damage().x, -0.04F) && near(clipped.argmax_damage().y, 0.0F),
            "body is now the damage optimum");
@@ -85,8 +86,8 @@ auto main() -> int {
     DamageField pitched;
     pitched.add(square(-0.04F, pitch - 0.01F, 0.04F, pitch + 0.01F), 100.0F);
     const auto objective = [&](float aim_pitch) -> float {
-      return pitched.expected_exact(Vec2{0.0F, aim_pitch}, sigma * cs2::aim::yaw_scale(aim_pitch),
-                                    sigma);
+      return pitched.expected_exact(Vec2{.x = 0.0F, .y = aim_pitch},
+                                    sigma * cs2::aim::yaw_scale(aim_pitch), sigma);
     };
     const float at_centre = objective(pitch);
     const Vec2 optimum = pitched.argmax_expected(sigma);
@@ -113,22 +114,22 @@ auto main() -> int {
     DamageField pellet_field;
     pellet_field.add(square(-0.01F, -0.01F, 0.01F, 0.01F), 100.0F);  // a cell at the origin
     pellet_field.add(square(0.09F, -0.01F, 0.11F, 0.01F), 100.0F);   // a cell at x = 0.1
-    const std::vector<Vec2> apart{Vec2{0.0F, 0.0F}, Vec2{0.1F, 0.0F}};
+    const std::vector<Vec2> apart{Vec2{.x = 0.0F, .y = 0.0F}, Vec2{.x = 0.1F, .y = 0.0F}};
 
     // From the origin, pellet 1 (aim + 0.1) lands on the far cell: 100 + 100.
-    expect(near(pellet_field.value_at_pellets(Vec2{0.0F, 0.0F}, apart), 200.0F),
+    expect(near(pellet_field.value_at_pellets(Vec2{.x = 0.0F, .y = 0.0F}, apart), 200.0F),
            "two pellets sum over two cells");
     // A single pellet is the single-ray value.
-    expect(
-        near(pellet_field.value_at_pellets(Vec2{0.0F, 0.0F}, std::vector<Vec2>{Vec2{0.0F, 0.0F}}),
-             100.0F),
-        "one pellet is the single-ray value");
+    expect(near(pellet_field.value_at_pellets(Vec2{.x = 0.0F, .y = 0.0F},
+                                              std::vector<Vec2>{Vec2{.x = 0.0F, .y = 0.0F}}),
+                100.0F),
+           "one pellet is the single-ray value");
     // The optimum reaches the two-pellet sum.
     const Vec2 pellet_aim = pellet_field.argmax_pellets(apart);
     expect(near(pellet_field.value_at_pellets(pellet_aim, apart), 200.0F),
            "the pellet optimum reaches the sum");
     // K=1 reduces to the damage optimum.
-    const Vec2 single = pellet_field.argmax_pellets(std::vector<Vec2>{Vec2{0.0F, 0.0F}});
+    const Vec2 single = pellet_field.argmax_pellets(std::vector<Vec2>{Vec2{.x = 0.0F, .y = 0.0F}});
     expect(near(single.x, pellet_field.argmax_damage().x) &&
                near(single.y, pellet_field.argmax_damage().y),
            "K=1 reduces to argmax_damage");
@@ -151,11 +152,12 @@ auto main() -> int {
     cone.add(square(-0.02F, -0.02F, 0.02F, 0.02F), 100.0F);  // a 0.04-wide cell at the origin
 
     expect(near(cone.hit_probability(Vec2{}, 0.0F), 1.0F), "no cone, centre -> hit");
-    expect(near(cone.hit_probability(Vec2{0.5F, 0.5F}, 0.0F), 0.0F), "no cone, far -> miss");
+    expect(near(cone.hit_probability(Vec2{.x = 0.5F, .y = 0.5F}, 0.0F), 0.0F),
+           "no cone, far -> miss");
     expect(near(cone.hit_probability(Vec2{}, 0.001F), 1.0F), "a tiny cone inside -> 1");
-    expect(cone.hit_probability(Vec2{0.5F, 0.5F}, 0.01F) < 0.01F, "a far cone -> ~0");
+    expect(cone.hit_probability(Vec2{.x = 0.5F, .y = 0.5F}, 0.01F) < 0.01F, "a far cone -> ~0");
     // A cone straddling the cell edge gives a partial probability.
-    const float edge = cone.hit_probability(Vec2{0.04F, 0.0F}, 0.04F);
+    const float edge = cone.hit_probability(Vec2{.x = 0.04F, .y = 0.0F}, 0.04F);
     expect(edge > 0.0F && edge < 1.0F, "a straddling cone -> partial");
     // The hitchance optimum maximizes the probability.
     const Vec2 best = cone.argmax_hit_probability(0.04F);
@@ -181,8 +183,9 @@ auto main() -> int {
       return (phi((x1 - a.x) / sigma) - phi((x0 - a.x) / sigma)) *
              (phi((y1 - a.y) / sigma) - phi((y0 - a.y) / sigma));
     };
-    for (const cs2::aim::Vec2 a : {cs2::aim::Vec2{0.0F, 0.0F}, cs2::aim::Vec2{0.04F, 0.0F},
-                                   cs2::aim::Vec2{0.05F, 0.03F}, cs2::aim::Vec2{-0.03F, 0.01F}}) {
+    for (const cs2::aim::Vec2 a :
+         {cs2::aim::Vec2{.x = 0.0F, .y = 0.0F}, cs2::aim::Vec2{.x = 0.04F, .y = 0.0F},
+          cs2::aim::Vec2{.x = 0.05F, .y = 0.03F}, cs2::aim::Vec2{.x = -0.03F, .y = 0.01F}}) {
       const double expected =
           closed(-0.04, -0.03, 0.02, 0.03, a) + closed(0.03, -0.02, 0.05, 0.02, a);
       expect(near(f.hit_probability(a, sigma), static_cast<float>(expected), 1.0e-3F),
@@ -193,8 +196,8 @@ auto main() -> int {
     float grid_best = 0.0F;
     for (int iy = -40; iy <= 40; ++iy) {
       for (int ix = -40; ix <= 40; ++ix) {
-        const cs2::aim::Vec2 a{-0.08F + static_cast<float>(ix) * 0.002F,
-                               -0.08F + static_cast<float>(iy) * 0.002F};
+        const cs2::aim::Vec2 a{.x = -0.08F + static_cast<float>(ix) * 0.002F,
+                               .y = -0.08F + static_cast<float>(iy) * 0.002F};
         grid_best = std::max(grid_best, f.hit_probability(a, sigma));
       }
     }
@@ -226,7 +229,7 @@ auto main() -> int {
     const auto probability = [](float pitch) -> float {
       constexpr float k_dist = 20.0F;
       constexpr float k_radius = 1.0F;
-      const Vec3 centre{k_dist * std::cos(pitch), 0.0F, k_dist * std::sin(pitch)};
+      const Vec3 centre{.x = k_dist * std::cos(pitch), .y = 0.0F, .z = k_dist * std::sin(pitch)};
       DamageField f;
       f.add(cs2::aim::project_sphere(Vec3{}, centre, k_radius, Basis::world(), 64), 100.0F);
       const Vec2 c = cs2::aim::chebyshev_center(f.cells.front().polygon);
@@ -260,7 +263,7 @@ auto main() -> int {
     int mismatches = 0;
     for (int iy = -70; iy <= 100; ++iy) {
       for (int ix = -40; ix <= 100; ++ix) {
-        const Vec2 p{static_cast<float>(ix) * 0.01F, static_cast<float>(iy) * 0.01F};
+        const Vec2 p{.x = static_cast<float>(ix) * 0.01F, .y = static_cast<float>(iy) * 0.01F};
         if (std::fabs(f.value_at(p) - linear(p)) > 1e-4F) {
           ++mismatches;
         }
@@ -268,7 +271,8 @@ auto main() -> int {
     }
     expect(mismatches == 0, "the point index matches the linear scan");
     // A query outside the field's bounds still finds the spanning cell.
-    expect(near(f.value_at(Vec2{0.70F, -0.30F}), 70.0F), "an outside probe keeps the large cell");
+    expect(near(f.value_at(Vec2{.x = 0.70F, .y = -0.30F}), 70.0F),
+           "an outside probe keeps the large cell");
   }
 
   // --- the cone objective prunes only the negligible tail ------------------

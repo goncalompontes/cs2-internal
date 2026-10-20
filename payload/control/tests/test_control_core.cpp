@@ -113,7 +113,7 @@ void test_snapshot_serialization() {
   local.team = 3;
   local.name = "me";
   local.on_ground = true;
-  local.origin = {1.0F, 2.0F, 3.0F};
+  local.origin = {.x = 1.0F, .y = 2.0F, .z = 3.0F};
   snapshot.local = local;
   snapshot.players = {local};
 

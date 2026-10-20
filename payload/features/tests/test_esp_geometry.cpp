@@ -292,24 +292,24 @@ void test_circle_points() {
 // pelvis and the limbs.
 auto player_points() -> std::vector<skeleton::BonePoint> {
   return {
-      {skeleton::k_hitgroup_head, 0.0F, 0.0F, 64.0F},
-      {skeleton::k_hitgroup_generic, 0.0F, 0.0F, 60.0F},  // the neck
-      {skeleton::k_hitgroup_chest, 0.0F, 0.0F, 50.0F},    // spine_2
-      {skeleton::k_hitgroup_chest, 0.0F, 0.0F, 45.0F},    // spine_1
-      {skeleton::k_hitgroup_stomach, 0.0F, 0.0F, 40.0F},
-      {skeleton::k_hitgroup_generic, 0.0F, 0.0F, 36.0F},     // the pelvis
-      {skeleton::k_hitgroup_left_arm, -8.0F, 0.0F, 50.0F},   // upper arm
-      {skeleton::k_hitgroup_left_arm, -16.0F, 0.0F, 46.0F},  // forearm
-      {skeleton::k_hitgroup_left_arm, -22.0F, 0.0F, 42.0F},  // hand
-      {skeleton::k_hitgroup_right_arm, 8.0F, 0.0F, 50.0F},
-      {skeleton::k_hitgroup_right_arm, 16.0F, 0.0F, 46.0F},
-      {skeleton::k_hitgroup_right_arm, 22.0F, 0.0F, 42.0F},
-      {skeleton::k_hitgroup_left_leg, -5.0F, 0.0F, 30.0F},  // thigh
-      {skeleton::k_hitgroup_left_leg, -5.0F, 0.0F, 16.0F},  // calf
-      {skeleton::k_hitgroup_left_leg, -5.0F, 0.0F, 2.0F},   // foot
-      {skeleton::k_hitgroup_right_leg, 5.0F, 0.0F, 30.0F},
-      {skeleton::k_hitgroup_right_leg, 5.0F, 0.0F, 16.0F},
-      {skeleton::k_hitgroup_right_leg, 5.0F, 0.0F, 2.0F},
+      {.group = skeleton::k_hitgroup_head, .x = 0.0F, .y = 0.0F, .z = 64.0F},
+      {.group = skeleton::k_hitgroup_generic, .x = 0.0F, .y = 0.0F, .z = 60.0F},  // the neck
+      {.group = skeleton::k_hitgroup_chest, .x = 0.0F, .y = 0.0F, .z = 50.0F},    // spine_2
+      {.group = skeleton::k_hitgroup_chest, .x = 0.0F, .y = 0.0F, .z = 45.0F},    // spine_1
+      {.group = skeleton::k_hitgroup_stomach, .x = 0.0F, .y = 0.0F, .z = 40.0F},
+      {.group = skeleton::k_hitgroup_generic, .x = 0.0F, .y = 0.0F, .z = 36.0F},     // the pelvis
+      {.group = skeleton::k_hitgroup_left_arm, .x = -8.0F, .y = 0.0F, .z = 50.0F},   // upper arm
+      {.group = skeleton::k_hitgroup_left_arm, .x = -16.0F, .y = 0.0F, .z = 46.0F},  // forearm
+      {.group = skeleton::k_hitgroup_left_arm, .x = -22.0F, .y = 0.0F, .z = 42.0F},  // hand
+      {.group = skeleton::k_hitgroup_right_arm, .x = 8.0F, .y = 0.0F, .z = 50.0F},
+      {.group = skeleton::k_hitgroup_right_arm, .x = 16.0F, .y = 0.0F, .z = 46.0F},
+      {.group = skeleton::k_hitgroup_right_arm, .x = 22.0F, .y = 0.0F, .z = 42.0F},
+      {.group = skeleton::k_hitgroup_left_leg, .x = -5.0F, .y = 0.0F, .z = 30.0F},  // thigh
+      {.group = skeleton::k_hitgroup_left_leg, .x = -5.0F, .y = 0.0F, .z = 16.0F},  // calf
+      {.group = skeleton::k_hitgroup_left_leg, .x = -5.0F, .y = 0.0F, .z = 2.0F},   // foot
+      {.group = skeleton::k_hitgroup_right_leg, .x = 5.0F, .y = 0.0F, .z = 30.0F},
+      {.group = skeleton::k_hitgroup_right_leg, .x = 5.0F, .y = 0.0F, .z = 16.0F},
+      {.group = skeleton::k_hitgroup_right_leg, .x = 5.0F, .y = 0.0F, .z = 2.0F},
   };
 }
 
@@ -390,7 +390,8 @@ void test_skeleton_missing_chest() {
 // A third "generic" capsule (a gear box) must not steal the pelvis role.
 void test_skeleton_gear_capsule() {
   std::vector<skeleton::BonePoint> points = player_points();
-  points.push_back({skeleton::k_hitgroup_generic, 0.0F, 0.0F, 4.0F});  // a gear box
+  points.push_back(
+      {.group = skeleton::k_hitgroup_generic, .x = 0.0F, .y = 0.0F, .z = 4.0F});  // a gear box
   const std::vector<skeleton::Segment> chain = skeleton::build_chain(points);
   expect(has_segment(chain, 0.0F, 0.0F, 40.0F, 0.0F, 0.0F, 36.0F),
          "the stomach still joins the pelvis");

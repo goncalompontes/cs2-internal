@@ -44,10 +44,14 @@ auto clip_to_view(const Polygon& polygon, const Vec2& view, float extent) -> Pol
   for (Vec2& point : clipped.points) {
     point.x = unwrap_yaw(point.x, view.x);
   }
-  clipped = clip_half_plane(clipped, Vec2{1.0F, 0.0F}, view.x + extent);    // u <= view.x + extent
-  clipped = clip_half_plane(clipped, Vec2{-1.0F, 0.0F}, -(view.x - extent));  // u >= view.x - extent
-  clipped = clip_half_plane(clipped, Vec2{0.0F, 1.0F}, view.y + half_v);    // v <= view.y + half_v
-  clipped = clip_half_plane(clipped, Vec2{0.0F, -1.0F}, -(view.y - half_v));  // v >= view.y - half_v
+  clipped = clip_half_plane(clipped, Vec2{.x = 1.0F, .y = 0.0F},
+                            view.x + extent);  // u <= view.x + extent
+  clipped = clip_half_plane(clipped, Vec2{.x = -1.0F, .y = 0.0F},
+                            -(view.x - extent));  // u >= view.x - extent
+  clipped = clip_half_plane(clipped, Vec2{.x = 0.0F, .y = 1.0F},
+                            view.y + half_v);  // v <= view.y + half_v
+  clipped = clip_half_plane(clipped, Vec2{.x = 0.0F, .y = -1.0F},
+                            -(view.y - half_v));  // v >= view.y - half_v
   return clipped;
 }
 
@@ -86,8 +90,13 @@ auto build_heatmap(const Vec3& eye, const Basis& basis, float extent,
           options.penetration, options.penetration_params, candidates_complete, used);
       map.occlusion_candidates_complete = map.occlusion_candidates_complete && candidates_complete;
       for (const DamageFragment& fragment : fragments) {
-        map.cells.push_back(HeatCell{fragment.polygon, fragment.value, fragment.base_value,
-                                     pose.target, hitbox.group, pose.record, pose.age});
+        map.cells.push_back(HeatCell{.polygon = fragment.polygon,
+                                     .value = fragment.value,
+                                     .base_value = fragment.base_value,
+                                     .target = pose.target,
+                                     .hitgroup = hitbox.group,
+                                     .record = pose.record,
+                                     .age = pose.age});
       }
     }
   }
