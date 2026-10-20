@@ -112,9 +112,11 @@ FUN_212c3668e6f  (the pass/shader table builder, 1 344 B)
   *(lVar6 + 0x280) = &DAT_212c41d4180 ; *(lVar6 + 0x288) = 0x680 ;   //  1 664 B
 ```
 (the sizes match the container sizes in §1 exactly, `verified`). The four
-`PolygonConstants` pixel shaders at offsets `0x50 / 0xf0 / 0x168 / 0x1e0` are
-therefore **four distinct passes of the same family** — consistent with a
-base/shadow/outline/glow decomposition.
+`PolygonConstants` pixel shaders sit in four different slots of that table
+(`0x50 / 0xf0 / 0x168 / 0x1e0`), i.e. they are **four distinct passes of the
+same family** — consistent with a base/shadow/outline/glow decomposition.
+`inferred` (the slot assignment is `verified`; the decomposition is the
+reading).
 
 ---
 
@@ -297,9 +299,11 @@ Not part of the four families, and not the chams:
   (3 args), `0x158` = `OMSetRenderTargets`, `0x140` = `RSSetViewports`,
   `0x120` = `CSSetShaderResources`. `verified`.
 
-**Where the depth state is decided** (`verified`, `FUN_212c36bde17`, 1 461 B):
-that function assembles a full `D3D11_GRAPHICS_PIPELINE_STATE_DESC` on the
-stack and copies it into the object it is given:
+**Where the depth state is decided** (`verified` for the copy, `inferred` for
+the struct identification; `FUN_212c36bde17`, 1 461 B): that function copies a
+**0xA0-byte block** into an object and then writes the tail — a
+`D3D11_GRAPHICS_PIPELINE_STATE_DESC` (identified from those offsets: the
+`BlendState` at `0x70`, the `SampleDesc` at `0xB8`, the total at `0x100`):
 
 ```
   /* 0x212c36bde17 — the PSO descriptor builder */
