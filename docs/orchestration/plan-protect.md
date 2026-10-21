@@ -39,17 +39,58 @@ Techniques that pay, in order:
 
 The plan is sequenced so the cheap, high-value items land first.
 
+### 1.1 The survey (2026-10-21)
+
+The full survey is
+[`docs/research/protect-techniques-survey.md`](../research/protect-techniques-survey.md).
+It ranks the techniques against **this** payload and marks every claim
+`verified` / `documented` / `inferred`. Its conclusions that changed this
+plan:
+
+- **T21 (strings + a runtime-derived key) is the highest-value remaining
+  task**, ahead of the virtualization. The plan's own number-one technique,
+  and the survey found the entropy source already in the repository: the
+  injector calls the payload's entry as `DllMain(base, DLL_PROCESS_ATTACH, 0)`
+  (`injector/src/main.cpp`), so the payload's **own mapped image base** arrives
+  in `hinst` — a value that is not in the file, costs no import and no TLS,
+  and is relocation-safe. The payload currently discards it
+  (`payload/src/payload_main.cpp`).
+- **T20 (the virtualization) is the lowest-payoff-per-effort item left.** The
+  2024-2026 literature has industrialised the attack: a trace plus symbolic
+  execution devirtualizes a commercial VM in an afternoon. It still buys
+  against an **offline** analyst, so it is worth doing — but scoped hard
+  (one function, integers and pointers, one proven differential test), and it
+  must not absorb the remaining budget.
+- **T19's cross-translation-unit hole is the cheapest real payoff** and was
+  not in this plan: 295 of the 332 call sites of the selected functions stay
+  direct, and they are the ones that carry the aim call graph. Proposed as
+  **T23**.
+- **The shipped DLL is a signature.** The file on disk is the artefact an
+  anti-cheat hashes, and today every build is identical except for a table
+  permutation: the build seed exists but is optional. Proposed as **T24**.
+- **T22 (integrity) is anti-tamper, not anti-reversing**, and it is worth
+  designing jointly with T21: a runtime-derived key that is *verified* needs
+  the same post-link binding machinery.
+
+
 ## 2. The task sequence
 
 | Task | Name | What it delivers | Depends on |
 |---|---|---|---|
 | **T18** | `protect-foundation` | the plugin builds, loads under clang-cl, selects functions (annotation + policy file), reports; Meson wiring; no code change yet | - |
 | **T19** | `protect-call-encryption` | direct calls to selected targets become indirect dispatches through an encrypted descriptor; relocation-safe | T18 |
-| **T20** | `protect-virtualization` | whole-function IR -> bytecode -> a freestanding interpreter emitted as IR | T19 |
-| **T21** | `protect-strings` | string/constant encryption with a runtime-derived key | T18 |
+| **T20a** | `protect-vm-front-end` | the ISA, the fail-closed eligibility gate, the IR→bytecode lowering, the encoder (encrypted, per-build opcode permutation); **read-only** — the image does not change | T19 |
+| **T20b** | `protect-vm-interpreter` | the interpreter emitted as IR, the per-call-site thunks, the rewrite of the function's body, the `virtualized` level made real, the differential test | T20a |
+| **T20c** | `protect-vm-payload` | the virtualization applied to the payload's real aim helpers, with the slowdown measured | T20b |
+| **T21** | `protect-strings` | string/constant encryption with a **runtime-derived** key (the mapped image base) | T18 |
 | **T22** | `protect-integrity` | post-link binder + runtime self-check | T19, T21 |
+| **T23** | `protect-cross-tu` | the cross-TU call graph of the protected functions leaves the image (today 295 of 332 call sites stay direct) | T19 |
+| **T24** | `protect-polymorphism` | the shipped DLL is not signaturable: the build seed is mandatory and drives the layout, the keys and the tables | T19 |
 
-T18-T20 are the core. T21/T22 are cheap add-ons once the plumbing exists.
+T18-T19 are done. **T20a-T20b are the core**; T20c, T21, T22, T23 and T24 are
+add-ons. The **order changed** in 2026-10-21 after the survey (§1.1):
+**T21 is now the highest-value task**, and T20 is deliberately scoped down.
+T21 and T23 are independent of the VM and can be interleaved with it.
 
 ## 3. The verified toolchain facts (all measured on this machine)
 
@@ -84,22 +125,41 @@ re-derives these will burn a day.
 > every LLVM upgrade, and keep the plugin behind an opt-in build option so a
 > broken toolchain can never block the normal build.
 
-The payload is **manually mapped** into `cs2.exe` by `payload/loader`:
+The payload is **manually mapped** into `cs2.exe` by the injector
+(`injector/src/main.cpp`):
 
 - the mapper **applies base relocations** (DIR64 / HIGHLOW) => an encrypted
   blob must never contain a relocatable pointer, and a cipher must never bake
   in an absolute address. Encode an **index** or a **relative offset**.
-- `RtlInsertInvertedFunctionTable` is **fatal** if it cannot be registered =>
-  the protected DLL must keep a correct `.pdata`/`.xdata` pair.
-- the mapper resolves TLS by an ntdll pattern scan and **fails the whole
-  injection** if it is not found => the pass must not introduce TLS variables.
+- the mapper registers the x64 unwind table and **only warns** when it cannot
+  (`injector/src/main.cpp`) => the protected DLL should keep a correct
+  `.pdata`/`.xdata` pair (robustness, not a fatal gate).
+- the injector allocates **one** TLS block for the whole image and sets it on
+  the **entry thread only** => the pass must not introduce TLS variables: a
+  `thread_local` read from another thread would read the wrong block. (The
+  payload already carries three `thread_local` variables and a 4 KB `.tls`
+  section.)
 - imports are resolved by name => the pass must not add imports of modules the
   target process does not have.
-- no CRT: the payload is static-CRT, has no global dynamic initialisers and no
-  exceptions. **Any runtime code the pass injects must be freestanding**: no
-  `new`, no `std::vector`, no global constructors, no unwind tables it cannot
-  justify. This is why the VM interpreter is **emitted as LLVM IR** rather
-  than linked in as C++.
+- **nothing in the image is ever initialised**: the map is done by the
+  injector, the CRT startup never runs, so a global with a dynamic
+  initialiser would be **silently zero** in the mapped image. **Any runtime
+  code the pass injects must be freestanding**: no `new`, no `std::vector`, no
+  global constructors, no unwind tables it cannot justify. This is why the VM
+  interpreter is **emitted as LLVM IR** rather than linked in as C++.
+
+> **Corrected on 2026-10-21** (the survey found these, and the built image
+> confirms them): the payload is built **`/MD`** (dynamic CRT — the image
+> imports `MSVCP140.dll`, `VCRUNTIME140.dll` and eight `api-ms-win-crt-*`
+> modules), **not** static CRT; the TLS is resolved by the injector **by
+> name**, not by an ntdll pattern scan; and the unwind table registration is a
+> **warning**, not a fatal error. The *conclusions* (no TLS, a coherent
+> `.pdata`, freestanding injected code) stand — but the reasons were wrong,
+> and the injector has to `--load-missing` the two CRT DLLs into the game
+> process. The documented cross file (`toolchain/windows-msvc.ini`, which sets
+> `b_vscrt = mt`) is **not used** by any of the builds on this machine:
+> all four `build-payload*` directories are configured `b_vscrt =
+> from_buildtype`.
 
 ## 5. The VM design (T20), in brief
 
