@@ -75,9 +75,15 @@ class BotMatchGame:
         #: ``("exec", line)`` and ``("state", screen)`` entries, in order.
         self.timeline: list[tuple[str, str]] = []
         self.waits: list[dict[str, Any]] = []
-        #: Whether the world simulates: a player that does not move is the
-        #: machine's liveness gate failing.
-        self.simulating = True
+
+    @property
+    def simulating(self) -> bool:
+        """Whether the world simulates — only the ``stuck`` phase does not.
+
+        A world that does not simulate is the machine's liveness gate failing:
+        the player does not move, so the round is not a live round.
+        """
+        return self.phase != "stuck"
 
     # --- the timeline -----------------------------------------------------
     def index_of(self, kind: str, value: str) -> int:
@@ -118,7 +124,6 @@ class BotMatchGame:
                 # buy window and never simulates again.
                 self.broken = True
                 self.phase = self.bot_phase
-                self.simulating = False
         elif line.startswith("bot_add"):
             self.player_count += 1
         elif line == "+forward" and self.simulating:
@@ -240,6 +245,20 @@ class TestTheFinalWait(unittest.TestCase):
         fake = BotMatchGame()
         result = run_setup(fake)
         self.assertEqual(result["screen"], "live")
+
+    def test_a_buy_time_round_that_simulates_is_a_live_round(self) -> None:
+        """The machine's ``LIVE`` target: a running round with an open window.
+
+        The playground's ``mp_buytime 9999`` keeps the buy window open for the
+        whole round, so the exact ``LIVE`` screen is unreachable there — a
+        running round whose window is still open **is** a live round (see
+        ``screens.Machine._reached``). What is not live is a world that sits
+        in that window without simulating: that is the case above.
+        """
+        fake = BotMatchGame(bot_phase="buy")
+        result = run_setup(fake, verify_movable=True)
+        self.assertEqual(result["screen"], "buy-time")
+        self.assertEqual(result["round"]["screen"], "buy-time")
 
 
 class TestTheResult(unittest.TestCase):

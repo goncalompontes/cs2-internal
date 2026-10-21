@@ -683,6 +683,16 @@ Knobs: `map_name`, `per_team`, `respawn`, `bot_stop`, `join_timeout` (the
 budget for the team join) and `final_timeout` (the budget for the final wait,
 120 s by default).
 
+> **The `screen` in the result is `buy-time` in the playground — and that is a
+> live round.** The playground sets `mp_buytime 9999`, so the buy window stays
+> open for the whole round and the machine's screen reads `buy-time` for a
+> round that is running (the machine counts a running round with an open buy
+> window as live — `screens.Machine._reached`). The round's own state is in
+> the result's `round` block: `freeze=false`, `warmup=false`,
+> `round_win_status=0` and the recent `round_start` / `round_freeze_end`
+> events. Demanding the exact `LIVE` screen would make every run fail, because
+> the window never closes.
+
 ### Console-output capture (open)
 
 `exec` returns `{queued}` only — the Cbuf path produces no text. `-concommandpipe`
