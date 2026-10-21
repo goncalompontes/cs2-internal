@@ -259,6 +259,39 @@ pub fn known_signatures() -> Vec<Signature> {
             None,
             None,
         ),
+        // ---- the camera split (`docs/re/camera-split.md`) ---------------------
+        // `C_BasePlayerPawn`'s **eye-angle copy** — the virtual that takes the
+        // view angles (the command's own, through the camera services at pawn
+        // `+0x1328`) and stores them into the pawn's eye angles
+        // (`m_angEyeAngles`, pawn `+0x3600`). The camera split hooks it: the
+        // engine copies the command's angles into the eye angles every frame,
+        // and the payload puts the camera back right after (`docs/re/strafing.md`
+        // §"The split").
+        //
+        // The anchor is the prologue plus the **virtual call at vtable +0x570**
+        // (the view-angle getter) — the function's entry, so the match start is
+        // the RVA. Resolved RVA on build 659940c1: `0x8cb9b0`.
+        sig(
+            "client.dll",
+            "eye_angles_copy",
+            "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 54 41 56 41 57 48 83 EC 30 48 8B 01 48 8D 54 24 20 4C 8B F1 FF 90 70 05 00 00",
+            None,
+            None,
+        ),
+        // `CCSGOInput`'s **view-angle setter** — `FUN_180b80e70(input, slot,
+        // angles)`: it stores the angles the movement path hands it into the
+        // local view angles (`input + slot*0x928 + 0x688`; slot 0 is the local
+        // player, and when the per-slot history is empty the write lands
+        // straight at `input + 0x688`). This is the write the camera reads and
+        // the write the camera split replaces with the player's own angles.
+        // Resolved RVA on build 659940c1: `0xb80e70`.
+        sig(
+            "client.dll",
+            "view_angles_setter",
+            "85 D2 75 3D 48 63 81 50 0B 00 00 F2 41 0F 10 00 85 C0 74 ?? 48 69 D0 40 04 00 00 48 03 91 58 0B 00 00",
+            None,
+            None,
+        ),
         // ---- occlusion / physics query (docs/re/occlusion.md) -------------
         // `CGamePhysicsQueryInterface` singleton — `*(client_base + 0x2227058)`.
         // Anchor on a load in the query's own call path (a `MOV RCX, [singleton]`
