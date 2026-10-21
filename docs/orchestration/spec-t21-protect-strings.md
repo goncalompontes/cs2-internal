@@ -90,40 +90,56 @@ plaintext out of the image.
 ### 3.2 What the key is a function of
 
 ```
-key = mix(seed0, seed1, instance_base, index)
+key = mix(seed0, seed1, index)
 ```
 
 - `seed0`, `seed1` — the **build seed**, derived the way T19 derives its key
   (`splitmix64` over the module seed). They live in two `private constant`
   globals of the module and are read with **volatile loads**.
-- `instance_base` — **the payload's own mapped image base**, at run time. It
-  is not in the file, it differs per injection, and it costs no import and
-  no TLS.
 - `index` — the string's index in the module's list of protected strings. A
   small integer, so it is passed as an `i32` argument (no 64-bit immediate).
 
 The mixing is the **same mixer family T19 uses** (`splitmix64` + the
 multiply/xor/rotate mixer). This is obfuscation, not cryptography: an
-analyst who finds the base and the seed recovers the strings. Say so in the
-README.
+analyst who finds the key recovers the strings. Say so in the README.
 
-**Why the image base and not something else.** It is the cheapest runtime
-entropy that already exists in this repository:
+> **CORRECTED (2026-10-21, after the implementation).** This section
+> originally said the key was `mix(seed0, seed1, instance_base, index)` and
+> that the image was therefore useless on its own. **That is impossible, and
+> the implementer was right to say so.** The ciphertext is baked into the
+> image at build time, so the value that encrypted it must be computable at
+> build time: a **per-injection** value cannot key data that is already in
+> the file. Mixing the instance base into the key makes the decode produce
+> **garbage**, not plaintext.
+>
+> The implementation therefore mixes the base in **and** takes it out again
+> (`runtime_key = build_key ^ base`, `stream_key = runtime_key ^ base`), so
+> the base is **not** a key: it cancels, and the recovered plaintext does not
+> depend on it. That is the honest shape of this task.
+>
+> **What this task therefore delivers:** the strings are **not plaintext in
+> the image** — they are not greppable, and they are not readable without
+> running the pass's decoder. **What it does not deliver:** protection
+> against an analyst who reads the decoder, which is in the image. The
+> **genuinely runtime-derived** key needs the ciphertext to be transformed at
+> **injection** time, not at build time — that is **T21b** (the injector
+> writes a per-injection mask into a reserved slot; the payload publishes it;
+> the decode mixes it in and does not take it out). Until T21b lands, the
+> plan's "the dumped image is useless on its own" claim is **not** true of
+> the strings.
 
-- the injector maps the image and calls its entry as
-  **`DllMain(base, DLL_PROCESS_ATTACH, 0)`** (`injector/src/main.cpp`) — the
-  **first parameter is the payload's own mapped image base**;
-- `payload/src/payload_main.cpp:764` is
-  `BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID)` — the handle is
-  **named and discarded**.
+**Why the image base at all, then.** It costs nothing and it keeps the door
+open for T21b: the reserved global, the publication in `DllMain` and the
+volatile load are already in place, so T21b only has to change the algebra
+and the injector. It also gives the decode a **runtime** input, which means
+the decoder cannot be folded away by the optimiser at build time — the
+volatile load is what keeps that true.
 
-So the payload has to do one thing: **publish the handle** it already
-receives. That is the payload-side change of this task (§6).
-
-The image base is **stable** for the payload's life: the injector maps the
+**The image base is stable** for the payload's life: the injector maps the
 image once and calls the entry point once. The payload's `self_unmap` is
 **denied** by the current policy, so there is no re-map path that would
 invalidate a cached key.
+
 
 ### 3.3 The blob, the decode helper and the globals
 
@@ -296,9 +312,11 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
 ```
 
 **The write must be the first thing that happens at attach**, before
-`boot()`: a string decoded before the base is published would decode with
-base 0 and produce garbage — a wrong behaviour, not a crash, so nothing else
-would notice it.
+`boot()`: a string decoded before the base is published would read a stale
+value — a wrong behaviour, not a crash, so nothing else would notice it.
+(The base does not change the recovered plaintext — see the correction in
+§3.2 — but it is a **runtime input** to the decode, and it must not be
+stale.)
 
 The global is **zero-initialised** (a static initialiser, so it is correct on
 disk), it is **writable** in the mapped image (the injector maps the image
@@ -413,9 +431,14 @@ step: the plugin reads it in the compiler process.
    and the check that proves it is in `check_payload.py`.
 2. The plaintext is **present** in the unprotected image — the check compares,
    so it cannot pass vacuously.
-3. The key is **runtime-derived**: the ciphertext is not the plaintext under
-   any build-time constant, and the decode reads the instance base at run
-   time. The IR test proves the decode is emitted and the literal is gone.
+3. The key is **not a compile-time constant in the image**: the ciphertext is
+   not the plaintext under any constant the pass bakes in, the seed parts and
+   the mixer constants live in globals and are read with **volatile** loads,
+   and the decode reads a **runtime** input (the published instance base).
+   The IR test proves the decode is emitted, the literal is gone, and the
+   constants are not immediates.
+   **What this does *not* claim:** that the image cannot decrypt itself —
+   §3.2's correction explains why it can, and what T21b must change.
 4. The **differential test** proves the protected and the unprotected
    fixture agree, and the test **can fail** (the mutations are listed in the
    report).
