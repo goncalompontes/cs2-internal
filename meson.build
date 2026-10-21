@@ -342,6 +342,26 @@ control_rage_objective_test = executable('control_rage_objective_test',
 )
 test('control-rage-objective', control_rage_objective_test)
 
+# The per-weapon rage profile's **line codec** (`cs2/control/rage_config.hpp`):
+# the text format of `cs2-rage.cfg` is a property of the file, not of the file
+# system, so the codec is pure and the host test drives it — the round trip
+# (save -> load) with the Monte-Carlo objective, and the refusal of an unknown
+# objective byte. The file's own I/O is Windows-only and unchanged.
+control_rage_config_test = executable('control_rage_config_test',
+  files(
+    'payload/control/tests/test_control_rage_config.cpp',
+    'payload/control/src/rage_config.cpp',
+    'payload/game/src/log.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+  dependencies : control_host_dep,
+)
+test('control-rage-config', control_rage_config_test)
+
 # The auto-strafe's decision maths (the W/A/S/D travel heading, the side's
 # dead zone and hysteresis, and the `AirAccelerate` optimum) — a pure,
 # dependency-free header, built natively so the strafe's maths has a host

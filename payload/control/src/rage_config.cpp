@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "cs2/control/rage_objective.hpp"
 #include "cs2/core/handle.hpp"
 #include "cs2/game/log.hpp"
 
@@ -118,6 +119,57 @@ void rage_weapon_key(const char* weapon, char* out, int size) noexcept {
   normalise_weapon(weapon, out, size);
 }
 
+auto rage_profile_parse(const char* line, RageProfile& out) noexcept -> bool {
+  if (line == nullptr) {
+    return false;
+  }
+  // The profile is **value-initialised**: a line with fewer fields than the
+  // format has keeps the defaults for the rest. (An uninitialised profile would
+  // hand the caller whatever was on the stack — the load's own bug, and the
+  // reason a truncated line was not reproducible.)
+  RageProfile profile{};
+  int key = 0;
+  const int fields = std::sscanf(
+      line, "%23[^|]|%hhu|%hhu|%hhu|%d|%f|%f|%f|%hhu|%hhu|%hhu|%hhu|%hhu", profile.weapon,
+      &profile.objective, &profile.hitbox, &profile.mode, &key, &profile.fov,
+      &profile.min_damage, &profile.min_hitchance, &profile.autostop, &profile.autoscope,
+      &profile.autoreload, &profile.only_visible, &profile.fire);
+  // Fewer than four fields is not a profile: a comment, a blank line, or a
+  // truncated write.
+  if (fields < 4) {
+    return false;
+  }
+  profile.key = key;
+  char normalised[24];
+  normalise_weapon(profile.weapon, normalised, sizeof(normalised));
+  std::snprintf(profile.weapon, sizeof(profile.weapon), "%s", normalised);
+  // The objective byte: an **unknown** value falls back to the documented safe
+  // default, never to an arbitrary objective. The value is the profile's wire
+  // format, so a file written by a newer payload (or a corrupted one) must not
+  // select an objective the service does not know.
+  if (!objective_value_valid(profile.objective)) {
+    profile.objective = static_cast<std::uint8_t>(OBJECTIVE_VALUE_DEFAULT);
+  }
+  out = profile;
+  return true;
+}
+
+auto rage_profile_format(const RageProfile& profile, char* out, std::size_t size) noexcept
+    -> bool {
+  if (out == nullptr || size == 0) {
+    return false;
+  }
+  const int written = std::snprintf(
+      out, size, "%s|%u|%u|%u|%d|%.4f|%.2f|%.3f|%u|%u|%u|%u|%u", profile.weapon,
+      static_cast<unsigned>(profile.objective), static_cast<unsigned>(profile.hitbox),
+      static_cast<unsigned>(profile.mode), profile.key, static_cast<double>(profile.fov),
+      static_cast<double>(profile.min_damage), static_cast<double>(profile.min_hitchance),
+      static_cast<unsigned>(profile.autostop), static_cast<unsigned>(profile.autoscope),
+      static_cast<unsigned>(profile.autoreload), static_cast<unsigned>(profile.only_visible),
+      static_cast<unsigned>(profile.fire));
+  return written > 0 && static_cast<std::size_t>(written) < size;
+}
+
 auto rage_profile_find(RageConfigStore& store, const char* weapon, bool create) -> RageProfile* {
   const char* key = weapon != nullptr ? weapon : "";
   for (int i = 0; i < store.count && i < k_max_rage_profiles; ++i) {
@@ -182,18 +234,8 @@ auto rage_config_load(RageConfigStore& store) noexcept -> bool {
       ++p;
     }
     if (*p != '\0' && *p != '#') {
-      RageProfile profile;
-      int key = 0;
-      const int fields = std::sscanf(
-          p, "%23[^|]|%hhu|%hhu|%hhu|%d|%f|%f|%f|%hhu|%hhu|%hhu|%hhu|%hhu", profile.weapon,
-          &profile.objective, &profile.hitbox, &profile.mode, &key, &profile.fov,
-          &profile.min_damage, &profile.min_hitchance, &profile.autostop, &profile.autoscope,
-          &profile.autoreload, &profile.only_visible, &profile.fire);
-      if (fields >= 4) {
-        profile.key = key;
-        char normalised[24];
-        normalise_weapon(profile.weapon, normalised, sizeof(normalised));
-        std::snprintf(profile.weapon, sizeof(profile.weapon), "%s", normalised);
+      RageProfile profile{};
+      if (rage_profile_parse(p, profile)) {
         store.profiles[store.count++] = profile;
       }
     }
@@ -220,12 +262,14 @@ auto rage_config_save(const RageConfigStore& store) noexcept -> bool {
                   used < static_cast<int>(sizeof(buffer)) - 1;
        ++i) {
     const RageProfile& p = store.profiles[i];
-    const int written = std::snprintf(
-        buffer + used, sizeof(buffer) - static_cast<std::size_t>(used),
-        "%s|%u|%u|%u|%d|%.4f|%.2f|%.3f|%u|%u|%u|%u|%u\n", p.weapon, p.objective, p.hitbox,
-        p.mode, p.key, static_cast<double>(p.fov), static_cast<double>(p.min_damage),
-        static_cast<double>(p.min_hitchance), p.autostop, p.autoscope, p.autoreload,
-        p.only_visible, p.fire);
+    // The line is formatted by the **codec**, so the file's shape and the codec
+    // the host test drives cannot drift apart.
+    char line[256];
+    if (!rage_profile_format(p, line, sizeof(line))) {
+      break;
+    }
+    const int written = std::snprintf(buffer + used, sizeof(buffer) - static_cast<std::size_t>(used),
+                                      "%s\n", line);
     if (written <= 0) {
       break;
     }
