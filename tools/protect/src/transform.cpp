@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -337,9 +338,9 @@ auto transform_module(llvm::Module& module, const Config& config,
   // The declarations the policy's `cross_module` list named in this module.
   // The key is the mangled symbol: the call site names the callee, and the
   // symbol is what the two phases agree on.
-  std::map<std::string, std::string> routable;  // symbol -> the pattern
+  std::set<std::string> routable;
   for (const RecordedCross& match : selection.cross) {
-    routable.emplace(match.symbol, match.pattern);
+    routable.insert(match.symbol);
   }
 
   // The call sites that are rewritten, and the callees they name.
