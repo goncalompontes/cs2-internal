@@ -987,11 +987,12 @@ captured. Against the code before this change the process died with
    0, with no GPU and no interactive desktop. The detour has still never run
    against the real draw, so the **number** of jobs that overlap in one frame
    is still not measured.
-2. **The animfix's comment** in `payload/control/src/input.cpp` still says
-   that the hook's publication "is a plain pointer store, which is atomic on
-   x86". It is not any more: the trampoline is published with an **atomic
-   release store**. That file is outside this task's ownership, so the
-   comment is left as it is and is reported with the task.
+2. **The animfix's comment** in `payload/control/src/input.cpp` said that the
+   hook's publication "is a plain pointer store, which is atomic on x86". It
+   was not any more: the trampoline is published with an **atomic release
+   store** and read with an **acquire load**. The comment is **updated** (the
+   file is outside this task's ownership, so the change is a single comment
+   and was authorised for exactly that).
 3. **The camera's own `g_active`** (`payload/features/thirdperson.cpp`) is a
    plain pointer with the same shape as the chams' was. It is outside this
    task's ownership (the camera's behaviour must not change), so it is

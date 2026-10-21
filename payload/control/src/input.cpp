@@ -1963,7 +1963,8 @@ void Input::report_animfix_status(std::string status, std::string log_line) noex
 // (The residual: `InlineHook::original()` is read by the detour while the
 // installing thread wrote it. The hook engine publishes the trampoline
 // *before* it patches the target, precisely so the detour always finds it;
-// the write is a plain pointer store, which is atomic on x86.)
+// the write is an **atomic release store** and the read an **atomic acquire
+// load**, so the detour sees the trampoline's bytes in place.)
 void Input::animfix_install() noexcept {
   if (animfix_codec_hook_.installed() && animfix_anim_tick_hook_.installed()) {
     return;
