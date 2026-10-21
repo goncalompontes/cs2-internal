@@ -752,8 +752,8 @@ Every slot carries a **sequence word**: odd while a writer is inside the
 slot, even when the entry is stable.
 
 * the **writer** claims the slot by taking the sequence from even to odd (one
-  compare-exchange, `acq_rel`), writes the entry as one unit, and publishes
-  the even sequence again behind a **release fence**;
+  compare-exchange), **fences**, writes the entry as one unit, fences again,
+  and publishes the even sequence again;
 * the **reader** takes the sequence (acquire), reads the entry, and takes the
   sequence again behind an **acquire fence**: if it changed, or if it was odd,
   the entry it read is not the entry it is looking at, and it retries (a
@@ -761,10 +761,45 @@ slot, even when the entry is stable.
   never allocates).
 
 The entry's own fields are **relaxed**: the sequence is what makes them
-consistent, and the writer's release fence is what publishes them. The
-compare-exchange is `acq_rel` so the claim is visible **before** the entry's
-writes (a reader that sees the odd sequence cannot see the entry first) and
-the entry's writes stay **below** the claim.
+consistent, and the writer's release fence is what publishes them.
+
+### 10.2.1 The two fences, and what each order actually buys
+
+The protocol is the canonical seqlock, and the canonical seqlock has **two**
+barriers — Linux's `write_seqcount_begin()` puts an `smp_wmb()` between "the
+sequence goes odd" and "the data is written", and `write_seqcount_end()`
+puts another one between "the data is written" and "the sequence goes even".
+Both are here, as `std::atomic_thread_fence(std::memory_order_release)`.
+
+The **first** fence is the one that makes the protocol correct on a weakly
+ordered machine, and it is the one this change added. A release orders the
+accesses that come **before** it, so a release fence between the claim and
+the entry's writes is exactly the store-store barrier that keeps the **claim**
+from being delayed past the entry's writes. The property the protocol needs
+is therefore:
+
+> a reader that observes the **new** entry also observes the **odd** marker —
+> so it retries, instead of reading the old even sequence, the new entry and
+> the old even sequence again, and accepting **desc A with entity B**.
+
+The claim's compare-exchange is **acquire**, and that is the whole of it: the
+acquire keeps the entry's writes **below** the claim (the compiler cannot
+hoist them above it). It was `acq_rel` here, and the release half was
+**credited with an ordering it does not have** — a release orders the
+accesses that come *before* it, not the ones that come after, so it never
+made the claim visible before the entry's writes. It bought nothing either:
+the only reader of the odd sequence is a reader that **skips** it and
+retries, so there is no value for a release to publish. The release half is
+gone; the fence does the work the comment used to claim.
+
+**On x86-64 this changes nothing observable**, and that is the point: the
+claim is a `lock cmpxchg`, which is already a full barrier, and x86's store
+buffer retires in order — so the protocol was safe on the supported target
+**by the accident of the instruction**. The fence is what makes it safe *by
+construction*. The fix is therefore a **correctness argument, not a
+behavioural change**: removing the fence again leaves the suite green on this
+platform, and no test here can show the difference (the review measured it:
+five runs, zero mismatches, with and without the fence).
 
 The **generation is part of the protocol**. Every entry records the frame
 stamp it was filled for, and the reader only accepts an entry that belongs to

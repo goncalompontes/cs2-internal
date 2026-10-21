@@ -113,10 +113,18 @@ namespace cs2::features {
 //
 // So every slot carries a **sequence word**: odd while a writer is inside the
 // slot, even when the entry is stable. The writer claims the slot by taking
-// the sequence from even to odd (one compare-exchange), writes the entry as
-// one unit, and publishes the even sequence again. The reader takes the
-// sequence, reads the entry, and takes the sequence again: if it changed, or
-// if it was odd, the entry it read is not the entry it is looking at.
+// the sequence from even to odd (one compare-exchange), **fences**, writes
+// the entry as one unit, and publishes the even sequence again behind a
+// second fence. The reader takes the sequence, reads the entry, and takes the
+// sequence again: if it changed, or if it was odd, the entry it read is not
+// the entry it is looking at.
+//
+// The two fences are the canonical seqlock's two barriers (Linux's
+// `write_seqcount_begin()` and `write_seqcount_end()` each put an
+// `smp_wmb()` in): the first one keeps the **claim** visible before the
+// entry's writes, the second one keeps the entry's writes visible before the
+// **even sequence**. The first is the one that makes the protocol correct on
+// a weakly ordered machine, and it is what `publish()`'s comment is about.
 //
 // The properties the protocol has to have (T33,
 // `docs/orchestration/spec-t33-chams-race.md` §2.1):
@@ -238,30 +246,66 @@ class DescCache {
   //
   // Returns false when another writer held the slot: the entry is then not
   // cached, and the caller keeps the values it computed.
-  auto publish(std::uint64_t desc_address, std::uint64_t stamp, std::uintptr_t entity,
-               bool view_model) noexcept -> bool {
+  [[nodiscard]] auto publish(std::uint64_t desc_address, std::uint64_t stamp, std::uintptr_t entity,
+                             bool view_model) noexcept -> bool {
     Slot& slot = slots_[slot_of(desc_address)];
     // The claim: the sequence goes from even to odd, and only the writer
-    // that took it may write the entry. The exchange is **acq_rel**: the
-    // release keeps the claim visible before the entry's writes (so a
-    // reader that sees the odd sequence cannot see the entry first), and the
-    // acquire keeps the entry's writes below the claim.
+    // that took it may write the entry.
+    //
+    // The exchange is **acquire**, and that is the whole of it. The acquire
+    // keeps the entry's writes **below** the claim — the compiler cannot
+    // hoist them above it — which is what the claim is for.
+    //
+    // It was `acq_rel` here, and the release half was **credited with an
+    // ordering it does not have**: a release orders the accesses that come
+    // *before* it, not the ones that come after, so it never made the claim
+    // visible before the entry's writes. It bought nothing either: the only
+    // reader of the odd sequence is a reader that **skips** it and retries,
+    // so there is no value for a release to publish. The ordering the
+    // protocol needs is the fence below.
     std::uint64_t sequence = slot.sequence.load(std::memory_order_relaxed);
     for (std::size_t attempt = 0; attempt < CLAIM_ATTEMPTS; ++attempt) {
       if ((sequence & 1U) != 0U) {
         // Another writer is inside the slot: the entry is not cached.
         return false;
       }
-      if (slot.sequence.compare_exchange_weak(sequence, sequence + 1, std::memory_order_acq_rel,
+      if (slot.sequence.compare_exchange_weak(sequence, sequence + 1, std::memory_order_acquire,
                                               std::memory_order_relaxed)) {
         // The slot is ours: the entry is written as one unit.
+        //
+        // **The release fence — the barrier the canonical seqlock has and
+        // this one did not.** Linux's `write_seqcount_begin()` puts an
+        // `smp_wmb()` between "the sequence goes odd" and "the data is
+        // written"; this is that barrier. A release orders the *prior*
+        // accesses before it, so it is exactly the store-store barrier that
+        // keeps the **claim** from being delayed past the entry's writes.
+        //
+        // Why the protocol needs it: a reader that observes the **new**
+        // entry must also observe the **odd** marker. Without the fence the
+        // entry's writes could become visible *before* the odd marker, and a
+        // reader could then read the old even sequence, the new entry and
+        // the old even sequence again — and accept the entry it did not
+        // want: **desc A with entity B**, the chams decided on the wrong
+        // player, which is the very defect this protocol exists to remove.
+        // With the fence the claim is visible first, so a reader that sees
+        // the new data sees the odd marker too, and retries.
+        //
+        // On x86-64 the claim is a `lock cmpxchg`, which is already a full
+        // barrier, and the store buffer retires in order — so the protocol
+        // was safe on this target **by the accident of the instruction**.
+        // The fence is what makes it safe by construction on a weakly
+        // ordered one, and it changes nothing observable on x86-64.
+        std::atomic_thread_fence(std::memory_order_release);
         slot.stamp.store(stamp, std::memory_order_relaxed);
         slot.entity.store(entity, std::memory_order_relaxed);
         slot.view_model.store(view_model ? 1U : 0U, std::memory_order_relaxed);
         slot.desc.store(desc_address, std::memory_order_relaxed);
         // The release fence: the entry's fields are visible **before** the
         // sequence says the entry is stable again, so a reader that sees
-        // the even sequence sees the whole entry.
+        // the even sequence sees the whole entry. (This is the canonical
+        // seqlock's **second** barrier — `write_seqcount_end()`'s
+        // `smp_wmb()` — and it is the one the reader's acquire load
+        // synchronises with.)
         std::atomic_thread_fence(std::memory_order_release);
         slot.sequence.store(sequence + 2, std::memory_order_relaxed);
         return true;
