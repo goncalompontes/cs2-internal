@@ -201,8 +201,11 @@ followed by the instruction stream.
   produces no value carries **8** (the frame's cell size), except
   `MemCpy`/`MemSet`, which are **byte-wise** and carry **1** (their length
   is in `imm`). `Ret` carries the width of the returned value, and 8 for a
-  `void` function. **A width of 0 is not a legal value**: an interpreter
-  written against this contract must never have to special-case it.
+  `void` function. The `Pop` **does** produce a value (the top of the
+  argument stack), but it yields a whole cell, so it carries **8** whatever
+  the type of the value in it is. **A width of 0 is not a legal value**: an
+  interpreter written against this contract must never have to
+  special-case it.
 - `flags` carries `nsw` (bit 0), `nuw` (bit 1) and `exact` (bit 2); `aux`
   carries the sub-opcode (the comparison kind, the branch target as an
   instruction index, the size of a memory access). `imm` carries the

@@ -977,11 +977,13 @@ u8 opcode | u8 width | u8 flags | u8 pad | u16 dst | u16 src1 | u16 src2 | u16 s
   an instruction that produces no value carries the width of a cell of
   the frame (**8**), except `MemCpy` and `MemSet`, which are byte-wise
   and carry **1**. The `Ret` carries the width of the returned value, and
-  8 for a function that returns nothing. **A width of 0 is not a legal
-  value**: an interpreter written against this contract truncates its
-  result to the width, and a width of 0 would truncate it to nothing — it
-  would return 0 from every function and load a null pointer for every
-  global;
+  8 for a function that returns nothing. The `Pop` **does** produce a value
+  (the top of the argument stack), but it yields a whole cell, so it
+  carries **8** whatever the type of the value in it is. **A width of 0 is
+  not a legal value**: an interpreter written against this contract
+  truncates its result to the width, and a width of 0 would truncate it to
+  nothing — it would return 0 from every function and load a null pointer
+  for every global;
 * `flags` carries `nsw` (bit 0), `nuw` (bit 1) and `exact` (bit 2). The
   flags are **carried**, never dropped: dropping `nsw` turns undefined
   behaviour into a defined wrap;
@@ -1276,6 +1278,19 @@ build's coverage. The analysis runs for every *selected* function, so
 the population is the 278 functions the policy selects (the aim module's
 own functions and the standard library's templates that they pull in).
 **56 of them are virtualizable and 222 are refused**:
+
+> **That wild policy is a measurement policy, not a build policy.** A
+> protected build with it is **red**: `protect-policy-check` fails ("1
+> policy entry named a selected function that did not survive to the
+> transform phase") and `check_payload` fails ("539 encrypted dispatches,
+> but the pass reported 566 rewrites: the compiler folded the dispatch
+> away"). Both failures are the checks doing their job — the wild policy
+> names functions the optimiser removes, and the call encryption's
+> descriptors are folded away for the ones it cannot keep. The **numbers**
+> below are what the analysis says; the **build** it was measured with is
+> not a build anyone should ship. The shipped policy
+> (`tools/protect/policy.local.json`) is the six functions of §14.8's
+> first table, and it builds green.
 
 | reason | refused |
 |---|---|

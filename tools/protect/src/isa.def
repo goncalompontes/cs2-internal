@@ -35,9 +35,11 @@
 // instruction that produces no value carries 8 (the width of a cell of
 // the frame), except `MemCpy` and `MemSet`, which are byte-wise and
 // carry 1 (their length is in the `imm`). The `Ret` carries the width of
-// the value it returns, and 8 for a function that returns nothing. A
-// width of 0 is not a legal value: an interpreter that truncates its
-// result to the width would truncate it to nothing.
+// the value it returns, and 8 for a function that returns nothing. The
+// `Pop` **does** produce a value (the top of the argument stack), but it
+// yields a whole cell, so it carries 8 whatever the type of the value in
+// it is. A width of 0 is not a legal value: an interpreter that truncates
+// its result to the width would truncate it to nothing.
 
 #ifndef CS2_VM_OPCODE
 #error "isa.def is an X-macro list: define CS2_VM_OPCODE(name, number, comment) first"
