@@ -4,8 +4,9 @@
 > everything is, what is done, what is open, and how to run the same
 > sub-agent + adversarial-review orchestration this wave used.
 >
-> The one-line version: the wave landed (121 commits, 42 Meson tests, 389 Python
-> tests, mypy strict clean); the **reviews** caught four blockers and eleven
+> The one-line version: the wave landed (121 commits, 45 Meson tests, 409 Python
+> tests, mypy strict clean — the test counts are of the tree as it stands on
+> 2026-10-21); the **reviews** caught four blockers and eleven
 > majors that would otherwise have shipped; the **chams** are refused because
 > their hook target is wrong; and the **auto-strafe's gate is now measured** — the
 > silent encoding works, but only on a server that honours the sub-tick view
@@ -18,7 +19,7 @@
 | What | Where |
 |---|---|
 | The repo | `C:\Users\gpmpo\cs2-internal`, branch `feat/occlusion-penetration` |
-| The task worktrees | `C:\Users\gpmpo\cs2-wt\<name>` — one per agent, each on its own branch; the build directories live **outside** the worktree, in `C:\Users\gpmpo\cs2-build\<task>\`, so a worktree holds about **8 MB** of sources |
+| The task worktrees | `C:\Users\gpmpo\cs2-wt\<name>` — one per agent, each on its own branch; the build directories live **outside** the worktree, in `C:\Users\gpmpo\cs2-build\<task>\<build-name>\`, so a worktree holds about **8 MB** of sources — **with the project's environment applied**, i.e. `. <worktree>\.orchestration\env.ps1` **before the first build**; a build that skips it puts the cargo target directory (117 MB) and the mypy cache (43 MB) back into the worktree, and it is **170 MB** again (this worktree, `t25-handoff`, is **127 MB** for exactly that reason) |
 | The neverlose artifacts | `C:\Users\gpmpo\nea\rea-work\` — the decompilation, the Ghidra project (`gproj3`), and the reconstructed PE (`neverlose_seeded3.exe`, sha `21efa969…`) |
 | The Linux box (the neverlose reversal) | `ssh pontes@100.104.244.127` (Tailscale SSH — it asks for a **one-time browser check** the first time) |
 | The game | Steam, `F:\SteamLibrary\…\Counter-Strike Global Offensive` |
@@ -59,9 +60,9 @@ parameter the schema does not know is **rejected**:
   writes the spec into it, and returns the **implementer's prompt**.
 - `orchestrate.verify({task, groups?, skip?, project?})` — runs the project's
   verify loop **in the task's own worktree** (`task: "integration"` verifies the
-  integration tree). The task is named on purpose: a call without one would
-  verify the integration tree, which is a green that says nothing about the
-  work in the worktree.
+  integration tree). The task is named on purpose, and the schema **requires**
+  it: a call without one is rejected before the tool runs, so a verify can
+  never land on the integration tree by accident.
 - `orchestrate.review({commit, task?, base?, spec_file?, focus?, shared?, project?})`
   — points a **per-task** review worktree (`cs2-wt\rev-<task>`, so two reviews
   can run at once) at the commit and returns the **reviewer's prompt**. The
@@ -78,17 +79,22 @@ parameter the schema does not know is **rejected**:
   is committed. A conflict or a red verify loop aborts the merge and leaves the
   integration tree exactly as it was. A branch that was **never reviewed**, or
   one whose review said **DO NOT SHIP**, is refused unless
-  `allow_unreviewed: true` is passed.
+  `allow_unreviewed: true` is passed. A branch that moved **after** its
+  review is not refused: the **older** review still counts, and the merge goes
+  ahead with a warning that the review is of an older commit.
 - `orchestrate.status({project?})` — the task board: every worktree, its
   branch, how far it is ahead and behind, whether it is dirty, merged or
   reviewed, and its disk usage.
 - `orchestrate.size({project?, task?})` — what makes the worktrees big and what
   to do about it; one task, or all of them.
-- `orchestrate.cleanup({task?, merged_only?, apply?, prune_branches?, remove_builds?, force?, project?})`
+- `orchestrate.cleanup({task?, merged_only?, scratch?, apply?, prune_branches?, remove_builds?, force?, project?})`
   — removes the worktrees that are done with: the shared links are unlinked
   first, so nothing can follow a junction into a shared tree. Without
   `apply: true` it only reports, and a worktree with uncommitted changes to a
-  tracked file is skipped unless `force: true` is passed.
+  tracked file is skipped unless `force: true` is passed. `merged_only: true`
+  selects the worktrees whose branch is already merged into the integration
+  branch; `scratch: true` adds the detached `rev-*` review worktrees, which
+  hold no work.
 
 The index of the tools, and the whole story of the worktree size, is
 [`docs/orchestration/README.md`](orchestration/README.md).
@@ -404,14 +410,22 @@ verify loop between them). Two checks are excluded with a documented reason
 ```powershell
 # the build (the host build needs no vcvars; the Windows targets do)
 meson compile -C build ; meson test -C build
-# in a TASK worktree the build directories are OUTSIDE it, in
-# C:\Users\gpmpo\cs2-build\<task>\ (build, build-payload, build-overlay, build-injector)
+# in a TASK worktree take the project's environment FIRST - it is what keeps
+# the cargo target directory and the tool caches out of the worktree:
+. C:\Users\gpmpo\cs2-wt\<task>\.orchestration\env.ps1
+# ... and the build directories are OUTSIDE the worktree, in
+# C:\Users\gpmpo\cs2-build\<task>\<build-name>\ - ONE directory per build
+# (build, build-payload, build-overlay, build-injector, cargo), so the task
+# directory on its own is NOT a build directory:
+meson compile -C C:\Users\gpmpo\cs2-build\t25-handoff\build
 $vc='C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat'
 cmd /c "call `"$vc`" >nul 2>&1 && set CC=clang-cl && set CXX=clang-cl && meson compile -C build-payload"
 # ... and the same for build-overlay / build-injector
+# (the bare names above are the INTEGRATION tree's, which builds in-tree; in a
+# task worktree they are C:\Users\gpmpo\cs2-build\<task>\<build-name>\)
 
 # the Python side
-python -m unittest discover -s scripts\scenario\tests -t scripts   # 389 tests
+python -m unittest discover -s scripts\scenario\tests -t scripts   # 409 tests
 python scripts\typecheck.py                                        # mypy strict, 0 errors
 
 # the game (the agent runs in session 0: no GPU, so the game must start in
@@ -433,14 +447,50 @@ the bots hold still), joins a team and adds the bots.
 ## 7. The state of the tree
 
 - The integration branch is **`feat/occlusion-penetration`**, and it is **clean**.
-- **27 merged task branches** and **15 worktrees** are still on disk under
-  `cs2-wt\`. They are all merged; prune them with
-  `orchestrate.cleanup({merged_only: true, apply: true, prune_branches: true,
-  remove_builds: true})` when you want the space back — it unlinks the shared
-  links before it removes a worktree. **`git worktree remove --force` by hand
-  destroys the shared tree** if the worktree still has a junction inside it —
-  see §4.1.
-- The host suite is **42/42**, the Python suite **387**, mypy **0 errors**.
+- The worktrees are still on disk: **11 task worktrees and one `rev-*` review
+  worktree under `cs2-wt\`** (the board counts 12 task worktrees, 3.1 GB — the
+  twelfth, `cs2-modern`, sits outside `cs2-wt\`; measured 2026-10-21, and
+  `orchestrate.status({project: "cs2"})` is the live number). The repository
+  has **16 local branches**, of which **5 task branches are merged** into the
+  integration branch: `feat/re-angle-split`, `feat/re-animfix`,
+  `feat/research-angle-split`, `feat/research-animfix` and
+  `feat/t19-protect-call-encryption` (merged on 2026-10-21). The rest —
+  `feat/t18-neverlose-strafe`, `feat/t18b-neverlose-camera-split`,
+  `feat/t20-animfix`, `feat/t21-quality-pass`, `feat/t25-handoff` and
+  `research/server-client-discrepancies` — hold **unmerged work** and are not
+  candidates for removal.
+- To get the space back, run the cleanup **in report mode first** and read what
+  it selects, then apply it:
+
+  ```text
+  orchestrate.cleanup({project: "cs2", merged_only: true, scratch: true})
+  # -> 6 worktrees, 949 MB would be reclaimed   (2026-10-21)
+  orchestrate.cleanup({project: "cs2", merged_only: true, scratch: true,
+                        apply: true, prune_branches: true,
+                        remove_builds: true, force: true})
+  ```
+
+  What that does, and what it does **not** do:
+
+  - `merged_only: true` selects the worktrees whose branch is **already an
+    ancestor of the integration branch**. A detached `rev-*` review worktree
+    has no branch, so it is never "merged" — `scratch: true` is what selects
+    the review worktrees, and they hold no work (a review produces a report,
+    not a commit).
+  - `force: true` removes a worktree **even when a tracked file has
+    uncommitted changes** — it **throws that work away**. Without it the
+    cleanup *skips* every dirty worktree and removes nothing at all. Of the
+    six the cleanup selects, only the four research worktrees are dirty, and
+    only in their spec file (a line-ending difference — the diff is empty),
+    so nothing is lost there; read the report before you apply it.
+  - `prune_branches: true` deletes a branch only when it is merged
+    (`git branch -d`), so an unmerged branch is never deleted.
+  - The cleanup unlinks the shared links before it removes a worktree.
+    **`git worktree remove --force` by hand still destroys the shared tree**
+    if the worktree still has a junction inside it — see §4.1. Do not fall
+    back to it when the cleanup skips something.
+- The host suite is **45/45**, the Python suite **409**, mypy **0 errors**
+  (measured 2026-10-21 on `feat/occlusion-penetration`).
 - The payload, the overlay and the injector all build.
 
 ## 8. The one thing to do first

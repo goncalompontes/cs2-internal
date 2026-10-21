@@ -20,7 +20,13 @@ Read `docs/handoff-wave2.md` and then work through it.
 - **one git worktree per agent** (`C:\Users\gpmpo\cs2-wt\<name>`), never a
   shared tree; the vendored `external/Vulkan-Headers` is **shared** through a
   junction (a removable worktree with a junction inside it follows the link and
-  deletes the target — the plugin unlinks it before it removes a worktree);
+  deletes the target — the plugin's `orchestrate.cleanup` unlinks it before it
+  removes a worktree; a `git worktree remove --force` **by hand** still
+  destroys the shared tree);
+- **take the project's environment before the first build** in a worktree
+  (`. <worktree>\.orchestration\env.ps1`) — it is what keeps the cargo target
+  directory and the tool caches out of the worktree; a build without it puts
+  170 MB back into every worktree;
 - an **implementer** sub-agent, then an **adversarial reviewer** sub-agent
   (hostile by construction — its brief is `docs/orchestration/reviewer-role.md`),
   then a **fix** round, then a **merge** with the full verify loop;

@@ -40,7 +40,7 @@ the wave now runs.
 **`NEXT_SESSION_WAVE2.md`** - the paragraph at lines 27-30: name the loop as
 it runs (`plan -> verify -> review -> fix -> merge`) and the tools as they
 are, and say that the plugin's source is its own repository
-(`C:\Users\gpmpo\orchestration-plugin`) with the installed copy a build of
+(`C:\Users\gpmpo\orchestration-plugin`) with the installed copy a **copy** of
 it. Keep it short - this file is the opening prompt of a session, not a
 manual.
 
