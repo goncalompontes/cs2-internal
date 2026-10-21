@@ -35,8 +35,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <limits>
+#include <string>
+#include <vector>
 
 #include "cs2/control/animfix.hpp"
 #include "cs2/hooks/inline.hpp"
@@ -343,6 +347,84 @@ void test_the_four_slots_must_be_distinct() {
 // hook.
 auto probe_detour(void*) -> void {}
 
+// The prologues the animfix's seams have on the live build (sha256
+// 659940c1...): `CAnimGraphGameSystem::AnimTickUpdate` (0x35aeb0), the netvar
+// codec (0x8d9740) and the AG2 parameter setter (0x8492a0).
+constexpr unsigned char k_anim_tick_prologue[] = {0x89, 0x54, 0x24, 0x10, 0x48, 0x89, 0x4c, 0x24,
+                                                  0x08, 0x55, 0x57, 0x41, 0x54, 0x41, 0x55};
+constexpr unsigned char k_codec_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x55, 0x56,
+                                              0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56};
+// The setter's prologue - the one with the RIP-relative load.
+constexpr unsigned char k_setter_prologue[] = {0xf3, 0x41, 0x0f, 0x10, 0x08, 0x4c, 0x8b, 0xc9,
+                                               0xf3, 0x0f, 0x10, 0x05, 0xa0, 0x0f, 0x3c, 0x01};
+
+// The repository's root, so the test can read the dumper's own source.
+auto test_repository_root(int argc, char** argv) -> std::string {
+  // The repository's root is passed by the Meson test (the same shape as the
+  // settings-sink test's source check).
+  return argc > 1 ? std::string(argv[1]) : std::string();
+}
+
+// The dumper's signature for a name, as the hex pattern it pins.
+auto signature_pattern(const std::string& source, const std::string& name) -> std::string {
+  const auto at = source.find('"' + name + '"');
+  if (at == std::string::npos) {
+    return {};
+  }
+  const auto open = source.find('"', at + name.size() + 2);
+  if (open == std::string::npos) {
+    return {};
+  }
+  const auto close = source.find('"', open + 1);
+  if (close == std::string::npos) {
+    return {};
+  }
+  return source.substr(open + 1, close - open - 1);
+}
+
+// The bytes of a dumper signature.
+auto signature_bytes(const std::string& source, const std::string& name)
+    -> std::vector<unsigned char> {
+  std::vector<unsigned char> bytes{};
+  const std::string pattern = signature_pattern(source, name);
+  std::size_t i = 0;
+  while (i < pattern.size()) {
+    const std::size_t end = pattern.find(' ', i);
+    const std::string byte = pattern.substr(i, end == std::string::npos ? end : end - i);
+    if (!byte.empty()) {
+      bytes.push_back(static_cast<unsigned char>(std::stoul(byte, nullptr, 16)));
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    i = end + 1;
+  }
+  return bytes;
+}
+
+// The test's pinned prologues and the dumper's signatures must not drift
+// apart: the payload resolves the seam through the signature, so a
+// signature that no longer matches the prologue the test pins would leave
+// the test green and the seam unhookable.
+void test_the_pinned_prologues_are_the_dumpers_signatures(const std::string& root) {
+  assert(!root.empty());
+  std::ifstream dumper(root + "/external/dumper/src/analysis.rs");
+  assert(dumper.good());
+  const std::string source((std::istreambuf_iterator<char>(dumper)),
+                           std::istreambuf_iterator<char>());
+  const auto matches = [&source](const std::string& name, const unsigned char* prologue,
+                                 std::size_t size) -> bool {
+    const std::vector<unsigned char> bytes = signature_bytes(source, name);
+    if (bytes.size() < size) {
+      return false;
+    }
+    return std::memcmp(bytes.data(), prologue, size) == 0;
+  };
+  assert(matches("animfix_anim_tick", k_anim_tick_prologue, sizeof(k_anim_tick_prologue)));
+  assert(matches("animfix_graph_codec", k_codec_prologue, sizeof(k_codec_prologue)));
+  assert(matches("animfix_param_setter", k_setter_prologue, sizeof(k_setter_prologue)));
+}
+
 // **The seam must be hookable by the repository's own relocator, at any
 // address distance.** The animfix's first cut hooked the AG2 parameter
 // setter, whose prologue ends in a RIP-relative load: the relocator rewrites
@@ -363,16 +445,6 @@ auto probe_detour(void*) -> void {}
 // counter-example: it *is* rewritten, which is why the seam is the anim
 // tick and not the setter.
 void test_the_seams_prologues_are_hookable() {
-  // `CAnimGraphGameSystem::AnimTickUpdate` (0x35aeb0) and the netvar codec
-  // (0x8d9740) on the live build (sha256 659940c1…).
-  constexpr unsigned char k_anim_tick_prologue[] = {0x89, 0x54, 0x24, 0x10, 0x48, 0x89, 0x4c, 0x24,
-                                                    0x08, 0x55, 0x57, 0x41, 0x54, 0x41, 0x55};
-  constexpr unsigned char k_codec_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x55, 0x56,
-                                                0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56};
-  // The setter's prologue — the one with the RIP-relative load.
-  constexpr unsigned char k_setter_prologue[] = {0xf3, 0x41, 0x0f, 0x10, 0x08, 0x4c, 0x8b, 0xc9,
-                                                 0xf3, 0x0f, 0x10, 0x05, 0xa0, 0x0f, 0x3c, 0x01};
-
   // Installs the hook over the prologue and reports whether the relocator
   // had to **rewrite** anything (a RIP-relative displacement) and whether the
   // hook was accepted at all.
@@ -434,7 +506,8 @@ void test_the_aim_yaw_difference_is_signed_and_wrapped() {
 
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  const std::string repository_root = test_repository_root(argc, argv);
   test_the_slot_layout_is_the_engines();
   test_the_parameter_layout_is_the_engines();
   test_the_engines_own_guard_is_reproduced();
@@ -448,6 +521,7 @@ auto main() -> int {
   test_the_capture_must_belong_to_the_live_controller();
   test_only_the_animfixs_own_slots_are_recognised();
   test_the_four_slots_must_be_distinct();
+  test_the_pinned_prologues_are_the_dumpers_signatures(repository_root);
   test_the_seams_prologues_are_hookable();
   test_the_aim_yaw_difference_is_signed_and_wrapped();
   std::puts("control-animfix: ok");

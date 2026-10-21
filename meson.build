@@ -324,7 +324,11 @@ control_animfix_test = executable('control_animfix_test',
   # not be), or the feature would be silently inert.
   dependencies : hooks_dep,
 )
-test('control-animfix', control_animfix_test)
+test('control-animfix', control_animfix_test,
+  # The seam test reads the dumper's own source, so the pinned prologues and
+  # the signatures the payload resolves cannot drift apart.
+  args : [meson.current_source_dir()],
+)
 
 # The settings **sink** (the payload's entry point) must hand the features the
 # clamped configuration: it used to read the wire fields directly, so a control
