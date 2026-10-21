@@ -30,9 +30,10 @@
 # -- the generator writes *empty* headers and the payload is built with zero
 # offsets. The CI's payload.dll is therefore a *compile* of the payload, not
 # the shipped artifact: the shipped one is built after a calibration
-# (docs/windows-validation.md). The headers the payload step compiles
-# against are the ones the host build generates, which is why the host build
-# runs first.
+# (docs/windows-validation.md). Both projects generate the headers
+# themselves -- the host project and the payload project each have their own
+# `sdk-headers` target -- so the payload step does not depend on the host
+# build having run first.
 #
 # THE COMPILER IS THE RUNNER IMAGE'S. clang-cl comes from the image's LLVM
 # (C:\Program Files\LLVM\bin) and is **not** pinned: there is no way to
