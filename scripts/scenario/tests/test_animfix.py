@@ -82,9 +82,9 @@ class TestAnimfixCommand(unittest.TestCase):
         self.assertEqual(result["animfix_captures"], 12)
         self.assertEqual(result["animfix_applies"], 48)
         self.assertEqual(result["animfix_skips"], 1)
-        self.assertAlmostEqual(result["animfix_aim_yaw_delta"], 3.5)
-        self.assertAlmostEqual(result["animfix_server_aim_yaw"], 91.5)
-        self.assertAlmostEqual(result["animfix_predicted_aim_yaw"], 88.0)
+        self.assertAlmostEqual(cast(float, result["animfix_aim_yaw_delta"]), 3.5)
+        self.assertAlmostEqual(cast(float, result["animfix_server_aim_yaw"]), 91.5)
+        self.assertAlmostEqual(cast(float, result["animfix_predicted_aim_yaw"]), 88.0)
 
 
 class FakeGame:
@@ -141,21 +141,25 @@ class FakeGame:
 class TestAnimfixScenario(unittest.TestCase):
     """The scenario's contract: observation-only, and it reports the evidence."""
 
-    def test_the_scenario_only_switches_the_animfix_on(self) -> None:
+    def test_the_scenario_switches_the_animfix_on_and_off(self) -> None:
         block = {
             "animfix": True,
             "animfix_ready": True,
+            "animfix_status": "ok",
             "animfix_acted": True,
             "animfix_captures": 5,
             "animfix_applies": 20,
             "animfix_skips": 0,
+            "animfix_data_valid": True,
             "animfix_server_aim_yaw": 10.0,
             "animfix_predicted_aim_yaw": 7.0,
             "animfix_aim_yaw_delta": 3.0,
         }
         game = FakeGame(block)
         result = animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
-        self.assertEqual(game.writes, [("animfix", True)])
+        # The feature is off by default: the scenario switches it on to
+        # observe it, and off again so the round is left as it was found.
+        self.assertEqual(game.writes, [("animfix", True), ("animfix", False)])
         self.assertIn("verdict", result)
         self.assertNotIn("skipped", result)
 
@@ -163,32 +167,40 @@ class TestAnimfixScenario(unittest.TestCase):
         block = {
             "animfix": True,
             "animfix_ready": True,
+            "animfix_status": "ok",
             "animfix_acted": True,
             "animfix_captures": 5,
             "animfix_applies": 20,
             "animfix_skips": 0,
+            "animfix_data_valid": True,
             "animfix_server_aim_yaw": 10.0,
             "animfix_predicted_aim_yaw": 7.0,
             "animfix_aim_yaw_delta": 3.0,
         }
         game = FakeGame(block)
         result = animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
-        self.assertAlmostEqual(result["server_aim_yaw"], 10.0)
-        self.assertAlmostEqual(result["predicted_aim_yaw"], 7.0)
-        self.assertAlmostEqual(result["aim_yaw_delta"], 3.0)
+        self.assertIsNotNone(result["server_aim_yaw"])
+        self.assertIsNotNone(result["predicted_aim_yaw"])
+        self.assertIsNotNone(result["aim_yaw_delta"])
+        self.assertAlmostEqual(float(result["server_aim_yaw"]), 10.0)
+        self.assertAlmostEqual(float(result["predicted_aim_yaw"]), 7.0)
+        self.assertAlmostEqual(float(result["aim_yaw_delta"]), 3.0)
+        self.assertTrue(result["data_valid"])
 
     def test_a_payload_that_never_acts_is_a_failure(self) -> None:
         """The animfix on but doing nothing is a failure, not a pass."""
         block = {
             "animfix": True,
             "animfix_ready": True,
+            "animfix_status": "ok",
             "animfix_acted": False,
             "animfix_captures": 0,
             "animfix_applies": 0,
             "animfix_skips": 0,
-            "animfix_server_aim_yaw": 0.0,
-            "animfix_predicted_aim_yaw": 0.0,
-            "animfix_aim_yaw_delta": 0.0,
+            "animfix_data_valid": False,
+            "animfix_server_aim_yaw": None,
+            "animfix_predicted_aim_yaw": None,
+            "animfix_aim_yaw_delta": None,
         }
         game = FakeGame(block, climbing=False)
         with self.assertRaises(Exception):
@@ -199,18 +211,22 @@ class TestAnimfixScenario(unittest.TestCase):
         block = {
             "animfix": True,
             "animfix_ready": False,
+            "animfix_status": "the calibration dump has no 'animfix_anim_tick' signature",
             "animfix_acted": False,
             "animfix_captures": 0,
             "animfix_applies": 0,
             "animfix_skips": 0,
-            "animfix_server_aim_yaw": 0.0,
-            "animfix_predicted_aim_yaw": 0.0,
-            "animfix_aim_yaw_delta": 0.0,
+            "animfix_data_valid": False,
+            "animfix_server_aim_yaw": None,
+            "animfix_predicted_aim_yaw": None,
+            "animfix_aim_yaw_delta": None,
         }
         game = FakeGame(block)
         result = animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
         self.assertTrue(result.get("skipped"))
         self.assertIn("not installed", result["verdict"])
+        # The payload's own explanation is carried through, not swallowed.
+        self.assertIn("calibration dump", result["animfix_status"])
 
 
 if __name__ == "__main__":

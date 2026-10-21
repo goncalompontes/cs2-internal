@@ -537,16 +537,21 @@ class InputStatus(TypedDict, total=False):
     step_dump: list[StepProbeDict]
     # The local animfix (`docs/re/animfix.md`): whether it is on, whether it
     # acted, its counters, and the **server's** aim yaw against the **client's
-    # predicted** one - the divergence the animfix removes.
+    # predicted** one - the divergence the animfix removes. The aim-yaw keys
+    # are ``None`` until the animfix has observed both (``animfix_data_valid``),
+    # so "no data" is not "no divergence". ``animfix_status`` says why the
+    # animfix is not ready (a stale calibration dump, an unhookable seam).
     animfix: bool
     animfix_ready: bool
+    animfix_status: str
     animfix_acted: bool
     animfix_captures: int
     animfix_applies: int
     animfix_skips: int
-    animfix_server_aim_yaw: float
-    animfix_predicted_aim_yaw: float
-    animfix_aim_yaw_delta: float
+    animfix_data_valid: bool
+    animfix_server_aim_yaw: float | None
+    animfix_predicted_aim_yaw: float | None
+    animfix_aim_yaw_delta: float | None
 
 
 class MoveSampleDict(TypedDict):
