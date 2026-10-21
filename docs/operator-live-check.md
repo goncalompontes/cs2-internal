@@ -25,11 +25,39 @@ cmd /c "call `"$vc`" >nul 2>&1 && set CC=clang-cl && set CXX=clang-cl && meson c
 cmd /c "call `"$vc`" >nul 2>&1 && set CC=clang-cl && set CXX=clang-cl && meson compile -C build-injector"
 ```
 
+> **The payload is injected with the STATIC CRT (`/MT`).** A build that
+> defaults to the dynamic CRT (`b_vscrt=from_buildtype` with a release-ish
+> buildtype gives `/MD`) makes `payload.dll` import `MSVCP140.dll`,
+> `VCRUNTIME140.dll` and the `api-ms-win-crt-*` DLLs — the injector would
+> then have to resolve them **inside the game process**. The configuration
+> that is actually injected is `/MT`, so build it that way and **check**:
+>
+> ```powershell
+> meson configure build-payload -Db_vscrt=mt
+> cmd /c "call `"$vc`" >nul 2>&1 && set CC=clang-cl && set CXX=clang-cl && meson compile -C build-payload"
+>
+> # the imports must be exactly these three
+> & 'F:\llvm-sdk\clang+llvm-22.1.8-x86_64-pc-windows-msvc\bin\llvm-readobj.exe' `
+>      --coff-imports build-payload\payload.dll | Select-String 'Name:'
+> ```
+>
+> `KERNEL32.dll`, `USER32.dll` and `D3DCOMPILER_47.dll` — anything else means
+> the build is not the injected configuration.
+
 **The calibration dump.** The payload's engine offsets come from
 `calibration/offsets.json`. The **offsets** can be refreshed **without the
-game** (the dumper's `--file` mode resolves the same curated signatures from
-the module's file on disk — `scripts/resolve-offsets-offline.py`, T28); the
-**interfaces and the schema** still need the live calibration
+game**:
+
+```powershell
+python scripts\resolve-offsets-offline.py --check     # compare, write nothing
+python scripts\resolve-offsets-offline.py             # refresh the offsets
+```
+
+(That script is T28; it resolves the same curated signatures from the
+module's file on disk and reproduces the shipped dump byte for byte. It names
+every signature that did **not** resolve — that list is the thing to read.)
+
+The **interfaces and the schema** still need the live calibration
 (`scripts/calibrate-live.py`, with the game running).
 
 A feature whose signature is missing from the dump says so **in its status** —
