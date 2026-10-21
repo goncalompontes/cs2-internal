@@ -1011,10 +1011,14 @@ that a live run would confirm — and the animfix does not depend on it
 being right (see below).
 
 **The seam this measurement selects** is the **anim tick**
-(`CAnimGraphGameSystem::AnimTickUpdate`, `0x35aeb0`): it runs *after* the
-prediction in the same tick, and it *contains* the AG2 evaluation (the
-per-entity `FUN_18038a070` → `0x12e4f90`), so a correction written there is
-the one the pose is computed from.
+(`CAnimGraphGameSystem::AnimTickUpdate`, `0x35aeb0`): it is **inferred** to
+run after the prediction in the same tick (see above), and it *contains* the
+AG2 evaluation (the per-entity `FUN_18038a070` → `0x12e4f90`), so a
+correction written there is the one the pose is computed from. The inference
+does not have to be right for the fix to work: the correction is written at
+the **start** of the anim tick and the evaluation happens **inside** it, so
+whatever the prediction did before - or does afterwards, in the next tick -
+the values the graph is evaluated from are the server's.
 
 **And it does not depend on the inferred order.** The correction is written
 at the *start* of the anim tick and the evaluation happens *inside* it, so
@@ -1126,32 +1130,51 @@ the server's values at the codec and re-applies them **in the anim tick** -
 the place the graph is evaluated (§9.3). The rule that decides whether a
 captured value may be re-applied is the specification's own:
 
-> A captured value may only be re-applied if it was captured **this frame**.
-> A capture corrects a slot **at most once**; only a newer decode (a newer
-> generation) can correct it again. A capture that has **aged out** - older
-> than the **observed snapshot interval** - is refused outright.
+> A captured value may only be re-applied while it is **current**: there
+> must be a capture, it must belong to the live controller, and it must not
+> have **aged out**. A fresh capture is re-applied on **every** client anim
+> tick, so the server's value stays in the graph between the decodes.
 
-The first clause is what keeps a capture from being written over the
-client's fresh prediction again and again; the second refuses a capture that
-aged out (a stalled connection, a dead player, a paused game), where the
-server's value describes a pose the server has long left behind: writing it
-over the client's fresh prediction would move the local hitboxes
-*backwards*, which is worse than not fixing them at all.
+**Why it is not consumed.** The engine writes the graph's parameters on the
+**command** path (the prediction) and evaluates the graph on the **anim**
+path, and the driver runs two variants (the client tick and the server tick
+of a listen server). A "correct a slot at most once per capture" rule would
+be consumed by whichever anim tick ran first - and the variant that
+evaluates the pose the player sees would then find nothing to write, so the
+animfix would do nothing at all (or, at a frame rate above the server's,
+leave the client's prediction in three frames out of four: a jitter at the
+server's tick rate). The protection the specification's rule asks for - "a
+stale value must not be written over a fresh prediction" - is the **staleness
+bound** below, and it is enforced on every apply.
 
 **What the bound is about.** It is the age of the server's *data*, and the
-data ages at the server's **snapshot rate**: the animfix measures the
-interval between two decodes (an exponential moving average, so a stall -
-which produces no decodes at all - cannot widen it) and judges a capture
-against that interval. A 64 Hz server's values may be 16 ms old, a 30 Hz
-server's 33 ms: the bound follows the server, not the client's frame rate.
+data ages at the server's **snapshot rate**. The animfix measures the
+intervals between the decodes and takes their **median** over a window of
+eight: a median does not move for a single outlier, so one snapshot that
+arrives late (a packet-reordering burst, a Wi-Fi stall, a server-side hitch)
+does not widen the window. The bound is that median **with a margin of two**,
+clamped to 8 ms .. 250 ms.
+
+* The **median** discards the outliers - in both directions.
+* The **margin** covers the jitter: the median is by construction the value
+  that half the intervals exceed, so a capture measured against it would age
+  out in the second half of every gap and the client's prediction would win
+  those frames. Twice the median keeps the duty cycle at 100 % on a regular
+  server and on one with jitter or a quarter of its snapshots late (the
+  status reports the **duty cycle** - the client anim ticks on which the
+  correction won - so the operator can see it).
+* A **total** stall needs no mechanism: it produces no decodes at all, so
+  the estimate does not change, and the capture ages out against it. (A
+  *partial* stall - one late decode - is what the median is for.)
+
 (An earlier cut used a fixed 16 ms window, which was the server's default
 tick interval and therefore refused *every* capture on a server that
 snapshots more slowly - the feature was inert there, and the status could
 not say so.)
 
-Every refusal carries a **reason** - no capture / aged out / already used /
-the controller changed - and the status counts them separately, so "the codec
-has not run yet" is distinguishable from "every capture aged out".
+Every refusal carries a **reason** - no capture / aged out / the controller
+changed - and the status counts them separately, so "the codec has not run
+yet" is distinguishable from "every capture aged out".
 
 **The hooks are installed on the game's thread.** The inline hook patches its
 target with a 14-byte write that is not atomic, and a patch that lands while
