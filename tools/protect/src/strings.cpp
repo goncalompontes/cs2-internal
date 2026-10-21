@@ -79,6 +79,40 @@ constexpr std::string_view k_blob_prefix = "cs2.protect.strblob.";
 
 // --- The uses ----------------------------------------------------------------
 
+/// The bytes of a literal, if it is a blob of bytes.
+///
+/// Two shapes carry bytes: a `ConstantDataSequential` of `i8`, and a
+/// `ConstantAggregateZero` of `i8` (an all-zero blob: the reader folds
+/// `c"\00"` into it, so the *empty* literal has that shape).
+[[nodiscard]] auto literal_bytes(const llvm::GlobalVariable& literal)
+    -> std::optional<std::vector<std::uint8_t>> {
+  const llvm::Constant* initializer = literal.getInitializer();
+  std::vector<std::uint8_t> bytes;
+  if (const auto* data = llvm::dyn_cast<llvm::ConstantDataSequential>(initializer)) {
+    if (!data->getElementType()->isIntegerTy(8)) {
+      return std::nullopt;
+    }
+    bytes.reserve(data->getNumElements());
+    for (unsigned index = 0; index < data->getNumElements(); ++index) {
+      const auto* element = llvm::dyn_cast<llvm::ConstantInt>(data->getElementAsConstant(index));
+      if (element == nullptr) {
+        return std::nullopt;
+      }
+      bytes.push_back(static_cast<std::uint8_t>(element->getValue().getZExtValue() & 0xFFU));
+    }
+    return bytes;
+  }
+  if (const auto* zero = llvm::dyn_cast<llvm::ConstantAggregateZero>(initializer)) {
+    const auto* array = llvm::dyn_cast<llvm::ArrayType>(zero->getType());
+    if (array == nullptr || !array->getElementType()->isIntegerTy(8)) {
+      return std::nullopt;
+    }
+    bytes.assign(array->getNumElements(), 0U);
+    return bytes;
+  }
+  return std::nullopt;
+}
+
 /// One use of a literal.
 struct UseSite {
   /// The instruction that uses the literal.
@@ -410,19 +444,11 @@ struct Decoder {
 }
 
 [[nodiscard]] auto string_content(const llvm::GlobalVariable& literal) -> std::optional<std::string> {
-  const auto* data = llvm::dyn_cast<llvm::ConstantDataSequential>(literal.getInitializer());
-  if (data == nullptr || !data->getElementType()->isIntegerTy(8)) {
+  const auto bytes = literal_bytes(literal);
+  if (!bytes.has_value()) {
     return std::nullopt;
   }
-  std::string content;
-  content.reserve(data->getNumElements());
-  for (unsigned index = 0; index < data->getNumElements(); ++index) {
-    const auto* element = llvm::dyn_cast<llvm::ConstantInt>(data->getElementAsConstant(index));
-    if (element == nullptr) {
-      return std::nullopt;
-    }
-    content.push_back(static_cast<char>(element->getValue().getZExtValue() & 0xFFU));
-  }
+  std::string content(bytes->begin(), bytes->end());
   // A C string carries a trailing NUL: it is not part of the content, but it
   // is part of the literal, and the blob keeps it.
   if (!content.empty() && content.back() == '\0') {
@@ -567,22 +593,22 @@ struct Decoder {
     }
 
     // The bytes of the literal, with the trailing NUL of a C string.
-    const auto* data =
-        llvm::cast<llvm::ConstantDataSequential>(candidate.global->getInitializer());
-    const std::size_t size = data->getNumElements();
-    std::vector<std::uint8_t> plain;
-    plain.reserve(size);
-    for (unsigned element = 0; element < data->getNumElements(); ++element) {
-      const auto* value = llvm::cast<llvm::ConstantInt>(data->getElementAsConstant(element));
-      plain.push_back(static_cast<std::uint8_t>(value->getValue().getZExtValue() & 0xFFU));
+    const auto bytes = literal_bytes(*candidate.global);
+    if (!bytes.has_value()) {
+      // The gate passed, so the literal has bytes: this cannot happen.
+      literal.reason = StringSkipReason::unsupported_shape;
+      ++result.refused_count;
+      result.literals.push_back(std::move(literal));
+      continue;
     }
+    const std::size_t size = bytes->size();
 
     // The ciphertext: the plaintext XORed with the key stream.
     const std::uint64_t key = build_key(seed0, seed1, index);
     std::vector<std::uint8_t> cipher;
     cipher.reserve(size);
     for (std::size_t byte = 0; byte < size; ++byte) {
-      cipher.push_back(static_cast<std::uint8_t>(plain[byte] ^ stream_byte(key, byte)));
+      cipher.push_back(static_cast<std::uint8_t>((*bytes)[byte] ^ stream_byte(key, byte)));
     }
 
     if (decoder.function == nullptr) {
