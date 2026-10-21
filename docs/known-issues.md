@@ -195,6 +195,15 @@ section is the plan, not the work.
 
 ### 11.1 Fully fix the chams
 
+> **Status (2026-10-21):** the whole recipe below is implemented on
+> `feat/t33-chams-race`, which is **not merged**: the desc cache is a
+> per-slot seqlock with the generation inside the entry (**H2a**), the
+> latch's wiring is pinned — and the *value* it stores with it (**H3**), the
+> guard's scope order is pinned (**H6**), the fail-closed policy and the
+> per-instance pool are in (**H7**), and the doc's file names are right
+> (**H8**). The rows in §5 stay until the merge and the re-review; see
+> `docs/re/chams.md` §10.
+
 The feature is in place (the target is resolved through a dumper signature and
 verified against the prologue ✓) and the guard is per-owner ✓. What is left
 is the **race the per-owner guard exposed** (**H2a**) and the test gaps around

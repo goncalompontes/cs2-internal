@@ -1036,7 +1036,8 @@ captured. Against the code before this change the process died with
 1. **The live run.** No live run was possible: the agent session is session
    0, with no GPU and no interactive desktop. The detour has still never run
    against the real draw, so the **number** of jobs that overlap in one frame
-   is still not measured.
+   is still not measured — which is exactly why the guard's pool is sized
+   with headroom (§10.4.1).
 2. **The animfix's comment** in `payload/control/src/input.cpp` said that the
    hook's publication "is a plain pointer store, which is atomic on x86". It
    was not any more: the trampoline is published with an **atomic release
@@ -1051,17 +1052,22 @@ captured. Against the code before this change the process died with
    and the input's (`control/src/input.cpp`) — are the same shape. The
    present hook runs on the game's own present thread and the input's on the
    game's tick, so the exposure is smaller, but it is the same exposure.
+5. **The release fence is not observable here.** The claim is a `lock
+   cmpxchg` on x86-64, which is already a full barrier, so the protocol was
+   safe on this target **by the accident of the instruction**. The fence
+   (§10.2.1) is what makes it safe by construction; no test on this platform
+   can show the difference, and none claims to.
 
 ### 10.8 The evidence index for this section
 
 | Where | What it proves |
 |---|---|
-| `payload/features/include/cs2/features/chams.hpp` | the desc cache: the per-slot seqlock, the generation inside the entry, the fail-closed guard, the `refused` counter |
-| `payload/features/src/chams.cpp` | the publish and read protocol, the atomic `g_active`, the counted refusal, the status line |
-| `payload/features/include/cs2/features/recursion_guard.hpp` | the per-instance policy: `fail_open` (the camera's default) and `fail_closed` (the draw path's) |
-| `payload/hooks/include/cs2/hooks/inline.hpp` | the atomic `trampoline_` / `installed_`, the retired trampolines |
-| `payload/hooks/src/inline.cpp` | the publication order on install and on uninstall, and the deferred free |
-| `payload/features/tests/test_chams_desc_cache.cpp` | the concurrency probe: four threads, two descs in one slot, **zero** mismatches |
-| `payload/features/tests/test_chams_draw_hook.cpp` | the latch clear's **wiring** (H3), the guard's scope **order** (H6), the fail-closed policy, the counted refusal |
-| `payload/hooks/tests/test_inline.cpp` | the trampoline's lifetime: an uninstall while the detour is inside does not free the memory it calls |
+| `payload/features/include/cs2/features/chams.hpp` | the desc cache: the per-slot seqlock, the release fence between the claim and the entry's writes, the generation inside the entry, the fail-closed guard with the draw path's pool, the refusal counters by cause |
+| `payload/features/src/chams.cpp` | the publish and read protocol, the atomic `g_active`, the refusals counted by cause, the status line |
+| `payload/features/include/cs2/features/recursion_guard.hpp` | the per-instance policy (`fail_open` is the camera's default, `fail_closed` the draw path's) and the per-instance pool (`DRAW_PATH_SLOT_COUNT`) |
+| `payload/hooks/include/cs2/hooks/inline.hpp` | the atomic `trampoline_` / `installed_`, and the rule that the trampoline's pages are never unmapped |
+| `payload/hooks/src/inline.cpp` | the publication order on install and on uninstall, and the pages that are never released |
+| `payload/features/tests/test_chams_desc_cache.cpp` | the concurrency probe: four threads, two descs in one slot, **zero** mismatches; the generation bump under a concurrent publisher; the reader's give-up path |
+| `payload/features/tests/test_chams_draw_hook.cpp` | the latch clear's **value** (H3), the guard's scope **order** (H6), the fail-closed policy and the per-instance pool (H7), the refusals counted by cause |
+| `payload/hooks/tests/test_inline.cpp` | the trampoline's lifetime: an uninstall **and a destruction** while the detour is inside do not free the memory it calls |
 
