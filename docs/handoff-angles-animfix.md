@@ -52,43 +52,62 @@ review is outstanding.
 ### T20 — the local animfix
 
 * branch `feat/t20-animfix`, worktree `C:\Users\gpmpo\cs2-wt\t20-animfix`
-* tip `64f3594`; it **merges the integration tip** as `67bd9b7` (a merge
+* tip **`9ab7c55`**; it **merges the integration tip** as `67bd9b7` (a merge
   commit, not a rebase — the no-rebase rule), so T19's anti-aim is already in
   the tree
-* **four** review rounds have run. The 4th (`rev-t20-animfix-r4`, tip
-  `64f3594`) returned **SHIP WITH FIXES** with three majors:
-  * **M-A** — the **median** bound refuses the capture in the second half of
+* **five** fix rounds have run; **the final review has NOT**. The 4th review
+  (`rev-t20-animfix-r4`, tip `64f3594`) returned **SHIP WITH FIXES** with
+  three majors:
+  * **M-A** — the **median** bound refused the capture in the second half of
     every gap, so the "the server's value stays in the graph" promise only
-    holds on a perfectly regular server. The reviewer **measured the duty
-    cycle**: 100 % (perfect) → 97 % (jitter 16–19 ms) → 82.6 % (25 % of the
-    snapshots delayed) → 63.1 % (50 % delayed). The fix is a **margin** on the
-    bound (`min(2 × median, 250 ms)` restores 100 % for the jitter and 25 %
-    cases), plus a **duty-cycle** figure in the status.
-  * **M-B** — `docs/re/animfix.md` §9.6 still documents the **round-3** rules
-    (it says "exponential moving average", "at most once" and lists "already
-    used" as a refusal reason — all three false) and `:1014` still asserts the
-    frame ordering as fact. The document that exists to prevent drift is
+    held on a perfectly regular server. The reviewer **measured the duty
+    cycle**: 100 % (perfect) → 97.0 % (jitter 16–19 ms) → 82.6 % (25 % of the
+    snapshots delayed) → 63.1 % (50 % delayed) → 82.0 % (a 48 ms hitch).
+  * **M-B** — `docs/re/animfix.md` §9.6 still documented the **round-3** rules
+    (it said "exponential moving average", "at most once", and listed "already
+    used" as a refusal reason — all three false) and `:1014` still asserted
+    the frame ordering as fact. The document that exists to prevent drift was
     itself the drifted one.
-  * **M-C** — the M2 fix is **not pinned by a test that can fail**; the
-    commit message's mutation claim is false (the reviewer restored the
+  * **M-C** — the M2 fix was **not pinned by a test that can fail**; the
+    commit message's mutation claim was false (the reviewer restored the
     consume-once machinery and the whole suite stayed green).
   * plus the minors m-1…m-7 and the nits n-1…n-4.
-* a **fifth fix round is running** (dispatched at the end of the session)
+* **the 5th fix round has landed** (all committed):
+  `f554738` the bound carries a margin and the duty cycle is reported ·
+  `218bc55` the capture is pinned as not-consumed · `4fe159e` §9.6 as it is
+  shipped · `c53ac68` the write-path failures are counted and the flag is
+  named · `9ab7c55` the status has its own mutex and the scenario judges the
+  duty cycle
 * host suite **46/46**, Python **402**, mypy clean (55 files) — verified
 
-**To finish:** let the fifth fix round land, then re-run the review
-(`orchestrate.review({commit:"feat/t20-animfix", project:"cs2", spec_file:"docs/orchestration/spec-t20-animfix.md", task:"t20-animfix-r5"})`),
-then `orchestrate.merge({branch:"feat/t20-animfix", project:"cs2"})`. The
+**To finish (the next session's first job):** run the final review —
+
+```powershell
+orchestrate.review({commit:"feat/t20-animfix", project:"cs2",
+                     spec_file:"docs/orchestration/spec-t20-animfix.md",
+                     task:"t20-animfix-r5"})
+```
+
+— with a focus on: (a) reproduce the **duty-cycle** experiment (the implementer
+claims 99.77 % / 99.75 % / 99.77 % / 99.54 % / 89.95 % for perfect / jitter /
+25 % delayed / 50 % delayed / a 48 ms hitch) **and** check the margin did not
+reopen M1 (one late decode, one fast decode and a total stall must all still
+behave); (b) the reviewer's **mutant E** must now make the suite **red**;
+(c) §9.6 read adversarially, sentence by sentence, against the code;
+(d) the guard must still be **bit-exact** (the reviewer proved it exact with a
+1 000 000-random-bit-pattern differential test against the engine's own
+predicate — it must not have changed).
+
+Then `orchestrate.merge({branch:"feat/t20-animfix", project:"cs2"})`. The
 merge gate refuses only a **DO NOT SHIP** verdict, so a **SHIP WITH FIXES**
 merges.
 
 **The reviewer's proven facts, worth keeping:** the anim tick's flag polarity
 is **proven from the live DLL** (`cmoveq %rdx,%rcx` at `0x35af26` ⇒ flag == 0
 ⇒ server tick, flag != 0 ⇒ client tick); the finite-value guard is **bit-exact**
-against the engine's own predicate (0 mismatches over 1 000 000 random bit
-patterns plus every boundary float); the seam test now catches **all six**
-signature corruptions (the round-3 test was blind to every one); and the merge
-with the integration tip is clean with T19 byte-identical.
+against the engine's own predicate; the seam test catches **all six** signature
+corruptions (the round-3 test was blind to every one); and the merge with the
+integration tip is clean with T19 byte-identical.
 
 ### T21 — the project-wide quality pass
 
@@ -102,11 +121,15 @@ with the integration tip is clean with T19 byte-identical.
   `c4769f8` **M1 — the policy contract gains `usable()` and the wrapper asks
   it first, so a policy whose default state cannot answer is never called**
   (the reviewer's `std::bad_function_call` → `std::terminate` path is closed)
-* the **third review round is running** (`rev-t21-quality-pass-r3`)
+* **the third review round was in flight and was NOT finished** — the review
+  worktree is `C:\Users\gpmpo\cs2-wt\rev-t21-quality-pass-r3` and the report
+  stub is `…\.orchestration\reviews\cs2\t21-quality-pass-r3-*.md` (empty). The
+  next session should re-run it.
 * host suite **44/44**, Python **404**, mypy clean (52 files)
 
-**To finish:** let the r3 review land, then
-`orchestrate.merge({branch:"feat/t21-quality-pass", project:"cs2"})`.
+**To finish:** re-run the review —
+`orchestrate.review({commit:"feat/t21-quality-pass", project:"cs2", spec_file:"docs/orchestration/spec-t21-quality-pass.md", task:"t21-quality-pass-r3"})`
+— then `orchestrate.merge({branch:"feat/t21-quality-pass", project:"cs2"})`.
 
 **The reviewer's own judgement, worth keeping:** the empty-SDK payload build
 is worth keeping (it is the only compile gate on the payload, the overlay and
@@ -210,15 +233,47 @@ build-injector\injector.exe cs2.exe build-payload\payload.dll --load-missing
 
 ## 8. What is next, in order
 
-1. finish the two reviews (T20 r4, T21 r2) and merge the two branches;
-2. **refresh the calibration dump** (`scripts/calibrate-live.py`) — without it
+1. **T20: run the final review** (`t20-animfix-r5`) — the focus list is in
+   §3; the branch is at `9ab7c55` with every finding fixed and committed;
+2. **T21: re-run the third review** (`t21-quality-pass-r3`) — the branch is
+   at `528fa59` with every finding fixed and committed;
+3. merge both (a **SHIP WITH FIXES** verdict merges; only **DO NOT SHIP**
+   blocks);
+4. **refresh the calibration dump** (`scripts/calibrate-live.py`) — without it
    neither feature can hook anything;
-3. **run the game** and check the animfix's `animfix_client_ticks` /
-   `animfix_anim_ticks` and the anti-aim's camera-vs-fake yaw;
-4. push the two merges to `github/master` (a fast-forward each — `master` is
+5. **run the game** and check the animfix's `animfix_duty_cycle` (it should be
+   ~1.0) and `animfix_client_tick_seen` (if it is false, the flag's polarity is
+   wrong for that build and the animfix cannot work), and the anti-aim's
+   camera-vs-fake yaw;
+6. push the two merges to `github/master` (a fast-forward each — `master` is
    an ancestor of the integration branch, so no force is needed);
-5. the **anim-state divergence** remains open (the client's
+7. the **anim-state divergence** remains open (the client's
    `CCSPlayerAnimationState` is never replicated) — the RE's §8 item 1
    experiment is a hardware watchpoint on `movementServices+0x328`;
-6. the **other players** are out of scope for the animfix so far — the RE
+8. the **other players** are out of scope for the animfix so far — the RE
    gives the same seams for them.
+
+## 9. A note on the review loop
+
+Both branches went through **four and three** review rounds. The loop earned
+its keep — it caught an **unhookable seam** (a RIP-relative prologue the
+relocator cannot relocate across the ~141 TB gap between the high-mapped
+module and the low-allocated trampoline), a **CI that was red on the first
+run**, two **`std::terminate` paths** in the ownership primitive, a **30°-off
+walk direction**, a **false engine claim in the RE**, and a **test that could
+not fail**.
+
+It also caught the implementer's own **overstated claims** — the RE
+documenting rules the code no longer had, and a commit message claiming a
+mutation proof that did not exist. Both were fixed by making the **code** and
+the **documents** agree.
+
+**The lesson worth keeping for the next session:** the reviewer that *runs*
+something — breaks the maths and watches the test fail, restores the old
+machinery and watches the suite stay green, measures the duty cycle — finds
+what reading does not. Several of the findings above were reachable **only**
+by execution.
+
+**And the honest limit:** every one of these findings is **static**. The
+features have never run in CS2. The next session's most valuable act is not
+another review round — it is a **live run**.
