@@ -350,6 +350,69 @@ auto coverage_vm(const std::vector<VmFunction>& functions) -> std::vector<Covera
   return result;
 }
 
+void write_string_report(const llvm::Module& module, const StringResult& result,
+                         const Config& config) {
+  const std::string module_id = module.getSourceFileName();
+  const std::string_view tag = module_tag(module_id);
+
+  llvm::errs() << "[cs2-protect] " << tag << ": str: " << result.protected_count
+               << " literals protected in this module, " << result.refused_count << " refused\n";
+
+  for (const StringLiteral& literal : result.literals) {
+    llvm::errs() << "[cs2-protect] " << tag << ": str: ";
+    // The content is named only with CS2_PROTECT_VERBOSE=1: the report goes
+    // to stderr, and a build log is a file -- and a file holds the strings.
+    // Without the verbosity the report carries the length and the digest,
+    // and the digest is salted with the build seed.
+    if (config.verbose) {
+      llvm::errs() << "\"" << literal.content << "\" ";
+    }
+    llvm::errs() << "(" << literal.length << " bytes";
+    if (literal.protected_literal) {
+      llvm::errs() << ", " << literal.uses << " uses, " << literal.functions << " function";
+      if (literal.functions != 1) {
+        llvm::errs() << "s";
+      }
+    }
+    // The digest, not the content: the report goes to stderr, and a build
+    // log is a file. The digest is salted with the seed of the build, so it
+    // does not yield the content either.
+    llvm::errs() << ", digest " << literal.digest;
+    if (literal.protected_literal) {
+      llvm::errs() << "): protected\n";
+      continue;
+    }
+    llvm::errs() << "): refused (";
+    llvm::errs() << to_string(*literal.reason) << ")\n";
+  }
+
+  if (config.verbose) {
+    llvm::errs() << "[cs2-protect] " << tag << ": str: " << result.plaintext_bytes
+                 << " bytes of plaintext left the image, " << result.blob_bytes
+                 << " bytes of ciphertext, " << result.decodes << " decodes\n";
+  }
+}
+
+auto coverage_strings(const StringResult& result) -> std::vector<CoverageString> {
+  std::vector<CoverageString> entries;
+  entries.reserve(result.literals.size());
+  for (const StringLiteral& literal : result.literals) {
+    CoverageString entry;
+    entry.length = literal.length;
+    // The digest the pass computed: it is salted with the build seed, so
+    // the coverage does not yield the content.
+    entry.digest = literal.digest;
+    entry.uses = literal.uses;
+    entry.functions = literal.functions;
+    entry.protected_literal = literal.protected_literal;
+    if (literal.reason.has_value()) {
+      entry.reason = to_string(*literal.reason);
+    }
+    entries.push_back(std::move(entry));
+  }
+  return entries;
+}
+
 auto coverage_entries(const SelectionResult& result) -> std::vector<CoverageEntry> {
   std::vector<CoverageEntry> entries;
   entries.reserve(result.policy_matches.size());
@@ -409,7 +472,9 @@ auto coverage_entries(const RecordedSelection& selection, std::string_view modul
 auto write_coverage(const Config& config, const llvm::Module& module,
                     const std::vector<CoverageEntry>& entries,
                     const std::vector<CoverageFunction>& functions, const CoverageProtect& protect,
-                    std::span<const CoverageVm> vm) -> std::optional<std::string> {
+                    std::span<const CoverageVm> vm,
+                    const std::vector<CoverageString>& strings, std::string_view strings_salt)
+    -> std::optional<std::string> {
   if (!config.policy) {
     return std::nullopt;
   }
@@ -510,6 +575,36 @@ auto write_coverage(const Config& config, const llvm::Module& module,
     text += std::to_string(function.instructions);
     text += " calls=";
     text += std::to_string(function.calls);
+    text += "\n";
+  }
+
+  // The literals: the length and a digest of the content, never the content
+  // itself. The coverage is a file, and a file holds the strings. The
+  // digest is salted with the build seed, and the salt is **not** in the
+  // coverage: the coverage alone does not yield the strings.
+  //
+  // The field is named `digest=` and not `sha256=`: the digest is
+  // `sha256(seed || content)`, not `sha256(content)`, and a reader that
+  // assumes the unsalted form finds nothing. A coverage of an older build
+  // names the field `sha256=`, and the readers take both.
+  if (!strings_salt.empty()) {
+    text += "str-salt " + std::string(strings_salt) + "\n";
+  }
+  for (const CoverageString& literal : strings) {
+    text += "str ";
+    text += literal.protected_literal ? "protected" : "refused";
+    text += " len=";
+    text += std::to_string(literal.length);
+    text += " digest=";
+    text += literal.digest;
+    text += " uses=";
+    text += std::to_string(literal.uses);
+    text += " functions=";
+    text += std::to_string(literal.functions);
+    if (!literal.reason.empty()) {
+      text += " reason=";
+      text += literal.reason;
+    }
     text += "\n";
   }
   // The digest of everything above: a file that was edited by hand (or

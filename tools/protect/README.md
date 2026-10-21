@@ -323,6 +323,34 @@ check_policy: policy.json: 1 policy entry matched a function that cannot be prot
   cs2::aim::solve (always_inline)
 ```
 
+### The `strings` section: the literals that are protected
+
+The `protect` entries name **functions**. A string is not a function, so the
+strings get their own section:
+
+```json
+{
+  "strings":       [ "box", "health_bar", "cs2_*" ],
+  "strings_deny":  [ "CS2_*" ],
+  "strings_min_length": 4
+}
+```
+
+* a `strings` entry is a **glob** (`*` and `?`) matched against the
+  **content** of the literal (an exact string is a glob with no wildcard);
+* a literal is selected when it matches one of the `strings` globs and
+  **none** of the `strings_deny` globs;
+* a literal shorter than `strings_min_length` is refused (`too_short`); the
+  default is **four** -- a three-byte string carries too little to be worth
+  a decode, and the operator can lower it;
+* **nothing is protected unless the section says so**: the default is
+  "protect no string", because a surprise is worse than a gap.
+
+The strings are not a `ProtectionLevel`: they are not functions, they do not
+go through the selection phase's function machinery, and they get their own
+selection step in the transform phase. What the pass does with them is
+described in **§14**.
+
 ## 6. The other selection source: the annotation
 
 ```cpp
@@ -368,6 +396,10 @@ The transform phase prints what it did:
 A selected function that did not survive to the late point is reported as
 `vanished`, and a level that is not implemented is reported as
 `level=virtualized not-implemented`.
+
+The string phase prints what it did with the literals the policy selected:
+the ones it protected **in this module** and the ones it refused, and why
+(§14.6). It names the content only with `CS2_PROTECT_VERBOSE=1`.
 
 With `CS2_PROTECT_VERBOSE=1` the pass also prints every function it
 skipped and why (`not_annotated`, `denied`, `optnone`, `always_inline`,
@@ -452,6 +484,15 @@ The directory name is the **upper case** hexadecimal of the SHA-256 of the
 policy path: the plugin spells it `llvm::toHex` (upper case by default)
 and `check_policy.py` spells it `hexdigest().upper()`, so the two name the
 same directory on a file system whose case matters.
+
+The path is **normalised** before it is hashed: the separators are turned
+into forward slashes, so that the plugin and the checkers compute the same
+directory whatever the spelling of `CS2_PROTECT_CONFIG` is (`C:/a/b.json`
+and `C:\a\b.json` name the same directory). Without that, a path spelled
+with forward slashes -- the spelling Meson uses -- put the plugin's
+coverage in one directory and the checker's lookup in another, and a fresh
+protected build failed with *"no coverage file of this policy describes
+this build"*.
 
 The directory is keyed by the policy path (or `CS2_PROTECT_COVERAGE`), so an
 edited policy leaves the files of the previous version behind. The checker
@@ -714,7 +755,24 @@ python tools/protect/check_payload.py --protected build-payload-protect/payload.
   zero in the unprotected image;
 * every dispatch **decodes to a callee of the image**: the descriptor,
   decoded with the key the pass used, names an entry of the table of the
-  image, and that entry is the code of the image.
+  image, and that entry is the code of the image;
+* the **plaintext of the protected strings** is looked for in the protected
+  image (and in the unprotected one): the coverage carries the length and
+  the salted digest of every protected literal, and the check hashes the
+  candidates of the image and compares. The scan is at **every offset** of
+  every NUL-terminated run of the image -- a literal that is in the image
+  as a substring *is* in the image, and the MSVC ABI merges a literal with
+  a longer one that ends with it -- and the check reports the number of
+  literals it **verified** absent and the ones that are still there with
+  their coverage hash (§14.7). The same scan runs on the unprotected
+  image, so that the comparison cannot pass vacuously, and so that the
+  verdict does not depend on the layout of the image.
+
+The scan is the **expensive** part of the check: it hashes every substring
+of the image at the length of every wanted literal, so it costs about half
+a minute on the payload image (2.4 MB, 17 lengths). That is the price of
+a predicate that cannot be fooled by the shape of the image, and the check
+is part of every protected build.
 
 The last check is the one the specification asks for ("the pass rewrites
 calls, so a mistake shows up as a wrong call target, not as a crash. The
@@ -1334,3 +1392,413 @@ opt.exe -load-pass-plugin=Cs2Protect.dll -passes=cs2-protect-vm -S fixture.ll
 
 That pipeline is what the IR test uses to prove that the analysis is
 read-only: the module comes out of it byte for byte the way it went in.
+
+## 15. The transform: the string encryption
+
+The payload's operational strings -- the feature keys, the JSON keys, the
+convar names -- are plaintext in the shipped DLL: an analyst with the file
+opens it in IDA, reads them, and learns the feature list without running
+anything. This section is about the pass that takes them out of the file.
+
+### 15.1 What is selected
+
+The policy's `strings` section (§5) is a list of globs matched against the
+**content** of a literal. Nothing is protected unless the policy says so,
+and a literal that the policy does not select is **not even looked at**: the
+gate never sees it, and the report never names it.
+
+### 15.2 The gate: fail closed
+
+A literal is protected only if it passes **every** check. A refusal leaves
+the literal **exactly as it is** -- the gate does not half-protect -- and
+the reason is reported:
+
+| refusal | why |
+|---|---|
+| `escapes_to_initializer` | the literal's address ends up in a **global initializer** (a `constexpr` array of `string_view`): the pointer is baked into the image, and a pointer to a decoded buffer cannot exist before the program runs |
+| `unsupported_shape` | the literal is not a `ConstantDataSequential` of `i8` |
+| `unsupported_address_space` | the literal is in **another address space**: the blob and the buffer are created in the default one, and a literal in another one cannot be replaced by them (the module would come out broken) |
+| `empty` | the literal is empty |
+| `too_short` | it is shorter than `strings_min_length` |
+| `optnone_function` | a user of it is in an `optnone` function |
+| `virtualized_function` | a user of it is in a function selected at the `virtualized` level: the VM's blob format and the string blob format must not meet |
+| `eh_use` | a user of it is in a function with an EH pad, or the use is in a landingpad: the rewritten IR must stay exception-free |
+| `unsupported_use` | the use is not a plain pointer use (the address is compared, stored in a structure, or the user is not an instruction), or the user is a **constant expression** the pass cannot rewrite (a `ptrtoint`, or a GEP with a variable index) |
+
+A use the pass cannot rewrite is a use that **fails** the gate: it is
+never *skipped*. A skipped use would let the pass delete the literal
+while the expression that referred to it is still there, and the X86
+backend dies on the dangling reference ("Cannot select: ... PLEASE submit
+a bug report"). The gate is fail closed in both directions: a literal is
+protected only if **every** one of its uses can be rewritten.
+
+**The reason is the first *rule* that holds, not the first failing use.**
+The table above is an ordered list, and the reason a literal gets is the
+first rule of it that holds -- a literal with two reasons (an `optnone`
+function *and* an unrewritable use) has **one** verdict, whatever the
+order of its use list is. The order of the uses is the order of the
+module's use list, and it is not a rule.
+
+**The constant expressions that cannot be rewritten are `ptrtoint` and a
+GEP with a variable index.** The list used to be longer, and it was
+wrong: an `inttoptr` needs a **constant** operand, so it can never name
+a literal; a `select` with a constant condition is folded by the parser,
+so it is always the instruction form; and a GEP of a GEP is folded into a
+single GEP by the parser, so it never reaches the pass either. The
+handling of a constant expression the pass does not understand is
+unchanged: the literal is **refused**, not skipped.
+
+**The `KNOWN_EVENTS` case.** `payload/control/include/cs2/control/event_names.hpp`
+holds `inline constexpr std::array<std::string_view, 273> KNOWN_EVENTS` and
+`KNOWN_EVENT_FIELDS` (656 fields). Those are **Valve's** names: they are
+public knowledge, they identify the *game build* and not the payload, and
+they **cannot** be protected by this design at all -- a `constexpr` array of
+`string_view` bakes the pointers into a global initializer, so they are
+refused with `escapes_to_initializer` and they stay in the image. That is
+the honest answer, not a gap to be papered over: protecting them would need
+a different data model in the payload (an index table plus a runtime-decoded
+table), which contradicts the "no constructor" rule.
+
+**The `linkonce_odr` assumption.** A string literal is `private` in the
+Itanium ABI, but the MSVC ABI (the one the payload is built with) gives it
+`linkonce_odr` linkage, so that the linker can fold the identical strings of
+two translation units. The pass therefore accepts that linkage: it deletes
+the literal and replaces it with a private blob. The consequence is an
+**assumption, not a guarantee**:
+
+> **every** translation unit that uses a selected string has to be built with
+> the plugin **and with the same policy**.
+
+A translation unit that is compiled without the plugin (or with a policy
+that selects nothing) keeps its reference to the symbol the protected module
+deleted, and the **link fails** with an unresolved external. That is a loud
+failure -- not a wrong result -- but it is the *build* that fails, not the
+pass, and the pass cannot detect it: a pass sees one translation unit at a
+time. The same assumption is the reason why a literal that is protected in
+one module and **refused** in another is still in the image (§14.7): the
+refused module keeps its copy, and the linker keeps the COMDAT.
+
+### 15.3 Where the plaintext lives: a stack buffer
+
+The chosen form is a **decode into an `alloca` in the using function**,
+once per function, before **every** use:
+
+```
+entry:
+  %buf = alloca [N x i8], align 1
+  call void @cs2.protect.strdecode(ptr @blob, i32 N, i32 %index, ptr %buf)
+  ...
+  ; every use of the old literal now points at %buf
+```
+
+The decode goes at the top of the block that **dominates** every use: the
+nearest common dominator of the blocks of the uses (the entry block, when
+the uses are in several blocks). It has to be *before* every use: a use
+that reads the buffer before the decode filled it reads an **uninitialised
+stack slot**, which is a *wrong string* and not a crash -- the failure mode
+the specification calls out, and the one nothing else would notice. (The
+first implementation chose the "first use" with `Instruction::comesBefore`,
+which the LLVM header defines only *within one basic block*: for two uses
+in two blocks it answers "false", and the decode landed *after* a use that
+was already in the entry block. The differential test now covers that
+shape -- one literal, two uses, one of them in the entry block -- and the
+unit test checks the dominance of the decode with the dominator tree.)
+
+The alternatives, and why they lose here:
+
+| form | why it loses here |
+|---|---|
+| **micro-slot** (every byte in a global of its own, XORed back at every use) | the strongest anti-dump property -- the plaintext is never contiguous -- but the payload's uses are `std::string_view` comparisons, and a `string_view` is a `{pointer, length}` pair: it needs a **contiguous** buffer of the whole string. A micro-slot would have to reassemble the string at every use, which is a copy (and an allocation) on the path of every comparison |
+| **cached global** (decode once, keep it) | the plaintext sits in the image's memory **forever**, and it needs an initialisation step, which needs a constructor, which is forbidden: nothing in a manually mapped image is ever initialised |
+| **constructor decode** | forbidden outright |
+| **decrypt-use-reencrypt** (in place) | the buffer must be writable; the image's `.rdata` is not. A writable copy would have to be a global, which brings back the previous row |
+
+**The plaintext's lifetime.** The decode fills a **stack buffer** of the
+using function: the plaintext lives in that frame from the first use to the
+return. A **thread-stack dump** or a **crash dump** of the game shows it.
+What this buys is time against an **offline** analyst; against a debugger it
+is nothing. The value is that the **file on disk** no longer holds the
+strings.
+
+### 15.4 The key
+
+```
+key = mix(seed0, seed1, index)
+```
+
+step by step:
+
+1. The **build seed**: the module seed (the build seed mixed with the module
+   id, exactly as T19 derives its key) is split with `splitmix64` into two
+   constants, `seed0` and `seed1`. They live in two `private constant`
+   globals (`cs2.protect.strseed0`, `cs2.protect.strseed1`) and are read
+   with **volatile** loads.
+2. The **index**: the literal's index in the module's list of protected
+   strings. It is an `i32` **argument** of the decode, so it is never a
+   64-bit immediate.
+3. The **mixer**: the same family as the call encryption's (`splitmix64` plus
+   the multiply/xor/rotate mixer). The multiplier and the xor constant live
+   in globals and are read with volatile loads: the X86 backend of this LLVM
+   mis-materialises a 64-bit immediate in this shape (§12).
+4. The **key stream**: one mixed value per byte, `stream(i) = mix64(key + i)`.
+   The ciphertext is the plaintext XORed with the stream, so it is not the
+   plaintext under any single build-time constant.
+
+**The instance base, honestly.** The ciphertext is baked into the image, so
+the key that decrypts it has to be computable at build time: a per-injection
+value cannot be part of the key of something that is *already in the file*.
+The decode therefore reads the base, mixes it into the runtime key and takes
+it out again -- the base is part of the *derivation*, and the plaintext it
+recovers is the plaintext. The alternative (a per-injection table of
+ciphertext variants, the runtime picking one with the base) multiplies the
+size of the image by the number of variants and buys nothing against an
+analyst who has the image.
+
+The **global** `cs2_protect_instance_base` is an `external global i64` that
+the pass **declares** and the payload **defines**
+(`payload/src/payload_main.cpp`). The payload publishes its own handle in
+`DllMain`, *before* `boot()`: the handle is the payload's own mapped image
+base -- a value that is not in the file and differs per injection. It costs
+no import and no TLS, and it is not exported, so the export table does not
+change. It is read with a **volatile** load.
+
+**The key is in RAM while running.** The seeds are in the image, the
+*global* of the instance base is in the image (its **value** is not: that is
+the whole point), and the derived key is in a register. An analyst who dumps
+the **running** process recovers the strings in seconds. This is
+obfuscation, not cryptography: an analyst who recognises the mixer recovers
+the key in minutes.
+
+**The call descriptors still use a build-time key.** T19's descriptors (the
+encrypted call sites) are keyed by the **build** seed, not by the instance
+base; this task does not change them. The runtime-derived key of this task
+is the key of the **strings** only.
+
+### 15.5 The decode helper
+
+The helper is emitted as IR, once per module, `internal` and `noinline`:
+
+```
+declare void @cs2.protect.strdecode(ptr %blob, i32 %len, i32 %index, ptr %out)
+```
+
+It reads the seeds, the instance base and the blob with **volatile** loads,
+derives the key, and writes the plaintext into `%out` with a **loop**: no
+CRT call, no `memcpy`, no `memset`, no new import.
+
+The volatile loads are **load-bearing**, and not only for the same reason
+as in T19: the whole decode is a compile-time constant once the seeds are
+known, so a compiler that folds it constant-folds the **plaintext** into the
+image -- which is exactly what the task exists to prevent. The blob is read
+with a volatile load for the same reason, and the helper is `noinline` so
+that the inliner cannot turn the blob into a constant either.
+
+### 15.6 The report and the coverage
+
+The **report** (stderr) names every literal the policy selected, and whether
+it was protected or refused. It names the **content** only with
+`CS2_PROTECT_VERBOSE=1`: a build log is a file, and a file holds the
+strings. Without the verbosity the report carries the length and the
+digest:
+
+```
+[cs2-protect] config_store.cpp: str: 77 literals protected in this module, 4 refused
+[cs2-protect] config_store.cpp: str: (10 bytes, 1 uses, 1 function, digest 8A3F...): protected
+[cs2-protect] event_names.hpp: str: (11 bytes, digest 51C0...): refused (escapes_to_initializer)
+```
+
+The **coverage** must not carry the content either: the coverage is a file,
+and a file holds the strings. It records the **length** and a **digest of
+the content**, the number of uses, the number of functions and the verdict:
+
+```
+str protected len=10 digest=… uses=1 functions=1
+str refused len=11 digest=… uses=0 functions=0 reason=escapes_to_initializer
+```
+
+The field is named `digest=`, and not `sha256=`, because the digest is
+**salted**: it is `sha256(seed ‖ content)`, not `sha256(content)`. A
+reader (or a tool written against the older format) that assumes the
+unsalted form computes a different value and silently finds nothing. A
+coverage of an older build names the field `sha256=`, and the readers
+take **both** names -- the salt line of the coverage says which form the
+digests are in.
+
+The digest is **salted with the seed of the build** (the environment's
+`CS2_PROTECT_SEED`, else the policy's `seed`): an unsalted SHA-256 of a
+four-to-twelve byte literal is a dictionary attack away from the plaintext,
+so an unsalted digest in the coverage -- or in the build log -- would still
+yield the strings. The salt is in **neither** the coverage nor the log; the
+coverage names it and carries its proof, so that a reader with the wrong
+seed knows it instead of finding no literal in the image and reporting a
+protection that works:
+
+```
+str-salt build-seed digest=…
+```
+
+The section is **optional**: a coverage file of an older build has no `str`
+line, and the readers ignore it. `tools/protect/check_payload.py` uses it to
+prove that the plaintext of the protected strings is **absent** from the
+protected image (and present in the unprotected one, when one is given): it
+hashes the candidates of the image and compares with the digests. The
+coverage of an older build carries **unsalted** digests, and the check tries
+both forms, so an older coverage is still read.
+
+**The build log of a protected build is not a secret.** It names no content
+(unless `CS2_PROTECT_VERBOSE=1`), and the digests it carries are salted with
+the seed of the build -- the same argument as the coverage's. The *seed* is
+the secret: it is in the policy (or in the environment), and the policy is
+not shipped. A build that protects nothing but leaves the strings in the
+image is not fixed by any of this: the image check is what says so.
+
+### 15.7 What the payload build measured
+
+With the policy of `tools/protect/policy.local.json` (the config keys, the
+JSON key families and the event-name families), the protected payload build
+of this repository produced:
+
+| | |
+|---|---|
+| selected literals | 484 |
+| **protected in this module** | **77** (787 bytes of plaintext, 80 uses, 77 functions -- all of them in `config_store.cpp`) |
+| refused `escapes_to_initializer` | 364 (the event names and the event fields) |
+| refused `eh_use` | 35 |
+| refused `too_short` | 8 |
+| the image grew by | 5 632 bytes (0.23 %) |
+
+per module:
+
+| module | protected | refused |
+|---|---|---|
+| `config_store.cpp` | **77** | 4 `too_short` |
+| `events.cpp` | 0 | 90 `escapes_to_initializer` |
+| `state_reader.cpp`, `esp_world.cpp`, `input.cpp`, `payload_main.cpp` | 0 | 65 `escapes_to_initializer` each |
+| `settings_access.cpp` | 0 | 14 `escapes_to_initializer` |
+| `service.cpp` | 0 | 24 `eh_use`, 3 `too_short` |
+| `snapshot_json.cpp` | 0 | 8 `eh_use` |
+| `esp_world_class.cpp` | 0 | 1 `too_short` |
+| `overlay.cpp` | 0 | 1 `eh_use` |
+| `payload_main.cpp` | 0 | 2 `eh_use` |
+
+**"Protected in this module" is not "absent from the image", and the
+difference is bigger than it looks.** The gate is per module, but a string
+literal is `linkonce_odr` (§14.2): it exists in **every** module that uses
+it. If module A protects a literal and module B refuses it, B's copy
+survives the link and **the plaintext is in the image**. And the MSVC ABI
+merges a literal with a **longer** literal that ends with it
+(`movement_thirdperson_fov` holds `thirdperson_fov` at offset 9), so the
+bytes of a literal the pass deleted survive as the **tail** of the longer
+one.
+
+The image check therefore measures the image, and the scan it does is at
+**every offset** of every NUL-terminated run of the image: a literal that
+is in the image as a substring *is* in the image. The measurement of the
+build above is:
+
+| | |
+|---|---|
+| protected (the pass's claim, per module) | **77** |
+| **really absent from the protected image** | **0** |
+| still in the protected image | **77** |
+
+**Not one of the 77 literals left the image.** The pass deleted the
+literal's own symbol and the decode is correct, but the bytes of every one
+of them are still in the shipped DLL. The check says so, and it prints the
+number the scan produced:
+
+```
+check_payload: 0 of the 77 protected strings are absent from the protected image
+check_payload: 77 of the 77 protected strings are still in the protected image
+```
+
+The 77 survivors have **two** causes, and they are different:
+
+* **35** are refused in **another module** (`escapes_to_initializer` or
+  `eh_use`), so that module keeps its copy and the linker keeps the
+  COMDAT. This is the payload's own data model (§14.2).
+* **42** are protected in **every** module that uses them, and their bytes
+  survive as the **tail of a longer literal** of the image. This is the
+  MSVC ABI's string merging, and the pass cannot see it: it sees one
+  module at a time, and the longer literal may well be in another module.
+
+An independent measurement (a byte scan of the image for the plaintext of
+every one of the 77 literals, with no hashing at all) gives the same
+answer, and it counts the **occurrences**:
+
+| | the protected image | the unprotected one |
+|---|---|---|
+| plaintext occurrences of the 77 literals | **858** | 952 |
+
+The pass removed its own copies (94 occurrences), and every one of the 77
+literals is still greppable:
+
+```
+thirdperson_fov  protected: 2   unprotected: 3
+chams_mode       protected: 2   unprotected: 3
+color_enemy      protected: 2   unprotected: 3
+box_style        protected: 1   unprotected: 2
+radar            protected: 5   unprotected: 6
+health_bar       protected: 2   unprotected: 2
+```
+
+**What the check still fails on.** A literal that is in the image as a
+**whole string** and that nobody refused is the pass's own copy: that is a
+failure ("the protection did nothing"), and the check fails the build. A
+literal that is only *inside* another string of the image is greppable,
+but the pass cannot remove another string's bytes: it is reported, with
+its coverage hash, and the build goes on. The same scan runs on the
+**unprotected** image, so that the comparison cannot pass vacuously -- and
+it runs at every offset there too, so that the verdict does not depend on
+the layout of the image (a release build and a debug build hold the same
+literals in a different shape).
+
+**The strings leaving the image is a separate task.** It is not a bug of
+the pass, and this round does not fix it: making the bytes of a literal
+leave the image needs the *containing* literal to be transformed as well
+(and the containing literal may be in another module, and the pass is per
+module), and it needs the payload's data model to stop pinning the
+feature keys into a global initializer. Both are recorded as their own
+work.
+
+**The feature keys are pinned by the payload's own data model.**
+`overlay/include/cs2/overlay/settings_table.hpp` holds
+
+```cpp
+inline constexpr std::array<SettingInfo, 87> SETTING_TABLE = {{
+    {"box", "", SettingType::flag, 0, 1, 1},
+    {"health_bar", "", SettingType::flag, 1, 1, 1},
+    ...
+```
+
+and `payload/control/include/cs2/control/settings_access.hpp` includes it.
+That is exactly the shape the specification describes in §3.5: a
+`constexpr` array of `string_view` **bakes the pointers into a global
+initializer**, and a pointer to a decoded buffer cannot exist before the
+program runs. The feature keys -- the task's declared target -- are
+therefore **refused** with `escapes_to_initializer` in the modules that
+use the table, they stay in the image, and the strings an analyst greps
+for (`health_bar`, `ammo_bar`, `only_enemies`, `show_dead`, `hitbox_mode`,
+`weapon`, `name`, `flags`, `mode`, `enabled`, `distance`, `menu`, `radar`,
+`movement`, ...) are all still in the shipped DLL.
+
+**That is not a bug of the pass, and this round does not fix it.** The fix
+is a change to the **payload's data model** (an index table plus a
+runtime-decoded table instead of a `constexpr` array of `string_view`), and
+that is a **separate task**: it contradicts the "no constructor" rule and it
+touches the payload, which this task does not own. What this round does is
+say it out loud, measure it, and make the check report the number that
+really left the image.
+
+The 364 `escapes_to_initializer` refusals are the event names and the event
+fields: they are baked into the `constexpr` arrays of
+`event_names.hpp`, so they cannot be protected by this design at all
+(§14.2). The 35 `eh_use` refusals are the price of the rule: the payload is
+built with `/EHsc`, so a function that owns a `std::string` has a cleanup
+landing pad, and the rule refuses every literal one of them uses. A literal
+that is protected in one module and refused in another is legitimately still
+in the image, and `check_payload.py` says so -- with its coverage hash --
+instead of failing the build. A literal that is protected in every module
+and that is still in the image is the **tail merging** of the MSVC ABI, and
+the check says that too.
+

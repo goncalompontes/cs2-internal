@@ -222,11 +222,13 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     const cs2::protect::Config settings = configuration();
 
     const cs2::protect::RecordedSelection selection = cs2::protect::read_selection(module);
-    if (selection.functions.empty()) {
-      // The selection phase did not run, or it selected nothing: there is
-      // nothing to rewrite.
-      return llvm::PreservedAnalyses::all();
-    }
+
+    // The strings first: they do not need a selected function, and their
+    // verdict has to be in the coverage even when the policy selected no
+    // function at all.
+    const cs2::protect::StringResult strings =
+        cs2::protect::transform_strings(module, settings, selection);
+    cs2::protect::write_string_report(module, strings, settings);
 
     // The analysis of the virtualizer runs *before* the transform. The
     // transform rewrites the calls of the selected functions into indirect
@@ -237,10 +239,11 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     const auto vm = cs2::protect::analyze_module(module, settings, symbols, virtualized);
     cs2::protect::write_vm_report(module, vm, settings);
 
-    const cs2::protect::TransformResult result =
-        cs2::protect::transform_module(module, settings, selection);
-
-    cs2::protect::write_transform_report(module, result, settings);
+    cs2::protect::TransformResult result;
+    if (!selection.functions.empty()) {
+      result = cs2::protect::transform_module(module, settings, selection);
+      cs2::protect::write_transform_report(module, result, settings);
+    }
 
     // The coverage: the final state of every policy entry. An entry whose
     // selected function did not survive to this phase is recorded as
@@ -260,8 +263,18 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     protect.mix_xor = result.mix_xor;
     protect.key_parts.assign(result.key_parts.begin(), result.key_parts.end());
     const auto vm_coverage = cs2::protect::coverage_vm(vm);
+    const std::vector<cs2::protect::CoverageString> covered =
+        cs2::protect::coverage_strings(strings);
+    // The salt of the digests is named in the coverage, and the salt itself
+    // is not: the coverage cannot be brute forced back into the strings.
+    // The proof tells a reader with a salt whether it is the salt of the
+    // build.
+    std::string salt;
+    if (strings.salted) {
+      salt = "build-seed digest=" + cs2::protect::salt_proof(settings);
+    }
     if (const auto error = cs2::protect::write_coverage(settings, module, entries, functions,
-                                                        protect, vm_coverage)) {
+                                                        protect, vm_coverage, covered, salt)) {
       llvm::errs() << "[cs2-protect] " << *error << "\n";
       llvm::report_fatal_error("cs2-protect: the coverage could not be written",
                                /*gen_crash_diag=*/false);
