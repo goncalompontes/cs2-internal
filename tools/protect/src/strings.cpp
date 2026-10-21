@@ -10,6 +10,7 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -189,6 +190,11 @@ struct ExpressionOffset {
 }
 
 /// The use sites of a literal, in the order of the module's use list.
+///
+/// Every user of the literal is a use. A user the pass cannot rewrite is
+/// reported as an **unsupported** use, and the gate refuses the literal
+/// because of it: the pass never skips a use, because a skipped use leaves
+/// the literal deleted and the expression that referred to it dangling.
 [[nodiscard]] auto use_sites(llvm::GlobalVariable& literal, const llvm::DataLayout& layout)
     -> std::vector<UseSite> {
   std::vector<UseSite> sites;
@@ -240,6 +246,42 @@ struct ExpressionOffset {
     }
   }
   return false;
+}
+
+/// The block that dominates every use of a literal in a function.
+///
+/// The decode has to run **before every use**: a use that reads the buffer
+/// before the decode filled it reads an uninitialised stack slot, which is
+/// a *wrong string* and not a crash -- the failure the specification calls
+/// out. The block that dominates every use is the nearest common dominator
+/// of the blocks of the uses, and the decode goes at its **top**, so that
+/// it is before the uses of the block itself as well.
+///
+/// The entry block is the fallback: it dominates every block of the
+/// function, so a decode at its top is before every use.
+///
+/// `Instruction::comesBefore` is **not** the tool for this: the LLVM
+/// header defines it only *within one basic block*, so it answers "false"
+/// for two instructions of two blocks and the selection degenerates into
+/// "the first use of the use list".
+[[nodiscard]] auto decode_block(llvm::Function& function, const std::vector<UseSite>& sites)
+    -> llvm::BasicBlock* {
+  llvm::BasicBlock* entry = &function.getEntryBlock();
+  if (sites.empty()) {
+    return entry;
+  }
+  llvm::DominatorTree tree(function);
+  llvm::BasicBlock* result = nullptr;
+  for (const UseSite& site : sites) {
+    llvm::BasicBlock* block = site.instruction->getParent();
+    if (tree.getNode(block) == nullptr) {
+      // A block that is not in the tree is not reachable from the entry: the
+      // entry block is the safe answer.
+      return entry;
+    }
+    result = result == nullptr ? block : tree.findNearestCommonDominator(result, block);
+  }
+  return result == nullptr ? entry : result;
 }
 
 /// Whether a function is selected at the `virtualized` level.
@@ -667,17 +709,19 @@ struct Decoder {
       buffer->setAlignment(llvm::Align(1));
       llvm::Value* buffer_value = buffer;
 
-      // The decode: immediately before the first use of the literal in the
-      // function. When the first use is in another block, the decode goes at
-      // the end of the entry block, so that it always runs before any use.
+      // The decode: it has to run before **every** use of the literal in
+      // this function, so it goes at the top of the block that dominates
+      // them all. When that block is the entry block, the decode goes right
+      // after the buffer.
+      llvm::BasicBlock* target = decode_block(*function, group_sites);
       llvm::Instruction* insertion = nullptr;
-      for (const UseSite& site : group_sites) {
-        if (insertion == nullptr || site.instruction->comesBefore(insertion)) {
-          insertion = site.instruction;
+      if (target == &entry_block) {
+        insertion = buffer->getNextNode();
+        if (insertion == nullptr) {
+          insertion = entry_block.getTerminator();
         }
-      }
-      if (insertion == nullptr || insertion->getParent() != &entry_block) {
-        insertion = entry_block.getTerminator();
+      } else {
+        insertion = &*target->getFirstInsertionPt();
       }
       llvm::IRBuilder<> call_builder(insertion);
       llvm::Value* arguments[] = {static_cast<llvm::Value*>(blob),

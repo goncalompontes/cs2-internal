@@ -29,6 +29,7 @@
 
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
@@ -601,6 +602,7 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16
 @.str.virtual = private unnamed_addr constant [8 x i8] c"virtual\00"
 @.str.eh = private unnamed_addr constant [5 x i8] c"ehxy\00"
 @.str.compare = private unnamed_addr constant [9 x i8] c"compared\00"
+@.str.twoblock = private unnamed_addr constant [9 x i8] c"twoblock\00"
 
 @global.init = private constant { ptr, i64 } { ptr @.str.escapes, i64 7 }
 
@@ -667,6 +669,21 @@ define i1 @compares_addresses() {
 entry:
   %c = icmp eq ptr @.str.compare, null
   ret i1 %c
+}
+
+define void @uses_two_blocks(ptr %out, i1 %cond) {
+entry:
+  %c = load i8, ptr @.str.twoblock
+  store i8 %c, ptr %out
+  br i1 %cond, label %then, label %else
+
+then:
+  %d = load i8, ptr @.str.twoblock
+  store i8 %d, ptr %out
+  ret void
+
+else:
+  ret void
 }
 )";
   llvm::SMDiagnostic error;
@@ -882,6 +899,80 @@ void test_string_transform() {
   std::filesystem::remove_all(directory, error);
 }
 
+/// The transform: the decode runs before **every** use of the literal.
+///
+/// A literal that is used in two blocks of one function -- one of them the
+/// entry block -- is the case that breaks a naive placement: a decode that
+/// is emitted after a use of the entry block leaves that use reading an
+/// uninitialised stack slot, which is a *wrong string* and not a crash.
+void test_string_decode_dominance() {
+  llvm::LLVMContext context;
+  const auto module = build_string_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  cs2::protect::Policy policy;
+  policy.strings = {"twoblock"};
+  policy.strings_min_length = 4;
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const cs2::protect::StringResult result = cs2::protect::transform_strings(*module, config, {});
+  check(result.protected_count == 1, "the literal of the two-block function is protected");
+  check(result.decodes == 1, "one decode is emitted");
+
+  llvm::Function* function = module->getFunction("uses_two_blocks");
+  check(function != nullptr, "the two-block function is there");
+  if (function == nullptr) {
+    return;
+  }
+
+  // The buffer, the decode and the uses of the buffer.
+  llvm::Value* buffer = nullptr;
+  llvm::Instruction* decode = nullptr;
+  for (llvm::BasicBlock& block : *function) {
+    for (llvm::Instruction& instruction : block) {
+      if (instruction.getName() == "cs2.protect.buffer") {
+        buffer = &instruction;
+      }
+      if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+        if (call->getCalledFunction() != nullptr &&
+            call->getCalledFunction()->getName() == "cs2.protect.strdecode") {
+          decode = &instruction;
+        }
+      }
+    }
+  }
+  check(buffer != nullptr, "the function has a buffer");
+  check(decode != nullptr, "the function has a decode");
+  if (buffer == nullptr || decode == nullptr) {
+    return;
+  }
+
+  std::vector<llvm::Instruction*> uses;
+  for (llvm::User* user : buffer->users()) {
+    auto* instruction = llvm::dyn_cast<llvm::Instruction>(user);
+    if (instruction == nullptr || instruction == decode) {
+      continue;
+    }
+    uses.push_back(instruction);
+  }
+  check(uses.size() == 2, "the function has two uses of the buffer");
+
+  // The decode dominates every use, and it is before the uses of its own
+  // block.
+  llvm::DominatorTree tree(*function);
+  for (const llvm::Instruction* use : uses) {
+    if (use->getParent() == decode->getParent()) {
+      check(decode->comesBefore(use), "the decode is before the use of its own block");
+      continue;
+    }
+    check(tree.dominates(decode->getParent(), use->getParent()),
+          "the decode dominates the use of the other block");
+  }
+}
+
 }  // namespace
 
 auto main() -> int {
@@ -896,6 +987,7 @@ auto main() -> int {
   test_string_policy();
   test_string_gate();
   test_string_transform();
+  test_string_decode_dominance();
   if (g_failures != 0) {
     std::printf("protect: %d check(s) failed\n", g_failures);
     return 1;

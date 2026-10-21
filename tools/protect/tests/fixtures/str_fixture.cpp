@@ -10,6 +10,8 @@
 //
 //   * a string used twice in one function;
 //   * a string used in two functions;
+//   * a string used in two blocks of one function, one of them the entry
+//     block: the decode has to run before both uses;
 //   * a string that is a format argument;
 //   * a string compared with `==` against a runtime value;
 //   * a string of exactly the minimum length;
@@ -45,13 +47,22 @@ namespace {
 // program runs.
 constexpr std::string_view kGlobal = "escaped";
 
+// A volatile global.
+//
+// The hash function reads it, so that the compiler cannot merge two calls
+// of it: a function that only reads its argument is `readonly`, and two
+// such calls with the same argument return the same value -- the optimiser
+// would fold the two uses of a literal into one call, and the fixture would
+// not have the shape it is here for.
+volatile std::uint64_t g_sink = 0;
+
 // The hash of a string, at run time.
 //
 // It is `noinline` on purpose: an inlined hash of a constant string is
 // folded by the optimiser, the literal disappears from the image, and the
 // test would pass without protecting anything.
 extern "C" __declspec(noinline) auto runtime_hash(const char* text) noexcept -> std::uint64_t {
-  std::uint64_t hash = 1469598103934665603ULL;
+  std::uint64_t hash = 1469598103934665603ULL ^ g_sink;
   for (const char* cursor = text; *cursor != '\0'; ++cursor) {
     hash ^= static_cast<unsigned char>(*cursor);
     hash *= 1099511628211ULL;
@@ -96,5 +107,22 @@ extern "C" __declspec(dllexport) auto probe(const char* text) noexcept -> std::u
   hash ^= runtime_hash("untouched");
   // The refused case.
   hash ^= runtime_hash(kGlobal.data());
+  return hash;
+}
+
+// A literal used in **two blocks** of one function, one of them the entry
+// block.
+//
+// The decode has to run before **both** uses. A decode that is emitted
+// after the use of the entry block leaves that use reading an uninitialised
+// stack slot: the function returns a *wrong* value, and nothing crashes, so
+// nothing else would notice it.
+extern "C" __declspec(dllexport) auto probe_blocks(const char* text) noexcept -> std::uint64_t {
+  // The use in the entry block.
+  std::uint64_t hash = runtime_hash("twoblok");
+  if (text[0] == 'x') {
+    // The use in the other block.
+    hash ^= runtime_hash("twoblok");
+  }
   return hash;
 }

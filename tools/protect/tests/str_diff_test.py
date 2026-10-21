@@ -35,12 +35,18 @@ SKIP = 77
 
 #: The literals the policy protects. The test checks that they are in the
 #: unprotected image and not in the protected one.
-PROTECTED_LITERALS = ("healthy", "shared", "formatted", "four")
+PROTECTED_LITERALS = ("healthy", "shared", "formatted", "four", "twoblok")
 
 #: The literals the policy does not protect: the denied one, the one the
-#: policy does not select, and the one the gate refuses. All three have to
-#: be in **both** images.
+#: policy does not select, and the one the gate refuses because its address
+#: escapes into a global initializer. All three have to be in **both**
+#: images.
 UNPROTECTED_LITERALS = ("deniedxx", "untouched", "escaped")
+
+#: The number of literals the policy protects. The report has to name each
+#: of them as protected: a pass that protected fewer of them would leave a
+#: literal in the image, and the image check would not see it.
+EXPECTED_PROTECTED = len(PROTECTED_LITERALS)
 
 VSWHERE = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
 KNOWN_VCVARS = Path(
@@ -148,6 +154,20 @@ def probe(dll: Path, text: bytes) -> int:
     return int(function(text))
 
 
+def probe_blocks(dll: Path, text: bytes) -> int:
+    """Loads the DLL and calls its exported two-block probe.
+
+    The probe uses one literal in the entry block and in another block: the
+    decode has to run before both uses, or the entry-block use reads an
+    uninitialised stack slot and the two builds disagree.
+    """
+    library = ctypes.WinDLL(str(dll))
+    function = library.probe_blocks
+    function.restype = ctypes.c_ulonglong
+    function.argtypes = [ctypes.c_char_p]
+    return int(function(text))
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--clang-cl", type=Path, required=True)
@@ -195,7 +215,12 @@ def main(argv: list[str]) -> int:
         # The pass has to have done something: the report says how many
         # literals it protected, and the two images have to differ.
         check("str:" in built.stderr, f"the pass did not report a string:\n{built.stderr}")
-        check("protected" in built.stderr, f"the pass protected no literal:\n{built.stderr}")
+        protected_count = built.stderr.count(": protected")
+        check(
+            protected_count == EXPECTED_PROTECTED,
+            f"the pass reported {protected_count} protected literals, expected "
+            f"{EXPECTED_PROTECTED}:\n{built.stderr}",
+        )
         check(
             plain.read_bytes() != protected.read_bytes(),
             "the protected image is identical to the unprotected one: the pass did nothing",
@@ -235,6 +260,19 @@ def main(argv: list[str]) -> int:
                 first == second,
                 f"the two builds disagree on '{text.decode('ascii', 'replace')}': "
                 f"{first} and {second}",
+            )
+
+        # The two-block probe: one literal, two uses, one of them in the
+        # entry block. A decode that is emitted after the use of the entry
+        # block leaves that use reading an uninitialised stack slot, and the
+        # two builds disagree -- silently, because nothing crashes.
+        for text in (b"x", b"y", b""):
+            first = probe_blocks(plain, text)
+            second = probe_blocks(protected, text)
+            check(
+                first == second,
+                f"the two builds disagree on the two-block probe "
+                f"'{text.decode('ascii', 'replace')}': {first} and {second}",
             )
     except Failure as error:
         print(f"str_diff_test: {error}", file=sys.stderr)

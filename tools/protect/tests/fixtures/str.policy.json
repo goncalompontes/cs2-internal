@@ -4,6 +4,7 @@
     "shared",
     "formatted",
     "four",
+    "twoblok",
     "denied*"
   ],
   "strings_deny": [
