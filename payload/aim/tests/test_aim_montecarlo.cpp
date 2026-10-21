@@ -75,6 +75,7 @@ auto main() -> int {
   {
     const SpreadKernel kernel{.spread = 0.02F, .inaccuracy = 0.01F, .pellets = 3};
     std::vector<Vec2> mine(3);
+    int mismatches = 0;
     for (int index = 0; index < 8; ++index) {
       const auto seed = cs2::aim::md5_pseudo_random(static_cast<std::uint32_t>(1000 + index));
       const auto engine = cs2::aim::pellet_offsets(seed, kernel.spread, kernel.inaccuracy,
@@ -83,10 +84,12 @@ auto main() -> int {
       expect(count == kernel.pellets, "the sampler draws every pellet");
       expect(engine.size() == mine.size(), "the offsets have the same count");
       for (std::size_t i = 0; i < engine.size(); ++i) {
-        expect(near(engine[i].x, mine[i].x, 1e-6F) && near(engine[i].y, mine[i].y, 1e-6F),
-               "the sampler's offsets are the engine's offsets");
+        if (!near(engine[i].x, mine[i].x, 1e-6F) || !near(engine[i].y, mine[i].y, 1e-6F)) {
+          ++mismatches;
+        }
       }
     }
+    expect(mismatches == 0, "the sampler's offsets are the engine's offsets");
 
     // The revolver's `r -> 1 - r^2` transform is part of the draw.
     const SpreadKernel revolver{.spread = 0.02F,
@@ -100,11 +103,14 @@ auto main() -> int {
     const int revolver_count =
         cs2::aim::draw_pellet_offsets(seed, revolver, std::span<Vec2>{revolver_offsets});
     expect(revolver_count == 2, "the revolver shot draws every pellet");
+    int revolver_mismatches = 0;
     for (std::size_t i = 0; i < engine.size(); ++i) {
-      expect(near(engine[i].x, revolver_offsets[i].x, 1e-6F) &&
-                 near(engine[i].y, revolver_offsets[i].y, 1e-6F),
-             "the revolver pattern is drawn the same way");
+      if (!near(engine[i].x, revolver_offsets[i].x, 1e-6F) ||
+          !near(engine[i].y, revolver_offsets[i].y, 1e-6F)) {
+        ++revolver_mismatches;
+      }
     }
+    expect(revolver_mismatches == 0, "the revolver pattern is drawn the same way");
 
     // A golden vector: the exact offsets of one seed, so a change in the RNG itself
     // cannot pass unnoticed by the cross-check above (both sides use the same
@@ -123,13 +129,17 @@ auto main() -> int {
     const SpreadKernel kernel{.spread = 0.03F, .inaccuracy = 0.02F, .pellets = 1};
     const float limit = kernel.spread + kernel.inaccuracy;
     std::vector<Vec2> offsets(1);
+    int outside = 0;
     for (int index = 0; index < 20000; ++index) {
       const auto seed = cs2::aim::md5_pseudo_random(static_cast<std::uint32_t>(index));
       const int count = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{offsets});
       expect(count == 1, "the support probe draws its pellet");
       const float radius = std::sqrt(offsets[0].x * offsets[0].x + offsets[0].y * offsets[0].y);
-      expect(radius <= limit + 1e-6F, "every sampled offset is inside the support");
+      if (radius > limit + 1e-6F) {
+        ++outside;
+      }
     }
+    expect(outside == 0, "every sampled offset is inside the support");
   }
 
   // --- 3. the radial law is uniform in radius, not area-uniform --------------
