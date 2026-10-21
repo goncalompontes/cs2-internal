@@ -213,11 +213,28 @@ python scripts/clang-tidy-fix.py --list-groups          # what's available
 python scripts/clang-tidy-fix.py                        # dry run (default)
 python scripts/clang-tidy-fix.py --group const --apply  # write one group
 python scripts/clang-tidy-fix.py --apply --format       # + whole-file format
+python scripts/clang-tidy-fix.py --list-gate            # the gated groups
+python scripts/clang-tidy-fix.py --check                # the gate
 ```
 
 **Groups** (ordered cheapest/most-mechanical first): `modernize-safe`,
 `modernize-types`, `const`, `nodiscard`, `performance`, `readability`,
 `modernize-extra`, `readability-extra`, `misc-extra`, `trailing-return-type`.
+
+**The check mode and the gate.** `--check` runs the selected groups **without
+writing anything** and fails when a selected group reports a finding. Without
+`--group`/`--checks` the selected groups are the **gated** ones
+(`GATED_GROUPS` in the script; `--list-gate` prints them), so the command is
+the regression gate: a change that introduces a finding under a gated group
+fails it. `--gate NAME` replaces the gated set — widening (or narrowing) the
+gate is a deliberate act, done in the same commit that clears the group. The
+gate is what CI runs (`.github/workflows/ci.yml`), and the decision it turns
+into an exit code has its own unit test
+(`scripts/scenario/tests/test_clang_tidy_fix.py`).
+
+A translation unit that does not compile is **not** a finding of a group: the
+sweep reports it as a failed translation unit ("failed on N translation
+unit(s)"), which is where a compile error belongs.
 
 **Rules of engagement:**
 
