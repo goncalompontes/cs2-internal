@@ -268,8 +268,8 @@ auto rage_config_save(const RageConfigStore& store) noexcept -> bool {
     if (!rage_profile_format(p, line, sizeof(line))) {
       break;
     }
-    const int written = std::snprintf(buffer + used, sizeof(buffer) - static_cast<std::size_t>(used),
-                                      "%s\n", line);
+    const int written =
+        std::snprintf(buffer + used, sizeof(buffer) - static_cast<std::size_t>(used), "%s\n", line);
     if (written <= 0) {
       break;
     }

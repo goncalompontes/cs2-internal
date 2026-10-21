@@ -153,7 +153,8 @@ auto main() -> int {
     expect(cs2::control::rage_profile_parse("ak47|1|0|0", profile), "a short name parses");
     expect(std::strcmp(profile.weapon, "weapon_ak47") == 0,
            "the weapon's name is normalised on load");
-    expect(cs2::control::rage_profile_parse("WEAPON_AK47|1|0|0", profile), "an upper-case name parses");
+    expect(cs2::control::rage_profile_parse("WEAPON_AK47|1|0|0", profile),
+           "an upper-case name parses");
     expect(std::strcmp(profile.weapon, "weapon_ak47") == 0,
            "the weapon's name is lower-cased on load");
   }

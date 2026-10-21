@@ -2865,8 +2865,8 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
           }
         }
         if (chosen != nullptr) {
-          input->monte_carlo_targets.push_back(
-              aim::TargetHealth{.index = chosen->index, .health = static_cast<float>(chosen->health)});
+          input->monte_carlo_targets.push_back(aim::TargetHealth{
+              .index = chosen->index, .health = static_cast<float>(chosen->health)});
         }
       }
     }
@@ -2936,7 +2936,8 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
         static_cast<int>(result.monte_carlo->seed_source)))));
   }
   if (result.monte_carlo_refusal.has_value()) {
-    payload.set("mc_refusal", Json::string(std::string(aim::to_string(*result.monte_carlo_refusal))));
+    payload.set("mc_refusal",
+                Json::string(std::string(aim::to_string(*result.monte_carlo_refusal))));
     payload.set("mc_fallback", Json::boolean(true));
   }
 
@@ -3159,10 +3160,11 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
                 Json::number(static_cast<double>(rage_mc_damage_.load())));
     payload.set("mc_target", Json::number(static_cast<double>(rage_mc_target_.load())));
     const int refusal = rage_mc_refusal_.load();
-    payload.set("mc_refusal",
-                Json::string(refusal >= 0
-                                ? std::string(aim::to_string(static_cast<aim::MonteCarloError>(refusal)))
-                                : std::string()));
+    payload.set(
+        "mc_refusal",
+        Json::string(refusal >= 0
+                        ? std::string(aim::to_string(static_cast<aim::MonteCarloError>(refusal)))
+                        : std::string()));
     payload.set("mc_fallback", Json::boolean(refusal >= 0));
     payload.set("mc_valid", Json::boolean(rage_mc_valid_.load()));
   }

@@ -465,7 +465,8 @@ auto main() -> int {
       expect(near(result.value, expected_value, 1e-3F), "the objective's value is the field's");
       expect(near(result.hitchance, field.hit_probability(result.aim, input.spread_sigma), 1e-4F),
              "the objective's hitchance is the field's Gaussian");
-      expect(!result.monte_carlo.has_value(), "the other objectives produce no Monte-Carlo verdict");
+      expect(!result.monte_carlo.has_value(),
+             "the other objectives produce no Monte-Carlo verdict");
       expect(!result.monte_carlo_refusal.has_value(), "the other objectives do not refuse");
     };
 

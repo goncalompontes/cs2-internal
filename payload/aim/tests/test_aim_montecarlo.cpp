@@ -759,7 +759,8 @@ auto main() -> int {
            "the refusal names the malformed hitbox");
     const auto poisoned_sample = cs2::aim::evaluate_sample(input, Vec2{}, 1234);
     expect(!poisoned_sample.has_value(), "a sample of a NaN-multiplier scene is refused too");
-    const auto poisoned_search = cs2::aim::solve_montecarlo(input, std::span<const cs2::aim::Cell>{});
+    const auto poisoned_search =
+        cs2::aim::solve_montecarlo(input, std::span<const cs2::aim::Cell>{});
     expect(!poisoned_search.has_value(), "the search refuses a NaN-multiplier scene");
   }
 
