@@ -1,9 +1,13 @@
-#include "vm.hpp"
+// The lowering of the front end of the virtualizer.
+//
+// The lowerer turns the optimised IR of a function into the instruction
+// stream of the virtual machine. It never changes the function: the rewrite
+// is the next task, and this one only produces a verdict.
 
-#include <algorithm>
-#include <array>
+#include "vm_internal.hpp"
+
+#include <cstddef>
 #include <cstdint>
-#include <expected>
 #include <optional>
 #include <string>
 #include <utility>
@@ -20,177 +24,9 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include "selection.hpp"
-#include "transform.hpp"
-
-namespace cs2::protect {
+namespace cs2::protect::detail {
 
 namespace {
-
-// --- The types -----------------------------------------------------------------
-
-/// The width of a type in bytes, or 0 when the virtual machine does not model
-/// the type.
-///
-/// The widths of the ISA are 1, 2, 4 and 8 bytes, so an integer of 8, 16, 32
-/// or 64 bits is modelled and nothing else is. An `i1` lives in a byte: the
-/// value of an `i1` is its low bit, and the lowering masks every operation
-/// whose result is an `i1` (see `mask_if_bool`).
-[[nodiscard]] auto width_of(llvm::Type* type) -> std::uint8_t {
-  if (type->isIntegerTy()) {
-    switch (type->getIntegerBitWidth()) {
-      case 1:
-      case 8:
-        return 1;
-      case 16:
-        return 2;
-      case 32:
-        return 4;
-      case 64:
-        return 8;
-      default:
-        return 0;
-    }
-  }
-  if (type->isPointerTy()) {
-    // Only the default address space: the manual mapper knows one address
-    // space, and a pointer into another one is not a pointer it can map.
-    if (llvm::cast<llvm::PointerType>(type)->getAddressSpace() != 0) {
-      return 0;
-    }
-    return 8;
-  }
-  return 0;
-}
-
-/// Whether the virtual machine models the type.
-[[nodiscard]] auto supported_type(llvm::Type* type) -> bool {
-  return width_of(type) != 0;
-}
-
-/// Whether the virtual machine models the type as the type of a *result*.
-///
-/// A function that returns nothing is modelled: the interpreter returns
-/// zero.
-[[nodiscard]] auto supported_result_type(llvm::Type* type) -> bool {
-  return type->isVoidTy() || supported_type(type);
-}
-
-/// Whether the type is an `i1`.
-[[nodiscard]] auto is_bool(llvm::Type* type) -> bool {
-  return type->isIntegerTy() && type->getIntegerBitWidth() == 1;
-}
-
-// --- The checks ----------------------------------------------------------------
-
-/// Whether the function has an EH edge.
-///
-/// The interpreter cannot model unwinding: the frame is a flat array of
-/// cells, and there is no place to put a landing pad.
-[[nodiscard]] auto has_eh(const llvm::Function& function) -> bool {
-  for (const llvm::BasicBlock& block : function) {
-    for (const llvm::Instruction& instruction : block) {
-      if (llvm::isa<llvm::InvokeInst>(instruction) ||
-          llvm::isa<llvm::LandingPadInst>(instruction) ||
-          llvm::isa<llvm::CatchSwitchInst>(instruction) ||
-          llvm::isa<llvm::CleanupReturnInst>(instruction) ||
-          llvm::isa<llvm::CatchReturnInst>(instruction) ||
-          llvm::isa<llvm::ResumeInst>(instruction)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-/// The calls of a function, in order.
-[[nodiscard]] auto calls_of(llvm::Function& function) -> std::vector<llvm::CallBase*> {
-  std::vector<llvm::CallBase*> calls;
-  for (llvm::BasicBlock& block : function) {
-    for (llvm::Instruction& instruction : block) {
-      if (auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
-        calls.push_back(call);
-      }
-    }
-  }
-  return calls;
-}
-
-/// The refusal of the virtual machine for a call that the transform's
-/// rules skip.
-///
-/// The rule that holds for a call is the transform's: the `byval`, `sret`,
-/// `inalloca` and `preallocated` parameters, the variadic callee, the
-/// `musttail` call and the indirect call are the same rules in the two
-/// phases, and the same reasons.
-[[nodiscard]] auto vm_failure(CallSkipReason reason, const llvm::CallBase& call)
-    -> std::expected<void, VmFailure> {
-  const auto* callee = call.getCalledFunction();
-  const std::string name = callee != nullptr ? callee->getName().str() : std::string();
-  switch (reason) {
-    case CallSkipReason::variadic_callee:
-      return std::unexpected(VmFailure{VmRefusal::variadic_callee, "the callee '" + name + "' is variadic"});
-    case CallSkipReason::indirect_parameter:
-      return std::unexpected(VmFailure{VmRefusal::indirect_parameter,
-                       "the callee '" + name +
-                           "' has a byval, sret, inalloca or preallocated parameter"});
-    case CallSkipReason::musttail:
-      return std::unexpected(VmFailure{VmRefusal::musttail, "the call is a musttail call"});
-    case CallSkipReason::indirect_callee:
-      return std::unexpected(VmFailure{VmRefusal::indirect_call, "the call goes through a pointer"});
-    case CallSkipReason::external_callee:
-    case CallSkipReason::intrinsic_callee:
-    case CallSkipReason::invoke:
-    case CallSkipReason::optnone_callee:
-      // The transform refuses these for its own reasons: the virtual
-      // machine calls an import through the pool, and the other three are
-      // refused elsewhere (an `invoke` is an EH edge, an intrinsic is
-      // lowered or refused by the lowering, and an `optnone` callee is
-      // an ordinary callee here).
-      break;
-  }
-  return {};
-}
-
-/// The rules of the calls that the virtual machine refuses, in the order
-/// of the transform's rules: the first rule that holds is the reason that
-/// is reported.
-constexpr std::array<CallSkipReason, 4> k_call_rules = {
-    CallSkipReason::variadic_callee,
-    CallSkipReason::indirect_parameter,
-    CallSkipReason::musttail,
-    CallSkipReason::indirect_callee,
-};
-
-/// Whether the address of the function is taken.
-///
-/// A rewrite changes what the address of the function means: the address
-/// would be the address of the thunk, and every user of the address would
-/// reach the interpreter.
-[[nodiscard]] auto address_taken(const llvm::Function& function) -> bool {
-  for (const llvm::User* user : function.users()) {
-    const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
-    if (call != nullptr && call->getCalledFunction() == &function) {
-      continue;  // a direct call is not the address
-    }
-    return true;
-  }
-  return false;
-}
-
-/// The length of a `memcpy` or a `memset`, when it is a constant.
-[[nodiscard]] auto constant_length(const llvm::CallBase& call) -> std::optional<std::uint64_t> {
-  const auto* intrinsic = llvm::dyn_cast<llvm::MemIntrinsic>(&call);
-  if (intrinsic == nullptr) {
-    return std::nullopt;
-  }
-  const auto* length = llvm::dyn_cast<llvm::ConstantInt>(intrinsic->getLength());
-  if (length == nullptr) {
-    return std::nullopt;
-  }
-  return length->getZExtValue();
-}
-
 /// The comparison kind of an `icmp`.
 [[nodiscard]] auto compare_kind(llvm::CmpInst::Predicate predicate) -> std::optional<VmCompare> {
   switch (predicate) {
@@ -235,62 +71,6 @@ constexpr std::array<CallSkipReason, 4> k_call_rules = {
   }
 }
 
-/// The greatest common divisor, for the permutation's multiplier.
-[[nodiscard]] auto greatest_common_divisor(std::uint64_t left, std::uint64_t right) noexcept
-    -> std::uint64_t {
-  while (right != 0) {
-    const std::uint64_t rest = left % right;
-    left = right;
-    right = rest;
-  }
-  return left;
-}
-
-/// The inverse of a number modulo another, with the extended Euclidean
-/// algorithm.
-[[nodiscard]] auto modular_inverse(std::uint64_t value, std::uint64_t modulus) noexcept
-    -> std::uint64_t {
-  std::int64_t old_remainder = static_cast<std::int64_t>(value % modulus);
-  std::int64_t remainder = static_cast<std::int64_t>(modulus);
-  std::int64_t old_coefficient = 1;
-  std::int64_t coefficient = 0;
-  while (remainder != 0) {
-    const std::int64_t quotient = old_remainder / remainder;
-    const std::int64_t rest = old_remainder - quotient * remainder;
-    old_remainder = remainder;
-    remainder = rest;
-    const std::int64_t next = old_coefficient - quotient * coefficient;
-    old_coefficient = coefficient;
-    coefficient = next;
-  }
-  std::int64_t inverse = old_coefficient % static_cast<std::int64_t>(modulus);
-  if (inverse < 0) {
-    inverse += static_cast<std::int64_t>(modulus);
-  }
-  return static_cast<std::uint64_t>(inverse);
-}
-
-/// Writes a little-endian value into a buffer.
-template <typename T>
-void write_le(std::vector<std::uint8_t>& buffer, std::size_t offset, T value) {
-  for (std::size_t index = 0; index < sizeof(T); ++index) {
-    buffer[offset + index] = static_cast<std::uint8_t>((value >> (8U * index)) & 0xFFU);
-  }
-}
-
-/// The keystream of the container: the byte at the offset `position`.
-///
-/// The cipher is a counter-mode stream: the word at the position is the
-/// mixer of the key and of the position, and the byte is one of its eight.
-/// The interpreter decrypts on fetch, so the blob stays read-only and the
-/// interpreter is re-entrant.
-[[nodiscard]] auto keystream_byte(std::uint64_t key, std::size_t position) noexcept
-    -> std::uint8_t {
-  const std::uint64_t word = position / 8U;
-  const std::uint64_t mixed = mix64(key + word * k_mix_multiplier);
-  return static_cast<std::uint8_t>((mixed >> (8U * (position % 8U))) & 0xFFU);
-}
-
 // --- The lowerer ----------------------------------------------------------------
 
 /// The lowerer of one function.
@@ -308,7 +88,9 @@ class Lowerer {
   /// Lowers the function. A success means that the function was lowered; the
   /// error holds the refusal.
   [[nodiscard]] auto run() -> std::expected<void, VmFailure> {
-    if (auto failure = check_function(); !failure.has_value()) {
+    // The gate is the gate of `vm_gate.cpp`: the eligibility is one
+    // thing, and it is not written twice.
+    if (auto failure = gate(function_, options_); !failure.has_value()) {
       return std::unexpected(failure.error());
     }
     if (auto failure = assign_slots(); !failure.has_value()) {
@@ -441,158 +223,6 @@ class Lowerer {
     return stream.str();
   }
 
-  // --- the checks ---
-
-  /// The eligibility gate.
-  ///
-  /// The checks run in the order of the specification's table, and the first
-  /// one that holds is the reason that is reported: one reason per function,
-  /// and a function that fails one is left completely untouched.
-  [[nodiscard]] auto check_function() -> std::expected<void, VmFailure> {
-    if (function_.isDeclaration()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "the function has no body"});
-    }
-    if (has_eh(function_)) {
-      return std::unexpected(VmFailure{VmRefusal::eh_pad, "the function has an EH edge"});
-    }
-    if (function_.isVarArg()) {
-      return std::unexpected(VmFailure{VmRefusal::variadic_function, "the function is variadic"});
-    }
-
-    const std::vector<llvm::CallBase*> calls = calls_of(function_);
-    // The rules of the calls are the rules of the transform: they are
-    // reused, not written a second time. The order is the transform's
-    // order, so the two phases report the same reason for the same call.
-    std::vector<std::optional<CallSkipReason>> reasons;
-    reasons.reserve(calls.size());
-    for (const llvm::CallBase* call : calls) {
-      reasons.push_back(skip_reason(*call));
-    }
-    for (const CallSkipReason rule : k_call_rules) {
-      for (std::size_t index = 0; index < calls.size(); ++index) {
-        if (!reasons[index].has_value() || *reasons[index] != rule) {
-          continue;
-        }
-        if (auto failure = vm_failure(rule, *calls[index]); !failure.has_value()) {
-          return std::unexpected(failure.error());
-        }
-      }
-    }
-
-    for (llvm::BasicBlock& block : function_) {
-      for (llvm::Instruction& instruction : block) {
-        if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction)) {
-          if (load->isAtomic()) {
-            return std::unexpected(VmFailure{VmRefusal::atomic_access, "the load is atomic"});
-          }
-          if (load->isVolatile()) {
-            return std::unexpected(VmFailure{VmRefusal::volatile_access, "the load is volatile"});
-          }
-        }
-        if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction)) {
-          if (store->isAtomic()) {
-            return std::unexpected(VmFailure{VmRefusal::atomic_access, "the store is atomic"});
-          }
-          if (store->isVolatile()) {
-            return std::unexpected(VmFailure{VmRefusal::volatile_access, "the store is volatile"});
-          }
-        }
-        if (llvm::isa<llvm::AtomicRMWInst>(instruction) ||
-            llvm::isa<llvm::AtomicCmpXchgInst>(instruction) ||
-            llvm::isa<llvm::FenceInst>(instruction)) {
-          return std::unexpected(VmFailure{VmRefusal::atomic_access, "the instruction is atomic"});
-        }
-      }
-    }
-
-    for (const llvm::CallBase* call : calls) {
-      const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(call);
-      if (intrinsic == nullptr) {
-        continue;
-      }
-      const auto id = intrinsic->getIntrinsicID();
-      if (id != llvm::Intrinsic::memcpy && id != llvm::Intrinsic::memset) {
-        continue;
-      }
-      if (const auto* copy = llvm::dyn_cast<llvm::MemCpyInst>(intrinsic)) {
-        if (copy->isVolatile()) {
-          return std::unexpected(VmFailure{VmRefusal::volatile_access, "the memcpy is volatile"});
-        }
-      }
-      if (const auto* set = llvm::dyn_cast<llvm::MemSetInst>(intrinsic)) {
-        if (set->isVolatile()) {
-          return std::unexpected(VmFailure{VmRefusal::volatile_access, "the memset is volatile"});
-        }
-      }
-      if (!constant_length(*call).has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::dynamic_memcpy,
-                         "the length of the " +
-                             std::string(intrinsic->getCalledFunction()->getName()) +
-                             " is not a constant"});
-      }
-    }
-
-    if (!supported_result_type(function_.getReturnType())) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                       "the return type is not an integer of at most 64 bits nor a pointer"});
-    }
-    for (const llvm::Argument& argument : function_.args()) {
-      if (!supported_type(argument.getType())) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                         "the type of the argument '" + argument.getName().str() +
-                             "' is not an integer of at most 64 bits nor a pointer"});
-      }
-    }
-    for (const llvm::CallBase* call : calls) {
-      const auto* callee = call->getCalledFunction();
-      if (callee == nullptr || callee->isIntrinsic()) {
-        continue;
-      }
-      if (!supported_result_type(callee->getReturnType())) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                         "the callee '" + callee->getName().str() +
-                             "' returns something that is not an integer nor a pointer"});
-      }
-      for (const llvm::Argument& argument : callee->args()) {
-        if (!supported_type(argument.getType())) {
-          return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                           "the callee '" + callee->getName().str() +
-                               "' takes a parameter that is not an integer nor a pointer"});
-        }
-      }
-    }
-
-    if (address_taken(function_)) {
-      return std::unexpected(VmFailure{VmRefusal::address_taken, "the address of the function is taken"});
-    }
-
-    // The budgets. The argument count is the number of the arguments of a
-    // call; the slot count is the number of the values the function holds,
-    // and it is known once the slots are assigned.
-    for (const llvm::CallBase* call : calls) {
-      if (call->arg_size() > k_max_call_arguments) {
-        return std::unexpected(VmFailure{VmRefusal::too_many_arguments,
-                         "a call has " + std::to_string(call->arg_size()) + " arguments"});
-      }
-    }
-
-    for (const llvm::CallBase* call : calls) {
-      if (call->getCalledFunction() == &function_) {
-        return std::unexpected(VmFailure{VmRefusal::recursion, "the function calls itself"});
-      }
-    }
-    for (const llvm::CallBase* call : calls) {
-      const auto* callee = call->getCalledFunction();
-      if (callee != nullptr && is_virtualized(callee->getName())) {
-        return std::unexpected(VmFailure{VmRefusal::virtualized_callee,
-                         "the callee '" + callee->getName().str() +
-                             "' is itself selected at the virtualized level"});
-      }
-    }
-
-    return {};
-  }
-
   // --- the slots ---
 
   /// Assigns a slot to every value of the function, and materialises the
@@ -601,7 +231,8 @@ class Lowerer {
     for (const llvm::Argument& argument : function_.args()) {
       const auto slot = allocate_slot();
       if (!slot.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
+        return std::unexpected(
+            VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
       }
       value_slots_[&argument] = *slot;
     }
@@ -612,7 +243,8 @@ class Lowerer {
         }
         const auto slot = allocate_slot();
         if (!slot.has_value()) {
-          return std::unexpected(VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
+          return std::unexpected(
+              VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
         }
         value_slots_[&instruction] = *slot;
       }
@@ -676,7 +308,8 @@ class Lowerer {
     }
     const auto slot = allocate_slot();
     if (!slot.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
+      return std::unexpected(
+          VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
     }
     constant_slots_[constant] = *slot;
 
@@ -723,9 +356,10 @@ class Lowerer {
     }
     if (const auto* expression = llvm::dyn_cast<llvm::ConstantExpr>(constant)) {
       if (!is_relocatable_address(expression)) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                         "the constant is an absolute address: the bytecode may hold indices and "
-                         "relative offsets only"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_type,
+                      "the constant is an absolute address: the bytecode may hold indices and "
+                      "relative offsets only"});
       }
       // A GEP of a global: the linker folds the offset into the
       // relocation, so the expression itself is what the pool holds.
@@ -736,7 +370,7 @@ class Lowerer {
       return {};
     }
     return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                     "the constant is not an integer, a pointer or a global"});
+                                     "the constant is not an integer, a pointer or a global"});
   }
 
   /// Whether the constant is an address the linker relocates.
@@ -883,7 +517,8 @@ class Lowerer {
     for (const auto& [instruction, label] : fixups_) {
       const auto target = labels_[label];
       if (!target.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "a branch points at no block"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_instruction, "a branch points at no block"});
       }
       code_[instruction].aux = static_cast<std::uint32_t>(*target);
     }
@@ -962,7 +597,8 @@ class Lowerer {
     }
     if (llvm::isa<llvm::ExtractValueInst>(instruction) ||
         llvm::isa<llvm::InsertValueInst>(instruction)) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_type, "the instruction works on an aggregate"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_type, "the instruction works on an aggregate"});
     }
     return std::unexpected(VmFailure{
         VmRefusal::unsupported_instruction,
@@ -986,7 +622,8 @@ class Lowerer {
     }
     const auto one = allocate_slot();
     if (!one.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
+      return std::unexpected(
+          VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
     }
     VmInstruction constant;
     constant.opcode = VmOpcode::Const;
@@ -1019,29 +656,32 @@ class Lowerer {
   [[nodiscard]] auto lower_alloca(llvm::AllocaInst& alloca) -> std::expected<void, VmFailure> {
     if (alloca.isArrayAllocation()) {
       return std::unexpected(VmFailure{VmRefusal::local_variable,
-                       "the alloca has a variable size: the frame is a constant"});
+                                       "the alloca has a variable size: the frame is a constant"});
     }
     if (alloca.getAddressSpace() != 0) {
       return std::unexpected(VmFailure{VmRefusal::local_variable,
-                       "the alloca is in another address space: the frame is not"});
+                                       "the alloca is in another address space: the frame is not"});
     }
     llvm::Type* type = alloca.getAllocatedType();
     const auto size = data_layout_.getTypeAllocSize(type);
     if (size.isScalable()) {
-      return std::unexpected(VmFailure{VmRefusal::local_variable, "the size of the local is not constant"});
+      return std::unexpected(
+          VmFailure{VmRefusal::local_variable, "the size of the local is not constant"});
     }
     const auto alignment = alloca.getAlign().value();
     if (alignment > k_frame_cell_bytes) {
-      return std::unexpected(VmFailure{VmRefusal::local_variable,
-                       "the local needs an alignment of " + std::to_string(alignment) +
-                           " bytes: the cells of the frame are 8 bytes"});
+      return std::unexpected(
+          VmFailure{VmRefusal::local_variable, "the local needs an alignment of " +
+                                                   std::to_string(alignment) +
+                                                   " bytes: the cells of the frame are 8 bytes"});
     }
     const auto bytes = size.getFixedValue();
     const auto cells = (bytes + k_frame_cell_bytes - 1) / k_frame_cell_bytes;
 
     const auto dst = slot_of(&alloca);
     if (!dst.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "the alloca has no slot"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction, "the alloca has no slot"});
     }
     VmInstruction instruction;
     instruction.opcode = VmOpcode::Alloca;
@@ -1065,13 +705,13 @@ class Lowerer {
     }
     if (next_slot_ + local_cells_ > k_frame_value_slots) {
       return std::unexpected(VmFailure{VmRefusal::local_variable,
-                       "the locals need " + std::to_string(local_cells_) +
-                           " cells and the value region of the frame has " +
-                           std::to_string(k_frame_value_slots - next_slot_) + " left"});
+                                       "the locals need " + std::to_string(local_cells_) +
+                                           " cells and the value region of the frame has " +
+                                           std::to_string(k_frame_value_slots - next_slot_) +
+                                           " left"});
     }
     for (const auto& [instruction, cell] : local_fixups_) {
-      code_[instruction].imm =
-          static_cast<std::uint64_t>(next_slot_ + cell) * k_frame_cell_bytes;
+      code_[instruction].imm = static_cast<std::uint64_t>(next_slot_ + cell) * k_frame_cell_bytes;
     }
     return {};
   }
@@ -1080,14 +720,14 @@ class Lowerer {
     const auto width = width_of(binary.getType());
     if (width == 0) {
       return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                       "the operand type is not an integer of at most 64 bits"});
+                                       "the operand type is not an integer of at most 64 bits"});
     }
     const auto dst = slot_of(&binary);
     const auto src1 = slot_of(binary.getOperand(0));
     const auto src2 = slot_of(binary.getOperand(1));
     if (!dst.has_value() || !src1.has_value() || !src2.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction,
-                       "an operand of the operation has no slot"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction, "an operand of the operation has no slot"});
     }
 
     VmOpcode opcode = VmOpcode::Const;
@@ -1208,7 +848,7 @@ class Lowerer {
     }
     if (width == 0) {
       return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                       "the comparison is not on an integer or a pointer"});
+                                       "the comparison is not on an integer or a pointer"});
     }
     const auto kind = compare_kind(compare.getPredicate());
     if (!kind.has_value()) {
@@ -1221,7 +861,7 @@ class Lowerer {
     const auto src2 = slot_of(compare.getOperand(1));
     if (!dst.has_value() || !src1.has_value() || !src2.has_value()) {
       return std::unexpected(VmFailure{VmRefusal::unsupported_instruction,
-                       "an operand of the comparison has no slot"});
+                                       "an operand of the comparison has no slot"});
     }
     VmInstruction instruction;
     instruction.opcode = VmOpcode::Cmp;
@@ -1239,21 +879,22 @@ class Lowerer {
     const auto src = slot_of(cast.getOperand(0));
     if (!dst.has_value() || !src.has_value()) {
       return std::unexpected(VmFailure{VmRefusal::unsupported_instruction,
-                       "an operand of the conversion has no slot"});
+                                       "an operand of the conversion has no slot"});
     }
     const auto source_width = width_of(cast.getOperand(0)->getType());
     const auto target_width = width_of(cast.getType());
     if (source_width == 0 || target_width == 0) {
       return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                       "the conversion is not on an integer or a pointer"});
+                                       "the conversion is not on an integer or a pointer"});
     }
 
     const auto kind = cast_kind(cast.getOpcode());
     if (kind.has_value()) {
       if (*kind == VmCast::bitcast && source_width != target_width) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                         "the bitcast changes the width: it is not a conversion the virtual "
-                         "machine models"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_type,
+                      "the bitcast changes the width: it is not a conversion the virtual "
+                      "machine models"});
       }
       VmInstruction instruction;
       instruction.opcode = VmOpcode::Cast;
@@ -1309,7 +950,8 @@ class Lowerer {
         // are then the bits of a pointer.
         const auto wide = allocate_slot();
         if (!wide.has_value()) {
-          return std::unexpected(VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
+          return std::unexpected(
+              VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
         }
         VmInstruction extend;
         extend.opcode = VmOpcode::Cast;
@@ -1341,13 +983,15 @@ class Lowerer {
   [[nodiscard]] auto lower_load(llvm::LoadInst& load) -> std::expected<void, VmFailure> {
     const auto width = width_of(load.getType());
     if (width == 0) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                       "the loaded type is not an integer of at most 64 bits nor a pointer"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_type,
+                    "the loaded type is not an integer of at most 64 bits nor a pointer"});
     }
     const auto dst = slot_of(&load);
     const auto pointer = slot_of(load.getPointerOperand());
     if (!dst.has_value() || !pointer.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "an operand of the load has no slot"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction, "an operand of the load has no slot"});
     }
     VmInstruction instruction;
     instruction.opcode = VmOpcode::Load;
@@ -1365,13 +1009,15 @@ class Lowerer {
   [[nodiscard]] auto lower_store(llvm::StoreInst& store) -> std::expected<void, VmFailure> {
     const auto width = width_of(store.getValueOperand()->getType());
     if (width == 0) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                       "the stored type is not an integer of at most 64 bits nor a pointer"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_type,
+                    "the stored type is not an integer of at most 64 bits nor a pointer"});
     }
     const auto pointer = slot_of(store.getPointerOperand());
     const auto value = slot_of(store.getValueOperand());
     if (!pointer.has_value() || !value.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "an operand of the store has no slot"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction, "an operand of the store has no slot"});
     }
     VmInstruction instruction;
     instruction.opcode = VmOpcode::Store;
@@ -1386,7 +1032,8 @@ class Lowerer {
 
   [[nodiscard]] auto lower_gep(llvm::GetElementPtrInst& gep) -> std::expected<void, VmFailure> {
     if (!gep.getType()->isPointerTy()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_type, "the GEP does not yield a pointer"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_type, "the GEP does not yield a pointer"});
     }
     std::vector<const llvm::Value*> indices;
     for (unsigned index = 0; index < gep.getNumIndices(); ++index) {
@@ -1394,12 +1041,14 @@ class Lowerer {
     }
     const auto described = gep_indices(gep.getSourceElementType(), indices);
     if (!described.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "the GEP is not modelled"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction, "the GEP is not modelled"});
     }
     const auto base = slot_of(gep.getPointerOperand());
     const auto dst = slot_of(&gep);
     if (!base.has_value() || !dst.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "an operand of the GEP has no slot"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction, "an operand of the GEP has no slot"});
     }
 
     // The constant part in the offset.
@@ -1438,15 +1087,18 @@ class Lowerer {
     // multiplied by the scale, and added to the address.
     for (const auto& [value, scale] : variable) {
       if (width_of(value->getType()) == 0) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_type, "the index of the GEP is not an integer"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_type, "the index of the GEP is not an integer"});
       }
       const auto index_slot = slot_of(value);
       if (!index_slot.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "an index of the GEP has no slot"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_instruction, "an index of the GEP has no slot"});
       }
       const auto scale_slot = allocate_slot();
       if (!scale_slot.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
+        return std::unexpected(
+            VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
       }
       // The scale is materialised here, and not in the prologue: the
       // prologue holds the constants the *source* uses, and this one is
@@ -1460,7 +1112,8 @@ class Lowerer {
       const auto wide = allocate_slot();
       const auto product = allocate_slot();
       if (!wide.has_value() || !product.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
+        return std::unexpected(
+            VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
       }
 
       // The index is signed, and it is widened before it is multiplied.
@@ -1506,10 +1159,12 @@ class Lowerer {
   [[nodiscard]] auto lower_call(llvm::CallInst& call) -> std::expected<void, VmFailure> {
     const auto* callee = call.getCalledFunction();
     if (callee == nullptr) {
-      return std::unexpected(VmFailure{VmRefusal::indirect_call, "the call goes through a pointer"});
+      return std::unexpected(
+          VmFailure{VmRefusal::indirect_call, "the call goes through a pointer"});
     }
     if (callee->isIntrinsic()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "the call is an intrinsic"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction, "the call is an intrinsic"});
     }
 
     // The arguments are pushed onto the argument stack, in the order of the
@@ -1518,7 +1173,8 @@ class Lowerer {
     for (const llvm::Use& argument : call.args()) {
       const auto slot = slot_of(argument.get());
       if (!slot.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "an argument of the call has no slot"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_instruction, "an argument of the call has no slot"});
       }
       VmInstruction push;
       push.opcode = VmOpcode::Arg;
@@ -1540,7 +1196,8 @@ class Lowerer {
 
     const auto result = slot_of(&call);
     if (!call.getType()->isVoidTy() && !result.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "the result of the call has no slot"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction, "the result of the call has no slot"});
     }
 
     VmInstruction instruction;
@@ -1568,7 +1225,8 @@ class Lowerer {
     if (branch.isConditional()) {
       const auto condition = slot_of(branch.getCondition());
       if (!condition.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "the condition has no slot"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_instruction, "the condition has no slot"});
       }
       // The moves of the PHIs of a successor belong to the **edge** that
       // leads to it: the edge that is not taken must not perform them. The
@@ -1583,21 +1241,24 @@ class Lowerer {
       code_.push_back(conditional);
 
       // The fall-through: the edge to the second successor.
-      if (auto failure = emit_phi_copies(*branch.getSuccessor(1), *branch.getParent()); !failure.has_value()) {
+      if (auto failure = emit_phi_copies(*branch.getSuccessor(1), *branch.getParent());
+          !failure.has_value()) {
         return std::unexpected(failure.error());
       }
       branch_to(VmOpcode::Br, block_labels.at(branch.getSuccessor(1)));
 
       // The taken edge: the trampoline.
       place_label(taken);
-      if (auto failure = emit_phi_copies(*branch.getSuccessor(0), *branch.getParent()); !failure.has_value()) {
+      if (auto failure = emit_phi_copies(*branch.getSuccessor(0), *branch.getParent());
+          !failure.has_value()) {
         return std::unexpected(failure.error());
       }
       branch_to(VmOpcode::Br, block_labels.at(branch.getSuccessor(0)));
       return {};
     }
     // The unconditional branch has one edge, and the moves of it are on it.
-    if (auto failure = emit_phi_copies(*branch.getSuccessor(0), *branch.getParent()); !failure.has_value()) {
+    if (auto failure = emit_phi_copies(*branch.getSuccessor(0), *branch.getParent());
+        !failure.has_value()) {
       return std::unexpected(failure.error());
     }
     branch_to(VmOpcode::Br, block_labels.at(branch.getSuccessor(0)));
@@ -1610,13 +1271,13 @@ class Lowerer {
       -> std::expected<void, VmFailure> {
     const auto value = slot_of(switcher.getCondition());
     if (!value.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction,
-                       "the condition of the switch has no slot"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction, "the condition of the switch has no slot"});
     }
     const auto width = width_of(switcher.getCondition()->getType());
     if (width == 0) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_type,
-                       "the condition of the switch is not an integer"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_type, "the condition of the switch is not an integer"});
     }
 
     // A switch is a chain of comparisons: the value of the specification's
@@ -1629,12 +1290,13 @@ class Lowerer {
     for (const auto& entry : switcher.cases()) {
       const auto case_slot = slot_of(entry.getCaseValue());
       if (!case_slot.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_instruction,
-                         "a case of the switch has no slot"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_instruction, "a case of the switch has no slot"});
       }
       const auto temporary = allocate_slot();
       if (!temporary.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
+        return std::unexpected(
+            VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
       }
       VmInstruction compare;
       compare.opcode = VmOpcode::Cmp;
@@ -1656,7 +1318,8 @@ class Lowerer {
     }
 
     // The default: the edge that is taken when no case matches.
-    if (auto failure = emit_phi_copies(*switcher.getDefaultDest(), *switcher.getParent()); !failure.has_value()) {
+    if (auto failure = emit_phi_copies(*switcher.getDefaultDest(), *switcher.getParent());
+        !failure.has_value()) {
       return std::unexpected(failure.error());
     }
     branch_to(VmOpcode::Br, block_labels.at(switcher.getDefaultDest()));
@@ -1666,7 +1329,8 @@ class Lowerer {
     for (const auto& entry : switcher.cases()) {
       place_label(case_labels[index]);
       ++index;
-      if (auto failure = emit_phi_copies(*entry.getCaseSuccessor(), *switcher.getParent()); !failure.has_value()) {
+      if (auto failure = emit_phi_copies(*entry.getCaseSuccessor(), *switcher.getParent());
+          !failure.has_value()) {
         return std::unexpected(failure.error());
       }
       branch_to(VmOpcode::Br, block_labels.at(entry.getCaseSuccessor()));
@@ -1681,7 +1345,8 @@ class Lowerer {
     const auto dst = slot_of(&select);
     if (!condition.has_value() || !true_value.has_value() || !false_value.has_value() ||
         !dst.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "an operand of the select has no slot"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction, "an operand of the select has no slot"});
     }
 
     // The select is a branch: the value is written on the edge that is
@@ -1726,7 +1391,8 @@ class Lowerer {
       // edge, and the prologue is emitted before the body.
       const auto zero = allocate_slot();
       if (!zero.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
+        return std::unexpected(
+            VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
       }
       VmInstruction constant;
       constant.opcode = VmOpcode::Const;
@@ -1738,7 +1404,8 @@ class Lowerer {
     } else {
       const auto slot = slot_of(ret.getOperand(0));
       if (!slot.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "the returned value has no slot"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_instruction, "the returned value has no slot"});
       }
       value = *slot;
       width = width_of(ret.getType());
@@ -1758,7 +1425,8 @@ class Lowerer {
     const auto dst = slot_of(&freeze);
     const auto src = slot_of(freeze.getOperand(0));
     if (!dst.has_value() || !src.has_value()) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "an operand of the freeze has no slot"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction, "an operand of the freeze has no slot"});
     }
     VmInstruction instruction;
     instruction.opcode = VmOpcode::Move;
@@ -1769,20 +1437,22 @@ class Lowerer {
     return {};
   }
 
-  [[nodiscard]] auto lower_intrinsic(llvm::IntrinsicInst& intrinsic) -> std::expected<void, VmFailure> {
+  [[nodiscard]] auto lower_intrinsic(llvm::IntrinsicInst& intrinsic)
+      -> std::expected<void, VmFailure> {
     if (const auto* copy = llvm::dyn_cast<llvm::MemCpyInst>(&intrinsic)) {
       if (copy->isVolatile()) {
         return std::unexpected(VmFailure{VmRefusal::volatile_access, "the memcpy is volatile"});
       }
       const auto length = constant_length(*copy);
       if (!length.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::dynamic_memcpy, "the length of the memcpy is not a constant"});
+        return std::unexpected(
+            VmFailure{VmRefusal::dynamic_memcpy, "the length of the memcpy is not a constant"});
       }
       const auto destination = slot_of(copy->getRawDest());
       const auto source = slot_of(copy->getRawSource());
       if (!destination.has_value() || !source.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_instruction,
-                         "an operand of the memcpy has no slot"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_instruction, "an operand of the memcpy has no slot"});
       }
       VmInstruction instruction;
       instruction.opcode = VmOpcode::MemCpy;
@@ -1799,13 +1469,14 @@ class Lowerer {
       }
       const auto length = constant_length(*set);
       if (!length.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::dynamic_memcpy, "the length of the memset is not a constant"});
+        return std::unexpected(
+            VmFailure{VmRefusal::dynamic_memcpy, "the length of the memset is not a constant"});
       }
       const auto destination = slot_of(set->getRawDest());
       const auto value = slot_of(set->getArgOperand(1));
       if (!destination.has_value() || !value.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_instruction,
-                         "an operand of the memset has no slot"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_instruction, "an operand of the memset has no slot"});
       }
       VmInstruction instruction;
       instruction.opcode = VmOpcode::MemSet;
@@ -1817,9 +1488,10 @@ class Lowerer {
       return {};
     }
     if (intrinsic.getIntrinsicID() == llvm::Intrinsic::memmove) {
-      return std::unexpected(VmFailure{VmRefusal::unsupported_instruction,
-                       "the memmove may copy overlapping ranges: the virtual machine has no "
-                       "opcode for it"});
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction,
+                    "the memmove may copy overlapping ranges: the virtual machine has no "
+                    "opcode for it"});
     }
 
     // The intrinsics that have no effect: the debug information, the
@@ -1832,7 +1504,7 @@ class Lowerer {
       return {};
     }
     return std::unexpected(VmFailure{VmRefusal::unsupported_instruction,
-                     "the intrinsic '" + name + "' is not modelled"});
+                                     "the intrinsic '" + name + "' is not modelled"});
   }
 
   /// The moves of the PHIs of the successor, on the edge from the
@@ -1851,19 +1523,20 @@ class Lowerer {
       return {};
     }
     if (phis.size() > k_frame_argument_slots) {
-      return std::unexpected(VmFailure{VmRefusal::too_many_slots, "the parallel copy needs " +
-                                                      std::to_string(phis.size()) +
-                                                      " cells of the argument stack"});
+      return std::unexpected(VmFailure{VmRefusal::too_many_slots,
+                                       "the parallel copy needs " + std::to_string(phis.size()) +
+                                           " cells of the argument stack"});
     }
     for (llvm::PHINode* phi : phis) {
       const auto* incoming = phi->getIncomingValueForBlock(&predecessor);
       if (incoming == nullptr) {
         return std::unexpected(VmFailure{VmRefusal::unsupported_instruction,
-                         "a phi of the successor has no value for the edge"});
+                                         "a phi of the successor has no value for the edge"});
       }
       const auto slot = slot_of(incoming);
       if (!slot.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_instruction, "a value of the copy has no slot"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_instruction, "a value of the copy has no slot"});
       }
       VmInstruction push;
       push.opcode = VmOpcode::Arg;
@@ -1874,8 +1547,8 @@ class Lowerer {
     for (auto phi = phis.rbegin(); phi != phis.rend(); ++phi) {
       const auto dst = slot_of(*phi);
       if (!dst.has_value()) {
-        return std::unexpected(VmFailure{VmRefusal::unsupported_instruction,
-                         "a destination of the copy has no slot"});
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_instruction, "a destination of the copy has no slot"});
       }
       VmInstruction pop;
       pop.opcode = VmOpcode::Pop;
@@ -1886,202 +1559,21 @@ class Lowerer {
   }
 };
 
-/// The container of a lowered function: the header, the instructions and the
-/// encryption.
-[[nodiscard]] auto encode(const std::vector<VmInstruction>& code, const VmHeader& header,
-                          std::uint64_t key, std::uint64_t perm_a, std::uint64_t perm_b)
-    -> std::vector<std::uint8_t> {
-  std::vector<std::uint8_t> buffer(k_header_bytes + code.size() * k_instruction_bytes, 0);
-
-  write_le<std::uint32_t>(buffer, 0, header.magic);
-  write_le<std::uint32_t>(buffer, 4, header.version);
-  write_le<std::uint32_t>(buffer, 8, header.slot_count);
-  write_le<std::uint32_t>(buffer, 12, header.arg_slots);
-  write_le<std::uint32_t>(buffer, 16, header.call_slots);
-  write_le<std::uint32_t>(buffer, 20, header.instruction_count);
-  write_le<std::uint32_t>(buffer, 24, header.flags);
-  write_le<std::uint32_t>(buffer, 28, header.local_cells);
-
-  for (std::size_t index = 0; index < code.size(); ++index) {
-    const VmInstruction& instruction = code[index];
-    const auto offset = k_header_bytes + index * k_instruction_bytes;
-    buffer[offset] = permuted_opcode(instruction.opcode, perm_a, perm_b);
-    buffer[offset + 1] = instruction.width;
-    buffer[offset + 2] = instruction.flags;
-    buffer[offset + 3] = 0;
-    write_le<std::uint16_t>(buffer, offset + 4, instruction.dst);
-    write_le<std::uint16_t>(buffer, offset + 6, instruction.src1);
-    write_le<std::uint16_t>(buffer, offset + 8, instruction.src2);
-    write_le<std::uint16_t>(buffer, offset + 10, instruction.src3);
-    write_le<std::uint32_t>(buffer, offset + 12, instruction.aux);
-    write_le<std::uint64_t>(buffer, offset + 16, instruction.imm);
-  }
-
-  // The encryption: the whole container, the header included, so that an
-  // analyst reads nothing but noise.
-  for (std::size_t index = 0; index < buffer.size(); ++index) {
-    buffer[index] ^= keystream_byte(key, index);
-  }
-  return buffer;
-}
-
 }  // namespace
 
-auto to_string(VmRefusal reason) noexcept -> const char* {
-  switch (reason) {
-    case VmRefusal::eh_pad:
-      return "eh_pad";
-    case VmRefusal::variadic_function:
-      return "variadic_function";
-    case VmRefusal::variadic_callee:
-      return "variadic_callee";
-    case VmRefusal::indirect_call:
-      return "indirect_call";
-    case VmRefusal::indirect_parameter:
-      return "indirect_parameter";
-    case VmRefusal::musttail:
-      return "musttail";
-    case VmRefusal::volatile_access:
-      return "volatile_access";
-    case VmRefusal::atomic_access:
-      return "atomic_access";
-    case VmRefusal::dynamic_memcpy:
-      return "dynamic_memcpy";
-    case VmRefusal::unsupported_type:
-      return "unsupported_type";
-    case VmRefusal::local_variable:
-      return "local_variable";
-    case VmRefusal::address_taken:
-      return "address_taken";
-    case VmRefusal::too_many_slots:
-      return "too_many_slots";
-    case VmRefusal::too_many_arguments:
-      return "too_many_arguments";
-    case VmRefusal::recursion:
-      return "recursion";
-    case VmRefusal::virtualized_callee:
-      return "virtualized_callee";
-    case VmRefusal::unsupported_instruction:
-      return "unsupported_instruction";
-    case VmRefusal::vanished:
-      return "vanished";
-    default:
-      return "unknown";
-  }
-}
-
-auto permuted_opcode(VmOpcode opcode, std::uint64_t a, std::uint64_t b) noexcept -> std::uint8_t {
-  const auto number = static_cast<std::uint64_t>(opcode);
-  return static_cast<std::uint8_t>((number * a + b) % k_opcode_count);
-}
-
-auto canonical_opcode(std::uint8_t permuted, std::uint64_t a, std::uint64_t b) noexcept
-    -> VmOpcode {
-  const auto inverse = modular_inverse(a % k_opcode_count, k_opcode_count);
-  const auto value = static_cast<std::uint64_t>(permuted);
-  const auto number = ((value + k_opcode_count - (b % k_opcode_count)) * inverse) % k_opcode_count;
-  return static_cast<VmOpcode>(number);
-}
-
-auto opcode_permutation(std::uint64_t seed) noexcept -> std::pair<std::uint64_t, std::uint64_t> {
-  std::uint64_t state = seed ^ 0x564D5045524D5554ULL;
-  std::uint64_t a = splitmix64(state) % k_opcode_count;
-  // The multiplier has to be **odd** and coprime with the number of the
-  // opcodes: the permutation is a permutation only if it is coprime, and
-  // the contract (the specification and the README) says it is odd. The
-  // walk below keeps both properties: `+1` makes an even multiplier odd,
-  // and `+2` keeps it odd while it looks for a coprime one. One is always
-  // odd and always coprime, so the walk terminates.
-  for (std::size_t step = 0; step < 2 * k_opcode_count; ++step) {
-    if (a % 2 == 0) {
-      a = (a + 1) % k_opcode_count;
-      continue;
-    }
-    if (greatest_common_divisor(a, k_opcode_count) == 1) {
-      break;
-    }
-    a = (a + 2) % k_opcode_count;
-    if (a == 0) {
-      a = 1;
-    }
-  }
-  const auto b = splitmix64(state) % k_opcode_count;
-  return {a, b};
-}
-
-auto analyze_function(llvm::Function& function, const VmOptions& options) -> VmFunction {
-  VmFunction result;
-  result.symbol = function.getName().str();
-  result.qualified = qualified_name(result.symbol);
-
-  const auto [perm_a, perm_b] = opcode_permutation(options.seed);
-  result.perm_a = perm_a;
-  result.perm_b = perm_b;
-  result.key_parts = key_parts(options.seed);
-  result.key = mix64(result.key_parts[0] ^ result.key_parts[1] ^ result.key_parts[2]);
-
+auto lower(llvm::Function& function, const VmOptions& options)
+    -> std::expected<Lowered, VmFailure> {
   Lowerer lowerer(function, options);
-  const auto failure = lowerer.run();
-  if (!failure.has_value()) {
-    result.virtualizable = false;
-    result.failure = failure.error();
-    result.frame_bytes = k_frame_bytes;
-    return result;
+  if (auto failure = lowerer.run(); !failure.has_value()) {
+    return std::unexpected(failure.error());
   }
-
-  result.virtualizable = true;
-  result.slots = lowerer.slot_count();
-  result.local_cells = lowerer.local_cells();
-  result.instructions = lowerer.code().size();
-  result.calls = lowerer.call_sites().size();
+  Lowered result;
+  result.code = lowerer.code();
   result.pool = lowerer.pool();
   result.call_sites = lowerer.call_sites();
-  result.code = lowerer.code();
-  result.frame_bytes = k_frame_bytes;
-
-  result.header.magic = k_vm_magic;
-  result.header.version = k_vm_version;
-  result.header.slot_count = static_cast<std::uint32_t>(result.slots);
-  result.header.arg_slots = static_cast<std::uint32_t>(k_frame_argument_slots);
-  result.header.call_slots = static_cast<std::uint32_t>(k_frame_call_slots);
-  result.header.instruction_count = static_cast<std::uint32_t>(result.instructions);
-  result.header.flags = k_vm_flag_encrypted | k_vm_flag_permuted;
-  result.header.local_cells = static_cast<std::uint32_t>(result.local_cells);
-
-  result.blob = encode(result.code, result.header, result.key, perm_a, perm_b);
-  result.bytecode_bytes = result.blob.size();
+  result.slots = lowerer.slot_count();
+  result.local_cells = lowerer.local_cells();
   return result;
 }
 
-auto analyze_module(llvm::Module& module, const Config& config,
-                    std::span<const std::string> symbols,
-                    std::span<const std::string> virtualized_symbols) -> std::vector<VmFunction> {
-  VmOptions options;
-  options.seed = module_seed(config, module.getSourceFileName());
-  options.virtualized_symbols = virtualized_symbols;
-
-  std::vector<VmFunction> result;
-  result.reserve(symbols.size());
-  for (const std::string& symbol : symbols) {
-    llvm::Function* function = module.getFunction(symbol);
-    if (function == nullptr) {
-      // The function did not survive to this phase. It gets a verdict, so
-      // that the operator can tell "not selected" from "selected and
-      // deleted by the optimiser": the transform reports the same thing
-      // the same way.
-      VmFunction vanished;
-      vanished.symbol = symbol;
-      vanished.qualified = qualified_name(symbol);
-      vanished.virtualizable = false;
-      vanished.failure =
-          VmFailure{VmRefusal::vanished, "the function did not survive to this phase"};
-      vanished.frame_bytes = k_frame_bytes;
-      result.push_back(std::move(vanished));
-      continue;
-    }
-    result.push_back(analyze_function(*function, options));
-  }
-  return result;
-}
-
-}  // namespace cs2::protect
+}  // namespace cs2::protect::detail

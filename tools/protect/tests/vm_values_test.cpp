@@ -211,10 +211,7 @@ class Interpreter {
  public:
   Interpreter(const cs2::protect::VmHeader& header, const std::vector<Decoded>& code,
               const std::map<std::string, Native>& natives)
-      : header_(header),
-        code_(code),
-        natives_(natives),
-        frame_(cs2::protect::k_frame_bytes, 0) {}
+      : header_(header), code_(code), natives_(natives), frame_(cs2::protect::k_frame_bytes, 0) {}
 
   /// Runs the bytecode with the arguments, and returns the value of the
   /// return slot.
@@ -283,8 +280,9 @@ class Interpreter {
               break;
             }
             case cs2::protect::VmOpcode::UDiv:
-              result = right == 0 ? 0 : mask_to(left, instruction.width) /
-                                            mask_to(right, instruction.width);
+              result = right == 0
+                           ? 0
+                           : mask_to(left, instruction.width) / mask_to(right, instruction.width);
               break;
             case cs2::protect::VmOpcode::SRem: {
               const auto a = signed_of(left, instruction.width);
@@ -293,8 +291,9 @@ class Interpreter {
               break;
             }
             case cs2::protect::VmOpcode::URem:
-              result = right == 0 ? 0 : mask_to(left, instruction.width) %
-                                            mask_to(right, instruction.width);
+              result = right == 0
+                           ? 0
+                           : mask_to(left, instruction.width) % mask_to(right, instruction.width);
               break;
             case cs2::protect::VmOpcode::Shl: {
               // The amount is masked to `width * 8 - 1`: the width is in
@@ -636,8 +635,8 @@ auto analyze(llvm::Module& module, const std::string& name) -> cs2::protect::VmF
 
 /// Runs the bytecode of a function and returns the value it computes.
 auto run_of(const cs2::protect::VmFunction& function, const std::vector<std::uint64_t>& arguments,
-            const std::map<std::string, Native>& natives = {},
-            const std::string& call_target = {}) -> std::uint64_t {
+            const std::map<std::string, Native>& natives = {}, const std::string& call_target = {})
+    -> std::uint64_t {
   std::vector<Decoded> code;
   const auto header = decode(function, code);
   Interpreter interpreter(header, code, natives);
@@ -669,11 +668,13 @@ entry:
   }
 
   // The container is encrypted: not one byte of the header is in the clear.
-  expect(function.blob[0] != static_cast<std::uint8_t>(cs2::protect::k_vm_magic & 0xFFU) ||
-             function.blob[1] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 8U) & 0xFFU) ||
-             function.blob[2] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 16U) & 0xFFU) ||
-             function.blob[3] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 24U) & 0xFFU),
-         "the container is not encrypted: the magic is in the clear");
+  expect(
+      function.blob[0] != static_cast<std::uint8_t>(cs2::protect::k_vm_magic & 0xFFU) ||
+          function.blob[1] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 8U) & 0xFFU) ||
+          function.blob[2] !=
+              static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 16U) & 0xFFU) ||
+          function.blob[3] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 24U) & 0xFFU),
+      "the container is not encrypted: the magic is in the clear");
 
   std::vector<Decoded> code;
   const auto header = decode(function, code);
@@ -864,8 +865,8 @@ merge:
     const auto expected = input < 2 ? 10U + 10U * input : 30U;
     const auto result = static_cast<std::uint32_t>(run_of(function, {input}));
     expect(result == expected, "the switch of " + std::to_string(input) +
-                                    ": the bytecode returned " + std::to_string(result) +
-                                    " and not " + std::to_string(expected));
+                                   ": the bytecode returned " + std::to_string(result) +
+                                   " and not " + std::to_string(expected));
   }
 }
 
@@ -966,8 +967,8 @@ entry:
          return sum;
        }}};
   const auto result = run_of(function, {5}, natives, "three");
-  expect(result == 115, "the call: the bytecode returned " + std::to_string(result) +
-                            " and not 115");
+  expect(result == 115,
+         "the call: the bytecode returned " + std::to_string(result) + " and not 115");
 }
 
 /// The slot budget at the limit: a function that needs the whole budget
@@ -1000,13 +1001,12 @@ void test_the_slot_budget() {
       continue;
     }
     // The program returns 1 when the sum is zero, and 0 otherwise.
-    const auto zero = run_of(function, {static_cast<std::uint64_t>(
-                                static_cast<std::uint32_t>(-static_cast<int>(additions)))});
+    const auto zero = run_of(
+        function,
+        {static_cast<std::uint64_t>(static_cast<std::uint32_t>(-static_cast<int>(additions)))});
     const auto other = run_of(function, {0});
-    expect(zero == 1, "the function at the limit returns " + std::to_string(zero) +
-                          " and not 1");
-    expect(other == 0, "the function at the limit returns " + std::to_string(other) +
-                          " and not 0");
+    expect(zero == 1, "the function at the limit returns " + std::to_string(zero) + " and not 1");
+    expect(other == 0, "the function at the limit returns " + std::to_string(other) + " and not 0");
   }
 }
 
@@ -1035,8 +1035,8 @@ entry:
   }
   expect(function.local_cells == 1, "the local takes one cell of the frame");
   const auto result = static_cast<std::uint32_t>(run_of(function, {21}));
-  expect(result == 42U, "the local variable: the bytecode returned " + std::to_string(result) +
-                            " and not 42");
+  expect(result == 42U,
+         "the local variable: the bytecode returned " + std::to_string(result) + " and not 42");
 }
 
 /// The opcode permutation: a bijection of the whole opcode space, and a
@@ -1046,8 +1046,8 @@ void test_the_permutation() {
   const std::size_t count = cs2::protect::k_opcode_count;
   for (std::uint64_t seed = 0; seed < 500; ++seed) {
     const auto [multiplier, offset] = cs2::protect::opcode_permutation(seed);
-    expect(multiplier % 2 == 1, "the multiplier of the seed " + std::to_string(seed) +
-                                    " is not odd");
+    expect(multiplier % 2 == 1,
+           "the multiplier of the seed " + std::to_string(seed) + " is not odd");
     expect(std::gcd(multiplier, static_cast<std::uint64_t>(count)) == 1,
            "the multiplier of the seed " + std::to_string(seed) + " is not coprime");
     const std::uint64_t inverse = modular_inverse(multiplier % count, count);
@@ -1055,8 +1055,8 @@ void test_the_permutation() {
       const std::uint64_t permuted = (canonical * multiplier + offset) % count;
       expect(permuted < count, "the permuted opcode is out of the space");
       const std::uint64_t back = ((permuted + count - (offset % count)) * inverse) % count;
-      expect(back == canonical, "the permutation of the seed " + std::to_string(seed) +
-                                    " is not invertible");
+      expect(back == canonical,
+             "the permutation of the seed " + std::to_string(seed) + " is not invertible");
     }
   }
 }

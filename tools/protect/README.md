@@ -37,12 +37,21 @@ tools/protect/
     report.hpp/.cpp     what the pass reports, and the coverage file
     transform.hpp/.cpp  the call encryption
     cipher.hpp/.cpp     the cipher the transform and the virtualizer share
-    vm.hpp/.cpp         the front end of the virtualizer: the ISA, the
-                        eligibility gate, the lowering and the encoder
+    vm.hpp              the front end of the virtualizer: the ISA, the frame,
+                        the budgets and the refusal reasons
+    vm_internal.hpp     what the three front-end files share: the type and
+                        the width model
+    vm_gate.cpp         the eligibility gate
+    vm_lower.cpp        the lowering: the IR of a function to the bytecode
+    vm_encode.cpp       the encoder: the container, the encryption and the
+                        per-build opcode permutation
     isa.def             the instruction set of the virtual machine: the one
                         source of truth for the opcode numbers
   tests/
     protect_tests.cpp   the plugin's own tests (CTest)
+    vm_values_test.cpp  the values the bytecode computes: the container is
+                        decrypted and executed in an interpreter written from
+                        the contract
     ir_test.py          the shape of the rewritten IR
     diff_test.py        the differential test: the same fixture, with and without
     coverage_test.py    the readers of the coverage: a malformed file is reported,

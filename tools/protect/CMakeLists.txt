@@ -24,7 +24,9 @@ add_library(Cs2Protect SHARED
   src/report.cpp
   src/transform.cpp
   src/cipher.cpp
-  src/vm.cpp
+  src/vm_gate.cpp
+  src/vm_lower.cpp
+  src/vm_encode.cpp
 )
 
 # --- The DIA SDK ------------------------------------------------------------
@@ -128,7 +130,9 @@ add_executable(cs2-protect-tests
   src/report.cpp
   src/transform.cpp
   src/cipher.cpp
-  src/vm.cpp
+  src/vm_gate.cpp
+  src/vm_lower.cpp
+  src/vm_encode.cpp
 )
 target_compile_features(cs2-protect-tests PRIVATE ${CS2_PROTECT_CXX_STANDARD})
 target_include_directories(cs2-protect-tests SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
@@ -152,7 +156,9 @@ add_executable(cs2-protect-vm-values-test
   src/report.cpp
   src/transform.cpp
   src/cipher.cpp
-  src/vm.cpp
+  src/vm_gate.cpp
+  src/vm_lower.cpp
+  src/vm_encode.cpp
 )
 target_compile_features(cs2-protect-vm-values-test PRIVATE ${CS2_PROTECT_CXX_STANDARD})
 target_include_directories(cs2-protect-vm-values-test SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
