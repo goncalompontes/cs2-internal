@@ -200,6 +200,16 @@ struct CameraEngine {
 // The live client's engine access (the payload's entry point).
 [[nodiscard]] auto camera_engine() noexcept -> CameraEngine;
 
+// The live engine, built from the **caller's** facts.
+//
+// The client base, the build gate and the input object are per-build facts:
+// they are resolved once — by whoever can afford a module lookup — and then
+// handed over. This binds them to the live reader without touching the
+// module table, so a caller that keeps the facts can build the engine per
+// frame for free.
+[[nodiscard]] auto live_camera_engine(std::uintptr_t client_base, bool build_verified,
+                                      std::uintptr_t input_object) noexcept -> CameraEngine;
+
 // The published per-slot view state (`client + 0x256af48 + slot*0xc`): the
 // origin (12 bytes) then the angles (12 bytes), written by the view-setup
 // finaliser every frame. This is the camera's **real** position.
@@ -261,8 +271,17 @@ struct FovCandidates {
 [[nodiscard]] auto read_third_person_switch() noexcept -> bool;
 
 // The direct write (route B): the switch, the camera mode, the distance and
-// the camera's angles. Refused unless the client build is the verified one.
-[[nodiscard]] auto write_third_person_state(const ThirdPersonParams& params, float pitch,
+// the camera's angles.
+//
+// The engine access is a **parameter**, like the reads above: the caller
+// resolves the per-build facts once and reuses them, so the write does no
+// module lookup and no allocation. It runs on the game's per-frame camera
+// thread, and that thread must not pay for the payload's bookkeeping.
+//
+// Refused unless the engine's build gate says the client build is the
+// verified one.
+[[nodiscard]] auto write_third_person_state(const CameraEngine& engine,
+                                            const ThirdPersonParams& params, float pitch,
                                             float yaw) noexcept -> bool;
 
 // Clear the third-person switch (the restore path when the feature is turned

@@ -88,11 +88,12 @@ class ThirdPerson {
   // build is not the one the offsets were verified on.
   [[nodiscard]] bool install() noexcept;
 
-  // One step of the feature (the payload's own thread, ~30 Hz): the console
-  // route, the distance knob and the re-arm after a respawn. `view_angles` is
-  // the local player's view angles — the base the camera's yaw offset is
-  // applied to — and `eye_origin` the local player's eye, the point the
-  // engine's camera orbits.
+  // One step of the feature (the overlay's per-frame callback, the game's
+  // render thread in the in-process mode): the console route, the distance
+  // knob and the re-arm after a respawn. `view_angles` is the local player's
+  // view angles — the base the camera's yaw offset is applied to — and
+  // `eye_origin` the local player's eye, the point the engine's camera
+  // orbits.
   void update(const game::Angle& view_angles, const game::Vec3& eye_origin) noexcept;
 
   // The hook's callback: the game's own thread, inside the client's camera
@@ -114,26 +115,26 @@ class ThirdPerson {
   void leave_camera_update() noexcept;
 
   // Diagnostics.
-  [[nodiscard]] auto hook_installed() const noexcept {
+  [[nodiscard]] auto hook_installed() const noexcept -> bool {
     return hook_.installed();
   }
-  [[nodiscard]] auto original() const noexcept {
+  [[nodiscard]] auto original() const noexcept -> void* {
     return hook_.original();
   }
-  [[nodiscard]] auto build_verified() const noexcept {
+  [[nodiscard]] auto build_verified() const noexcept -> bool {
     return game::client_build_verified();
   }
   // The camera updates the detour saw, and the writes that landed.
-  [[nodiscard]] auto updates() const noexcept {
+  [[nodiscard]] auto updates() const noexcept -> std::uint64_t {
     return updates_.load(std::memory_order_relaxed);
   }
-  [[nodiscard]] auto writes() const noexcept {
+  [[nodiscard]] auto writes() const noexcept -> std::uint64_t {
     return writes_.load();
   }
-  [[nodiscard]] auto commands() const noexcept {
+  [[nodiscard]] auto commands() const noexcept -> std::uint64_t {
     return commands_.load();
   }
-  [[nodiscard]] auto active() const noexcept {
+  [[nodiscard]] auto active() const noexcept -> bool {
     return active_.load();
   }
   // Why the camera hook is (not) installed.
@@ -154,10 +155,11 @@ class ThirdPerson {
   // published, and the payload's model of it).
   void report(const game::Angle& view_angles, const game::Vec3& eye_origin,
               const game::ThirdPersonParams& params) noexcept;
-  // The per-build facts the detour needs: the input object's address and the
-  // build gate. They are resolved on the **payload's own thread** (a module
-  // lookup and a PE-header read) and cached, so the detour — which runs on the
-  // game's camera thread, once per frame — only reads them.
+  // The per-build facts the detour needs: the client's base, the input
+  // object's address and the build gate. They are resolved on the **render
+  // thread** (a module lookup and a PE-header read, at most once a second)
+  // and cached, so the detour — which runs on the game's camera thread, once
+  // per frame — only reads them.
   void refresh_target() noexcept;
   // Record the hook's status, and say it **once** per status: the install path
   // is retried every frame and the log opens, writes and closes a file per
@@ -183,22 +185,23 @@ class ThirdPerson {
   // The camera updates the detour saw.
   std::atomic<std::uint64_t> updates_{0};
   // The cached per-build facts (see `refresh_target`).
+  std::atomic<std::uintptr_t> client_base_{0};
   std::atomic<std::uintptr_t> input_object_{0};
   std::atomic<bool> build_verified_{false};
   // Set when the detour saw an input object that is not the cached one: the
-  // module changed under us and the payload's own thread re-resolves it.
+  // module changed under us and the render thread re-resolves it.
   std::atomic<bool> input_stale_{false};
   // The hook's status, and the statuses that have already been logged.
   std::atomic<third_person::HookStatus> hook_status_{third_person::HookStatus::off};
   std::atomic<std::uint8_t> logged_statuses_{0};
   // The distance the engine's `cam_idealdist` had before the payload changed
-  // it, so the feature can restore it. The payload's own thread only.
+  // it, so the feature can restore it. The render thread only.
   float saved_ideal_distance_ = 0.0F;
   bool has_saved_ideal_distance_ = false;
   float last_distance_ = 0.0F;
   std::uint64_t last_log_ms_ = 0;
   // When the per-build facts were last resolved. The install path runs on the
-  // payload's own thread and on the settings thread, so the stamp is atomic.
+  // render thread and on the settings thread, so the stamp is atomic.
   std::atomic<std::uint64_t> last_refresh_ms_{0};
   // When the console route last re-armed the camera (the re-arm is
   // rate-limited; see `k_rearm_interval_ms`).

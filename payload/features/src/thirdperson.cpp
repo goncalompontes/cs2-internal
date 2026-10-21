@@ -85,12 +85,20 @@ std::uint64_t __fastcall camera_update_detour(void* input, int slot) {
 // is back in third person before the operator notices it dropped out.
 constexpr std::uint64_t k_rearm_interval_ms = 1000;
 
-// How often the per-build facts (the input object's address and the build
-// gate) are resolved, in milliseconds.
+// How often the per-build facts (the client's base, the input object's
+// address and the build gate) are resolved, in milliseconds.
 //
-// They are resolved on the payload's own thread, never on the game's camera
-// thread: a module lookup and a PE-header read per frame are work the game
-// does not need, and the facts cannot change while the client is up.
+// They are resolved on the **render thread** — the overlay's per-frame
+// callback, which is the game's render thread in the in-process mode — and
+// never on the game's camera thread: a module lookup and a PE-header read
+// per frame are work the game does not need, and the facts cannot change
+// while the client is up.
+//
+// The rate limit is **hard**: the resolution happens at most once a second,
+// and *not* at all while the facts are already known. (An earlier version
+// also refreshed whenever the target could not be resolved, which made the
+// lookup run on **every** frame for as long as the client was not up — the
+// one window in which the camera update does not run at all.)
 constexpr std::uint64_t k_refresh_interval_ms = 1000;
 
 // The view angles, packed into one atomic so the pitch/yaw pair is consistent
@@ -135,8 +143,9 @@ auto third_person::hook_status_text(third_person::HookStatus status) noexcept ->
       return "hook-refused";
     case third_person::HookStatus::installed:
       return "installed";
+    default:
+      return "unknown";
   }
-  return "unknown";
 }
 
 ThirdPerson::~ThirdPerson() {
@@ -152,6 +161,7 @@ ThirdPerson::~ThirdPerson() {
 }
 
 void ThirdPerson::configure(const game::ThirdPersonParams& params) noexcept {
+  const bool was_enabled = enabled_.load(std::memory_order_relaxed);
   enabled_.store(params.enabled);
   distance_.store(params.distance);
   angle_.store(params.angle);
@@ -165,13 +175,24 @@ void ThirdPerson::configure(const game::ThirdPersonParams& params) noexcept {
   // The hook is installed when the operator turns the camera on, and removed
   // when they turn it off.
   if (params.enabled) {
-    (void)install();
-  } else if (hook_.installed()) {
-    hook_.uninstall();
-    if (g_active == this) {
-      g_active = nullptr;
+    if (!was_enabled) {
+      // The feature is being turned **on**: the status latch is cleared, so
+      // a failure of the same kind is reported again. (The latch is a
+      // one-shot per status; without the reset, the operator would turn the
+      // feature off and on again and the second refusal would be silent.)
+      logged_statuses_.store(0, std::memory_order_relaxed);
     }
-    g_original = nullptr;
+    (void)install();
+  } else {
+    if (hook_.installed()) {
+      hook_.uninstall();
+      if (g_active == this) {
+        g_active = nullptr;
+      }
+      g_original = nullptr;
+    }
+    // The feature is off: the status says so, whatever it said before (the
+    // hook may never have been installed at all).
     set_hook_status(third_person::HookStatus::off);
   }
 }
@@ -191,9 +212,10 @@ auto ThirdPerson::current() const noexcept -> game::ThirdPersonParams {
   return params;
 }
 
-// The per-build facts, resolved on the payload's own thread.
+// The per-build facts, resolved on the render thread.
 //
-// The input object is a singleton: its address is fixed while the client is
+// The client's base, the input object and the build gate are per-build facts:
+// the input object is a singleton whose address is fixed while the client is
 // up, and the build gate is the client's PE timestamp. Resolving them means a
 // module lookup and a PE-header read, so they are resolved **here** and
 // cached; the detour — which runs on the game's camera thread, once per frame
@@ -201,20 +223,27 @@ auto ThirdPerson::current() const noexcept -> game::ThirdPersonParams {
 //
 // The cache is refreshed when it is empty, when it is stale (the detour saw an
 // input object that is not the cached one, so the module changed under us) and
-// at most once per `k_refresh_interval_ms` otherwise.
+// at most once per `k_refresh_interval_ms` otherwise. The stale flag is
+// cleared **after** the new values are stored, so a mismatch the detour
+// signals in between is not lost.
+//
+// This runs on the render thread and on the settings thread (the install path
+// calls it), so the stamp is atomic.
 void ThirdPerson::refresh_target() noexcept {
   const std::uint64_t now = now_ms();
   const std::uint64_t last = last_refresh_ms_.load(std::memory_order_relaxed);
   const bool stale = input_stale_.load(std::memory_order_relaxed);
-  const bool due = last == 0 || stale || (now != 0 && now - last >= k_refresh_interval_ms) ||
-                   input_object_.load(std::memory_order_relaxed) == 0;
+  const bool due = last == 0 || stale || (now != 0 && now - last >= k_refresh_interval_ms);
   if (!due) {
     return;
   }
   last_refresh_ms_.store(now != 0 ? now : 1, std::memory_order_relaxed);
+  // The three facts come out of **one** module lookup.
+  const game::CameraEngine engine = game::camera_engine();
+  client_base_.store(engine.client_base, std::memory_order_relaxed);
+  build_verified_.store(engine.build_verified, std::memory_order_relaxed);
+  input_object_.store(engine.input_object, std::memory_order_relaxed);
   input_stale_.store(false, std::memory_order_relaxed);
-  build_verified_.store(game::client_build_verified(), std::memory_order_relaxed);
-  input_object_.store(game::input_object(), std::memory_order_relaxed);
 }
 
 // The status of the camera hook, and the log line that goes with it.
@@ -295,8 +324,8 @@ bool ThirdPerson::install() noexcept {
 
 void ThirdPerson::update(const game::Angle& view_angles, const game::Vec3& eye_origin) noexcept {
   view_angles_.store(pack_angles(view_angles), std::memory_order_relaxed);
-  // The per-build facts the detour needs are refreshed here, on the payload's
-  // own thread — never on the game's camera thread.
+  // The per-build facts the detour needs are refreshed here, on the render
+  // thread — never on the game's camera thread.
   refresh_target();
   if (!hook_.installed()) {
     (void)install();  // the client may not have been up when the payload booted
@@ -356,8 +385,8 @@ void ThirdPerson::update(const game::Angle& view_angles, const game::Vec3& eye_o
 // last two is what the engine does *not* implement (the pivot, the shoulder
 // and the part of the yaw offset the smoothing damps away).
 //
-// The line is built **here**, on the payload's own thread: the detour's path
-// never logs and never allocates.
+// The line is built **here**, on the render thread: the detour's path never
+// logs and never allocates.
 void ThirdPerson::report(const game::Angle& view_angles, const game::Vec3& eye_origin,
                          const game::ThirdPersonParams& params) noexcept {
   const std::uint64_t now = now_ms();
@@ -409,7 +438,7 @@ void ThirdPerson::on_camera_update(void* input, int slot) noexcept {
   }
   // The build gate: the camera block's offsets are build-specific, so a write
   // on another build would land in the wrong field of the input object. The
-  // gate is the **cached** one — resolved on the payload's own thread — so the
+  // gate is the **cached** one — resolved on the render thread — so the
   // detour does not pay for a module lookup per frame.
   if (!build_verified_.load(std::memory_order_relaxed)) {
     return;
@@ -419,16 +448,22 @@ void ThirdPerson::on_camera_update(void* input, int slot) noexcept {
   //
   // The input object is a singleton whose address is fixed while the client
   // is up, so it is resolved once and cached (see `refresh_target`). A
-  // mismatch means the module changed under us: the payload's own thread
+  // mismatch means the module changed under us: the render thread
   // re-resolves it.
   const std::uintptr_t expected = input_object_.load(std::memory_order_relaxed);
   if (expected == 0 || input != reinterpret_cast<void*>(expected)) {
     input_stale_.store(true, std::memory_order_relaxed);
     return;
   }
+  // The engine access, built from the **cached** facts: the write does no
+  // module lookup and no allocation, so the game's camera thread pays
+  // nothing for it.
+  const game::CameraEngine engine =
+      game::live_camera_engine(client_base_.load(std::memory_order_relaxed),
+                               build_verified_.load(std::memory_order_relaxed), expected);
   const game::Angle view = unpack_angles(view_angles_.load(std::memory_order_relaxed));
   const float yaw = game::third_person_yaw(view, params);
-  if (game::write_third_person_state(params, view.pitch, yaw)) {
+  if (game::write_third_person_state(engine, params, view.pitch, yaw)) {
     writes_.fetch_add(1, std::memory_order_relaxed);
   }
 }
