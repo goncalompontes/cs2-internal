@@ -137,20 +137,37 @@ inline constexpr std::size_t TOTAL_SLOT_COUNT = SLOT_COUNT + RESERVE_SLOT_COUNT;
 // so the pool has to hold one slot per **concurrent render job**, not one per
 // thread. The scene system's job count is **unmeasured** (the live run has
 // still not happened: `docs/re/chams.md` §10.7.1), so the pool is sized with
-// headroom over any plausible count — the tier0 thread pool has about as
-// many threads as the machine has hardware threads, and the scene system
-// splits the draw list across them.
+// headroom — the tier0 thread pool has about as many threads as the machine
+// has hardware threads, and the scene system splits the draw list across
+// them, so sixty-four covers a machine with up to sixty-four hardware
+// threads. It is **not** "well above any plausible count": beyond that the
+// pool can be exhausted again, and the draws are then dropped and
+// **counted** (`pool=`), which is the mitigation.
 //
 // The cost of the headroom is the **scan**: the guard's first pass ("am I
 // already inside?") walks **every** slot, so the scan is O(pool) per draw.
 // A slot is one 64-bit word, so sixty-four slots are 512 bytes (eight cache
-// lines, resident in L1) and the scan is sixty-four loads — about ten
-// nanoseconds, or roughly twenty microseconds per frame at two thousand
-// primitives (a hundredth of a millisecond against a sixteen millisecond
-// frame).
+// lines, resident in L1) and the scan is sixty-four loads.
 //
-// Sixty-four is **eight times** the camera's pool, so the camera's behaviour
-// and its cost are exactly what they were.
+// **Measured** (clang-cl, `/O2`, two million enter+leave pairs, this
+// machine): the sixty-four-slot pool costs **48.3–54.6 ns** per enter and
+// leave — about **100 µs per frame** at two thousand primitives (a
+// hundredth of a millisecond against a sixteen millisecond frame). The
+// camera's nine-slot pool costs **10.4–11.9 ns**: the "ten nanoseconds"
+// that used to be quoted here was the **camera's** pool, not this one, and
+// this pool's scan is about **4.5 times** that.
+//
+// The **conclusion** does not change: the desc cache saves about 2 300 µs
+// per frame on the same path (the four engine reads per primitive that the
+// cache removes — eight thousand reads at 284 ns each, at two thousand
+// primitives), so the scan is noise next to it.
+//
+// Sixty-four is **7.1 times** the camera's nine-slot pool (not eight: eight
+// is the camera's `SLOT_COUNT` without its reserve). The camera's
+// **behaviour** and its per-call cost are exactly what they were — but its
+// guard **object** grew: `sizeof(RecursionGuard)` is 528 bytes (it was 80),
+// because the slots array is sized for the largest pool any guard may ask
+// for.
 inline constexpr std::size_t DRAW_PATH_SLOT_COUNT = 64;
 
 // How many times `leave` re-scans the slots when an exchange fails.
@@ -191,6 +208,11 @@ class RecursionGuard {
   RecursionGuard& operator=(const RecursionGuard&) = delete;
 
   // How many slots this guard has.
+  //
+  // It is a **test-only** accessor: the payload never asks a guard how big
+  // it is (the pool is the guard's own configuration — the chams build
+  // theirs with `DRAW_PATH_SLOT_COUNT` and the camera with the default), so
+  // the host test is its only reader.
   [[nodiscard]] auto slot_count() const noexcept -> std::size_t {
     return slot_count_;
   }

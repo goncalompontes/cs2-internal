@@ -850,9 +850,19 @@ Two more rounds were added:
 
 The give-up path was correct and **unmeasured**; the cache counts the
 give-ups now (`DescCache::give_ups()`), and the round reports them: on this
-machine the reader gives up on **between a third and nine tenths** of the
-lookups under that contention, and the entry the cache hands out is still
+machine the reader gives up on **28.6 % to 93.9 %** of the lookups under that
+contention (the review's runs measured 28.5 % to 39.3 %; the rate depends on
+how the eight writers and the one reader are scheduled, so it is a
+measurement and not a property), and the entry the cache hands out is still
 the right one every time (zero mismatches).
+
+The count is **reported**, not just measured: the cache counts it
+(`DescCache::give_ups()`), the chams read it (`Chams::cache_give_ups()`) and
+the status line shows it as `gu=` (§10.4.1). The counter exists to tell the
+operator that the cache is giving up — while it climbs, the draw path pays
+two engine reads per *primitive* instead of per *model*, which is the exact
+cost the cache exists to remove — and a counter nobody can see is a counter
+nobody reads.
 
 ### 10.4 The guard fails **closed** on the draw path
 
@@ -883,7 +893,7 @@ the pool has to hold one slot per **concurrent render job**, not one per
 thread. With the camera's nine slots, a **tenth** concurrent render job was
 refused, and a refusal on the draw path **drops the primitive**: the model
 was hole-ridden, every frame, where the old fail-open path dropped nothing.
-Visible (`refused=`) is not the same as harmless.
+Visible (`rec=`/`pool=`/`tdn=`) is not the same as harmless.
 
 So the pool's size is **per instance** now (`RecursionGuard`'s constructor),
 and the draw path asks for `DRAW_PATH_SLOT_COUNT` — **sixty-four** slots.
@@ -894,18 +904,42 @@ nothing in the tree has ever measured it: the detour has still never run
 against the real draw (the live run needs a GPU and an interactive desktop,
 §10.7.1). Sixty-four is therefore chosen with **headroom**: the tier0 pool
 has about as many threads as the machine has hardware threads, so sixty-four
-is well above any plausible count, and it is **eight times** the camera's
-pool. The camera's pool — and the camera's cost — are exactly what they
-were.
+covers a machine with up to sixty-four hardware threads. It is **not** "well
+above any plausible count": on a machine with more than sixty-four hardware
+threads the pool can be exhausted again, and the draws are then dropped and
+**counted** (`pool=`), which is the mitigation — the operator sees it.
+Sixty-four is **7.1 times** the camera's nine-slot pool (not eight: eight is
+the camera's `SLOT_COUNT` without its reserve).
+
+The camera's **behaviour** is exactly what it was — its pool is untouched and
+its per-call cost did not change (measured below) — but its guard **object**
+grew: `sizeof(RecursionGuard)` is now **528 bytes** (it was 80), because the
+slots array is sized for the largest pool any guard may ask for. The
+camera's `ThirdPerson` grew by 448 bytes.
 
 **The cost of the headroom** is the scan: the guard's first pass ("am I
 already inside?") walks **every** slot, so the scan is O(pool) per draw. A
 slot is one 64-bit word, so sixty-four slots are 512 bytes (eight cache
-lines, resident in L1) and the scan is sixty-four loads — about ten
-nanoseconds, or roughly twenty microseconds per frame at two thousand
-primitives (a hundredth of a millisecond against a sixteen millisecond
-frame). The desc cache saves two thousand engine reads per frame on the same
-path, so the scan is noise next to it.
+lines, resident in L1) and the scan is sixty-four loads. **Measured** on this
+machine (clang-cl, `/O2`, two million enter+leave pairs, the shipped header):
+
+| guard | per enter+leave | per frame at 2000 primitives |
+|---|---|---|
+| the camera's pool (9 slots) | **10.4–11.9 ns** | — (the camera is not per-primitive) |
+| **the draw path's pool (64 slots)** | **48.3–54.6 ns** | **≈ 100 µs** |
+
+The review measured the same thing on the same machine: **9.4–9.8 ns** and
+**43.7–46.7 ns**, i.e. **≈ 90 µs** per frame. The comment this section
+quotes said "about ten nanoseconds … roughly twenty microseconds per frame":
+the ten nanoseconds was the **camera's** nine-slot pool, not this one, and
+the draw path's scan is about **4.5 times** that.
+
+The **conclusion does not change**: ≈ 100 µs against a sixteen millisecond
+frame is 0.6 %, and the desc cache saves about **2 300 µs** per frame on the
+same path (the four engine reads per primitive that the cache removes —
+eight thousand reads at 284 ns each, at two thousand primitives), so the scan
+is noise next to it. What changes is the number: the next person sizing a
+pool from it would have been wrong in the same direction.
 
 **The fail-open path is not back on the table.** The prologue is verified
 before the hook is installed (`hook_target`), so the recursion the fail-open
@@ -921,10 +955,12 @@ invisible.
 
 The three **causes** are counted **separately**, because they need different
 responses and the counters are not reset — a climbing number is the
-operator's only signal:
+operator's only signal. The desc cache's **give-ups** are counted with them,
+because they are the same kind of thing: a number that climbs while the
+feature quietly does less than it says.
 
 ```
-hook=installed seen=1234 chams=56 skip=1178 rec=0 pool=0 tdn=0
+hook=installed seen=1234 chams=56 skip=1178 rec=0 pool=0 tdn=0 gu=0
 ```
 
 * `seen` — the draws that reached the feature's **decision**;
@@ -937,7 +973,11 @@ hook=installed seen=1234 chams=56 skip=1178 rec=0 pool=0 tdn=0
   This is the serious one: the primitive is **not drawn at all**, every
   frame, so a climbing `pool` means the chams are eating the scene (§10.4.1);
 * `tdn` — the draws that arrived while the hook was being torn down. One per
-  teardown.
+  teardown;
+* `gu` — the desc cache's **give-ups**: the lookups that gave up on a slot
+  that never settled, so the draw path paid two engine reads per *primitive*
+  instead of per *model* while it lasted (§10.3). A climbing `gu` is the
+  cache losing the promise it exists to keep.
 
 The counters count the drops that could be **attributed**: a draw that
 arrives after the feature is gone (`g_active == nullptr`) is dropped too, but
@@ -946,20 +986,41 @@ window is tiny — the hook is un-patched before `g_active` is cleared.
 
 A dropped draw never reaches the decision, so it is not in `seen` at all.
 
-`seen == chams + skip` holds at every **instant**: the draw's counter is
-moved **before** the call into the original, exactly like the skip paths'
-counters, so a reader that catches a draw in flight does not see the
-relation broken. (A reader that reads the three counters one after another
-can still see a torn combination — the counters are not read as one
-snapshot — but the relation holds at every point in time.)
+`seen == chams + skip` holds at every point in time **except** the two
+instructions between `seen_++` and the paired `drawn_++`/`skipped_++`: the
+draw's counter is moved **before** the call into the original, exactly like
+the skip paths' counters, so the window is two instructions wide and not the
+whole draw. (A reader that reads the three counters one after another can
+still see a torn combination — the counters are not read as one snapshot —
+but the relation holds at every point in time otherwise.)
 
-The line has to fit the overlay's 192-byte HUD buffer, and the counters are
-what the operator reads, so the **state** is the field that gives room: when
-the line does not fit, the state is cut (at its parenthesis, and at 24
-characters at the most) and the line is written again. The longest line the
-counters can produce — the counters at their 64-bit maximum and the longest
-state — is 220 bytes, and the cut brings it to 183. The overflow needs 10^19
-draws, so in practice the operator sees the full state.
+The line has to fit the overlay's **192-byte** HUD buffer, and the counters
+are what the operator reads, so the **state** is the field that gives room:
+when the line does not fit, the state is cut (at its parenthesis, and at 24
+characters at the most) and the line is written again. The line also has
+**two shapes**: the full one, and a fallback that drops the **derived**
+`skip` field (`skip` is exactly `seen - chams`, so the line still carries
+the information) when even the cut state does not fit.
+
+The bound, in **bytes** — the figure that matters is the length *with* the
+NUL, against the 192-byte buffer:
+
+| what the caller can receive | characters | with the NUL |
+|---|---|---|
+| the fallback (the state cut to 24 characters, `skip` dropped) | 181 | 182 |
+| the longest line the hook's own states can produce (the `off` state with every counter at its maximum — the full shape still fits there) | 187 | **188** |
+
+The **full** shape is 243 characters at its worst (the seven counters at
+their 64-bit maximum and the longest state), and it is only written when it
+fits, so the line never exceeds 191 characters (192 with the NUL): it fits
+the buffer by construction. The overflow needs 10^19 draws, so in practice
+the operator sees the full state.
+
+The bound is a **test**, not a comment: the status line's formatting is a
+pure function (`chams_status::format`, in the chams' header), so the host
+test drives it with every counter at its 64-bit maximum, over every state
+the hook can report, and checks that the line and its NUL fit the 192-byte
+buffer (`payload/features/tests/test_chams_draw_hook.cpp`).
 
 ### 10.5 The counters are not reset
 
@@ -1062,12 +1123,12 @@ captured. Against the code before this change the process died with
 
 | Where | What it proves |
 |---|---|
-| `payload/features/include/cs2/features/chams.hpp` | the desc cache: the per-slot seqlock, the release fence between the claim and the entry's writes, the generation inside the entry, the fail-closed guard with the draw path's pool, the refusal counters by cause |
+| `payload/features/include/cs2/features/chams.hpp` | the desc cache: the per-slot seqlock, the release fence between the claim and the entry's writes, the generation inside the entry, the fail-closed guard with the draw path's pool, the refusal counters by cause, the give-up counter, and the status line's pure formatting (`chams_status`) |
 | `payload/features/src/chams.cpp` | the publish and read protocol, the atomic `g_active`, the refusals counted by cause, the status line |
 | `payload/features/include/cs2/features/recursion_guard.hpp` | the per-instance policy (`fail_open` is the camera's default, `fail_closed` the draw path's) and the per-instance pool (`DRAW_PATH_SLOT_COUNT`) |
 | `payload/hooks/include/cs2/hooks/inline.hpp` | the atomic `trampoline_` / `installed_`, and the rule that the trampoline's pages are never unmapped |
 | `payload/hooks/src/inline.cpp` | the publication order on install and on uninstall, and the pages that are never released |
 | `payload/features/tests/test_chams_desc_cache.cpp` | the concurrency probe: four threads, two descs in one slot, **zero** mismatches; the generation bump under a concurrent publisher; the reader's give-up path |
-| `payload/features/tests/test_chams_draw_hook.cpp` | the latch clear's **value** (H3), the guard's scope **order** (H6), the fail-closed policy and the per-instance pool (H7), the refusals counted by cause |
+| `payload/features/tests/test_chams_draw_hook.cpp` | the latch clear's **value** (H3), the guard's scope **order** (H6), the fail-closed policy and the per-instance pool (H7), the refusals counted by cause, the cache's give-ups **reported**, and the status line's 192-byte bound |
 | `payload/hooks/tests/test_inline.cpp` | the trampoline's lifetime: an uninstall **and a destruction** while the detour is inside do not free the memory it calls |
 
