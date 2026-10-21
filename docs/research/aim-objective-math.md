@@ -814,23 +814,23 @@ evaluations) were measured.
    cells.
 
 6. **§1.6's cost, measured on the saved 717-cell set — at a live hitbox count.**
-   The estimator's whole search (32 candidates) costs p50/p95/p99 = **4.3 / 5.2 /
-   5.7 ms** at 64 samples, **8.7 / 10.0 / 10.2 ms** at 128 and **19.9 / 22.8 /
-   24.6 ms** at 256 — against the **15.6 ms** tick and the service's **12 ms**
-   guard (the median of six runs; the six runs' p99 ranged 5.1–6.7 ms, 9.4–12.9 ms
-   and 22.0–31.5 ms).
+   The estimator's whole search (32 candidates) costs p50/p95/p99 = **4.3 / 5.0 /
+   5.1 ms** at 64 samples, **8.9 / 10.1 / 10.7 ms** at 128 and **19.2 / 23.2 /
+   23.8 ms** at 256 — against the **15.6 ms** tick and the service's **12 ms**
+   guard (the median of six runs; the six runs' p99 ranged 4.9–7.4 ms, 9.2–12.8 ms
+   and 22.9–29.3 ms).
 
    **These numbers are at a live-sized hitbox set: 57 hitboxes** (19 per player ×
    3 players, `docs/re/aim.md`: `m_nHitBoxes (19 on a player)`). The saved set
    stores *chart cells*, so the benchmark's first reconstruction rebuilt only **24**
    hitboxes (8 per target, one per hitgroup) — 2.4× fewer than a live solve — and
-   the cost was **understated by the same factor** (2.3 / 4.7 / 9.4 ms). The
+   the cost was **understated by the same factor** (2.4 / 4.8 / 9.7 ms). The
    benchmark now measures both, and the **live-sized** one is the one the budget
    verdict is taken from: **64 samples fit with room to spare, 128 samples are at
-   the guard** (the median p99 is 10.2 ms, but the run-to-run spread crosses the
+   the guard** (the median p99 is 10.7 ms, but the run-to-run spread crosses the
    12 ms guard), and **256 samples do not fit** (the p50 is already over the tick).
 
-   The existing cone objective on the same field measures **60 / 65 / 68 ms** here
+   The existing cone objective on the same field measures **60 / 65 / 67 ms** here
    (the published 34 ms is the same order). The sample-based objective is
    therefore **3–14× cheaper** than the one it would replace — not the 4–20× the
    24-hitbox reconstruction suggested.

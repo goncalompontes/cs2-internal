@@ -846,37 +846,37 @@ count changes).
 
 | what | N=64 | N=128 | N=256 |
 |---|---|---|---|
-| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.13 / 0.18 / 0.19 ms | 0.26 / 0.35 / 0.37 ms | 0.53 / 0.74 / 1.04 ms |
-| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | **4.3 / 5.2 / 5.7 ms** | **8.7 / 10.0 / 10.2 ms** | **19.9 / 22.8 / 24.6 ms** |
+| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.13 / 0.18 / 0.19 ms | 0.26 / 0.35 / 0.37 ms | 0.52 / 0.70 / 0.75 ms |
+| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | **4.3 / 5.0 / 5.1 ms** | **8.9 / 10.1 / 10.7 ms** | **19.2 / 23.2 / 23.8 ms** |
 
 **The reconstructed set (24 hitboxes) — the old, understated measurement:**
 
 | what | N=64 | N=128 | N=256 |
 |---|---|---|---|
-| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.07 / 0.10 / 0.10 ms | 0.14 / 0.18 / 0.21 ms | 0.28 / 0.37 / 0.41 ms |
-| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | 2.3 / 2.8 / 3.0 ms | 4.7 / 5.5 / 6.1 ms | 9.4 / 10.6 / 11.1 ms |
+| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.07 / 0.10 / 0.10 ms | 0.14 / 0.19 / 0.22 ms | 0.28 / 0.38 / 0.42 ms |
+| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | 2.4 / 2.9 / 3.2 ms | 4.8 / 5.4 / 5.6 ms | 9.7 / 10.5 / 11.9 ms |
 
 | the existing objective, on the same field | p50 | p95 | p99 |
 |---|---|---|---|
-| `argmax_hit_probability` (σ = 0.002) | 60 ms | 65 ms | 68 ms |
-| `hit_probability` (one evaluation) | 3.4 ms | 8.2 ms | 9.3 ms |
+| `argmax_hit_probability` (σ = 0.002) | 60 ms | 65 ms | 67 ms |
+| `hit_probability` (one evaluation) | 3.5 ms | 8.3 ms | 9.1 ms |
 
 One sample (one seed, one pellet) costs **1.0 µs** against the 24 hitboxes and
 **2.0 µs** against the 57.
 
 **The verdict (at the live-sized hitbox count).** The Monte-Carlo search is **3–14×
-cheaper than the existing objective** on the same field (60 ms ÷ 19.9 ms at 256
+cheaper than the existing objective** on the same field (60 ms ÷ 19.2 ms at 256
 samples, 60 ms ÷ 4.3 ms at 64) — not the 4–20× the 24-hitbox reconstruction
 suggested. Against the budget:
 
-* **64 samples fit with room to spare**: p99 5.7 ms (the six runs' p99 ranged
-  5.1–6.7 ms) against the 15.6 ms tick and the service's 12 ms guard.
-* **128 samples are *at* the guard**: the median p99 is 10.2 ms, but the six runs'
-  p99 ranged **9.4–12.9 ms** — it crosses the 12 ms guard on a loaded machine. This
+* **64 samples fit with room to spare**: p99 5.1 ms (the six runs' p99 ranged
+  4.9–7.4 ms) against the 15.6 ms tick and the service's 12 ms guard.
+* **128 samples are *at* the guard**: the median p99 is 10.7 ms, but the six runs'
+  p99 ranged **9.2–12.8 ms** — it crosses the 12 ms guard on a loaded machine. This
   is the mode the next task must size from, and it is not comfortably inside the
   budget.
-* **256 samples do not fit at all**: the p50 (19.9 ms) is already over the 15.6 ms
-  tick and the p99 (24.6 ms) is over the guard.
+* **256 samples do not fit at all**: the p50 (19.2 ms) is already over the 15.6 ms
+  tick and the p99 (23.8 ms) is over the guard.
 
 The existing objective does **not** fit the tick at all (p50 60 ms).
 
