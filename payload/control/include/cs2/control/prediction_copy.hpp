@@ -47,26 +47,26 @@ using SnapshotReader = bool (*)(std::uintptr_t address, void* out, std::size_t c
 using SnapshotWriter = void (*)(std::uintptr_t address, const void* data,
                                 std::size_t count) noexcept;
 
-// Take the snapshot of the engine's movement services into `snapshot`.
+// Take the snapshot of the engine's movement services into `buffer`.
 //
 // False when the object could not be read. The caller must then leave the
 // engine's object alone: nothing was changed, so there is nothing to restore.
-[[nodiscard]] inline auto snapshot(std::uintptr_t address, MovementServicesSnapshot& snapshot,
+[[nodiscard]] inline auto snapshot(std::uintptr_t address, MovementServicesSnapshot& buffer,
                                    SnapshotReader read) noexcept -> bool {
   if (address == 0 || read == nullptr) {
     return false;
   }
-  return read(address, snapshot.data(), snapshot.size());
+  return read(address, buffer.data(), buffer.size());
 }
 
 // Put the snapshot back: the engine's object is exactly as it was before the
 // simulation.
-inline auto restore(std::uintptr_t address, const MovementServicesSnapshot& snapshot,
+inline auto restore(std::uintptr_t address, const MovementServicesSnapshot& buffer,
                     SnapshotWriter write) noexcept -> void {
   if (address == 0 || write == nullptr) {
     return;
   }
-  write(address, snapshot.data(), snapshot.size());
+  write(address, buffer.data(), buffer.size());
 }
 
 }  // namespace cs2::control::prediction
