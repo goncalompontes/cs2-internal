@@ -46,6 +46,7 @@
 // (`payload/control/tests/test_control_animfix.cpp`) pins it.
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -160,6 +161,34 @@ struct Target {
     }
   }
   return true;
+}
+
+// --- the engine's own guard on a graph parameter ---------------------------
+
+// The engine refuses a value before it reaches the graph. `FUN_1808492a0`
+// (the AG2 parameter setter) is:
+//
+//     if (((-2.1474836e+09 < v) && (v < 2.1474836e+09)) && (!NAN(v)) &&
+//         (((uint)value & 0x7f800000) != 0x7f800000)) { write }
+//
+// The mask test is the "exponent is all ones" test, so it refuses both the
+// NaNs and the infinities; the range test refuses the values a float can
+// hold but a graph parameter must not.
+//
+// **The animfix must not be laxer than the engine.** The captured value is
+// network-controlled — it is whatever the server put in the snapshot — and a
+// single NaN in `m_flAimYawAngle` would propagate through the graph
+// evaluation into the pose, the bone array and every hitbox transform. The
+// engine's own prediction path refuses such a value (the client's value
+// stays in the graph); the animfix has to refuse it too.
+inline constexpr double k_engine_value_limit = 2.1474836e9;
+
+// True when the engine would write `value` into a graph parameter.
+[[nodiscard]] inline auto value_is_writable(float value) noexcept -> bool {
+  if (!std::isfinite(value)) {
+    return false;  // NaN or +-infinity: the engine's mask test refuses those
+  }
+  return std::fabs(static_cast<double>(value)) < k_engine_value_limit;
 }
 
 // --- the validity rule ----------------------------------------------------

@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 #include "cs2/control/animfix.hpp"
 #include "cs2/hooks/inline.hpp"
@@ -211,6 +212,41 @@ void test_the_freshness_of_a_capture() {
   assert(!animfix::may_reapply(capture, animfix::Slot::aim_yaw, 1000));
 }
 
+// --- the engine's own guard --------------------------------------------------
+
+// The animfix writes into the graph where the engine's setter writes, so it
+// must refuse **exactly** what the engine refuses: the setter's test is
+// `(-2.1474836e+09 < v) && (v < 2.1474836e+09) && !NAN(v) &&
+// ((bits & 0x7f800000) != 0x7f800000)` — the mask test refuses the NaNs and
+// the infinities, the range test refuses the rest.
+//
+// The captured values are network-controlled, so a NaN in the server's
+// `m_flAimYawAngle` would otherwise propagate into the pose, the bone array
+// and every hitbox transform.
+void test_the_engines_own_guard_is_reproduced() {
+  // A normal value: the engine writes it.
+  assert(animfix::value_is_writable(0.0F));
+  assert(animfix::value_is_writable(42.0F));
+  assert(animfix::value_is_writable(-42.0F));
+  assert(animfix::value_is_writable(180.0F));
+  // A NaN: refused (the engine's `!NAN(v)` and its mask test).
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  assert(!animfix::value_is_writable(nan));
+  assert(!animfix::value_is_writable(-nan));
+  // The infinities: refused (the engine's mask test).
+  assert(!animfix::value_is_writable(std::numeric_limits<float>::infinity()));
+  assert(!animfix::value_is_writable(-std::numeric_limits<float>::infinity()));
+  // The limit: the engine's range test is strict, so the value at the limit
+  // is refused.
+  const float limit = static_cast<float>(animfix::k_engine_value_limit);
+  assert(!animfix::value_is_writable(limit));
+  assert(!animfix::value_is_writable(-limit));
+  // The largest float the engine accepts: one float below the limit.
+  const float largest = 2147483520.0F;  // 2^31 - 128
+  assert(animfix::value_is_writable(largest));
+  assert(animfix::value_is_writable(-largest));
+}
+
 // --- the target lookup ----------------------------------------------------
 
 // The animfix recognises **its own** four slots by the (node, index) pair
@@ -362,6 +398,7 @@ auto main() -> int {
   test_the_freshness_of_a_capture();
   test_a_refreshed_capture_works_again();
   test_the_capture_keeps_its_own_copy();
+  test_the_engines_own_guard_is_reproduced();
   test_only_the_animfixs_own_slots_are_recognised();
   test_the_four_slots_must_be_distinct();
   test_the_seams_prologues_are_hookable();

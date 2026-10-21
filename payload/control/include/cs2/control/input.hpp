@@ -655,6 +655,13 @@ class Input {
   [[nodiscard]] std::uint64_t animfix_skips() const noexcept {
     return animfix_skips_.load();
   }
+  // How many captured values the **engine's own guard** refused (a NaN, an
+  // infinity, or a value outside the engine's range). The captured values are
+  // network-controlled, so this is the count of "the server sent something
+  // the graph must not hold" — it should be zero.
+  [[nodiscard]] std::uint64_t animfix_rejected() const noexcept {
+    return animfix_rejected_.load();
+  }
   // True when the last anim tick corrected the graph (the specification's
   // "acted this frame").
   [[nodiscard]] bool animfix_acted() const noexcept { return animfix_acted_.load(); }
@@ -1126,6 +1133,7 @@ class Input {
   std::atomic<std::uint64_t> animfix_captures_{0};
   std::atomic<std::uint64_t> animfix_applies_{0};
   std::atomic<std::uint64_t> animfix_skips_{0};
+  std::atomic<std::uint64_t> animfix_rejected_{0};
   std::atomic<bool> animfix_acted_{false};
   std::atomic<float> animfix_server_yaw_{0.0F};
   std::atomic<float> animfix_predicted_yaw_{0.0F};

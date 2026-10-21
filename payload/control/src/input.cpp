@@ -1652,6 +1652,14 @@ void Input::animfix_apply() noexcept {
       }
       server = *captured;
     }
+    // The engine's own guard: a graph parameter must never hold a NaN, an
+    // infinity or a value outside the engine's range. The captured value is
+    // network-controlled, so the animfix has to refuse exactly what the
+    // engine's setter would refuse (and count the refusals).
+    if (!animfix::value_is_writable(server)) {
+      animfix_rejected_.fetch_add(1);
+      continue;
+    }
     if (!cs2::game::write_bytes(value_address, &server, sizeof(server))) {
       continue;
     }
