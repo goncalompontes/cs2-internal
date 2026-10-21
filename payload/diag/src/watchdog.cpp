@@ -10,6 +10,9 @@
 #include <windows.h>
 
 #include <tlhelp32.h>
+
+#include "cs2/core/handle.hpp"
+#include "cs2/core/win_handle.hpp"
 #endif
 
 namespace cs2::diag {
@@ -88,20 +91,22 @@ void unwind(CONTEXT& context, unsigned long thread_id) noexcept {
 }
 
 void log_thread(const THREADENTRY32& entry) noexcept {
-  const HANDLE thread =
+  // The handle is owned by the wrapper: it is released on every path out of
+  // this function. The wrapper allocates nothing, so this stays usable from
+  // the crash handler's cold path.
+  core::ScopedHandle<void*, core::KernelHandlePolicy> thread(
       OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
-                 entry.th32ThreadID);
-  if (thread == nullptr) {
+                 entry.th32ThreadID));
+  if (!thread.valid()) {
     return;
   }
-  SuspendThread(thread);
+  SuspendThread(static_cast<HANDLE>(thread.get()));
   CONTEXT context{};
   context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-  if (GetThreadContext(thread, &context) != 0) {
+  if (GetThreadContext(static_cast<HANDLE>(thread.get()), &context) != 0) {
     unwind(context, entry.th32ThreadID);
   }
-  ResumeThread(thread);
-  CloseHandle(thread);
+  ResumeThread(static_cast<HANDLE>(thread.get()));
 }
 
 void report_freeze(unsigned long long stalled_ms) noexcept {
@@ -114,22 +119,22 @@ void report_freeze(unsigned long long stalled_ms) noexcept {
   text += ')';
   cs2::game::append_log(text.view());
 
-  const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-  if (snapshot == INVALID_HANDLE_VALUE) {
+  core::ScopedHandle<void*, core::KernelHandlePolicy> snapshot(
+      CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0));
+  if (!snapshot.valid()) {
     return;
   }
   const DWORD self = GetCurrentProcessId();
   const DWORD current = GetCurrentThreadId();
   THREADENTRY32 entry{};
   entry.dwSize = sizeof(entry);
-  if (Thread32First(snapshot, &entry) != 0) {
+  if (Thread32First(static_cast<HANDLE>(snapshot.get()), &entry) != 0) {
     do {
       if (entry.th32OwnerProcessID == self && entry.th32ThreadID != current) {
         log_thread(entry);
       }
-    } while (Thread32Next(snapshot, &entry) != 0);
+    } while (Thread32Next(static_cast<HANDLE>(snapshot.get()), &entry) != 0);
   }
-  CloseHandle(snapshot);
 }
 
 DWORD WINAPI watchdog_thread(void*) noexcept {
