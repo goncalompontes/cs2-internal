@@ -398,8 +398,10 @@ compile step: the plugin reads it in the compiler process.
    be able to fail**.
 5. The function's IR is **unchanged** by the analysis — asserted by a test.
 6. The plugin's four existing tests are green, the host suite is green, and
-   the protected payload still builds with **37 encrypted dispatches** and an
-   unchanged import and export table.
+   the protected payload still builds with an unchanged import and export
+   table and `check_payload.py` ending in `ok`. The **number** of encrypted
+   dispatches is a snapshot of the tree (37 today): this task does not change
+   the image, so the number must not go **down**.
 7. The `virtualized` level still **fails the build** when a policy asks for
    it, with a message that says it is not implemented yet.
 8. `tools/protect/README.md` documents: the ISA, the frame layout, the
