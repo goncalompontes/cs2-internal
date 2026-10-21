@@ -33,18 +33,34 @@
 //
 // Publishing the null before the free closes the window for every detour that
 // **enters** after the null — but a detour that **already holds** the pointer
-// can still call it. So the trampoline's pages are **not** released when the
-// hook is uninstalled: the retired trampoline is kept alive (a **deferred
-// free**) and its pages are only unmapped when the `InlineHook` itself is
-// destroyed. The cost is a bounded leak — one retired trampoline per
-// uninstall — and the bound is the number of times the hook is uninstalled
-// (for the chams: the number of times the operator switches the feature
-// off).
+// can still call it. So the trampoline's pages are **never unmapped**: the
+// trampoline is **retired** at the uninstall (the pointer is published as
+// null and dropped) and its pages stay mapped — and executable — until the
+// process exits.
+//
+// The old order freed the trampoline **before** it nulled the pointer: a
+// detour that had already read `trampoline_` held a **dangling** pointer and
+// called **freed executable memory**. The deferred free closed that window
+// for the **uninstall**; keeping the pages mapped closes it for the
+// **destruction** as well, because there is no point in the hook's life at
+// which the pages can be released: the engine cannot know whether a detour
+// is still inside the hook — the detour is the **caller's** function, and the
+// engine never sees it enter or leave.
+//
+// The cost is a bounded leak — **one page per uninstall** — and the operating
+// system reclaims it when the process exits. For the chams that is one page
+// per switch-off of the feature; the other users (the third-person camera,
+// the present hook, the animfix) uninstall when the state they hook changes,
+// which is a handful of times in a session.
+//
+// The one sentence: **no thread can execute freed trampoline memory, because
+// the trampoline's pages are never unmapped** — the null is published before
+// the teardown, and a retired trampoline stays mapped and executable for the
+// life of the process.
 
 #include <atomic>
 #include <cstddef>
 #include <optional>
-#include <vector>
 
 namespace cs2::hooks {
 
@@ -79,26 +95,13 @@ class InlineHook {
   }
 
  private:
-  // A trampoline that has been uninstalled but whose pages are still mapped.
-  //
-  // It is kept because a detour that was already inside the hook when the
-  // uninstall happened may still call it: the pages must not be unmapped
-  // under it. They are released when the hook is destroyed.
-  struct Retired {
-    void* address = nullptr;
-    std::size_t size = 0;
-  };
-
   void* target_ = nullptr;
   // The published trampoline. `nullptr` when the hook is not installed.
   std::atomic<void*> trampoline_{nullptr};
-  std::size_t trampoline_size_ = 0;
   std::size_t patched_size_ = 0;
   unsigned char saved_[16]{};
   // Whether the hook is in place.
   std::atomic<bool> installed_{false};
-  // The trampolines that were uninstalled and are still mapped.
-  std::vector<Retired> retired_;
 };
 
 }  // namespace cs2::hooks

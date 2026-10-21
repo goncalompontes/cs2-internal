@@ -353,14 +353,17 @@ auto to_string(InlineError error) noexcept -> const char* {
 
 InlineHook::~InlineHook() {
   uninstall();
-  // The retired trampolines are released here, and only here: their pages
-  // have to stay mapped for as long as any detour could still hold the
-  // pointer, and the hook's own destruction is the point where no detour can
-  // (the feature is being torn down).
-  for (const Retired& retired : retired_) {
-    free_executable(retired.address, retired.size);
-  }
-  retired_.clear();
+  // The retired trampolines are **not** released here, and that is the point
+  // of the deferred free: a detour that was already inside the hook when it
+  // was uninstalled may still hold the trampoline pointer and call it, and
+  // the engine cannot know whether one is — the detour is the **caller's**
+  // function, and the engine never sees it enter or leave. Releasing the
+  // pages here would be a use-after-free on **executable** memory: the
+  // review measured it (the detour's call landed on unmapped pages and the
+  // process died with 0xC0000005).
+  //
+  // So the pages stay mapped until the process exits. The cost is one page
+  // per uninstall.
 }
 
 auto InlineHook::install(void* target, void* detour) noexcept -> std::optional<InlineError> {
@@ -429,7 +432,6 @@ auto InlineHook::install(void* target, void* detour) noexcept -> std::optional<I
   // place before the pointer that finds them is visible, and the reader
   // (the game's render threads) reads it with an **acquire** load.
   target_ = target;
-  trampoline_size_ = trampoline_size;
   patched_size_ = total;
   trampoline_.store(trampoline, std::memory_order_release);
   std::memcpy(code, patch, total);
@@ -452,17 +454,16 @@ void InlineHook::uninstall() noexcept {
   //   3. the target is un-patched: no new detour enters at all.
   //   4. the trampoline is **retired**, not freed: a detour that was already
   //      inside when the uninstall happened may still hold the pointer and
-  //      call it, and the pages it runs on have to stay mapped until the
-  //      hook is destroyed. The old order freed the trampoline **before** it
-  //      nulled the pointer, which is a use-after-free on freed executable
-  //      memory.
+  //      call it, and the pages it runs on have to stay mapped — for the life
+  //      of the process, because there is no point at which the engine can
+  //      know that no detour is inside the hook any more (see the header).
+  //      The old order freed the trampoline **before** it nulled the
+  //      pointer, which is a use-after-free on freed executable memory.
   installed_.store(false, std::memory_order_release);
-  // The exchange publishes the null **and** hands the pointer over: the
-  // trampoline's pages stay mapped (see below), so the pointer is only kept,
-  // not released.
-  void* const trampoline = trampoline_.exchange(nullptr, std::memory_order_release);
+  // The exchange publishes the null: the trampoline's pages stay mapped (see
+  // below), so the pointer is only dropped, not released.
+  trampoline_.exchange(nullptr, std::memory_order_release);
   std::memcpy(target_, saved_, patched_size_);
-  retired_.push_back(Retired{trampoline, trampoline_size_});
 }
 
 }  // namespace cs2::hooks

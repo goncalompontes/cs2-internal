@@ -906,16 +906,36 @@ install's:
 
 Step 4 is what closes the window for a detour that was **already inside**
 when the uninstall happened: the retired trampoline's pages stay mapped, so
-the call it makes is a call into live memory. The pages are released when the
-`InlineHook` itself is destroyed — the point where the feature is torn down
-and no detour can be inside it any more. The cost is a bounded leak: **one
-retired trampoline per uninstall** (for the chams: one per switch-off of the
-feature), and each is a few dozen bytes of code in one page.
+the call it makes is a call into live memory.
+
+**The destructor was the other half of the property, and it was false.** The
+pages were released when the `InlineHook` itself was destroyed, on the
+assumption that "the feature is being torn down" means "no detour can be
+inside it any more". That is an assumption, not a property: the review
+proved it against the shipped code — a detour inside the hook, the hook
+destroyed, the detour calls the trampoline → **0xC0000005**, a call into
+unmapped executable memory.
+
+There is no point in the hook's life at which the engine can know that no
+detour is inside the hook: the detour is the **caller's** function, and the
+engine never sees it enter or leave. So the pages are **never unmapped** —
+the trampoline is retired at the uninstall (the pointer is published as null
+and dropped) and its pages stay mapped, and executable, until the process
+exits. The cost is a bounded leak: **one page per uninstall** (for the
+chams: one per switch-off of the feature; for the camera, the present hook
+and the animfix: one per state change they hook), and each page is reclaimed
+by the operating system when the process exits.
 
 The one sentence: **no thread can execute freed trampoline memory, because
-the trampoline's pages are never unmapped while the hook is alive — the null
-is published before the teardown and the retired trampoline stays mapped
-until the hook is destroyed.**
+the trampoline's pages are never unmapped — the null is published before the
+teardown, and a retired trampoline stays mapped and executable for the life
+of the process.**
+
+The property is proved by a host test
+(`payload/hooks/tests/test_inline.cpp`): the detour blocks inside the hook,
+the hook is **destroyed**, and the detour then calls the trampoline it
+captured. Against the code before this change the process died with
+0xC0000005; it passes now.
 
 ### 10.7 What is still open
 
