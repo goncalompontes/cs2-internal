@@ -727,3 +727,63 @@ evaluations) were measured.
 24. Bar-Shalom, Li & Kirubarajan, *Estimation with Applications to Tracking and
     Navigation: Theory, Algorithms, and Software*, Wiley (2001), ch. 6 (Kalman/α-β
     prediction and process noise).
+
+---
+
+## 11. Addendum (2026-10-21) — the Monte-Carlo estimator, measured
+
+> Task T34 (`docs/orchestration/spec-t34-montecarlo.md`) built the estimator this
+> note argues for: `cs2/aim/montecarlo.hpp`, host-tested (`aim-montecarlo`) and
+> benchmarked (`aim_bench`, replaying the committed 717-cell set). The write-up is
+> [`docs/ragebot.md`](../ragebot.md) §13. **Nothing above changes** — this note
+> records what the implementation *sharpens*, with the numbers.
+
+1. **§3.1's variance, confirmed by the implementation.** The sampler draws the
+   engine's kernel (`r1, a1, r2, a2` per pellet) and the measured second moments
+   reproduce the derivation: one term (`S = 1`, `I = 0`) gives `E[r] = 0.486`
+   (theory `c/2`) and `rms(r) = 0.570` (theory `c/√3 = 0.577`), so the per-axis
+   variance is `c²/6` to within 1 %; two equal terms (`S = I = 1`) give
+   `rms(r) = 0.813`, so the per-axis variance is `0.33 c²` and the variance-matched
+   `σ = 0.575 c` — the derivation's `sqrt(S² + I²)/√6 = 0.577 c`. The `√6` claim of
+   §3.1/§0 therefore holds **for the repo's own kernel model**; the correction
+   itself is still blocked (the `sqrt(r)` question, the inaccuracy's units) and is
+   **not** applied anywhere.
+
+2. **§3.1's radial law, measured.** The single term is **uniform in radius**
+   (`E[r] = c/2`, and the rim is reached: the largest radius over 200 000 draws is
+   0.99999 c), so §3.3's linear-radial row is the right limit and the
+   area-uniform `2c/3` is wrong. The **sum** of two terms is much more concentrated
+   than its support suggests: with `S = I = c` the support is `2c` but the measured
+   mean radius is only **0.72 c** and the largest sampled radius 1.99 c. A "half the
+   cone radius" target is therefore *easier* than the support-based estimate of §3.3
+   suggests, and the `sqrt(r)` variant would move the single term to `c/3` — the
+   difference the note calls "large" is exactly `c/2` against `c/3`.
+
+3. **§3.1's `sqrt(r)` question is now a test, not a comment.** The host test pins
+   the linear law (the mean radius `c/2` to ±0.02, and *not* the area-uniform
+   `2c/3`); reintroducing the `sqrt` fails it. The repo's RE stays the authority
+   (no `sqrt`).
+
+4. **§3.2's seed question has a structured answer.** The seed is a **parameter of
+   the solver**, not an assumption: the `sequence` policy
+   (`md5_pseudo_random(sequence + i)`) makes the number the **expectation over the
+   next N shots**, and the `angle_grid` policy (the seed is a function of the aim
+   and the tick) makes it the **probability over the shot that would be taken**. The
+   `angle_grid` hash is a **stand-in** — the engine's `get_tick_view_angles` is not
+   reverse-engineered — so its numbers are indicative, not exact.
+
+5. **§6's "P(hit) is not the pellet sum" is implemented as a union.** A sample hits
+   when **any** of its pellets hits; the sample's damage is the sum over the pellets
+   that hit. §1.2's double-count is removed by the **nearest-hit** rule, and the
+   price is that the two solvers are **not comparable cell-for-cell** any more: the
+   Monte-Carlo solver scores the hitbox geometry, the field solver scores the chart
+   cells.
+
+6. **§1.6's cost, measured on the saved 717-cell set.** The estimator's whole
+   search (32 candidates) costs p50/p95/p99 = **2.36 / 3.15 / 3.58 ms** at 64
+   samples, **4.75 / 5.33 / 5.61 ms** at 128 and **9.89 / 11.38 / 11.50 ms** at 256
+   — against the **15.6 ms** tick and the service's **12 ms** guard. The existing
+   cone objective on the same field measures **48.3 / 60.3 / 65.5 ms** here (the
+   published 34 ms is the same order). The sample-based objective is therefore
+   **4–20× cheaper** than the one it would replace, and 256 samples is the only
+   mode that does not fit the 12 ms guard with margin.

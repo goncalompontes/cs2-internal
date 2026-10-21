@@ -605,3 +605,190 @@ the **environment**, like the ragebot's own tuning:
   the shared mask, so while the trigger is enabled it owns the trigger button
   (a manual `press("attack")` from the control channel is overridden until the
   trigger fires again).
+
+## 13. The Monte-Carlo hit-chance solver (alongside, not instead)
+
+> Added 2026-10-21 — task T34 (`docs/orchestration/spec-t34-montecarlo.md`).
+> **The core only.** The module (`cs2/aim/montecarlo.hpp`, `cs2/aim/src/montecarlo.cpp`)
+> is host-tested (`aim-montecarlo`) and benchmarked (`aim_bench`), but it is **not
+> wired into the live path**: no `AimObjective`, no dispatch, no `wire::Settings`, no
+> per-weapon profile value. The damage-field solver of §2/§3 is **untouched** and
+> stays the live one; the new solver is the community's estimator, available for a
+> side-by-side comparison.
+
+### 13.1 Why a second solver
+
+The live objective blurs the damage field with a **Gaussian**
+(`payload/aim/src/field.cpp`). The engine's spread kernel is not Gaussian
+(`docs/re/aim.md` §"The spread cone", `docs/research/aim-objective-math.md` §3.1):
+
+* its **support** is exactly `|off| <= S + I` — a Gaussian puts ~2.5e-3 of its mass
+  beyond that radius, where the truth assigns exactly zero;
+* its **radial law** is uniform in radius (rim-heavy), not area-uniform;
+* the field's cells **overlap**, so the Gaussian's per-cell sum double-counts
+  (`docs/known-issues.md` §11.2) — a Monte-Carlo sample asks "where does *this one*
+  bullet land?", and the **nearest** hit wins.
+
+The new solver therefore samples the engine's **own** kernel over seed indices and
+tests every sample against the target's hitboxes with a nearest-hit ray test — the
+community's estimator (velocity's 64/128/256 seed loop).
+
+### 13.2 The kernel
+
+The draw is the engine's, in the engine's order (`docs/re/aim.md`):
+
+```
+per pellet, sequential across the pellets:
+  r1 = RandomFloat(0, 1);   a1 = RandomFloat(0, 2pi)   // spread
+  r2 = RandomFloat(0, 1);   a2 = RandomFloat(0, 2pi)   // inaccuracy
+  off = spread·r1·(cos a1, sin a1) + inaccuracy·r2·(cos a2, sin a2)
+```
+
+with the revolver's `r1 -> 1 - r1²` transform. The RNG and the seed derivation are
+the repo's own (`UniformRandomStream`, `md5_pseudo_random` — `cs2/aim/spread.hpp`);
+the sampler's assembly of the offsets is a second implementation of the recipe on
+purpose, so the host test's cross-check against `pellet_offsets` is a real
+comparison and not a tautology.
+
+The offset is applied in the **(right, up) tangent frame** of the aim direction, and
+the chart's local metric carries it into the chart's coordinates: a true angular
+offset of `r` radians spans `r` in the chart's `v` (pitch) and `r / cos(v)` in its
+`u` (yaw) — `yaw_scale`, `cs2/aim/geometry.hpp`.
+
+**The weapons whose pellet pattern is not modelled are refused**, not silently given
+the standard pattern: the shotgun's pattern table (`FUN_1807cd1b0`) and the negev's
+`r -> 1 - r^(2^k)`. `WeaponProfile` carries the weapon *type* only, so the
+machineguns are refused with the negev (`pattern_supported`).
+
+### 13.3 The hit test
+
+Every sample's pellet becomes a ray from the eye; the ray is intersected with
+**every** hitbox of **every** candidate target and the **nearest** hit wins — not
+the sum (that double-counts the overlapping cells) and not the best-value hit (that
+ignores the geometry). The hit's `multiplier`, the weapon's damage and the range
+falloff over the hit distance give the sample's damage; the hitbox's `group` is the
+hitgroup.
+
+The intersection is **exact**: a capsule is the union of its two cap spheres and
+its side cylinder, and an oriented box is a slab test in its own frame. Both use the
+same span arithmetic as the occluders — it now lives in `cs2/aim/ray_span.hpp`, so
+the two share one implementation instead of two (`payload/aim/src/occlusion.cpp` is
+unchanged in behaviour).
+
+A multi-pellet weapon's sample **hits when any of its pellets hits** (the union,
+not the sum — `docs/research/aim-objective-math.md` §6); the sample's damage is the
+sum over the pellets that hit (the engine's per-pellet damage).
+
+### 13.4 The seed policies — the open question, made a parameter
+
+The engine's seed is **not settled** (`docs/known-issues.md` §11.2): the repo's own
+RE says `MD5_PseudoRandom(sequence)` (a pure function of the command number), the
+community says the seed is a function of the view angles and the tick. The solver
+takes the seed source as a **parameter** and implements both:
+
+| policy | the seed of sample `i` | what the number means |
+|---|---|---|
+| `sequence` (the default) | `md5_pseudo_random(sequence + i)`, `i` in `[0, N)` | the **expectation over the next N shots** — the seed advances with the command number, so `sequence + i` is a *different shot* |
+| `angle_grid` | `md5_pseudo_random(hash(probe yaw, probe pitch, tick))`, the probes sweeping the candidate's neighbourhood at `probe_step` | the **probability over the shot that would be taken** — the seed is a function of the aim, so within a cell there are many seeds and the lottery is the *choice* |
+
+> **The `angle_grid` hash is a STAND-IN.** The engine's `get_tick_view_angles` is
+> **not reverse-engineered** (`docs/re/aim.md` §"The seed"; the RVAs there resolve to
+> unrelated functions on the live build), so the hash is *ours*: the probe angles are
+> quantised onto a fixed grid and mixed with the tick. It reproduces the **shape** of
+> the community's model and nothing more — **the numbers that policy produces are
+> indicative, not exact.**
+
+### 13.5 The search and the selection rule
+
+The objective is not differentiable, so the search is a **bounded evaluation over a
+candidate set**: the best cells' **Chebyshev centres** and **centroids** — the same
+two candidates the existing solver's `field_candidates` builds — capped by a
+**documented budget** (`CandidateBudget`: 16 cells, 64 candidates), never a
+function of the field's size.
+
+The selection is the community's **lexicographic** rule
+(`docs/research/aim-objective-math.md` §2):
+
+1. a candidate that **can kill** (its expected damage reaches the target's
+   remaining health) beats one that cannot;
+2. then the **highest probability of any hit**;
+3. then the **hitgroup preference** — the repo has no ordered hitgroup list of its
+   own (the "head beats body" test works through the damage multiplier, not through
+   an order), so the module states the order it uses: **head, chest, stomach,
+   generic (neck/pelvis), arms, legs** (`hitgroup_preference`);
+4. then the highest expected damage (the final tie-break).
+
+### 13.6 The measured cost
+
+The committed benchmark (`payload/aim/bench/bench_montecarlo.cpp`, the `aim_bench`
+target) replays the committed saved cell set `artifacts/live-heatmap.json` (717
+cells) and publishes p50/p95/p99 for the community's sample counts, next to the
+existing objective's cost on the same field. It runs **from the repository root**
+(the data path is relative):
+
+```
+meson compile -C <build>
+<build>/aim_bench.exe
+```
+
+Measured on this machine (the host build, `debugoptimized`; the 717-cell saved set,
+24 reconstructed hitboxes, a cone radius of 0.002 rad — the same σ the published
+`argmax_hit_probability` number uses):
+
+| what | N=64 | N=128 | N=256 |
+|---|---|---|---|
+| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.070 / 0.096 / 0.099 ms | 0.141 / 0.190 / 0.198 ms | 0.283 / 0.370 / 0.394 ms |
+| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | **2.36 / 3.15 / 3.58 ms** | **4.75 / 5.33 / 5.61 ms** | **9.89 / 11.38 / 11.50 ms** |
+
+| the existing objective, on the same field | p50 | p95 | p99 |
+|---|---|---|---|
+| `argmax_hit_probability` (σ = 0.002) | 48.3 ms | 60.3 ms | 65.5 ms |
+| `hit_probability` (one evaluation) | 3.58 ms | 8.41 ms | 9.52 ms |
+
+One sample (one seed, one pellet, 24 hitboxes) costs **1.0 µs** (p50).
+
+**The verdict.** The Monte-Carlo search is **4–20× cheaper than the existing
+objective** on the same field. At 64 and 128 samples it fits the tick with room to
+spare (p99 3.6 ms and 5.6 ms against the 15.6 ms tick and the service's 12 ms
+guard); at **256 samples the p99 is 11.5 ms — inside the tick, but at the edge of the
+12 ms guard**, so the 256-sample mode does not fit the service's own budget with
+margin on this machine. The existing objective does **not** fit the tick at all
+(p50 48 ms).
+
+The published figure for the existing objective is 34 ms (`docs/ragebot-perf.md`
+§3.9); the out-of-tree harness that produced it measures 29–50 ms on this machine
+for the same call, so the two are the same order — the numbers above are the
+committed, reproducible ones.
+
+**The benchmark's hitboxes are a reconstruction.** The saved set stores the field's
+*chart* cells, not the world-space solids they came from, so the benchmark rebuilds
+one world-space capsule per (target, hitgroup) group. The **cost** is what is
+measured and the reconstruction preserves its shape (24 hitboxes over three
+targets, the same order as a live multi-target solve), but the **hit chances** the
+benchmark prints are not meaningful.
+
+### 13.7 What the new solver does not model
+
+* **The world.** The repo's design is Tier-2: it projects the world solids into the
+  chart instead of tracing rays (`docs/ragebot.md` §3). The Monte-Carlo solver
+  scores the **hitbox geometry only** — whether the shot is *visible* (or
+  penetrates a wall) stays the existing solver's job (`only_visible` / `penetrated`).
+* **The `sqrt(r)` question.** The RE listing has no `sqrt` between `RandomFloat` and
+  the `cos/sin`, and the repo's RE is the authority, so there is none
+  (`docs/research/aim-objective-math.md` §3.1). The host test pins the **linear**
+  radial law, so a `sqrt` would fail it loudly.
+* **The seed's truth.** Both policies are implemented; neither is declared the
+  engine's. That needs RE.
+* **The `√6` σ correction.** Not applied — it is blocked on the `sqrt(r)` question
+  and on the inaccuracy's units. A solver that uses the true kernel does not need it.
+
+### 13.8 The files
+
+| file | what |
+|---|---|
+| `payload/aim/include/cs2/aim/montecarlo.hpp` | the solver's API: the kernel, the seed policies, the sample, the hit test, the search |
+| `payload/aim/src/montecarlo.cpp` | the implementation |
+| `payload/aim/include/cs2/aim/ray_span.hpp` | the exact ray/solid span arithmetic, shared with the occluders |
+| `payload/aim/tests/test_aim_montecarlo.cpp` | the host test (`aim-montecarlo`) |
+| `payload/aim/bench/bench_montecarlo.cpp` | the committed benchmark (`aim_bench`) |
+| `artifacts/live-heatmap.json` | the saved cell set the benchmark replays (committed; the directory is git-ignored, so it is force-added) |
