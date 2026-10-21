@@ -316,6 +316,9 @@ class Lowerer {
     if (auto failure = lower_body()) {
       return failure;
     }
+    if (auto failure = place_locals()) {
+      return failure;
+    }
     return std::nullopt;
   }
 
@@ -327,6 +330,11 @@ class Lowerer {
   /// The number of slots the function uses.
   [[nodiscard]] auto slot_count() const -> std::size_t {
     return next_slot_;
+  }
+
+  /// The number of cells the locals of the function take.
+  [[nodiscard]] auto local_cells() const -> std::size_t {
+    return local_cells_;
   }
 
   /// The entries of the pool.
@@ -353,6 +361,12 @@ class Lowerer {
   std::vector<VmPoolEntry> pool_;
   std::vector<VmCallSite> call_sites_;
   std::size_t next_slot_{0};
+  /// The cells the locals of the function take.
+  std::size_t local_cells_{0};
+  /// The `alloca`s: the index of the instruction and the cell of the local
+  /// region that the local takes. The byte offset of a local is only known
+  /// when the lowering is over.
+  std::vector<std::pair<std::size_t, std::size_t>> local_fixups_;
 
   /// The labels the branches point at. A label is an index into this table;
   /// the table is filled at the end, because a branch may point forward.
@@ -644,6 +658,7 @@ class Lowerer {
         }
       }
     }
+
     return std::nullopt;
   }
 
@@ -936,12 +951,8 @@ class Lowerer {
       emit(zero);
       return std::nullopt;
     }
-    if (llvm::isa<llvm::AllocaInst>(instruction)) {
-      // The frame is a constant: there is no room for the locals of the
-      // function, and a frame that grows is not the frame the interpreter
-      // expects.
-      return VmFailure{VmRefusal::unsupported_instruction,
-                       "the function has an alloca: the frame has no room for the locals"};
+    if (auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction)) {
+      return lower_alloca(*alloca);
     }
     if (llvm::isa<llvm::AtomicRMWInst>(instruction) ||
         llvm::isa<llvm::AtomicCmpXchgInst>(instruction) ||
@@ -990,6 +1001,77 @@ class Lowerer {
     mask.src1 = slot;
     mask.src2 = *one;
     emit(mask);
+    return std::nullopt;
+  }
+
+  /// Lowers an `alloca`: the local lives in the frame arena.
+  ///
+  /// The parent specification says that an `alloca` gets a byte offset into
+  /// the frame arena, and the frame **is** an arena: the locals are the
+  /// cells above the value slots, and the frame does not grow. The opcode
+  /// carries the byte offset, so the bytecode holds a relative offset and
+  /// never an address.
+  ///
+  /// The byte offset is only known when the lowering is over (the value
+  /// slots above the locals are allocated as the lowering goes), so the
+  /// instruction is patched at the end.
+  [[nodiscard]] auto lower_alloca(llvm::AllocaInst& alloca) -> std::optional<VmFailure> {
+    if (alloca.isArrayAllocation()) {
+      return VmFailure{VmRefusal::local_variable,
+                       "the alloca has a variable size: the frame is a constant"};
+    }
+    if (alloca.getAddressSpace() != 0) {
+      return VmFailure{VmRefusal::local_variable,
+                       "the alloca is in another address space: the frame is not"};
+    }
+    llvm::Type* type = alloca.getAllocatedType();
+    const auto size = data_layout_.getTypeAllocSize(type);
+    if (size.isScalable()) {
+      return VmFailure{VmRefusal::local_variable, "the size of the local is not constant"};
+    }
+    const auto alignment = alloca.getAlign().value();
+    if (alignment > k_frame_cell_bytes) {
+      return VmFailure{VmRefusal::local_variable,
+                       "the local needs an alignment of " + std::to_string(alignment) +
+                           " bytes: the cells of the frame are 8 bytes"};
+    }
+    const auto bytes = size.getFixedValue();
+    const auto cells = (bytes + k_frame_cell_bytes - 1) / k_frame_cell_bytes;
+
+    const auto dst = slot_of(&alloca);
+    if (!dst.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction, "the alloca has no slot"};
+    }
+    VmInstruction instruction;
+    instruction.opcode = VmOpcode::Alloca;
+    instruction.width = 8;
+    instruction.dst = *dst;
+    instruction.imm = 0;  // the byte offset is patched when the lowering is over
+    local_fixups_.emplace_back(code_.size(), local_cells_);
+    local_cells_ += cells;
+    emit(instruction);
+    return std::nullopt;
+  }
+
+  /// Puts the locals in the frame, and checks that they fit.
+  ///
+  /// The locals are the cells above the value slots, so their byte offsets
+  /// are only known when the lowering is over: the value slots above them
+  /// are allocated as the lowering goes.
+  [[nodiscard]] auto place_locals() -> std::optional<VmFailure> {
+    if (local_cells_ == 0) {
+      return std::nullopt;
+    }
+    if (next_slot_ + local_cells_ > k_frame_value_slots) {
+      return VmFailure{VmRefusal::local_variable,
+                       "the locals need " + std::to_string(local_cells_) +
+                           " cells and the value region of the frame has " +
+                           std::to_string(k_frame_value_slots - next_slot_) + " left"};
+    }
+    for (const auto& [instruction, cell] : local_fixups_) {
+      code_[instruction].imm =
+          static_cast<std::uint64_t>(next_slot_ + cell) * k_frame_cell_bytes;
+    }
     return std::nullopt;
   }
 
@@ -1817,7 +1899,7 @@ class Lowerer {
   write_le<std::uint32_t>(buffer, 16, header.call_slots);
   write_le<std::uint32_t>(buffer, 20, header.instruction_count);
   write_le<std::uint32_t>(buffer, 24, header.flags);
-  write_le<std::uint32_t>(buffer, 28, header.reserved);
+  write_le<std::uint32_t>(buffer, 28, header.local_cells);
 
   for (std::size_t index = 0; index < code.size(); ++index) {
     const VmInstruction& instruction = code[index];
@@ -1866,6 +1948,8 @@ auto to_string(VmRefusal reason) noexcept -> const char* {
       return "dynamic_memcpy";
     case VmRefusal::unsupported_type:
       return "unsupported_type";
+    case VmRefusal::local_variable:
+      return "local_variable";
     case VmRefusal::address_taken:
       return "address_taken";
     case VmRefusal::too_many_slots:
@@ -1946,6 +2030,7 @@ auto analyze_function(llvm::Function& function, const VmOptions& options) -> VmF
 
   result.virtualizable = true;
   result.slots = lowerer.slot_count();
+  result.local_cells = lowerer.local_cells();
   result.instructions = lowerer.code().size();
   result.calls = lowerer.call_sites().size();
   result.pool = lowerer.pool();
@@ -1960,6 +2045,7 @@ auto analyze_function(llvm::Function& function, const VmOptions& options) -> VmF
   result.header.call_slots = static_cast<std::uint32_t>(k_frame_call_slots);
   result.header.instruction_count = static_cast<std::uint32_t>(result.instructions);
   result.header.flags = k_vm_flag_encrypted | k_vm_flag_permuted;
+  result.header.local_cells = static_cast<std::uint32_t>(result.local_cells);
 
   result.blob = encode(result.code, result.header, result.key, perm_a, perm_b);
   result.bytecode_bytes = result.blob.size();

@@ -93,3 +93,12 @@ entry:
   call void @llvm.memcpy.p0.p0.i64(ptr %destination, ptr %source, i64 16, i1 false)
   ret void
 }
+
+; A local variable: the local is a byte offset into the frame arena.
+define i32 @vm_alloca(i32 %x) {
+entry:
+  %slot = alloca i32
+  store i32 %x, ptr %slot
+  %value = load i32, ptr %slot
+  ret i32 %value
+}

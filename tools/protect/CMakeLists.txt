@@ -139,6 +139,30 @@ target_compile_options(cs2-protect-tests PRIVATE ${CS2_PROTECT_COMPILE_OPTIONS})
 target_link_libraries(cs2-protect-tests PRIVATE ${LLVM_LIBS_FIXED})
 add_test(NAME protect-tests COMMAND cs2-protect-tests)
 
+# The value-level test of the front end: the unit test above checks the
+# *shape* of the bytecode, and this one checks the *values*. It reads the
+# container, decrypts it with the keystream of the contract and executes
+# the bytecode in an interpreter written from the documented contract, so
+# a disagreement between the encoder and the contract is a real
+# disagreement.
+add_executable(cs2-protect-vm-values-test
+  tests/vm_values_test.cpp
+  src/config.cpp
+  src/selection.cpp
+  src/report.cpp
+  src/transform.cpp
+  src/cipher.cpp
+  src/vm.cpp
+)
+target_compile_features(cs2-protect-vm-values-test PRIVATE ${CS2_PROTECT_CXX_STANDARD})
+target_include_directories(cs2-protect-vm-values-test SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_include_directories(cs2-protect-vm-values-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(cs2-protect-vm-values-test PRIVATE ${LLVM_DEFINITIONS})
+target_compile_options(cs2-protect-vm-values-test PRIVATE ${LLVM_DEFINITIONS_LIST})
+target_compile_options(cs2-protect-vm-values-test PRIVATE ${CS2_PROTECT_COMPILE_OPTIONS})
+target_link_libraries(cs2-protect-vm-values-test PRIVATE ${LLVM_LIBS_FIXED})
+add_test(NAME protect-vm-values-test COMMAND cs2-protect-vm-values-test)
+
 # --- The IR-level test and the differential test -----------------------------
 # The pass rewrites calls, so a mistake shows up as a *wrong call target*,
 # not as a crash. The two tests below are the ones that catch it:

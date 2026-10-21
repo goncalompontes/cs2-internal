@@ -152,16 +152,20 @@ inline constexpr std::size_t k_frame_call_slots = k_max_call_arguments;
 /// are absolute. The layout is
 ///
 ///     [0, slot_count)                  the value slots
-///     [slot_count, +arg_slots)         the argument stack
-///     [slot_count + arg_slots, +call)  the call scratch
+///     [slot_count, +local_cells)       the locals
+///     [slot_count + local_cells, +arg_slots)         the argument stack
+///     [slot_count + local_cells + arg_slots, +call)  the call scratch
 ///
-/// and the header of the bytecode carries the three sizes, so the
-/// interpreter reads the layout out of the header instead of assuming it.
+/// and the header of the bytecode carries the sizes, so the interpreter
+/// reads the layout out of the header instead of assuming it.
 inline constexpr std::size_t k_frame_cells =
     k_frame_value_slots + k_frame_argument_slots + k_frame_call_slots;
 
+/// The size of a cell of the frame, in bytes.
+inline constexpr std::size_t k_frame_cell_bytes = 8;
+
 /// The size of the frame, in bytes.
-inline constexpr std::size_t k_frame_bytes = k_frame_cells * 8U;
+inline constexpr std::size_t k_frame_bytes = k_frame_cells * k_frame_cell_bytes;
 
 // --- The refusal reasons ------------------------------------------------------
 
@@ -193,6 +197,11 @@ enum class VmRefusal : std::uint8_t {
   unsupported_type,         ///< a float, a vector, an aggregate or an address
                             ///< wider than 64 bits: this task handles integers of
                             ///< at most 64 bits and pointers only.
+  local_variable,           ///< the function has a local variable that the
+                            ///< frame cannot hold: the frame is a constant, so
+                            ///< the local gets a byte offset into the frame
+                            ///< arena, and a local that does not fit is
+                            ///< refused.
   address_taken,            ///< the address of the function is taken (`&F`): the
                             ///< rewrite changes what the address means.
   too_many_slots,           ///< the function needs more slots than the budget.
@@ -261,7 +270,8 @@ struct VmHeader {
   std::uint32_t call_slots{0};  ///< the size of the call scratch.
   std::uint32_t instruction_count{0};
   std::uint32_t flags{0};
-  std::uint32_t reserved{0};
+  std::uint32_t local_cells{0};  ///< the number of cells the locals take: they
+                                 ///< are the cells above the value slots.
 };
 
 /// One entry of the pool.
@@ -302,6 +312,7 @@ struct VmFunction {
   bool virtualizable{false};
   VmFailure failure{};                   ///< the refusal, when the function is refused.
   std::size_t slots{0};                  ///< the number of value slots.
+  std::size_t local_cells{0};            ///< the number of cells the locals take.
   std::size_t frame_bytes{0};            ///< the size of the frame, in bytes.
   std::size_t instructions{0};           ///< the number of bytecode instructions.
   std::size_t calls{0};                  ///< the number of call sites.

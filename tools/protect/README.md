@@ -121,17 +121,21 @@ function that cannot be protected is *blocked*, not matched), the
 coverage file (two modules with different identifiers write two files),
 the front end of the virtualizer (the eligibility, the lowering, the
 parallel copy of a PHI, the flags of the arithmetic and the refusal
-reasons) and the IR of the analysis (the verdict of every function of a
-fixture, and the proof that the analysis does not touch the IR).
+reasons), the **values** the bytecode computes (the container is
+decrypted with the keystream of the contract and executed in an
+interpreter written from the contract) and the IR of the analysis (the
+verdict of every function of a fixture, and the proof that the analysis
+does not touch the IR).
 
-There are **five** tests:
+There are **six** tests:
 
 ```
-  1/5 Test #1: protect-tests ....................   Passed
-  2/5 Test #2: protect-ir-test ..................   Passed
-  3/5 Test #3: protect-diff-test ................   Passed
-  4/5 Test #4: protect-coverage-test ............   Passed
-  5/5 Test #5: protect-vm-ir-test ...............   Passed
+  1/6 Test #1: protect-tests ....................   Passed
+  2/6 Test #2: protect-ir-test ..................   Passed
+  3/6 Test #3: protect-diff-test ................   Passed
+  4/6 Test #4: protect-coverage-test ............   Passed
+  5/6 Test #5: protect-vm-values-test ...........   Passed
+  6/6 Test #6: protect-vm-ir-test ...............   Passed
 ```
 
 ## 3. Enabling it in the payload build
@@ -906,9 +910,11 @@ number never appears in the image.
 | `MemCpy` | src1, src2, imm | copies a **constant** number of bytes |
 | `MemSet` | src1, src2, imm | sets a **constant** number of bytes |
 | `Pool` | dst, imm | dst = the pool entry imm (a relocatable pointer) |
+| `Alloca` | dst, imm | dst = the address of the frame's local at the byte offset `imm` |
 
-Two of the opcodes are **not** in the specification's table, and both are
-there because the table cannot express what the lowering has to express:
+Three of the opcodes are **not** in the specification's table, and all
+three are there because the table cannot express what the lowering has
+to express:
 
 * **`Pop`** — the parallel copy of a PHI pushes every source and pops
   every destination in the reverse order (§14.3), and the argument stack
@@ -921,7 +927,14 @@ there because the table cannot express what the lowering has to express:
   therefore not in the bytecode; the **pool** holds it, and the pool is a
   relocatable global (the linker emits the DIR64 fixups for its
   entries). The `Call` opcode uses the same pool for the callees: one
-  entry per call site, and the bytecode holds the index.
+  entry per call site, and the bytecode holds the index. The pool holds
+  the **data** pointers as well (the address of a global), and the
+  opcode tells the two apart.
+* **`Alloca`** — a local variable is a **byte offset into the frame
+  arena** (T20 §2.3), and the frame is an arena. The opcode carries the
+  offset, so the bytecode holds a relative offset and never an address;
+  the interpreter adds the base of the frame to it, and the local is
+  then real memory, like every other pointer of the virtual machine.
 
 A `switch` is lowered to a chain of `Cmp` + `BrIf`. It is not refused.
 
@@ -956,7 +969,7 @@ u32 arg_slots      the size of the argument-stack region
 u32 call_slots     the size of the call-scratch region
 u32 instruction_count
 u32 flags          bit 0: the container is encrypted, bit 1: the opcodes are permuted
-u32 reserved
+u32 local_cells    the number of cells the locals take
 ```
 
 The header is the **contract** between the encoder and the interpreter:
@@ -972,8 +985,9 @@ absolute.
 
 ```
 [0, slot_count)                  the value slots        (256 cells at most)
-[slot_count, +arg_slots)         the argument stack     (64 cells)
-[slot_count + arg_slots, +call)  the call scratch       (64 cells)
+[slot_count, +local_cells)       the locals            (the arena above the value slots)
+[slot_count + local_cells, +arg_slots)         the argument stack     (64 cells)
+[slot_count + local_cells + arg_slots, +call)  the call scratch       (64 cells)
 ```
 
 **384 cells, 3072 bytes.** The specification's §6 table says 2560 bytes,
@@ -985,6 +999,10 @@ three regions the layout describes, and the report says 3072.
 * the **value slots** hold the values: one slot per SSA value, plus the
   slots of the constants, of the globals and of the temporaries the
   lowering needs;
+* the **locals** are the cells above the value slots: a local variable
+  is a byte offset into the frame arena (T20 §2.3), and the arena is
+  the frame. The value region holds 256 cells at most, so a function
+  whose locals do not fit is **refused** (`local_variable`);
 * the **argument stack** holds the values that were pushed for a call
   (`Arg`), and the values of a parallel copy (`Arg` and `Pop`). The
   pushes and the pops are balanced, so the stack is empty at every
@@ -1030,6 +1048,25 @@ The whole container is encrypted, the header included: an analyst reads
 nothing but noise. The header is what the interpreter reads *after* it
 has decrypted it, so there is nothing to gain from leaving it in the
 clear.
+
+**The keystream, exactly.** The word at the byte offset `n` is
+
+```
+mix64(key + (n / 8) * 0x9E3779B97F4A7C15)
+```
+
+and the byte at the offset `n` is its `(n % 8)`-th byte, little
+endian. The mixer is
+
+```
+mix64(v) = rotl((v * 0x9E3779B97F4A7C15) ^ 0xBF58476D1CE4E5B9, 31)
+```
+
+and the key is the xor of the **three** parts of the key, mixed: the
+parts come from `splitmix64` over the module seed, a part that is zero
+becomes one, and two equal parts are redrawn (they would cancel each
+other in the xor). The interpreter decrypts **on fetch**, so the blob
+stays read-only and the interpreter is re-entrant.
 
 The **opcode permutation** is `p(x) = (x * k_a + k_b) mod N`, with `k_a`
 odd and coprime with the number of the opcodes and `k_b` from the module
@@ -1106,6 +1143,7 @@ reported as `too_many_arguments`.
 | `atomic_access` | an atomic access: the ordering guarantees are not modelled |
 | `dynamic_memcpy` | a `memcpy` / `memset` with a **non-constant** length: it would lower to a CRT call |
 | `unsupported_type` | a float, a vector, an aggregate or an integer of more than 64 bits: this task handles integers of at most 64 bits and pointers only |
+| `local_variable` | the function has a local variable that the frame cannot hold: the locals are the cells above the value slots, and a local that does not fit (or one that needs more than eight bytes of alignment, or one whose size is not constant) is refused |
 | `address_taken` | the address of the function is taken (`&F`): the rewrite changes what the address means |
 | `too_many_slots` | the function needs more slots than the budget |
 | `too_many_arguments` | a call needs more arguments than the budget |
@@ -1129,11 +1167,21 @@ What the lowering models: the integer and pointer arithmetic, the
 comparisons, the conversions, the loads and the stores, the `getelementptr`
 (both the constant and the variable indices), the branches, the `switch`,
 the `select` (a branch), the `phi` (a parallel copy, §14.3), the
-`freeze`, the `memcpy` and the `memset` with a constant length, the calls
-and the `ret`. What it refuses: the floats, the aggregates, the
-`alloca` (the frame is a constant and has no room for the locals), the
-`memmove` (it may copy overlapping ranges), the atomic and the volatile
-accesses, and everything else.
+`freeze`, the `alloca` (a byte offset into the frame arena, §14.3), the
+`memcpy` and the `memset` with a constant length, the calls and the
+`ret`. What it refuses: the floats, the aggregates, a local that the
+frame cannot hold (`local_variable`), the `memmove` (it may copy
+overlapping ranges), the atomic and the volatile accesses, and
+everything else.
+
+**The moves of a PHI belong to the edge.** A PHI becomes edge
+assignments (§14.3): the predecessor performs the moves of the
+successor's PHIs **before its branch, on the edge that leads to the
+successor**. The taken edge of a conditional branch therefore gets a
+trampoline, and every case of a `switch` gets one of its own: the moves
+of an edge that is not taken are not performed. A copy that runs on the
+wrong edge is observable — a back edge that swaps two values would swap
+them even when the loop is left.
 
 ### 14.8 What the analysis says about the payload
 
@@ -1142,8 +1190,8 @@ and it is in the report (§7) and in the coverage (§9). The coverage
 gains a `vm` line per function:
 
 ```
-vm ?newest@RecordRing@aim@cs2@@QEBAPEBURecord@23@XZ verdict=virtualizable slots=7 frame=3072 bytecode=392 instructions=15 calls=2
-vm ?solve@aim@cs2@@YA?AUSolveResult@12@… verdict=refused reason=eh_pad detail=the_function_has_an_EH_edge slots=0 frame=3072 bytecode=0 instructions=0 calls=0
+vm ?newest@RecordRing@aim@cs2@@QEBAPEBURecord@23@XZ verdict=virtualizable slots=7 locals=0 frame=3072 bytecode=392 instructions=15 calls=2
+vm ?solve@aim@cs2@@YA?AUSolveResult@12@… verdict=refused reason=eh_pad detail=the_function_has_an_EH_edge slots=0 locals=0 frame=3072 bytecode=0 instructions=0 calls=0
 ```
 
 The section is **new**: a coverage file of an older build has no `vm`

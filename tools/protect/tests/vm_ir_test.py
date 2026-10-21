@@ -42,6 +42,7 @@ EXPECTED: dict[str, tuple[str, str]] = {
     "vm_call": ("virtualizable", ""),
     "vm_memcpy": ("refused", "dynamic_memcpy"),
     "vm_memcpy_constant": ("virtualizable", ""),
+    "vm_alloca": ("virtualizable", ""),
 }
 
 #: One line of the report: the verdict of one function.

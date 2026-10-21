@@ -1037,6 +1037,39 @@ void test_vm_refusals() {
                   "an instruction the lowering does not model is refused");
   }
 
+  // A local variable whose size is not constant: the frame is a constant.
+  {
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                            llvm::GlobalValue::ExternalLinkage, "dynamic_local",
+                                            &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    builder.CreateAlloca(i32, function->getArg(0), "slot");
+    builder.CreateRet(function->getArg(0));
+    check_refused(*function, cs2::protect::VmRefusal::local_variable,
+                  "a local with a variable size is refused");
+  }
+
+  // Locals that do not fit in the frame: the value region of the frame
+  // holds 256 cells, and the locals are the cells above the value slots.
+  {
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                            llvm::GlobalValue::ExternalLinkage, "big_local",
+                                            &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    // 64 cells of local, and 200 values: the sum does not fit.
+    builder.CreateAlloca(llvm::ArrayType::get(llvm::Type::getInt64Ty(context), 64), nullptr,
+                         "buffer");
+    llvm::Value* value = function->getArg(0);
+    for (int index = 0; index < 200; ++index) {
+      value = builder.CreateAdd(value, builder.getInt32(1));
+    }
+    builder.CreateRet(value);
+    check_refused(*function, cs2::protect::VmRefusal::local_variable,
+                  "locals that do not fit in the frame are refused");
+  }
+
   // A callee with an `sret` parameter: Windows x64 rejects it in an
   // indirect signature.
   {
@@ -1098,6 +1131,34 @@ void test_vm_refusals() {
   }
 }
 
+/// The virtualizer's front end: a function that did not survive.
+///
+/// The transform reports such a function as `vanished`, and the analysis
+/// has to say the same: an operator who cannot tell "not selected" from
+/// "selected and deleted by the optimiser" cannot act on the verdict.
+void test_vm_vanished() {
+  llvm::LLVMContext context;
+  llvm::Module module("vanished.obj", context);
+  auto* function = llvm::Function::Create(
+      llvm::FunctionType::get(llvm::Type::getInt32Ty(context), {}, false),
+      llvm::GlobalValue::ExternalLinkage, "survivor", &module);
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+  llvm::IRBuilder<> builder(entry);
+  builder.CreateRet(builder.getInt32(0));
+
+  cs2::protect::Config config;
+  const std::vector<std::string> symbols{"survivor", "ghost"};
+  const auto results = cs2::protect::analyze_module(module, config, symbols, {});
+  check(results.size() == 2, "the analysis has a verdict for every selected function");
+  if (results.size() != 2) {
+    return;
+  }
+  check(results[0].virtualizable, "the function that is there is virtualizable");
+  check(!results[1].virtualizable, "the function that vanished is not virtualizable");
+  check(results[1].failure.reason == cs2::protect::VmRefusal::vanished,
+        "the function that vanished is reported as vanished");
+}
+
 /// The virtualizer's front end: a call.
 void test_vm_call() {
   llvm::LLVMContext context;
@@ -1149,6 +1210,7 @@ auto main() -> int {
   test_vm_freeze();
   test_vm_refusals();
   test_vm_call();
+  test_vm_vanished();
   if (g_failures != 0) {
     std::printf("protect: %d check(s) failed\n", g_failures);
     return 1;

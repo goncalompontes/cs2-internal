@@ -81,6 +81,7 @@ struct CoverageVm {
                        ///< virtualizable).
   std::string detail;  ///< what the refusal is about.
   std::size_t slots{0};
+  std::size_t local_cells{0};  ///< the number of cells the locals take.
   std::size_t frame_bytes{0};
   std::size_t bytecode_bytes{0};
   std::size_t instructions{0};

@@ -314,7 +314,8 @@ void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& 
     }
     if (function.virtualizable) {
       llvm::errs() << " virtualizable"
-                   << " slots=" << function.slots << " frame=" << function.frame_bytes
+                   << " slots=" << function.slots << " locals=" << function.local_cells
+                   << " frame=" << function.frame_bytes
                    << " bytecode=" << function.bytecode_bytes
                    << " instructions=" << function.instructions << " calls=" << function.calls;
     } else {
@@ -339,6 +340,7 @@ auto coverage_vm(const std::vector<VmFunction>& functions) -> std::vector<Covera
       entry.detail = function.failure.detail;
     }
     entry.slots = function.slots;
+    entry.local_cells = function.local_cells;
     entry.frame_bytes = function.frame_bytes;
     entry.bytecode_bytes = function.bytecode_bytes;
     entry.instructions = function.instructions;
@@ -498,6 +500,8 @@ auto write_coverage(const Config& config, const llvm::Module& module,
     }
     text += " slots=";
     text += std::to_string(function.slots);
+    text += " locals=";
+    text += std::to_string(function.local_cells);
     text += " frame=";
     text += std::to_string(function.frame_bytes);
     text += " bytecode=";
