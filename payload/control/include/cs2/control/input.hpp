@@ -832,22 +832,40 @@ class Input {
   }
   // The refusals, broken down by reason — so the operator can tell "the
   // codec has not run yet" from "every capture aged out" (a stalled
-  // connection) and from "the capture was already used" (the
-  // specification's once-per-capture rule, which is the normal case).
+  // connection) and from "the controller changed" (the pawn respawned) and
+  // from "the graph parameter could not be written" (the write path failed).
   [[nodiscard]] std::uint64_t animfix_skip_no_capture() const noexcept {
     return animfix_skip_no_capture_.load();
   }
   [[nodiscard]] std::uint64_t animfix_skip_stale() const noexcept {
     return animfix_skip_stale_.load();
   }
+  // The anim ticks the driver ran — **every** tick, whether or not the
+  // animfix is on. This is the driver's own counter, not the animfix's: do
+  // **not** divide the correction counter by it (see
+  // `animfix_enabled_client_ticks`).
   [[nodiscard]] std::uint64_t animfix_anim_ticks() const noexcept {
     return animfix_anim_ticks_.load();
   }
   [[nodiscard]] std::uint64_t animfix_client_ticks() const noexcept {
     return animfix_client_ticks_.load();
   }
+  // The **client** anim ticks that ran while the animfix was **on**: the
+  // denominator the duty cycle is measured against.
+  //
+  // The animfix is off by default, and the driver's own counters climb
+  // whether or not it is on — so `animfix_corrected_ticks` (which only moves
+  // while it is on) over `animfix_client_ticks` (which moves since the
+  // payload started) divides two counters with **different windows**, and
+  // the quotient is diluted by the payload's uptime: a feature that works
+  // perfectly reads as 0 % after an hour. This counter closes the windows:
+  // both it and the correction counter only move while the animfix is on.
+  [[nodiscard]] std::uint64_t animfix_enabled_client_ticks() const noexcept {
+    return animfix_enabled_client_ticks_.load();
+  }
   // The anim ticks on which the correction won: the **duty cycle** is this
-  // over the client anim ticks.
+  // over `animfix_enabled_client_ticks` (the client anim ticks that ran
+  // while the animfix was on) — not over `animfix_client_ticks`.
   [[nodiscard]] std::uint64_t animfix_corrected_ticks() const noexcept {
     return animfix_corrected_ticks_.load();
   }
@@ -861,16 +879,26 @@ class Input {
   [[nodiscard]] std::uint64_t animfix_skip_controller() const noexcept {
     return animfix_skip_controller_.load();
   }
+  // The graph parameters the animfix could **not** write (the page is not
+  // writable, or the object was freed between the read and the write). It is
+  // a failure of its own: the controller answered, but the write did not
+  // land.
+  [[nodiscard]] std::uint64_t animfix_skip_write_failed() const noexcept {
+    return animfix_skip_write_failed_.load();
+  }
   // The observed **snapshot interval** (the server's rate), in milliseconds:
   // the staleness bound is measured against it, so this is what tells the
   // operator how old the server's values are allowed to be.
   [[nodiscard]] std::uint64_t animfix_snapshot_interval_ms() const noexcept {
     return animfix_snapshot_interval_.load();
   }
-  // How many captured values the **engine's own guard** refused (a NaN, an
+  // How many **captures** the **engine's own guard** refused (a NaN, an
   // infinity, or a value outside the engine's range). The captured values are
   // network-controlled, so this is the count of "the server sent something
-  // the graph must not hold" — it should be zero.
+  // the graph must not hold" — it should be zero. It counts **one refusal
+  // per capture**, not per apply: the capture is re-applied on every anim
+  // tick, so a per-apply count would climb at the tick rate and hide how
+  // many *snapshots* were bad.
   [[nodiscard]] std::uint64_t animfix_rejected() const noexcept {
     return animfix_rejected_.load();
   }
@@ -1398,8 +1426,15 @@ class Input {
   void count_animfix_refusal(animfix::Refusal refusal) noexcept;
   // The local player's `CCS2PawnGraphController*` (0 when it is not known).
   [[nodiscard]] auto animfix_controller() const noexcept -> std::uintptr_t;
-  // The status string (why the animfix is not ready, or "ok").
-  void set_animfix_status(std::string status) noexcept;
+  // Set the status the operator reads **and** write it to the log — but
+  // only when the status **changed**.
+  //
+  // The hooks are installed from the CreateMove detour, which runs on every
+  // tick, and the log helper opens, writes and closes the log file on every
+  // call: a line per tick would be ~64 file round trips a second on the
+  // game's main thread and ~500 MB of log a day. The latch is what keeps
+  // the log to one line per distinct status.
+  void report_animfix_status(std::string status, std::string log_line) noexcept;
   cs2::hooks::InlineHook animfix_codec_hook_{};
   cs2::hooks::InlineHook animfix_anim_tick_hook_{};
   // The capture's state is touched on the **game's main thread** only (the
@@ -1413,6 +1448,9 @@ class Input {
   std::string animfix_status_{
       "the animfix's hooks are not installed yet (they are installed on the game's "
       "first command)"};
+  // The latch that keeps the log quiet: it holds the last status that was
+  // written to the log, so the log gets a line only when the status changes.
+  animfix::StatusLatch animfix_status_latch_{};
   std::atomic<bool> animfix_enabled_{false};
   std::atomic<bool> animfix_data_valid_{false};
   std::atomic<std::uint64_t> animfix_captures_{0};
@@ -1422,12 +1460,17 @@ class Input {
   std::atomic<std::uint64_t> animfix_skip_no_capture_{0};
   std::atomic<std::uint64_t> animfix_skip_stale_{0};
   std::atomic<std::uint64_t> animfix_skip_controller_{0};
+  std::atomic<std::uint64_t> animfix_skip_write_failed_{0};
   // The anim ticks the driver ran, and the ones that were the **client**
   // tick (the driver takes a flag: 0 = the server tick, otherwise the client
   // tick - the correction is written on the client tick, because that is the
   // graph the local player's hitboxes come from).
   std::atomic<std::uint64_t> animfix_anim_ticks_{0};
   std::atomic<std::uint64_t> animfix_client_ticks_{0};
+  // The client anim ticks that ran while the animfix was **on**: the
+  // denominator of the duty cycle (the correction counter only moves while
+  // the animfix is on, so this closes the windows).
+  std::atomic<std::uint64_t> animfix_enabled_client_ticks_{0};
   std::atomic<std::uint64_t> animfix_corrected_ticks_{0};
   std::atomic<std::uint64_t> animfix_snapshot_interval_{0};
   std::atomic<bool> animfix_acted_{false};

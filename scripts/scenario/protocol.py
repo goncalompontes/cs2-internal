@@ -551,8 +551,14 @@ class InputStatus(TypedDict, total=False):
     animfix_skip_no_capture: int
     animfix_skip_stale: int
     animfix_skip_controller: int
+    animfix_skip_write_failed: int
     animfix_anim_ticks: int
     animfix_client_ticks: int
+    # The client anim ticks that ran while the animfix was **on**: the
+    # denominator of the duty cycle. The counters above are cumulative and
+    # the animfix is off by default, so the driver's own client-tick counter
+    # counts ticks from before the feature was ever switched on.
+    animfix_enabled_client_ticks: int
     animfix_client_tick_seen: bool
     animfix_corrected_ticks: int
     animfix_snapshot_interval_ms: int

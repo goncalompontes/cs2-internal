@@ -1501,6 +1501,10 @@ void __fastcall Input::create_move_input_detour(void* self, int slot, char activ
 // see the report.
 
 void __fastcall Input::animfix_codec_detour(void* dst, void* src, void* schema) noexcept {
+  // A game thread has no TLS block for our mapped image until we install one.
+  // (The codec runs on the network thread, so this is not a formality: see
+  // `docs/re/camera-split.md`.)
+  cs2::tls::ensure_thread_tls();
   // The original runs **first**: the codec writes the server's values into
   // the slots, and the capture copies them out afterwards.
   Input* input = g_active;
@@ -1515,6 +1519,8 @@ void __fastcall Input::animfix_codec_detour(void* dst, void* src, void* schema) 
 }
 
 void __fastcall Input::animfix_anim_tick_detour(void* self, int client_tick_flag) noexcept {
+  // A game thread has no TLS block for our mapped image until we install one.
+  cs2::tls::ensure_thread_tls();
   Input* input = g_active;
   if (input == nullptr) {
     return;
@@ -1534,6 +1540,11 @@ void __fastcall Input::animfix_anim_tick_detour(void* self, int client_tick_flag
   // oscillate at the server's tick rate.)
   if (client_tick_flag != 0 && input->animfix_enabled_.load()) {
     input->animfix_apply();
+    // The **duty cycle**'s denominator: the client anim ticks that ran
+    // while the animfix was **on**. The correction counter only moves while
+    // it is on, so this closes the windows - dividing the two absolute
+    // counters would dilute the duty cycle by the payload's uptime.
+    input->animfix_enabled_client_ticks_.fetch_add(1);
   }
   input->animfix_anim_ticks_.fetch_add(1);
   if (client_tick_flag != 0) {
@@ -1572,15 +1583,19 @@ void Input::animfix_capture(void* controller) noexcept {
     }
   }
   const std::uint64_t now = animfix_now_ms();
+  std::uint64_t interval = 0;
   {
     const std::lock_guard<std::mutex> lock(animfix_mutex_);
     animfix::store(animfix_capture_, local, values, now);
     // The server's snapshot rate: the animfix's staleness bound is measured
     // against it (see `animfix::snapshot_bound_ms`).
     animfix::observe_decode(animfix_clock_, now);
+    // The estimate reads the clock, so it is taken **under the lock** like
+    // every other access to it.
+    interval = animfix::snapshot_interval_ms(animfix_clock_);
   }
   animfix_captures_.fetch_add(1);
-  animfix_snapshot_interval_.store(animfix::snapshot_interval_ms(animfix_clock_));
+  animfix_snapshot_interval_.store(interval);
   animfix_server_yaw_.store(values[animfix::slot_position(animfix::Slot::aim_yaw)]);
 }
 
@@ -1651,6 +1666,7 @@ void Input::animfix_apply() noexcept {
   for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
     const animfix::Slot slot = animfix::k_tracked_slots[i];
     float server = 0.0F;
+    std::uint64_t generation = 0;
     {
       const std::lock_guard<std::mutex> lock(animfix_mutex_);
       const animfix::Decision decision =
@@ -1663,6 +1679,7 @@ void Input::animfix_apply() noexcept {
         break;
       }
       server = animfix_capture_.values[animfix::slot_position(slot)];
+      generation = animfix_capture_.generation;
     }
     // The graph parameter's address: node -> the parameter array -> the
     // parameter object -> the value.
@@ -1682,6 +1699,10 @@ void Input::animfix_apply() noexcept {
     // The client's own prediction — the value that is in the graph now.
     float current = 0.0F;
     if (!cs2::game::read(value_address, current)) {
+      // The parameter does not answer: the controller is gone, or the object
+      // was freed under us. Counted, so the operator can tell "idle because
+      // I am dead" from "broken".
+      count_animfix_refusal(animfix::Refusal::controller);
       continue;
     }
     if (slot == animfix::Slot::aim_yaw && current != server) {
@@ -1701,10 +1722,25 @@ void Input::animfix_apply() noexcept {
     // network-controlled, so the animfix has to refuse exactly what the
     // engine's setter would refuse (and count the refusals).
     if (!animfix::value_is_writable(server)) {
-      animfix_rejected_.fetch_add(1);
+      // Counted **once per capture**: the capture is re-applied on every
+      // anim tick, so a per-apply count would climb at the tick rate and
+      // hide how many *snapshots* the server sent something the graph must
+      // not hold.
+      bool first = false;
+      {
+        const std::lock_guard<std::mutex> lock(animfix_mutex_);
+        first = animfix::mark_guard_refused(animfix_capture_, generation);
+      }
+      if (first) {
+        animfix_rejected_.fetch_add(1);
+      }
       continue;
     }
     if (!cs2::game::write_bytes(value_address, &server, sizeof(server))) {
+      // The write itself failed: the page is not writable, or the object was
+      // freed between the read and the write. Its own reason, so the
+      // operator can tell it from "the controller does not answer".
+      count_animfix_refusal(animfix::Refusal::write_failed);
       continue;
     }
     {
@@ -1742,6 +1778,9 @@ void Input::count_animfix_refusal(animfix::Refusal refusal) noexcept {
     case animfix::Refusal::controller:
       animfix_skip_controller_.fetch_add(1);
       break;
+    case animfix::Refusal::write_failed:
+      animfix_skip_write_failed_.fetch_add(1);
+      break;
     case animfix::Refusal::not_tracked:
     case animfix::Refusal::none:
       break;
@@ -1757,9 +1796,20 @@ auto Input::animfix_status() const noexcept -> std::string {
   return animfix_status_;
 }
 
-void Input::set_animfix_status(std::string status) noexcept {
-  const std::lock_guard<std::mutex> lock(animfix_status_mutex_);
-  animfix_status_ = std::move(status);
+void Input::report_animfix_status(std::string status, std::string log_line) noexcept {
+  {
+    const std::lock_guard<std::mutex> lock(animfix_status_mutex_);
+    // The latch: the status is written to the log only when it **changes**.
+    // `animfix_install` runs on every tick, and the log helper opens,
+    // writes and closes the log file on every call — a line per tick would
+    // be ~64 file round trips a second on the game's main thread, and the
+    // log would be useless for anything else.
+    if (!animfix_status_latch_.should_log(status)) {
+      return;
+    }
+    animfix_status_ = std::move(status);
+  }
+  cs2::game::append_log("[cs2-payload] animfix: " + std::move(log_line));
 }
 
 // The animfix's hooks are installed **on the game's thread** (from the
@@ -1787,7 +1837,8 @@ void Input::animfix_install() noexcept {
   }
   const cs2::game::ModuleInfo module = cs2::game::find_module("client.dll");
   if (!module.valid()) {
-    set_animfix_status("the client module is not resolved yet");
+    report_animfix_status("the client module is not resolved yet",
+                          "the client module is not resolved yet");
     return;
   }
   const OffsetInfo* codec = find_offset("animfix_graph_codec");
@@ -1798,14 +1849,14 @@ void Input::animfix_install() noexcept {
     // that predates this feature has no entry for it, and the animfix would
     // then be silently inert. Say so, loudly, in the log and in the status.
     const std::string missing = codec == nullptr ? "animfix_graph_codec" : "animfix_anim_tick";
-    set_animfix_status("the calibration dump has no '" + missing +
-                       "' signature (re-run scripts/calibrate-live.py to refresh it)");
-    cs2::game::append_log("[cs2-payload] animfix: " + animfix_status());
+    const std::string status = "the calibration dump has no '" + missing +
+                               "' signature (re-run scripts/calibrate-live.py to refresh it)";
+    report_animfix_status(status, status);
     return;
   }
   if (codec->module != "client.dll" || anim_tick->module != "client.dll") {
-    set_animfix_status("the animfix's signatures are not from client.dll");
-    cs2::game::append_log("[cs2-payload] animfix: " + animfix_status());
+    report_animfix_status("the animfix's signatures are not from client.dll",
+                          "the animfix's signatures are not from client.dll");
     return;
   }
   if (!animfix_anim_tick_hook_.installed()) {
@@ -1813,9 +1864,9 @@ void Input::animfix_install() noexcept {
         animfix_anim_tick_hook_.install(reinterpret_cast<void*>(module.base + anim_tick->rva),
                                         reinterpret_cast<void*>(&Input::animfix_anim_tick_detour));
     if (error.has_value()) {
-      set_animfix_status(std::string("the anim tick is not hookable: ") +
-                         cs2::hooks::to_string(*error));
-      cs2::game::append_log("[cs2-payload] animfix: " + animfix_status());
+      const std::string status =
+          std::string("the anim tick is not hookable: ") + cs2::hooks::to_string(*error);
+      report_animfix_status(status, status);
       return;
     }
   }
@@ -1824,14 +1875,15 @@ void Input::animfix_install() noexcept {
         animfix_codec_hook_.install(reinterpret_cast<void*>(module.base + codec->rva),
                                     reinterpret_cast<void*>(&Input::animfix_codec_detour));
     if (error.has_value()) {
-      set_animfix_status(std::string("the graph codec is not hookable: ") +
-                         cs2::hooks::to_string(*error));
-      cs2::game::append_log("[cs2-payload] animfix: " + animfix_status());
+      const std::string status =
+          std::string("the graph codec is not hookable: ") + cs2::hooks::to_string(*error);
+      report_animfix_status(status, status);
       return;
     }
   }
-  set_animfix_status("ok");
-  cs2::game::append_log("[cs2-payload] animfix: the graph codec and the anim tick are hooked");
+  // The success is logged **once**: the latch keeps the line to one, no
+  // matter how many ticks go by.
+  report_animfix_status("ok", "the graph codec and the anim tick are hooked");
 }
 
 auto Input::current_cmd() noexcept -> void* {

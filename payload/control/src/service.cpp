@@ -861,7 +861,9 @@ auto Service::input_status() noexcept -> Json {
   // `animfix_skips` and the refusal counters count **anim ticks** (one reason
   // per tick: the capture-level reasons - no capture, aged out, the
   // controller changed - hold for every slot, so counting them per slot
-  // would multiply them by the number of slots).
+  // would multiply them by the number of slots). The write path's own
+  // failures are counted per **slot**, because they are per slot: the
+  // parameter that could not be written is a parameter, not a tick.
   result.set("animfix_skips", Json::number(static_cast<double>(input_.animfix_skips())));
   // The refusals, by reason: "the codec has not run yet" must be
   // distinguishable from "every capture aged out" (a stalled connection or a
@@ -875,17 +877,28 @@ auto Service::input_status() noexcept -> Json {
   result.set("animfix_anim_ticks", Json::number(static_cast<double>(input_.animfix_anim_ticks())));
   result.set("animfix_client_ticks",
              Json::number(static_cast<double>(input_.animfix_client_ticks())));
+  // The client anim ticks that ran **while the animfix was on**: the
+  // denominator of the duty cycle. The driver's own counters climb whether
+  // or not the feature is on, so dividing the correction counter by them
+  // would divide two counters with different windows.
+  result.set("animfix_enabled_client_ticks",
+             Json::number(static_cast<double>(input_.animfix_enabled_client_ticks())));
   // The correction is written on the client tick only; a payload that never
   // saw one cannot work, and this says so.
   result.set("animfix_client_tick_seen", Json::boolean(input_.animfix_client_tick_seen()));
   // The **duty cycle**: the client anim ticks on which the correction won.
-  // Divided by the client anim ticks, it is the fraction of the frames that
-  // carry the server's value - a duty cycle below 100 % is the oscillation
-  // at the server's tick rate that the animfix exists to remove.
+  // Divided by the client anim ticks **while the animfix was on**, it is the
+  // fraction of the frames that carry the server's value - a duty cycle below
+  // 100 % is the oscillation at the server's tick rate that the animfix exists
+  // to remove.
   result.set("animfix_corrected_ticks",
              Json::number(static_cast<double>(input_.animfix_corrected_ticks())));
   result.set("animfix_skip_controller",
              Json::number(static_cast<double>(input_.animfix_skip_controller())));
+  // The graph parameters the animfix could not write: a failure of its own,
+  // so the operator can tell it from "the controller does not answer".
+  result.set("animfix_skip_write_failed",
+             Json::number(static_cast<double>(input_.animfix_skip_write_failed())));
   // The server's snapshot rate: the staleness bound is measured against it.
   result.set("animfix_snapshot_interval_ms",
              Json::number(static_cast<double>(input_.animfix_snapshot_interval_ms())));

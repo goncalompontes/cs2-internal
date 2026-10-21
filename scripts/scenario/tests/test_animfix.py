@@ -138,6 +138,98 @@ class FakeGame:
         raise AssertionError("the animfix scenario must not use the raw escape hatch")
 
 
+class UptimeGame(FakeGame):
+    """A payload that has been up for a while, with the animfix **on**.
+
+    The counters behave the way the real ones do:
+
+    * ``animfix_client_ticks`` climbs on every client tick, whether or not
+      the animfix is on — it is the driver's own counter, and the animfix is
+      off by default, so it carries the payload's whole uptime;
+    * ``animfix_enabled_client_ticks`` climbs only while the animfix is on;
+    * ``animfix_corrected_ticks`` climbs only while the animfix is on, and
+      only on the ticks on which the correction won.
+    """
+
+    def __init__(self, *, uptime_ticks: int = 3608, ticks_per_read: int = 8,
+                 corrected_per_read: int = 8) -> None:
+        super().__init__({
+            "animfix": True,
+            "animfix_ready": True,
+            "animfix_status": "ok",
+            "animfix_acted": True,
+            "animfix_captures": 5,
+            "animfix_applies": 20,
+            "animfix_skips": 0,
+            "animfix_data_valid": True,
+            "animfix_server_aim_yaw": 10.0,
+            "animfix_predicted_aim_yaw": 7.0,
+            "animfix_aim_yaw_delta": 3.0,
+        }, climbing=True)
+        self.client_ticks = uptime_ticks
+        self.enabled_client_ticks = 0
+        self.corrected_ticks = 0
+        self.ticks_per_read = ticks_per_read
+        self.corrected_per_read = corrected_per_read
+
+    def _status(self) -> InputStatus:
+        status = super()._status()
+        self.client_ticks += self.ticks_per_read
+        self.enabled_client_ticks += self.ticks_per_read
+        self.corrected_ticks += self.corrected_per_read
+        status["animfix_client_ticks"] = self.client_ticks
+        status["animfix_enabled_client_ticks"] = self.enabled_client_ticks
+        status["animfix_corrected_ticks"] = self.corrected_ticks
+        return status
+
+
+class TestAnimfixDutyCycle(unittest.TestCase):
+    """The **duty cycle** the scenario reports.
+
+    The payload's counters are cumulative, and the two of them have
+    **different windows**: the correction counter only moves while the
+    animfix is on, and the driver's own client-tick counter climbs since the
+    payload started (the animfix is off by default). Dividing the two
+    absolute counters therefore reports a duty cycle of 0 % for a feature
+    that wins every tick — the quotient is diluted by the payload's uptime.
+    """
+
+    def test_the_duty_cycle_is_measured_over_the_window_not_the_uptime(self) -> None:
+        """A payload that has been up for an hour still reads 100 %."""
+        game = UptimeGame(uptime_ticks=3608)
+        result = animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
+        self.assertAlmostEqual(float(result["duty_cycle"]), 1.0)
+        # The window's deltas are what is reported.
+        self.assertEqual(result["corrected_ticks_during_window"], 8)
+        self.assertEqual(result["client_ticks_during_window"], 8)
+
+    def test_a_duty_cycle_below_the_floor_is_a_failure(self) -> None:
+        """The correction wins on a quarter of the ticks: that is a failure."""
+        game = UptimeGame(uptime_ticks=3608, ticks_per_read=8, corrected_per_read=2)
+        with self.assertRaises(Exception):
+            animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
+        # The feature is switched off again even when the run fails.
+        self.assertEqual(game.writes[-1], ("animfix", False))
+
+    def test_a_payload_without_client_ticks_does_not_fail_the_run(self) -> None:
+        """No client ticks means the duty cycle is not measurable, not zero."""
+        game = FakeGame({
+            "animfix": True,
+            "animfix_ready": True,
+            "animfix_status": "ok",
+            "animfix_acted": True,
+            "animfix_captures": 5,
+            "animfix_applies": 20,
+            "animfix_skips": 0,
+            "animfix_data_valid": True,
+            "animfix_server_aim_yaw": 10.0,
+            "animfix_predicted_aim_yaw": 7.0,
+            "animfix_aim_yaw_delta": 3.0,
+        })
+        result = animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
+        self.assertIsNone(result["duty_cycle"])
+
+
 class TestAnimfixScenario(unittest.TestCase):
     """The scenario's contract: observation-only, and it reports the evidence."""
 

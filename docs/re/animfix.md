@@ -1202,3 +1202,141 @@ is being written by the research sibling task (`docs/research/animfix.md`; it
 may not be in the tree yet). The hitbox/bone model this report re-derives is
 in [`aim.md`](aim.md) §"Hitboxes / bones"; the shot model is in
 [`aim.md`](aim.md) and [`bullet-trace.md`](bullet-trace.md).
+
+---
+
+## 10. The animfix as it is shipped, corrected (2026-10-21)
+
+This section is an **append**: §9 and everything above it are left as they
+are, and this is the correction of three of their claims, plus the
+diagnostics that go with them. The code is
+`payload/control/include/cs2/control/animfix.hpp` (the pure part) and
+`payload/control/src/input.cpp` (the engine access); the host test that
+pins them is `payload/control/tests/test_control_animfix.cpp`.
+
+### 10.1 The bound's estimator — §9.6's "the median discards the outliers, in both directions" was false
+
+§9.6 says the estimate is the **median** of the eight observed intervals,
+and that the median "discards the outliers - in both directions". The
+estimate was the **lower** median of the whole window
+(`sorted[(count - 1) / 2]`), and that is *not* robust in both directions:
+**four** fast intervals among four normal ones are enough to move it. The
+window then held a 2 ms estimate, the bound (the estimate with the margin
+of two over it) fell to the 8 ms floor, and on a 64 Hz server the capture
+aged out in the second half of every gap: the client's own prediction won
+those frames, which is the oscillation at the server's tick rate that the
+animfix exists to remove. Measured with the repository's own `duty_cycle()`
+helper: **50.3 %** over the burst, against **99.7 %** on a regular server.
+
+**What the code does now.** The floor (`k_min_snapshot_interval_ms`, 8 ms)
+is the shortest snapshot interval the animfix assumes, so an interval
+**shorter** than the floor cannot be a snapshot interval - it is a **burst**
+(a catch-up after a hitch, a re-ordered packet). The estimate does not
+sample those intervals at all; the **lower median** is taken over the
+window's remaining samples.
+
+* A burst of fast decodes - of **any** size - cannot move the estimate: the
+  burst's intervals are not sampled. The same 4x2 ms + 4x16 ms window now
+  measures **99.74 %** (the margin of two over the 16 ms interval is a
+  32 ms bound, and the capture never ages out against it).
+* A **late** decode still cannot move it: the lower median is unchanged,
+  and the window of eight is half late at worst before the estimate moves.
+* The **lower** median is kept on purpose. The mean of the two middle
+  samples would be the larger of the two in exactly the case that matters
+  (half the intervals late), so it would *double* the bound on a connection
+  that has started to hitch - and an inflated bound is the direction that
+  writes a stale capture over the client's fresh prediction.
+* A server that really does snapshot **faster** than the floor is still
+  covered: nothing is sampled, the estimate is 0, and the bound is the
+  floor - which still covers an interval shorter than the floor.
+
+The five scenarios §9.6's numbers were measured on are **unchanged** (the
+repository's own helper, to the digit): 99.7717 % (a 64 Hz server), 99.7500 %
+(jitter 16-19 ms), 99.7717 % (a quarter of the snapshots late), 99.5434 %
+(half of them late), 89.9543 % (a 48 ms hitch every eighth snapshot) and
+22.0165 % (a 500 ms stall). So §9.6's other claim - "twice the median
+keeps the duty cycle at 100 %" - is true only up to the first ticks, before
+the window has filled: the helper measures **99.77 %**, not 100 %.
+
+### 10.2 The duty cycle's counters had mismatched windows
+
+The status block and the scenario reported a **duty cycle** - the fraction
+of the client anim ticks on which the correction won - as
+`animfix_corrected_ticks / animfix_client_ticks`. The two counters have
+**different windows**: the correction counter only moves while the animfix
+is on, and the driver's own client-tick counter climbs on every client tick
+since the payload started (the animfix is **off by default**). The quotient
+is therefore diluted by the payload's uptime: after an hour it reads 0.0 %
+for a feature that wins every tick, and the scenario's verdict says "the
+pose alternates between the server's and the client's aim yaw at the
+server's tick rate" - a false alarm about the exact failure the feature
+exists to remove.
+
+**What the code does now.**
+
+* The payload counts the **client anim ticks that ran while the animfix was
+  on** (`animfix_enabled_client_ticks`), on the same branch as the
+  correction itself. Both counters then have the same window, and their
+  quotient is the duty cycle.
+* The scenario measures the duty cycle over the **watch window** (the
+  deltas), like it already did for the captures, the applies and the skips,
+  and it **fails** when the duty cycle falls below 90 % - the number is the
+  one the animfix exists for, so a note in the verdict string was not
+  enough.
+* The header's accessor comments no longer tell the operator to divide the
+  two absolute counters.
+
+### 10.3 The log: one line per status, not one line per tick
+
+The hooks are installed from the CreateMove detour, which runs on **every
+tick**, and every failure path wrote a line to the payload's log. The log
+helper opens, writes and closes the log file on **every call**, so the
+shipped state (the repository's calibration dump has no animfix signatures,
+so the missing-offset path is taken on every tick of every session) was ~64
+file round trips a second on the game's main thread and ~500 MB of log a
+day - and the log was useless for anything else.
+
+**What the code does now.** The status is **latched**: the log gets a line
+only when the status **changes** (`animfix::StatusLatch`), and the
+successful install is logged once too. The animfix's log has exactly one
+call site, and the host test pins that.
+
+### 10.4 Every refusal carries a reason
+
+§9.6 says "every refusal carries a **reason** ... so 'the codec has not run
+yet' is distinguishable from 'every capture aged out'". Two write-path
+failures moved **no** counter at all: the read of the graph parameter's
+current value, and the **write** itself (the page is not writable, or the
+object was freed between the read and the write). The animfix then silently
+does nothing and the operator sees "skips climbing, no reason counter
+moving" - exactly the ambiguity the rule was meant to remove.
+
+**What the code does now.** The write path's failures are counted, and the
+write has its **own** reason (`write_failed`), so it is distinguishable
+from "the controller does not answer". And the engine's own guard (the NaN
+/ infinity / range test) is counted **once per capture** rather than once
+per apply: the capture is re-applied on every anim tick, so the per-apply
+count climbed at the tick rate and hid how many *snapshots* the server sent
+something the graph must not hold.
+
+### 10.5 Two smaller corrections to §9
+
+* §9.3's two paragraphs - "The inference does not have to be right for the
+  fix to work ..." and "**And it does not depend on the inferred order.**"
+  - say the same thing twice. The second is the fuller statement.
+* §9.6 says the inline hook "patches its target with a 14-byte write". The
+  hook's **jump** is 14 bytes, but the **patched** size is the
+  whole-instruction total the relocator lands on
+  (`payload/hooks/src/inline.cpp`): **15 bytes** for the anim tick's
+  prologue (4+5+1+1+2+2) and 14 for the codec's.
+
+### 10.6 What is still unverified
+
+* The **ordering** inside a frame is still **inferred**, not measured
+  (§9.3): the correction does not depend on it, but no live run has
+  confirmed it.
+* Whether the engine can actually deliver a **burst** of fast decodes is
+  unproven: the estimator is now robust to one, but the trigger has not
+  been observed in a live round.
+* No live run: the numbers above come from the repository's own host test
+  and its helper, not from the game.

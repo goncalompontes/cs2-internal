@@ -55,6 +55,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 
 #include "cs2/control/strafe_geometry.hpp"  // normalize_angle
 
@@ -194,13 +195,21 @@ inline constexpr std::uint64_t k_max_snapshot_interval_ms = 250;
 
 // How many intervals the estimate is taken over.
 //
-// The estimate is the **median** of the window, and that is what makes it
-// robust in both directions: a single **late** decode (a packet-reordering
+// The estimate is the **lower median** of the window, and that is what makes
+// it robust in both directions: a single **late** decode (a packet-reordering
 // burst, a Wi-Fi stall, a server-side hitch) cannot move the median, and
-// neither can a single fast one. A plain average would be inflated by the
-// late decode - and an inflated bound is exactly the failure the bound
-// exists to prevent: a capture that is minutes old would be written over
-// the client's fresh prediction.
+// neither can a single fast one — a fast decode is below the floor, and the
+// estimate does not sample it at all (see `snapshot_window_samples`). A
+// plain average would be inflated by the late decode - and an inflated bound
+// is exactly the failure the bound exists to prevent: a capture that is
+// minutes old would be written over the client's fresh prediction.
+//
+// The **lower** median (the smaller of the two middle values) and not the
+// mean of the two, because the estimate must never be *inflated*: the two
+// differ only when the window is evenly split, and the mean of the two
+// middle values is the larger of the two in exactly the case that matters
+// here (half the intervals late), so it would double the bound on a
+// connection that has started to hitch.
 inline constexpr std::size_t k_snapshot_window = 8;
 
 // The animfix's estimate of the server's snapshot interval: the observed
@@ -229,16 +238,51 @@ inline void observe_decode(SnapshotClock& clock, std::uint64_t now_ms) noexcept 
   clock.seen = true;
 }
 
-// The server's snapshot interval, in milliseconds: the **median** of the
-// observed intervals. Zero until the first interval has been seen.
+// The window's samples the estimate is taken over: the ones that are **at
+// least** the floor.
+//
+// The floor is the shortest snapshot interval the animfix assumes, so a
+// decode that arrives sooner than that cannot be a snapshot interval - it is
+// a **burst** (a catch-up after a hitch, a re-ordered packet). The estimate
+// must not learn from a burst: four fast decodes among four normal ones
+// would otherwise collapse the bound to the floor, and the capture would age
+// out in the second half of every gap - the client's own prediction would
+// win those frames, which is the oscillation the animfix exists to remove.
+//
+// The samples stay in the window (the window is what advances), so a server
+// that really does run faster than the floor is still tracked: its window
+// fills with sub-floor samples, the estimate has nothing left to work with
+// and the bound falls back to the floor - which still covers an interval
+// shorter than the floor.
+[[nodiscard]] inline auto snapshot_window_samples(
+    const SnapshotClock& clock, std::array<std::uint64_t, k_snapshot_window>& out) noexcept
+    -> std::size_t {
+  std::size_t count = 0;
+  for (std::size_t i = 0; i < clock.count; ++i) {
+    const std::uint64_t sample = clock.samples[i];
+    if (sample >= k_min_snapshot_interval_ms) {
+      out[count] = sample;
+      ++count;
+    }
+  }
+  return count;
+}
+
+// The server's snapshot interval, in milliseconds: the **lower median** of the
+// observed intervals, ignoring the ones below the floor (the bursts). Zero
+// until the first interval has been seen.
 [[nodiscard]] inline auto snapshot_interval_ms(const SnapshotClock& clock) noexcept
     -> std::uint64_t {
   if (clock.count == 0) {
     return 0;
   }
-  std::array<std::uint64_t, k_snapshot_window> sorted = clock.samples;
-  std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(clock.count));
-  return sorted[(clock.count - 1) / 2];
+  std::array<std::uint64_t, k_snapshot_window> sorted{};
+  const std::size_t count = snapshot_window_samples(clock, sorted);
+  if (count == 0) {
+    return 0;
+  }
+  std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(count));
+  return sorted[(count - 1) / 2];
 }
 
 // The margin the bound carries over the observed interval.
@@ -256,6 +300,10 @@ inline constexpr std::uint64_t k_bound_margin = 2;
 
 // The staleness bound: the observed snapshot interval with the margin over
 // it, clamped to the floor and to the hard maximum.
+//
+// The floor is also what a **burst** of fast decodes leaves behind: the
+// estimate ignores the intervals below it, so a burst cannot collapse the
+// bound (see `snapshot_window_samples`).
 [[nodiscard]] inline auto snapshot_bound_ms(const SnapshotClock& clock) noexcept -> std::uint64_t {
   const std::uint64_t interval = snapshot_interval_ms(clock);
   if (interval == 0) {
@@ -301,6 +349,14 @@ struct Capture {
   std::uint64_t reapply_count{0};
   std::uint64_t captured_at_ms{0};
   std::uintptr_t controller{0};
+  /// Which capture this is: it counts up on every `store`, so two captures
+  /// taken in the same millisecond are still told apart. **Diagnostic only**
+  /// (see `mark_guard_refused`): the decision never depends on it.
+  std::uint64_t generation{0};
+  /// True once the **engine's own guard** has refused one of this capture's
+  /// values. **Diagnostic only** (see `mark_guard_refused`): the decision
+  /// never depends on it.
+  bool guard_refused{false};
   bool valid{false};
 };
 
@@ -319,7 +375,35 @@ inline void store(Capture& capture, std::uintptr_t controller,
   capture.reapply_count = 0;
   capture.captured_at_ms = now_ms;
   capture.controller = controller;
+  capture.generation += 1;
+  capture.guard_refused = false;
   capture.valid = true;
+}
+
+// Note that the **engine's own guard** refused one of this capture's values
+// (a NaN, an infinity, or a value outside the engine's range).
+//
+// True on the **first** refusal of this capture only: the capture is
+// re-applied on every anim tick while it is fresh, so counting the refusal
+// per apply would inflate the counter at the tick rate and hide how many
+// *snapshots* the server sent something the graph must not hold. The flag is
+// cleared by the next `store`, so the counter is one refusal per capture.
+//
+// `generation` is the generation of the capture the refused **value** came
+// from. If the capture has been replaced since (a decode landed between the
+// read and the check), the refusal belongs to a capture that no longer
+// exists: it is not counted here, and the *new* capture counts its own
+// refusal on the next anim tick.
+[[nodiscard]] inline auto mark_guard_refused(Capture& capture, std::uint64_t generation) noexcept
+    -> bool {
+  if (capture.generation != generation) {
+    return false;
+  }
+  if (capture.guard_refused) {
+    return false;
+  }
+  capture.guard_refused = true;
+  return true;
 }
 
 // Note that the capture was re-applied.
@@ -356,12 +440,19 @@ inline void mark_applied(Capture& capture) noexcept {
 // connection) and from "the controller is not the one the capture came
 // from" (the pawn respawned) — otherwise a feature that refuses everything
 // looks like a feature that is merely idle.
+//
+// Every refusal carries a reason, and the write path's failures carry one
+// too: a graph parameter that cannot be written (the page is not writable,
+// or the object was freed between the read and the write) is a **different**
+// failure from "the controller does not answer", and the operator has to be
+// able to tell them apart.
 enum class Refusal : std::size_t {
-  none = 0,     // the re-apply is allowed
-  no_capture,   // the codec has not run yet
-  stale,        // the capture aged out (the snapshots stopped)
-  controller,   // the live controller is not the one the capture came from
-  not_tracked,  // the slot is not one of the animfix's own
+  none = 0,      // the re-apply is allowed
+  no_capture,    // the codec has not run yet
+  stale,         // the capture aged out (the snapshots stopped)
+  controller,    // the live controller is not the one the capture came from
+  write_failed,  // the graph parameter could not be written
+  not_tracked,   // the slot is not one of the animfix's own
 };
 
 // The decision for one slot.
@@ -436,5 +527,40 @@ struct Decision {
     -> float {
   return normalize_angle(server_yaw - predicted_yaw);
 }
+
+// --- the status, and the latch that keeps the log quiet ---------------------
+
+// The animfix's status, latched: the log gets a line only when the status
+// **changes**.
+//
+// The hooks are installed from the CreateMove detour, which runs on every
+// tick, and the payload's log helper opens, writes and closes the log file
+// on **every call**: a line per tick would be ~64 file round trips a second
+// on the game's main thread and ~500 MB of log a day — and the log would be
+// useless for anything else. The status itself is not latched: it is what
+// the operator reads, and it must always be current.
+class StatusLatch {
+ public:
+  StatusLatch() = default;
+
+  /// True when `status` is **not** the one the latch already holds — that is,
+  /// when the caller should write it to the log. The latch takes it either
+  /// way, so the next call with the same status says nothing.
+  [[nodiscard]] auto should_log(const std::string& status) -> bool {
+    if (status == held_) {
+      return false;
+    }
+    held_ = status;
+    return true;
+  }
+
+  /// The status the latch currently holds ("" until the first one).
+  [[nodiscard]] auto held() const noexcept -> const std::string& {
+    return held_;
+  }
+
+ private:
+  std::string held_;
+};
 
 }  // namespace cs2::control::animfix

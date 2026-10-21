@@ -25,6 +25,17 @@
 // tell "the codec has not run yet" from "every capture aged out" and from
 // "the controller is not the one the capture came from".
 //
+// The **bound's estimator** is pinned as well: the estimate must survive a
+// **burst** of fast decodes (a catch-up after a hitch), or the bound
+// collapses to the floor and the correction stops for the length of the
+// window — the oscillation at the server's tick rate that the animfix exists
+// to remove.
+//
+// The **log** is pinned too: the hooks are installed from a per-tick detour,
+// so the status must be latched and the animfix's log must have exactly one
+// call site — a line per tick would be ~64 file round trips a second on the
+// game's main thread.
+//
 // The engine's layout is pinned as well: the slot offsets, the stride, the
 // four slots the server replicates as floats, and the shape of the graph
 // parameter the correction writes. Those are the numbers the engine access
@@ -266,6 +277,66 @@ void test_the_bound_has_a_hard_maximum() {
   assert(animfix::snapshot_bound_ms(slow) == animfix::k_max_snapshot_interval_ms);
 }
 
+// **A burst of fast decodes must not collapse the bound.** The floor is the
+// shortest snapshot interval the animfix assumes, so a decode that arrives
+// sooner than that is not a snapshot interval - it is a **burst** (a
+// catch-up after a hitch, a re-ordered packet) - and the estimate must not
+// learn from it.
+//
+// The failure this pins: four fast decodes among four normal ones used to
+// collapse the estimate to the burst's interval, the bound fell to the 8 ms
+// floor, and the capture aged out in the second half of every gap - the
+// client's own prediction won those frames, which is the oscillation at the
+// server's tick rate that the animfix exists to remove.
+void test_a_burst_of_fast_decodes_does_not_collapse_the_bound() {
+  animfix::SnapshotClock clock{};
+  // A healthy 64 Hz stream.
+  for (int i = 0; i < 8; ++i) {
+    animfix::observe_decode(clock, 1000 + static_cast<std::uint64_t>(i) * 16);
+  }
+  assert(animfix::snapshot_bound_ms(clock) == 32);
+  // A burst: four decodes two milliseconds apart.
+  std::uint64_t now = 1000 + 7 * 16;
+  for (int i = 0; i < 4; ++i) {
+    now += 2;
+    animfix::observe_decode(clock, now);
+  }
+  // The burst is not sampled: the estimate is still the server's rate.
+  assert(animfix::snapshot_interval_ms(clock) == 16);
+  assert(animfix::snapshot_bound_ms(clock) == 32);
+  // And the capture is still fresh one interval later.
+  const animfix::Capture capture = captured_at(now);
+  assert(animfix::decide(capture, animfix::Slot::aim_yaw, now + k_interval_ms, 32, k_controller)
+             .reapply);
+}
+
+// The burst must not cost the **duty cycle** either: the correction wins on
+// every anim tick while the capture is fresh, and a collapsed bound would
+// take it away from half of them.
+void test_a_burst_of_fast_decodes_keeps_the_duty_cycle() {
+  // Four normal snapshots and a burst of four fast ones, repeating.
+  const double burst = duty_cycle({16, 16, 16, 16, 2, 2, 2, 2}, 7);
+  assert(burst >= 0.99);
+}
+
+// A server that really does snapshot **faster** than the floor: the estimate
+// has nothing to sample, and the bound is the floor - which still covers an
+// interval shorter than the floor, so the capture never ages out.
+void test_a_server_faster_than_the_floor_is_still_covered() {
+  animfix::SnapshotClock clock{};
+  for (int i = 0; i < 8; ++i) {
+    animfix::observe_decode(clock, 1000 + static_cast<std::uint64_t>(i) * 4);
+  }
+  // Nothing above the floor: no estimate.
+  assert(animfix::snapshot_interval_ms(clock) == 0);
+  // The bound is the floor, and a capture younger than the floor is fresh.
+  assert(animfix::snapshot_bound_ms(clock) == animfix::k_min_snapshot_interval_ms);
+  const animfix::Capture capture = captured_at(1032);
+  assert(animfix::decide(capture, animfix::Slot::aim_yaw, 1032 + 7,
+                         animfix::k_min_snapshot_interval_ms, k_controller)
+             .reapply);
+}
+
 // The **duty cycle** of the correction: the fraction of the anim ticks on
 // which the server's value wins. The bound carries a margin over the median
 // precisely so that this is 100 % on an ordinary connection - the median is
@@ -404,6 +475,107 @@ void test_the_capture_keeps_its_own_copy() {
   animfix::store(capture, k_controller, values, 1000);
   values[animfix::slot_position(animfix::Slot::aim_yaw)] = 999.0F;
   assert(nearly(capture.values[animfix::slot_position(animfix::Slot::aim_yaw)], 42.0F));
+}
+
+// The **engine's own guard** refuses a bad value, and the refusal is counted
+// **once per capture**.
+//
+// The capture is re-applied on every anim tick while it is fresh, so a
+// per-apply count would climb at the tick rate (64 a second) and the
+// operator could not tell "the server sent one bad snapshot" from "the
+// server sends bad snapshots all the time". The count is per capture, so it
+// says how many *snapshots* the server sent something the graph must not
+// hold.
+void test_the_guard_refusal_is_counted_once_per_capture() {
+  animfix::Capture capture{};
+  animfix::store(capture, k_controller, server_values(42.0F), 1000);
+  const std::uint64_t generation = capture.generation;
+  // The first refusal of this capture is counted.
+  assert(animfix::mark_guard_refused(capture, generation));
+  // The capture is re-applied on every anim tick: the refusal must not be
+  // counted again.
+  for (int tick = 0; tick < 64; ++tick) {
+    assert(!animfix::mark_guard_refused(capture, generation));
+  }
+  // A new capture (the next decode) counts again - and the generations tell
+  // the two apart even when they are taken in the same millisecond.
+  animfix::store(capture, k_controller, server_values(42.0F), 1000);
+  assert(capture.generation != generation);
+  // A refusal that belongs to the **previous** capture is not counted
+  // against this one: the new capture counts its own refusal.
+  assert(!animfix::mark_guard_refused(capture, generation));
+  assert(animfix::mark_guard_refused(capture, capture.generation));
+  // And the flag does not leak into the decision: a capture the guard
+  // refused is still re-applied on the slots it did not refuse.
+  assert(
+      animfix::decide(capture, animfix::Slot::aim_yaw, 1001, k_interval_ms, k_controller).reapply);
+}
+
+// The **log** must not get a line per tick.
+//
+// The hooks are installed from the CreateMove detour, which runs on every
+// tick, and the payload's log helper opens, writes and closes the log file
+// on **every call**: a line per tick would be ~64 file round trips a second
+// on the game's main thread and ~500 MB of log a day. So the status is
+// latched: the log gets a line only when the status **changes**.
+void test_the_status_is_logged_once_per_distinct_status() {
+  animfix::StatusLatch latch{};
+  const std::string missing = "the calibration dump has no 'animfix_anim_tick' signature";
+  // The first occurrence is logged.
+  assert(latch.should_log(missing));
+  // Every tick after it says the same thing: nothing is logged.
+  for (int tick = 0; tick < 1000; ++tick) {
+    assert(!latch.should_log(missing));
+  }
+  // A **different** status is logged again (the install recovered).
+  assert(latch.should_log("ok"));
+  assert(!latch.should_log("ok"));
+  // And the latch holds the last one it was given.
+  assert(latch.held() == "ok");
+}
+
+// The animfix's log must have **one** call site: the one that latches.
+//
+// This is the wiring the latch above cannot see for itself: a second
+// `append_log` in the install path would put a line per tick back into the
+// log, and the host test would still be green.
+void test_the_animfix_logs_through_one_latched_call_site(const std::string& root) {
+  std::ifstream source(root + "/payload/control/src/input.cpp");
+  assert(source.good());
+  const std::string text((std::istreambuf_iterator<char>(source)),
+                         std::istreambuf_iterator<char>());
+  const std::string prefix = "[cs2-payload] animfix: ";
+  std::size_t sites = 0;
+  std::size_t at = text.find(prefix);
+  while (at != std::string::npos) {
+    ++sites;
+    at = text.find(prefix, at + prefix.size());
+  }
+  assert(sites == 1);
+  // And that one call site is **latched**: the status is consulted before
+  // the line is written.
+  assert(text.find("animfix_status_latch_.should_log") != std::string::npos);
+}
+
+// The **duty cycle**'s denominator: the client anim ticks that ran while the
+// animfix was on.
+//
+// The correction counter only moves while the animfix is on, and the
+// driver's own client-tick counter climbs since the payload started (the
+// animfix is off by default), so the two absolute counters have **different
+// windows**: dividing them would report a duty cycle of 0 % for a feature
+// that wins every tick, diluted by the payload's uptime. The denominator is
+// therefore counted on the same branch as the correction itself.
+void test_the_duty_cycles_denominator_is_counted_with_the_correction(const std::string& root) {
+  std::ifstream source(root + "/payload/control/src/input.cpp");
+  assert(source.good());
+  const std::string text((std::istreambuf_iterator<char>(source)),
+                         std::istreambuf_iterator<char>());
+  const std::size_t branch = text.find("animfix_apply();");
+  assert(branch != std::string::npos);
+  // The counter is incremented in the same branch as the apply.
+  const std::string window = text.substr(branch, 512);
+  assert(window.find("animfix_enabled_client_ticks_.fetch_add") != std::string::npos);
 }
 
 // --- the controller the capture belongs to -----------------------------------
@@ -636,6 +808,9 @@ auto main(int argc, char** argv) -> int {
   test_the_bound_is_the_observed_snapshot_interval();
   test_a_late_decode_does_not_widen_the_bound();
   test_the_bound_has_a_hard_maximum();
+  test_a_burst_of_fast_decodes_does_not_collapse_the_bound();
+  test_a_burst_of_fast_decodes_keeps_the_duty_cycle();
+  test_a_server_faster_than_the_floor_is_still_covered();
   test_the_correction_holds_a_full_duty_cycle();
   test_nothing_is_reapplied_before_the_first_capture();
   test_a_fresh_capture_is_reapplied();
@@ -643,6 +818,10 @@ auto main(int argc, char** argv) -> int {
   test_the_refusal_reasons_are_distinguishable();
   test_a_fresh_capture_is_reapplied_on_every_tick();
   test_the_capture_keeps_its_own_copy();
+  test_the_guard_refusal_is_counted_once_per_capture();
+  test_the_status_is_logged_once_per_distinct_status();
+  test_the_animfix_logs_through_one_latched_call_site(repository_root);
+  test_the_duty_cycles_denominator_is_counted_with_the_correction(repository_root);
   test_the_capture_must_belong_to_the_live_controller();
   test_the_four_slots_must_be_distinct();
   test_the_pinned_prologues_are_the_dumpers_signatures(repository_root);

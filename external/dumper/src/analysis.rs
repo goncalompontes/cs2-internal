@@ -242,12 +242,16 @@ pub fn known_signatures() -> Vec<Signature> {
             None,
         ),
         // `CAnimGraphGameSystem::AnimTickUpdate` — the animation driver, and
-        // the place the AG2 graph is evaluated. It runs **after** the
-        // client's prediction in the same tick, so a correction written here
-        // is the one the pose is computed from. Its 15-byte prologue is
-        // RIP-free (the relocator accepts it at any address distance). The
-        // second argument is a **flag** (0 = the server tick, otherwise the
-        // client tick), not a tick count. RVA on 659940c1: `0x35aeb0`.
+        // the place the AG2 graph is evaluated. It is **inferred** to run
+        // after the client's prediction in the same tick (`docs/re/animfix.md`
+        // §9.3 — inferred, not measured), so a correction written here is
+        // the one the pose is computed from; the fix does not depend on the
+        // inference being right, because the correction is written at the
+        // **start** of the anim tick and the evaluation happens **inside**
+        // it. Its 15-byte prologue is RIP-free (the relocator accepts it at
+        // any address distance). The second argument is a **flag** (0 = the
+        // server tick, otherwise the client tick), not a tick count. RVA on
+        // 659940c1: `0x35aeb0`.
         sig(
             "client.dll",
             "animfix_anim_tick",
