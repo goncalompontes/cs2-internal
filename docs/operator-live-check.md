@@ -109,9 +109,17 @@ cs2_run_scenario({name:"anti_aim",  args:{map_name:"de_dust2"}})
 cs2_run_scenario({name:"bot-match", args:{map_name:"de_dust2", per_team:5}})
 ```
 
-A bot match is one call: it loads the map, applies the playground convars
-(no warmup, no freeze, infinite ammo, respawn on death, `bot_stop 1` so the
-bots hold still), joins a team and adds the bots.
+A bot match is one call: it loads the map, **joins the team** (as early as
+the screen allows), applies the playground convars (no warmup, no freeze,
+infinite ammo, respawn on death), restarts the round so the convars take
+effect, waits for the round to go live, adds the bots, freezes them
+(`bot_stop 1` so the bots hold still) and **waits for the round to be live
+again** before it returns — so nothing has to be waited for by hand.
+
+The result says what happened: `screen` (the screen the game is in when the
+scenario returns), `round` (the phase and the recent round events),
+`waited_s` (how long the final wait took) and `team_joined` (`"joined"` — the
+scenario's own `jointeam` — or `"auto"`, the server assigned the team).
 
 ## 4. What to do when a probe fails
 

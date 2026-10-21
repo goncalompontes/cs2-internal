@@ -258,6 +258,45 @@ def ensure_live_round(game: Game, *, map_name: str = DEFAULT_MAP, pause_bots: bo
         verify_movable=verify_movable)
 
 
+#: The budget for :func:`wait_round_live`: the round time is 60 minutes and the
+#: freeze window is seconds, so a generous but **finite** budget — the scenario
+#: must never hang.
+DEFAULT_FINAL_TIMEOUT = 120.0
+
+
+def wait_round_live(game: Game, *, map_name: str = DEFAULT_MAP,
+                    timeout: float = DEFAULT_FINAL_TIMEOUT,
+                    verify_movable: bool = True) -> float:
+    """Wait until the round is **live** again; return how long it took (seconds).
+
+    The question is the state machine's own: ``ensure(Screen.LIVE)`` — a round
+    that is running, not frozen and not over. The machine counts a running
+    round whose **buy window** is still open as live (``Screen.BUY_TIME``),
+    because the playground's ``mp_buytime 9999`` keeps that window open for the
+    whole round; demanding the exact ``LIVE`` screen there would time out
+    forever (see :meth:`screens.Machine._reached`).
+
+    The **liveness gate** (``verify_movable``) is on by default: a world that
+    sits in the buy window without simulating is not a live round, and the
+    machine's answer to that is to re-roll the round and try again.
+
+    Raises :class:`SessionError` when the round does not go live within
+    ``timeout`` — the wait is bounded, so the scenario never hangs.
+    """
+    start = time.monotonic()
+    try:
+        screens.Machine(game, map_name=map_name).ensure(
+            screens.Screen.LIVE, timeout=timeout, pause_bots=False,
+            verify_movable=verify_movable)
+    except SessionError as error:
+        raise SessionError(
+            f"the round did not go live within {timeout:.0f}s after the bots "
+            f"were added ({error}) — the bots are in place, but the round never "
+            f"started: check the game (paused? at the main menu?) and retry"
+        ) from error
+    return time.monotonic() - start
+
+
 # --- bot-match setup ------------------------------------------------------
 #: The practice convars for a bot match: rounds that do not end (roundtime is in
 #: **minutes**, so 60 is "never" for a defuse map; ``mp_roundtime`` covers the
@@ -338,20 +377,50 @@ def ensure_bot_match(
     verify_movable: bool = True,
     timeout: float = 300.0,
     map_timeout: float = 180.0,
+    join_timeout: float = 30.0,
+    final_timeout: float = DEFAULT_FINAL_TIMEOUT,
 ) -> dict[str, Any]:
     """Join ``map_name`` and set up a ready-to-test bot match.
 
-    Loads the level (a casual offline match), applies the playground convars
-    (:data:`PLAYGROUND_CONVARS`, plus :data:`RESPAWN_CONVARS` when ``respawn``),
-    joins a team and drives to a live round, adds ``per_team`` bots to each side
-    (each add confirmed), then freezes them (``bot_stop 1``) so the world is
-    still. ``map_name``/``per_team``/``respawn``/``bot_stop`` are the knobs;
-    ``verify_movable`` is the state machine's liveness gate.
+    The order is the contract (2026-10-21):
 
-    Returns ``{map, players, teams, convars, local_name, local_alive, screen}``.
+    1. load the level (:func:`ensure_map`);
+    2. **join the team** — as early as the screen allows, through the state
+       machine's own ``join_team`` transition (:meth:`screens.Machine.ensure_team`),
+       so the team choice stays in one place;
+    3. the playground convars (:data:`PLAYGROUND_CONVARS`, plus
+       :data:`RESPAWN_CONVARS` when ``respawn``) — **before** the restart, so
+       the round's freezetime/roundtime/respawn rules are the new ones;
+    4. ``mp_restartgame 1`` — the convars take effect on a fresh round;
+    5. wait for the round to go live (:func:`ensure_live_round`);
+    6. add ``per_team`` bots to each side (each add confirmed), then freeze
+       them (``bot_stop 1``) so the world is still;
+    7. **wait for the round to be live again** (:func:`wait_round_live`) — the
+       scenario's last act: it must not return while the round is still in a
+       transition.
+
+    ``map_name``/``per_team``/``respawn``/``bot_stop`` are the knobs;
+    ``verify_movable`` is the state machine's liveness gate, ``timeout`` the
+    budget for the first live wait, ``map_timeout`` the budget for the level
+    load, ``join_timeout`` the budget for the team join and ``final_timeout``
+    the budget for the final wait.
+
+    Returns ``{map, players, teams, convars, local_name, local_alive, screen,
+    round, waited_s, team_joined}``: ``screen`` is the screen the game is in
+    when the scenario returns — a **running** round (the state machine's
+    ``LIVE`` target, which also accepts a round whose buy window is still
+    open), ``round`` the compact round state (:func:`round_state`),
+    ``waited_s`` how long the final wait took and ``team_joined`` how the
+    local player got onto a team (``"joined"`` — this scenario's own
+    ``jointeam`` — or ``"auto"``, the server assigned it).
     """
     game.exec("sv_cheats 1")
     ensure_map(game, map_name=map_name, timeout=map_timeout)
+
+    # The team, as early as the screen allows: the machine's own join, so the
+    # `jointeam` line lives in one place (the state machine).
+    team_joined = screens.Machine(game, map_name=map_name).ensure_team(
+        timeout=join_timeout)
 
     convars = list(PLAYGROUND_CONVARS)
     if respawn:
@@ -367,6 +436,10 @@ def ensure_bot_match(
     if bot_stop:
         game.exec("bot_stop 1")
 
+    # The last act: the round must be live again before the scenario returns.
+    waited = wait_round_live(game, map_name=map_name, timeout=final_timeout,
+                             verify_movable=verify_movable)
+
     teams: dict[int, int] = {}
     for player in game.players():
         team = player["team"]
@@ -381,6 +454,9 @@ def ensure_bot_match(
         "local_name": local_player.get("name"),
         "local_alive": bool(local_player.get("alive")),
         "screen": str(observation.screen),
+        "round": round_state(game),
+        "waited_s": round(waited, 1),
+        "team_joined": "joined" if team_joined else "auto",
     }
 
 
