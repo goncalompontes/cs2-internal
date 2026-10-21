@@ -21,7 +21,9 @@ Usage: coverage_test.py
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import shutil
 import sys
 import tempfile
@@ -51,12 +53,17 @@ def digest_of(data: bytes) -> str:
 
 
 def write_coverage(path: Path, policy_digest: str, source: Path, rewritten: int,
-                   vm: str | None = None) -> None:
+                   vm: str | None = None, cross: str | None = None,
+                   direct: str | None = None, cross_rewritten: int = 0) -> None:
     """Writes a coverage file the way the plugin writes it.
 
     The `vm` line is the verdict of the virtualizer's analysis. It is
     optional: a coverage file of an older build has none, and a reader that
     does not know the section still reads the file.
+
+    The `cross` and the `direct` lines are the cross-module routing: the
+    state of every `cross_module` entry and the cross-TU callees that
+    stayed direct. They are optional in the same way.
     """
     body = (
         f"policy-sha256 {policy_digest}\n"
@@ -66,10 +73,14 @@ def write_coverage(path: Path, policy_digest: str, source: Path, rewritten: int,
         "protect table=2 descriptor=3 multiplier=0x9e3779b97f4a7c15 "
         "xor=0xbf58476d1ce4e5b9 key=0x1 key=0x2 key=0x3\n"
         "entry matched cs2::aim::solve\n"
-        f"fn ?solve rewritten={rewritten} skipped=0\n"
+        f"fn ?solve rewritten={rewritten} skipped=0 cross={cross_rewritten}\n"
     )
     if vm is not None:
         body += vm
+    if cross is not None:
+        body += cross
+    if direct is not None:
+        body += direct
     path.write_text(body + f"content-sha256 {digest_of(body.encode('utf-8'))}\n",
                     encoding="utf-8")
 
@@ -101,7 +112,14 @@ def check_the_readers(root: Path) -> None:
     # The coverage of this build.
     write_coverage(coverage / "0x1.cov", policy_digest, tree / "payload" / "solver.cpp", 7,
                    "vm ?solve verdict=virtualizable slots=42 frame=3072 bytecode=268 "
-                   "instructions=57 calls=17\n")
+                   "instructions=57 calls=17\n",
+                   "cross matched cs2::aim::DamageField::add ?add@DamageField@aim@cs2@@QEAA...\n"
+                   "cross blocked:indirect_parameter cs2::aim::project_capsule "
+                   "?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ\n"
+                   "cross unmatched cs2::aim::never_called\n",
+                   "direct ?atan2f external_callee\n"
+                   "direct ?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ indirect_parameter\n",
+                   3)
     # The coverage of another worktree that shares the policy. It has no
     # `vm` line: it is the coverage of an older build.
     write_coverage(coverage / "0x2.cov", policy_digest, other, 3)
@@ -159,12 +177,48 @@ def check_the_readers(root: Path) -> None:
     check(verdict.get("slots") == "42", "the slot count is not the one that was written")
     check(verdict.get("bytecode") == "268", "the bytecode size is not the one that was written")
 
+    # The cross-module routing is in the coverage, and it is read: the state
+    # of every `cross_module` entry, the symbols they named, and the
+    # cross-TU callees that stayed direct.
+    states = read.files[0].cross_states()
+    check(
+        states.get("cs2::aim::DamageField::add") == "matched",
+        f"the reader did not read the state of the cross_module entry: {states}",
+    )
+    check(
+        states.get("cs2::aim::project_capsule") == "blocked:indirect_parameter",
+        f"the reader did not read the blocked state: {states}",
+    )
+    check(
+        states.get("cs2::aim::never_called") == "unmatched",
+        f"the reader did not read the unmatched state: {states}",
+    )
+    symbols = read.files[0].cross_symbols()
+    check(
+        ("cs2::aim::DamageField::add", "?add@DamageField@aim@cs2@@QEAA...") in symbols,
+        f"the reader did not read the symbol of the match: {symbols}",
+    )
+    direct = read.files[0].direct_callees()
+    check(direct.get("?atan2f") == "external_callee",
+          f"the reader did not read the direct callee: {direct}")
+    check(direct.get("?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ") == "indirect_parameter",
+          f"the reader did not read the reason of the direct callee: {direct}")
+    check(read.files[0].cross_rewritten == 3, "the reader did not read the cross rewrites")
+
     # A coverage file of an older build has no `vm` line: the reader still
     # reads it, and it is not malformed.
     old = Coverage(coverage / "0x2.cov")
     check(not old.malformed, f"a coverage file without a vm section is malformed: {old.malformed}")
     check(old.intact, "a coverage file without a vm section is not intact")
     check(old.vm == {}, "a coverage file without a vm section has verdicts")
+
+    # The same holds for the cross-module sections: a coverage file of an
+    # older build has no `cross` line, no `direct` line and no `cross=` key,
+    # and the reader still reads it.
+    check(old.cross_states() == {}, "a coverage file without a cross section has states")
+    check(old.cross_symbols() == [], "a coverage file without a cross section has symbols")
+    check(old.direct_callees() == {}, "a coverage file without a direct section has callees")
+    check(old.cross_rewritten == 0, "a coverage file without a cross section has rewrites")
 
     # The policy checker reads the same directory, and its pruning must not
     # choke on the malformed files either.
@@ -190,12 +244,64 @@ def check_the_image_reader() -> None:
         raise TestFailure(f"the reader accepted {data!r} as a PE image")
 
 
+def run_check_policy(policy: Path, coverage: Path) -> int:
+    """Runs the policy checker and returns its exit code."""
+    with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+        return check_policy.main(["--policy", str(policy), "--coverage", str(coverage)])
+
+
+def check_the_cross_module_rule(root: Path) -> None:
+    """A `cross_module` entry that did not route every call fails the build.
+
+    The rule is the one the `protect` entries follow: an entry that protects
+    nothing is a build failure. The priority is the opposite: a
+    `cross_module` entry has to be routed *everywhere* it is called.
+    """
+    tree = root / "cross-tree"
+    (tree / "payload").mkdir(parents=True)
+    source = tree / "payload" / "solver.cpp"
+    source.write_text("int main() { return 0; }\n", encoding="utf-8")
+
+    policy = root / "cross-policy.json"
+    policy.write_text(
+        '{"protect": ["cs2::aim::solve"], "cross_module": ["cs2::aim::DamageField::add"]}\n',
+        encoding="utf-8",
+    )
+    policy_digest = digest_of(policy.read_bytes())
+
+    coverage = root / "cross-coverage"
+    coverage.mkdir()
+    target = coverage / "0x1.cov"
+
+    # The entry was seen, but the call to it could not be routed: the build
+    # has to fail, and the reason has to be named.
+    write_coverage(target, policy_digest, source, 7,
+                   cross="cross blocked:indirect_parameter cs2::aim::DamageField::add "
+                         "?add@DamageField@aim@cs2@@QEAA...\n")
+    status = run_check_policy(policy, coverage)
+    check(status == 1, f"a blocked cross_module entry did not fail the build (status {status})")
+
+    # The entry matched nothing at all: the build has to fail too.
+    write_coverage(target, policy_digest, source, 7,
+                   cross="cross unmatched cs2::aim::DamageField::add\n")
+    status = run_check_policy(policy, coverage)
+    check(status == 1, f"an unmatched cross_module entry did not fail the build (status {status})")
+
+    # The entry routed every call: the build passes.
+    write_coverage(target, policy_digest, source, 7,
+                   cross="cross matched cs2::aim::DamageField::add "
+                         "?add@DamageField@aim@cs2@@QEAA...\n")
+    status = run_check_policy(policy, coverage)
+    check(status == 0, f"a routed cross_module entry failed the build (status {status})")
+
+
 def main() -> int:
     try:
         check_the_image_reader()
         root = Path(tempfile.mkdtemp(prefix="cs2-protect-coverage-test-"))
         try:
             check_the_readers(root)
+            check_the_cross_module_rule(root)
         finally:
             shutil.rmtree(root, ignore_errors=True)
     except TestFailure as error:
