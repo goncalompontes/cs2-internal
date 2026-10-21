@@ -185,6 +185,10 @@ aim_solver_test = executable('aim_solver_test',
     'payload/aim/src/damage.cpp',
     'payload/aim/src/occlusion.cpp',
     'payload/aim/src/penetration.cpp',
+    # The Monte-Carlo objective (docs/ragebot.md §13): the solver dispatches to
+    # the core, so the test links it and its spread model.
+    'payload/aim/src/montecarlo.cpp',
+    'payload/aim/src/spread.cpp',
   ),
   include_directories : [
     include_directories('payload/aim/include'),

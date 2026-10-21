@@ -314,6 +314,170 @@ auto main() -> int {
     expect(result.value > 150.0F, "the pellet aim sums two hitboxes");
   }
 
+  // --- the Monte-Carlo objective (docs/ragebot.md §13) ----------------------
+  {
+    // The scene: one sphere at 100 units, so its silhouette is symmetric about the
+    // view axis and the field's cell is centred on it. The cone (the weapon's
+    // spread) is twice the sphere's angular radius, so the Monte-Carlo solver
+    // measures a probability of about one half — where the field's **Gaussian**
+    // (whose sigma is too wide, `docs/research/aim-objective-math.md`) reports far
+    // less. The two numbers are not interchangeable, and the objective must report
+    // the Monte-Carlo's.
+    const Vec3 centre{.x = 100.0F, .y = 0.0F, .z = 0.0F};
+    constexpr float k_radius = 1.0F;
+    constexpr float k_spread = 0.02F;
+
+    SolveInput input;
+    input.eye = Vec3{};
+    input.basis = basis;
+    input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F,
+                                           .range_modifier = 1.0F,
+                                           .spread = k_spread,
+                                           .weapon_type = 3};
+    input.spread_sigma = k_spread;
+    input.objective = AimObjective::monte_carlo;
+    Hitbox sphere;
+    sphere.is_capsule = true;
+    sphere.capsule = cs2::aim::Capsule{.a = centre, .b = centre, .radius = k_radius};
+    sphere.multiplier = 1.0F;
+    sphere.group = cs2::aim::HITGROUP_CHEST;
+    sphere.target = 0;
+    input.hitboxes.push_back(sphere);
+    input.monte_carlo_targets.push_back(cs2::aim::TargetHealth{.index = 0, .health = 1000.0F});
+    input.monte_carlo_seed = cs2::aim::SeedContext{.sequence = 4242U, .tick = 42U};
+
+    const auto result = cs2::aim::solve(input);
+    expect(result.valid, "the Monte-Carlo objective solves");
+    expect(result.monte_carlo.has_value(), "the Monte-Carlo solver produced a verdict");
+    expect(!result.monte_carlo_refusal.has_value(), "the Monte-Carlo solver did not refuse");
+
+    // The field's own Gaussian at the same aim — the number the objective must
+    // **not** report.
+    cs2::aim::DamageField field;
+    {
+      const auto polygon = cs2::aim::project_capsule(input.eye, centre, centre, k_radius, basis);
+      field.add_hitbox(polygon, sphere.multiplier, 100.0F, input.weapon);
+    }
+    const float gaussian = field.hit_probability(result.aim, input.spread_sigma);
+    expect(!near(result.hitchance, gaussian, 0.05F),
+           "the reported hitchance is not the field's Gaussian");
+    expect(result.hitchance > 0.3F && result.hitchance < 0.7F,
+           "the reported hitchance is the Monte-Carlo's measured probability");
+    // The value is the **expected** damage: a miss contributes 0, so it is the
+    // probability times the damage of a hit — and it is not the field's value (the
+    // damage of a shot that hits).
+    expect(near(result.value, result.hitchance * 100.0F, 0.01F),
+           "the reported value is the expected damage");
+    expect(result.value < 100.0F, "the expected damage is not the damage of a shot that hits");
+    expect(near(field.value_at(result.aim), 100.0F, 0.01F),
+           "the field's own value is the damage of a shot that hits");
+    // The verdict carries the policy that produced it, and the sample count.
+    expect(result.monte_carlo.has_value() && result.monte_carlo->samples == 64,
+           "the verdict reports the sample count");
+    expect(result.monte_carlo.has_value() &&
+               result.monte_carlo->seed_source == cs2::aim::SeedSource::sequence,
+           "the verdict reports the seed policy");
+
+    // The can-kill key: the damage **attributed to the target** against that
+    // target's own health.
+    expect(result.monte_carlo.has_value() && !result.monte_carlo->can_kill,
+           "a target with 1000 hp left does not die from the expected damage");
+    SolveInput lethal = input;
+    lethal.monte_carlo_targets.clear();
+    lethal.monte_carlo_targets.push_back(cs2::aim::TargetHealth{.index = 0, .health = 10.0F});
+    const auto lethal_result = cs2::aim::solve(lethal);
+    expect(lethal_result.monte_carlo.has_value() && lethal_result.monte_carlo->can_kill,
+           "a target with 10 hp left dies from the expected damage");
+
+    // --- the refusal: the weapon's pattern is not modelled ------------------
+    // The shotgun's pellet pattern table is not modelled, so the core refuses —
+    // and the refusal is **observable**: the aim falls back to the `damage`
+    // objective, and the reason is in the result.
+    SolveInput shotgun = input;
+    shotgun.weapon.weapon_type = cs2::aim::WEAPON_TYPE_SHOTGUN;
+    const auto refused = cs2::aim::solve(shotgun);
+    expect(refused.valid, "the refused solve still produces an aim");
+    expect(!refused.monte_carlo.has_value(), "the refused solve has no Monte-Carlo verdict");
+    expect(refused.monte_carlo_refusal.has_value() &&
+               *refused.monte_carlo_refusal == cs2::aim::MonteCarloError::unsupported_pattern,
+           "the refusal names the unmodelled pattern");
+    // The fallback is the `damage` objective — the aim is exactly the one the
+    // `damage` objective produces on the same field.
+    SolveInput damage = input;
+    damage.objective = AimObjective::damage;
+    const auto damage_result = cs2::aim::solve(damage);
+    expect(near(refused.aim.x, damage_result.aim.x, 1e-4F) &&
+               near(refused.aim.y, damage_result.aim.y, 1e-4F),
+           "the refusal falls back to the damage objective's aim");
+    expect(near(refused.value, damage_result.value, 1e-4F),
+           "the refusal reports the damage objective's value");
+
+    // The **search's** own refusal (not only the kernel's): a sample count of zero
+    // is refused by the core, and the refusal is observable too.
+    SolveInput no_samples = input;
+    no_samples.monte_carlo_samples = 0;
+    const auto refused_samples = cs2::aim::solve(no_samples);
+    expect(refused_samples.valid, "the refused search still produces an aim");
+    expect(!refused_samples.monte_carlo.has_value(), "the refused search has no verdict");
+    expect(refused_samples.monte_carlo_refusal.has_value() &&
+               *refused_samples.monte_carlo_refusal == cs2::aim::MonteCarloError::invalid_samples,
+           "the search's refusal names the invalid sample count");
+  }
+
+  // --- the four other objectives are unchanged -------------------------------
+  {
+    // The regression: the Monte-Carlo objective is a **value**, not a behaviour
+    // change. The four objectives above must produce exactly what the field's
+    // own optima produce — the same aim, the same value, the same hitchance and
+    // the same penetration flag — and a `SolveInput` that does not set the
+    // Monte-Carlo parameters must be solved exactly as it was before.
+    const Vec3 centre{.x = 100.0F, .y = 0.0F, .z = 0.0F};
+    constexpr float k_radius = 1.0F;
+
+    SolveInput input;
+    input.eye = Vec3{};
+    input.basis = basis;
+    input.weapon = cs2::aim::WeaponProfile{.damage = 100.0F, .range_modifier = 0.98F,
+                                           .spread = 0.02F, .weapon_type = 3};
+    input.spread_sigma = 0.02F;
+    input.pose_sigma = 0.01F;
+    input.pellet_offsets = {Vec2{.x = 0.0F, .y = 0.0F}, Vec2{.x = 0.0F, .y = 0.002F}};
+    Hitbox sphere;
+    sphere.is_capsule = true;
+    sphere.capsule = cs2::aim::Capsule{.a = centre, .b = centre, .radius = k_radius};
+    sphere.multiplier = 1.0F;
+    input.hitboxes.push_back(sphere);
+
+    // The field the solver builds, rebuilt here: one hitbox, no occluders.
+    cs2::aim::DamageField field;
+    {
+      const auto polygon = cs2::aim::project_capsule(input.eye, centre, centre, k_radius, basis);
+      field.add_hitbox(polygon, sphere.multiplier, 100.0F, input.weapon);
+    }
+
+    const auto check = [&](AimObjective objective, const Vec2& expected_aim, float expected_value) {
+      SolveInput solved = input;
+      solved.objective = objective;
+      const auto result = cs2::aim::solve(solved);
+      expect(result.valid, "the objective solves");
+      expect(near(result.aim.x, expected_aim.x, 1e-4F) && near(result.aim.y, expected_aim.y, 1e-4F),
+             "the objective's aim is the field's own optimum");
+      expect(near(result.value, expected_value, 1e-3F), "the objective's value is the field's");
+      expect(near(result.hitchance, field.hit_probability(result.aim, input.spread_sigma), 1e-4F),
+             "the objective's hitchance is the field's Gaussian");
+      expect(!result.monte_carlo.has_value(), "the other objectives produce no Monte-Carlo verdict");
+      expect(!result.monte_carlo_refusal.has_value(), "the other objectives do not refuse");
+    };
+
+    check(AimObjective::damage, field.argmax_damage(), field.value_at(field.argmax_damage()));
+    check(AimObjective::hitchance, field.argmax_hitchance(),
+          field.value_at(field.argmax_hitchance()));
+    check(AimObjective::expected, field.argmax_expected(input.pose_sigma),
+          field.value_at(field.argmax_expected(input.pose_sigma)));
+    check(AimObjective::pellets, field.argmax_pellets(input.pellet_offsets),
+          field.value_at_pellets(field.argmax_pellets(input.pellet_offsets), input.pellet_offsets));
+  }
+
   if (failures == 0) {
     std::printf("aim-solver: ok\n");
     return 0;
