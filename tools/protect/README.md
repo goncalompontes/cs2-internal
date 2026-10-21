@@ -768,9 +768,17 @@ python tools/protect/check_payload.py --protected build-payload-protect/payload.
   image, so that the comparison cannot pass vacuously, and so that the
   verdict does not depend on the layout of the image.
 
+  The scan also looks at the windows that **span** a NUL: a literal whose
+  content holds an embedded NUL is not inside a run (the run is cut at the
+  NUL), and a scan that only looks at the runs calls it absent -- the same
+  mistake the prefix-only scan made, one level down. Only the NULs with a
+  printable byte on both sides are considered, because the image holds half
+  a million NUL bytes and the binary ones (padding, GUIDs) cannot split a
+  string.
+
 The scan is the **expensive** part of the check: it hashes every substring
-of the image at the length of every wanted literal, so it costs about half
-a minute on the payload image (2.4 MB, 17 lengths). That is the price of
+of the image at the length of every wanted literal, so it costs about a
+minute on the payload image (2.4 MB, 17 lengths). That is the price of
 a predicate that cannot be fooled by the shape of the image, and the check
 is part of every protected build.
 
@@ -1724,7 +1732,9 @@ The 77 survivors have **two** causes, and they are different:
 
 An independent measurement (a byte scan of the image for the plaintext of
 every one of the 77 literals, with no hashing at all) gives the same
-answer, and it counts the **occurrences**:
+answer, and it counts the **occurrences**. The numbers below are the
+**debugoptimized** build (the project's default); a release build holds the
+same literals in a different shape and the counts differ (734 of 768):
 
 | | the protected image | the unprotected one |
 |---|---|---|
@@ -1753,13 +1763,26 @@ it runs at every offset there too, so that the verdict does not depend on
 the layout of the image (a release build and a debug build hold the same
 literals in a different shape).
 
-**The strings leaving the image is a separate task.** It is not a bug of
-the pass, and this round does not fix it: making the bytes of a literal
-leave the image needs the *containing* literal to be transformed as well
-(and the containing literal may be in another module, and the pass is per
-module), and it needs the payload's data model to stop pinning the
-feature keys into a global initializer. Both are recorded as their own
-work.
+**The strings leaving the image is a separate task — and it is not a task
+anymore.** It is not a bug of the pass, and this round does not fix it:
+making the bytes of a literal leave the image needs the *containing* literal
+to be transformed as well (and the containing literal may be in another
+module, and the pass is per module), and it needs the payload's data model to
+stop pinning the feature keys into a global initializer.
+
+What the follow-up actually is, and why it was dropped: the feature-key names
+are **displayed** -- the in-process menu draws them and so does the overlay's
+fallback menu -- so a name that is displayed **must exist in a shipped
+image**. The best that can be done is to hold it in **one** artifact instead
+of two, and that is a **product** decision, not a pass decision. The
+reasoning, with the measurements, is in
+[`docs/orchestration/plan-protect.md`](../orchestration/plan-protect.md) §1.2.
+
+What is left in the string domain, and is small: the **internal** keys (the
+JSON keys, the convar names, the console commands) are never displayed and
+could be compared by hash; and the **event/field tables** (364 literals) are
+Valve's own names and could be read from the game's resource files at run
+time instead of shipped as a generated copy.
 
 **The feature keys are pinned by the payload's own data model.**
 `overlay/include/cs2/overlay/settings_table.hpp` holds

@@ -78,7 +78,7 @@ def check_the_scan() -> None:
     # The scan of a build with a seed: the digests are salted.
     forms = check_payload.DigestForms(salted=True, plain=False)
     whole, part = check_payload.scan_literals(
-        runs, wanted(WHOLE, TAIL, ABSENT, salted=True), SEED, forms
+        image, runs, wanted(WHOLE, TAIL, ABSENT, salted=True), SEED, forms
     )
     check(salted_digest(WHOLE) in whole,
           "the scan did not find the literal that is a whole run of the image")
@@ -92,7 +92,7 @@ def check_the_scan() -> None:
     # The scan of an older build: the digests are unsalted.
     forms = check_payload.DigestForms(salted=False, plain=True)
     whole, part = check_payload.scan_literals(
-        runs, wanted(WHOLE, TAIL, ABSENT, salted=False), SEED, forms
+        image, runs, wanted(WHOLE, TAIL, ABSENT, salted=False), SEED, forms
     )
     check(plain_digest(WHOLE) in whole,
           "the scan did not find the unsalted literal that is a whole run")
@@ -104,6 +104,21 @@ def check_the_scan() -> None:
     # that is only inside another string is the bytes of another string.
     check(len(whole) == 1, f"the scan found {len(whole)} whole runs, not 1")
     check(len(part) == 1, f"the scan found {len(part)} literals inside a run, not 1")
+
+    # A literal whose content holds an **embedded NUL**: the run split cuts it
+    # in two, so a scan that only looks at the runs cannot see it -- and it
+    # would call it absent.
+    embedded = b"ab\x00cd"
+    image = b"\x00" + WHOLE + b"\x00" + b"zz" + embedded + b"zz\x00"
+    runs = check_payload.image_runs(image)
+    forms = check_payload.DigestForms(salted=True, plain=False)
+    embedded_whole, embedded_part = check_payload.scan_literals(
+        image, runs, wanted(embedded, salted=True), SEED, forms
+    )
+    check(salted_digest(embedded) in embedded_part,
+          "the scan did not find the literal with an embedded NUL")
+    check(salted_digest(embedded) not in embedded_whole,
+          "the scan found the literal with an embedded NUL as a whole run")
 
 
 def main() -> int:

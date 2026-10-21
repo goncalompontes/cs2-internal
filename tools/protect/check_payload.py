@@ -357,6 +357,31 @@ def image_runs(data: bytes) -> list[bytes]:
     return list({part for part in data.split(b"\0") if part})
 
 
+def printable(byte: int) -> bool:
+    """Whether a byte is a printable ASCII character."""
+    return 0x20 <= byte < 0x7F
+
+
+def nul_positions(data: bytes) -> list[int]:
+    """The positions of the NUL bytes that can **split a string**.
+
+    The scan needs them: a window that spans a NUL is not inside a run, and
+    a literal whose content holds an embedded NUL lives in such a window.
+
+    The image holds half a million NUL bytes -- alignment padding, GUIDs,
+    other binary data -- and the windows around every one of them would cost
+    two minutes per build. A NUL that splits a **string** has a printable
+    byte on both sides; the binary data does not.
+    """
+    positions: list[int] = []
+    index = data.find(b"\0")
+    while index >= 0:
+        if 0 < index < len(data) - 1 and printable(data[index - 1]) and printable(data[index + 1]):
+            positions.append(index)
+        index = data.find(b"\0", index + 1)
+    return positions
+
+
 #: The text the proof of the salt is computed over. It is the plugin's
 #: constant (tools/protect/src/strings.cpp).
 SALT_PROOF_TEXT = b"cs2.protect.salt.proof"
@@ -428,8 +453,8 @@ def digest_forms(coverage: list[Coverage]) -> DigestForms:
     return DigestForms(salted, plain)
 
 
-def scan_literals(runs: list[bytes], by_length: dict[int, set[str]], seed: int | None,
-                  forms: DigestForms) -> tuple[set[str], set[str]]:
+def scan_literals(data: bytes, runs: list[bytes], by_length: dict[int, set[str]],
+                  seed: int | None, forms: DigestForms) -> tuple[set[str], set[str]]:
     """The wanted literals the image holds: as a whole run, and inside a run.
 
     The scan is at **every offset** of every run. A literal that is in the
@@ -446,6 +471,11 @@ def scan_literals(runs: list[bytes], by_length: dict[int, set[str]], seed: int |
       NUL-terminated string of their own: a copy of the literal itself;
     * the literals that are only **inside** a run -- as its prefix or as its
       tail: the bytes of another string of the image.
+
+    The scan also looks at the windows that **span** a NUL: a literal whose
+    content holds an embedded NUL is not inside a run (the run is cut at the
+    NUL), and a scan that only looks at the runs calls it absent -- the same
+    mistake the prefix-only scan made, one level down.
     """
     whole: set[str] = set()
     part: set[str] = set()
@@ -482,6 +512,23 @@ def scan_literals(runs: list[bytes], by_length: dict[int, set[str]], seed: int |
                             whole.add(name)
                         else:
                             part.add(name)
+
+        # The windows that span a NUL. A literal with an embedded NUL is cut
+        # in two by the run split, so the run scan cannot see it.
+        for position in nul_positions(data):
+            first = position - length + 1
+            if first < 0:
+                first = 0
+            for start in range(first, position + 1):
+                piece = data[start:start + length]
+                if len(piece) < length:
+                    continue
+                if forms.salted:
+                    raw = sha256(salt + piece).digest()
+                else:
+                    raw = sha256(piece).digest()
+                if raw in wanted:
+                    part.add(raw.hex().upper())
     return whole, part
 
 
@@ -588,7 +635,7 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
     forms = digest_forms(coverage)
     runs = image_runs(protected.data)
     everywhere = {digest for digests in by_length.values() for digest in digests}
-    whole, part = scan_literals(runs, by_length, seed, forms)
+    whole, part = scan_literals(protected.data, runs, by_length, seed, forms)
     survivors = (whole | part) & everywhere
     absent = everywhere - survivors
 
@@ -639,7 +686,8 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
         # whose image holds the plaintext as the tail of another string --
         # a verdict that depends on the layout of the image and not on the
         # protection.
-        plain_whole, plain_part = scan_literals(plain_runs, by_length, seed, forms)
+        plain_whole, plain_part = scan_literals(unprotected.data, plain_runs, by_length,
+                                         seed, forms)
         missing = everywhere - (plain_whole | plain_part)
         if missing:
             check(

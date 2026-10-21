@@ -486,7 +486,8 @@ class Coverage:
         The digest is **salted** with the seed of the build, and the field
         says so (`digest=`).  A coverage of an older build names it
         `sha256=`, and that name is still read: the digest it carries is the
-        unsalted one, and the check tries both forms.
+        unsalted one. Which form a digest is in is decided by the coverage's
+        `str-salt` line, not by the field's name.
         """
         state, _, rest = value.partition(" ")
         length = 0
