@@ -48,10 +48,23 @@ That is the 2026-10-21 handoff for the feature wave: where every artifact lives
 config), what landed, what is open, and the **orchestration playbook** — a
 written spec per task, one git worktree per agent, an implementer sub-agent, an
 **adversarial** reviewer sub-agent that reads the same spec, a fix round, and a
-merge with the full verify loop. The mechanics of that loop are a plugin
-(`tools.orchestrate.plan` / `.review` / `.merge`), and every task spec, the
-shared brief, the reviewer's role and the review prompt template live in
-[`docs/orchestration/`](docs/orchestration/).
+merge with the full verify loop. The mechanics of that loop are a plugin: it
+runs **plan → verify → review → fix → merge** over eight `tools.orchestrate.*`
+tools: `plan` makes the task's worktree, `verify` runs the verify loop in that
+worktree, `review` points a review worktree at the commit, `fix` returns the
+findings to the implementer, `merge` merges the branch into the integration
+branch, `status` is the task board, `size` explains the worktrees' size, and
+`cleanup` removes the worktrees that are done with (report-only without
+`apply: true`; a worktree with a modified tracked file needs `force: true`).
+The plugin's **source** — the thing to read and the thing to edit — is its own
+repository (`C:\Users\gpmpo\orchestration-plugin`); the installed copy is a
+**copy** of it, in the same shape, so `node scripts/install.mjs` is what makes
+an edit live. **The merge verifies the merged tree before it commits** and
+**refuses a branch with no review** (or a *DO NOT SHIP* one) unless
+`allow_unreviewed: true`; an *older* review still counts, with a warning. The
+index is [`docs/orchestration/README.md`](docs/orchestration/README.md) — the
+tool table, the merge rules and this repository's orchestration files are there
+— and the detail is the plugin's own `README.md`.
 
 **Do this first:** the operator reported that the movement (the auto-strafer or
 the bhop) **no longer accelerates**. That is **settled** (`docs/handoff-wave2.md`
