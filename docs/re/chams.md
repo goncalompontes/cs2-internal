@@ -833,6 +833,27 @@ fail the suite. The proof that the probe bites is the run against the
 pre-fix protocol in a scratch copy of the tree, whose number is in the
 task's report.
 
+Two more rounds were added:
+
+* **the generation bump under a concurrent publisher** — a fifth thread
+  advances the generation while the four writers hammer the slot. The
+  invalidation is part of the protocol, and this is the only way it ever
+  happens in the payload: a publisher that was mid-publish when the frame
+  advanced publishes an entry of the *older* generation, and the reader
+  rejects it. The round reports **zero** mismatches with ten to forty
+  thousand advances per run;
+* **the reader's give-up path** — eight writers hammer one slot while a
+  reader looks it up. The reader gives up after four tries and resolves the
+  desc itself (the uncached path), and that is the one path where the
+  cache's promise ("once per model") does not hold: the draw path pays two
+  engine reads per *primitive* instead of per *model* while it lasts.
+
+The give-up path was correct and **unmeasured**; the cache counts the
+give-ups now (`DescCache::give_ups()`), and the round reports them: on this
+machine the reader gives up on **between a third and nine tenths** of the
+lookups under that contention, and the entry the cache hands out is still
+the right one every time (zero mismatches).
+
 ### 10.4 The guard fails **closed** on the draw path
 
 The shared guard's fail-open rationale is the **camera's**: refusing a call

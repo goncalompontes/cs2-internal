@@ -273,6 +273,119 @@ void test_the_slots_are_independent() {
   expect(hit.has_value() && hit->entity == entity_of(DESC_A), "the first slot is untouched");
 }
 
+// The **generation bump under a concurrent publisher**: the frame advances
+// while the writers are hammering the slot.
+//
+// The invalidation is part of the protocol — a publisher that was mid-publish
+// when the frame advanced publishes an entry of the **older** generation,
+// and the reader rejects it — and this is the interaction that argument
+// rests on. The single-threaded case above covers the rule; this one covers
+// the rule **under** the concurrency, which is the only way it ever happens
+// in the payload.
+void test_the_generation_bump_under_a_concurrent_publisher() {
+  cs2::features::DescCache cache;
+  Probe probe;
+  constexpr int THREADS = 4;
+  constexpr int ROUNDS = 40000;
+  std::atomic<bool> stop{false};
+  std::atomic<std::uint64_t> advances{0};
+
+  // The fifth thread: the frame advances, over and over, while the writers
+  // publish. The bump is not continuous — a continuous bump would leave the
+  // cache empty and the probe would never read it — but it is frequent
+  // enough that the publishers straddle it.
+  std::thread advancer([&cache, &stop, &advances]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      for (int round = 0; round < 1000; ++round) {
+        if (stop.load(std::memory_order_relaxed)) {
+          return;
+        }
+      }
+      cache.advance();
+      advances.fetch_add(1, std::memory_order_relaxed);
+    }
+  });
+
+  std::vector<std::thread> threads;
+  for (int index = 0; index < THREADS; ++index) {
+    const std::uint64_t desc = (index % 2 == 0) ? DESC_A : DESC_B;
+    threads.emplace_back([&cache, &probe, desc]() { probe_shipped(cache, probe, desc, ROUNDS); });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+  stop.store(true, std::memory_order_relaxed);
+  advancer.join();
+
+  std::printf("the generation bump: %llu mismatches, %llu hits, %llu publishes, %llu advances\n",
+              static_cast<unsigned long long>(probe.mismatches.load()),
+              static_cast<unsigned long long>(probe.hits.load()),
+              static_cast<unsigned long long>(probe.publishes.load()),
+              static_cast<unsigned long long>(advances.load()));
+  expect(probe.mismatches.load() == 0, "the cache never pairs two writes across a bump");
+  expect(advances.load() > 0, "the generation really advanced");
+  expect(probe.hits.load() > 0, "the probe still read the cache across the bumps");
+}
+
+// The reader's **give-up** path: the slot never settled, so the reader
+// resolves the desc itself (the uncached path).
+//
+// This is the one path where the cache's promise ("once per model") does not
+// hold: the draw path pays two engine reads per *primitive* instead of per
+// *model* while it lasts. It was correct and **unmeasured**; the cache
+// counts the give-ups, and this test drives the contention that produces
+// them and checks that the entry the cache hands out is still the right one.
+void test_the_reader_gives_up_and_the_entry_is_still_right() {
+  cs2::features::DescCache cache;
+  Probe probe;
+  constexpr int WRITERS = 8;
+  constexpr int ROUNDS = 20000;
+  std::atomic<bool> stop{false};
+
+  // The writers hammer **one** slot, so the reader keeps finding it claimed.
+  std::vector<std::thread> writers;
+  for (int index = 0; index < WRITERS; ++index) {
+    writers.emplace_back([&cache, &stop]() {
+      while (!stop.load(std::memory_order_relaxed)) {
+        const std::uint64_t stamp = cache.stamp();
+        (void)cache.publish(DESC_A, stamp, entity_of(DESC_A), false);
+      }
+    });
+  }
+
+  // The reader: it looks the desc up, and when the cache does not know it —
+  // or the slot never settled — it resolves the desc itself.
+  std::thread reader([&cache, &probe]() {
+    for (int round = 0; round < ROUNDS * WRITERS; ++round) {
+      const auto hit = cache.lookup(DESC_A);
+      if (!hit.has_value()) {
+        probe.publishes.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      probe.hits.fetch_add(1, std::memory_order_relaxed);
+      if (hit->entity != entity_of(DESC_A)) {
+        // The defect: the desc and the entity came from two different
+        // writes.
+        probe.mismatches.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  });
+  reader.join();
+  stop.store(true, std::memory_order_relaxed);
+  for (auto& writer : writers) {
+    writer.join();
+  }
+
+  std::printf("the give-up path: %llu give-ups, %llu hits, %llu misses, %llu mismatches\n",
+              static_cast<unsigned long long>(cache.give_ups()),
+              static_cast<unsigned long long>(probe.hits.load()),
+              static_cast<unsigned long long>(probe.publishes.load()),
+              static_cast<unsigned long long>(probe.mismatches.load()));
+  expect(cache.give_ups() > 0, "the reader gave up at least once under the contention");
+  expect(probe.mismatches.load() == 0, "the entry is still the right one after a give-up");
+  expect(probe.hits.load() > 0, "the reader still got the entry when it could");
+}
+
 }  // namespace
 
 auto main() -> int {
@@ -281,6 +394,8 @@ auto main() -> int {
   test_a_stale_publisher_cannot_resurrect_the_entry();
   test_the_slots_are_independent();
   test_the_cache_never_pairs_two_writes();
+  test_the_generation_bump_under_a_concurrent_publisher();
+  test_the_reader_gives_up_and_the_entry_is_still_right();
   test_the_old_protocol_is_the_control();
 
   if (failures != 0) {

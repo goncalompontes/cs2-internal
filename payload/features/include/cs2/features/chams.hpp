@@ -237,8 +237,22 @@ class DescCache {
       return Entry{static_cast<std::uintptr_t>(entry_entity), entry_view_model != 0};
     }
     // The slot never settled: there is no cached entry, and the caller
-    // resolves the desc itself.
+    // resolves the desc itself (the uncached path).
+    //
+    // This is the one path where the cache's promise ("once per model") does
+    // not hold, so it is **counted**: the draw path pays two engine reads
+    // per *primitive* instead of per *model* while it lasts.
+    give_ups_.fetch_add(1, std::memory_order_relaxed);
     return std::nullopt;
+  }
+
+  // How many times a reader gave up on a slot that never settled.
+  //
+  // It is zero in the quiet case (the writer holds the slot for a handful of
+  // stores, so the first retry normally succeeds) and it climbs under
+  // sustained contention.
+  [[nodiscard]] auto give_ups() const noexcept -> std::uint64_t {
+    return give_ups_.load(std::memory_order_relaxed);
   }
 
   // Publish the entry for `desc_address`, resolved under the generation
@@ -332,6 +346,11 @@ class DescCache {
   // The generation the cache is serving. The payload's per-frame step bumps
   // it; the render threads read it.
   std::atomic<std::uint64_t> frame_stamp_{0};
+  // The readers that gave up on a slot that never settled.
+  //
+  // It is `mutable` because `lookup()` is a **const** reader: counting the
+  // give-ups does not change what the cache knows.
+  mutable std::atomic<std::uint64_t> give_ups_{0};
 };
 
 class Chams {
