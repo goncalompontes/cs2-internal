@@ -805,6 +805,40 @@ failure family as F2, one door over.
 | `8cdef05` | **docs(quality-pass):** 6.2 publishes the command the numbers come from (m1) |
 | `b824a9e` | **docs(quality-pass):** the clang-tidy table is re-measured at the tip (m2) |
 
+### 9.8 The third re-review
+
+The pass was reviewed a fourth time. The reviewer re-ran the whole verify
+loop in a fresh worktree (44/44 host tests, 404 Python tests, mypy clean on
+52 files, all four builds), re-ran the whole workflow on a fresh
+`git archive HEAD` checkout with the pinned tools (every step green), and
+re-measured the report's own tables (§6.1, §6.2 and §6.3) instead of
+believing them. The verdict was **ship with fixes** again: no blocker and
+no major, four documentation findings and three nits. The refactor itself
+was verified sound — the reviewer broke the `usable()` guard, the ownership
+flag and the policy copy in scratch copies, and the host test failed in all
+three cases.
+
+| finding | what it was | what changed | how it was proven |
+|---|---|---|---|
+| **M1** | §6.1's "after" number did not follow from the method printed next to it: the published command gives **15** `CloseHandle` tokens and the table said 14. The count became 15 in `c4769f8` (the M1 commit, which added a third `CloseHandle` mention to `win_handle.hpp`'s `usable()` comment); the table had been measured before it and was never re-measured | §6.1's table says 15, the per-file breakdown gives `win_handle.hpp` 3, and the "of the N that are left" paragraph counts the fifteen (nine of them aliases, comments and string literals; six are calls). The F7 row of §9.4 says what the commands print now, and why the number moved | the published commands were run verbatim in git bash at the tip: **35, 15, 25, 5**. The per-file breakdown reproduces: `rage_config.cpp` 7, `win_handle.hpp` 3, `service.cpp` 3, `channel.cpp` 1, `trivial_dll.cpp` 1 = 15 |
+| **M2** | the workflow ran on `windows-latest` — a moving label — while its header documented the facts of a *pinned* image, so the recorded facts could stop being true without anything failing | the job runs on `windows-2025`, and the header says the facts were **observed on windows-2025** and that the image is refreshed inside the label | the header and `runs-on` now describe the same image; `windows-2025` is a published runner label |
+| **M3** | the workflow's header (and §9.6's `m6` row) overstated what the payload step proves: with no calibration dumps the generator writes an **empty** SDK, so the schema-facing code is **compiled out** and the CI compiles a payload that is not the shipped payload | the header, the step's own comment, §7.3 and the `m6` row now say that the payload step is a compile gate for the non-schema code only, and that the SDK paths are compiled after a local calibration. The stub SDK stays declined — but for the honest reason: a frozen stub is no closer to the real shape than the empty headers are | the empty SDK was measured in a fresh tree (`0 interfaces, 0 classes, 0 offsets`), and the guard is in `payload/features/src/esp_world.cpp:25`, `payload/game/src/state_reader.cpp:10` and `payload/control/src/input.cpp:16` |
+| **M4** | §6.2 and §6.3 labelled their columns "the tip", but the tip had moved past the commit they name | the tables name the commit they were measured at (`9fb8875`, the last commit on the branch that touches a source file) and say that the commits after it — the workflow and this report — do not move the numbers | the sweep was re-run over all ten groups at that commit and §6.2's table was re-measured with the published command: every row reproduces |
+| the nits | `injector/src/main.cpp` had a line of 101 columns; the new host test was not clang-format-clean; the header claimed a `__cplusplus` value (202400) it could not verify, and probably had wrong for the runner's LLVM 20.1.8 | all three are fixed: the call is re-wrapped the way `clang-format` wraps it, the test file is formatted, and the clause is dropped in favour of "no `__cplusplus` value is assumed" (the tree has no `__cplusplus` conditional of its own) | `clang-format --dry-run --Werror` on the test file is clean, and the only lines over 100 columns left in the injector are the three that were already there before this branch |
+
+### 9.9 The third re-review's commits
+
+| commit | what it changed |
+|---|---|
+| `2496ea8` | **fix(injector):** the remote thread's call fits in the column limit (a nit) |
+| `9fb8875` | **style(core):** the new host test is clang-format-clean (a nit) |
+| `d4125f4` | **ci:** the header claims no `__cplusplus` value it cannot verify (a nit) |
+| `6a4f3ca` | **ci:** the runner label is pinned to the image the header describes (M2) |
+| `7f729d5` | **ci:** the payload step says what it actually compiles (M3) |
+| `6ed7dc3` | **docs(quality-pass):** the handle counts are re-measured at the tip (M1) |
+| `819f6c9` | **docs(quality-pass):** the tables name the commit they were measured at (M4) |
+| `f08e018` | **docs(quality-pass):** the m6 row says what the payload step compiles (M3) |
+
 ---
 
 ## 10. Where to look next
