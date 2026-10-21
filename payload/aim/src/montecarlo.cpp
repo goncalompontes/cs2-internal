@@ -1,0 +1,357 @@
+#include "cs2/aim/montecarlo.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <numeric>
+#include <utility>
+#include <vector>
+
+#include "cs2/aim/ray_span.hpp"
+
+namespace cs2::aim {
+namespace {
+
+constexpr float TWO_PI = 6.28318530717958647F;
+
+// The grid the stand-in `angle_grid` hash quantises the probe angles onto (radians).
+constexpr float ANGLE_HASH_QUANTUM = 1.0e-4F;
+
+// The tie threshold of the selection rule: two probabilities closer than this are a
+// tie (the probabilities are `hits / samples`, so they are exact multiples of
+// `1 / samples` and never land this close by accident).
+constexpr float TIE_EPSILON = 1.0e-6F;
+
+// The engine's per-pellet draw, in the engine's order (`docs/re/aim.md` §"The spread
+// cone"):
+//
+//   r1, a1 = RandomFloat(0, 1), RandomFloat(0, 2pi)   (spread)
+//   r2, a2 = RandomFloat(0, 1), RandomFloat(0, 2pi)   (inaccuracy)
+//   off    = spread·r1·(cos a1, sin a1) + inaccuracy·r2·(cos a2, sin a2)
+//
+// with the revolver's `r1 -> 1 - r1²` transform. The draw order is load-bearing: the
+// offsets must be the engine's, so the expression order matches `pellet_offsets`
+// exactly (the floating-point result is bit-identical).
+//
+// This is a **second implementation of the recipe, not a second RNG** — the stream
+// itself is the repo's `UniformRandomStream` and the seed is the repo's
+// `md5_pseudo_random`. Keeping the assembly separate is what makes the test a real
+// cross-check of the two implementations instead of a tautology.
+[[nodiscard]] auto draw_pellet(UniformRandomStream& stream, float spread, float inaccuracy,
+                               SpreadPattern pattern) noexcept -> Vec2 {
+  float r1 = stream.random_float(0.0F, 1.0F);
+  const float a1 = stream.random_float(0.0F, TWO_PI);
+  const float r2 = stream.random_float(0.0F, 1.0F);
+  const float a2 = stream.random_float(0.0F, TWO_PI);
+  if (pattern == SpreadPattern::revolver) {
+    r1 = 1.0F - r1 * r1;
+  }
+  return Vec2{.x = spread * r1 * std::cos(a1) + inaccuracy * r2 * std::cos(a2),
+              .y = spread * r1 * std::sin(a1) + inaccuracy * r2 * std::sin(a2)};
+}
+
+// The remaining health of `target`, and whether it is known at all.
+[[nodiscard]] auto remaining_health(const MonteCarloInput& input, int target) noexcept
+    -> std::optional<float> {
+  for (const TargetHealth& entry : input.targets) {
+    if (entry.index == target) {
+      return entry.health;
+    }
+  }
+  return std::nullopt;
+}
+
+// Whether the candidate beats the incumbent under the lexicographic rule.
+[[nodiscard]] auto better(const HitChance& candidate, bool candidate_kills, const HitChance& best,
+                          bool best_kills) noexcept -> bool {
+  // 1. can kill first.
+  if (candidate_kills != best_kills) {
+    return candidate_kills;
+  }
+  // 2. then the highest probability of any hit.
+  if (std::fabs(candidate.probability - best.probability) > TIE_EPSILON) {
+    return candidate.probability > best.probability;
+  }
+  // 3. then the hitgroup preference (head before body).
+  const int candidate_preference = hitgroup_preference(candidate.hitgroup);
+  const int best_preference = hitgroup_preference(best.hitgroup);
+  if (candidate_preference != best_preference) {
+    return candidate_preference < best_preference;
+  }
+  // 4. and the expected damage as the final tie-break.
+  return candidate.expected_damage > best.expected_damage;
+}
+
+}  // namespace
+
+auto to_string(MonteCarloError error) noexcept -> const char* {
+  switch (error) {
+    case MonteCarloError::no_hitboxes:
+      return "no_hitboxes";
+    case MonteCarloError::invalid_samples:
+      return "invalid_samples";
+    case MonteCarloError::too_many_pellets:
+      return "too_many_pellets";
+    case MonteCarloError::unsupported_pattern:
+      return "unsupported_pattern";
+    case MonteCarloError::no_candidates:
+      return "no_candidates";
+  }
+  return "unknown";
+}
+
+auto pattern_supported(const WeaponProfile& weapon) noexcept -> bool {
+  // The shotgun's pattern table (`FUN_1807cd1b0`) and the negev's `r -> 1 - r^(2^k)`
+  // are not modelled (`payload/aim/include/cs2/aim/spread.hpp`). The machineguns are
+  // refused with the negev because `WeaponProfile` carries the weapon *type* only.
+  return weapon.weapon_type != WEAPON_TYPE_SHOTGUN && weapon.weapon_type != WEAPON_TYPE_MACHINEGUN;
+}
+
+auto spread_kernel(const WeaponProfile& weapon, int pellets, SpreadPattern pattern) noexcept
+    -> std::expected<SpreadKernel, MonteCarloError> {
+  if (!pattern_supported(weapon)) {
+    return std::unexpected(MonteCarloError::unsupported_pattern);
+  }
+  if (pellets <= 0) {
+    return std::unexpected(MonteCarloError::invalid_samples);
+  }
+  if (pellets > MAX_PELLETS) {
+    return std::unexpected(MonteCarloError::too_many_pellets);
+  }
+  return SpreadKernel{.spread = weapon.spread,
+                      .inaccuracy = weapon.inaccuracy,
+                      .pellets = pellets,
+                      .pattern = pattern};
+}
+
+auto draw_pellet_offsets(std::int32_t seed, const SpreadKernel& kernel,
+                         std::span<Vec2> out) noexcept -> int {
+  UniformRandomStream stream(seed);
+  const int count = std::min(kernel.pellets, static_cast<int>(out.size()));
+  for (int i = 0; i < count; ++i) {
+    out[static_cast<std::size_t>(i)] =
+        draw_pellet(stream, kernel.spread, kernel.inaccuracy, kernel.pattern);
+  }
+  return count;
+}
+
+auto angle_seed_hash(float yaw, float pitch, std::uint32_t tick) noexcept -> std::uint32_t {
+  const auto quantise = [](float value) noexcept -> std::uint32_t {
+    const auto scaled =
+        static_cast<std::int64_t>(std::llround(static_cast<double>(value) / ANGLE_HASH_QUANTUM));
+    return static_cast<std::uint32_t>(scaled);
+  };
+  std::uint32_t hash = quantise(yaw) * 0x27d4eb2dU;
+  hash ^= quantise(pitch) * 0x165667b1U;
+  hash ^= tick * 0x9e3779b9U;
+  // splitmix32's finalizer: a bijection, so two different probe angles never share a
+  // hash (a stand-in, but a deterministic and injective one).
+  hash ^= hash >> 16;
+  hash *= 0x85ebca6bU;
+  hash ^= hash >> 13;
+  hash *= 0xc2b2ae35U;
+  hash ^= hash >> 16;
+  return hash;
+}
+
+auto sample_seed(const SeedContext& context, const Vec2& aim, int index, int sample_count) noexcept
+    -> std::int32_t {
+  if (context.source == SeedSource::sequence) {
+    return md5_pseudo_random(context.sequence + static_cast<std::uint32_t>(index));
+  }
+  // The probe angles: a yaw sweep across the candidate's neighbourhood, centred on the
+  // candidate (velocity's `find_spread_correction` probes the yaw in half-degree
+  // steps). The pitch is the candidate's own.
+  const float centre = 0.5F * static_cast<float>(std::max(sample_count, 1) - 1);
+  const float probe_yaw = aim.x + (static_cast<float>(index) - centre) * context.probe_step;
+  const float probe_pitch = aim.y;
+  return md5_pseudo_random(angle_seed_hash(probe_yaw, probe_pitch, context.tick));
+}
+
+auto ray_hitbox(const Vec3& eye, const Vec3& direction, const Hitbox& hitbox) noexcept
+    -> std::optional<float> {
+  const auto span = hitbox.is_capsule ? ray_capsule_span(eye, direction, hitbox.capsule.a,
+                                                         hitbox.capsule.b, hitbox.capsule.radius)
+                                      : ray_obb_span(eye, direction, hitbox.box);
+  if (!span.has_value()) {
+    return std::nullopt;
+  }
+  return span->entry;
+}
+
+auto evaluate_sample(const MonteCarloInput& input, const Vec2& aim, std::int32_t seed) noexcept
+    -> Sample {
+  Sample sample{};
+  std::array<Vec2, MAX_PELLETS> offsets{};
+  const int pellets = draw_pellet_offsets(seed, input.kernel, std::span<Vec2>{offsets});
+  if (pellets <= 0) {
+    return sample;
+  }
+  sample.offset = offsets[0];
+  // The chart's local metric at the aim's pitch: a true angular offset of `r` radians
+  // spans `r` in the chart's `v` (pitch) but `r / cos(v)` in its `u` (yaw)
+  // (`yaw_scale`, `cs2/aim/geometry.hpp`). The tangent displacement is therefore
+  // `(offset.x · yaw_scale, offset.y)` in chart coordinates.
+  const float scale = yaw_scale(aim.y);
+  bool have_nearest = false;
+  for (int pellet = 0; pellet < pellets; ++pellet) {
+    const Vec2 offset = offsets[static_cast<std::size_t>(pellet)];
+    const Vec2 point{.x = aim.x + offset.x * scale, .y = aim.y + offset.y};
+    const Vec3 direction = input.basis.unproject(point);
+    // The **nearest** hit wins: the hitboxes overlap, so the sum of their hits would
+    // double-count and the best-value hit would ignore the geometry.
+    const Hitbox* hit = nullptr;
+    float nearest = 0.0F;
+    for (const Hitbox& hitbox : input.hitboxes) {
+      const auto distance = ray_hitbox(input.eye, direction, hitbox);
+      if (!distance.has_value()) {
+        continue;
+      }
+      if (hit == nullptr || *distance < nearest) {
+        nearest = *distance;
+        hit = &hitbox;
+      }
+    }
+    if (hit == nullptr) {
+      continue;
+    }
+    sample.hit = true;
+    // The engine's damage model: the weapon's damage, the hitgroup's multiplier and
+    // the range falloff over the distance the bullet travelled (`range_falloff`,
+    // `cs2/aim/field.hpp`).
+    sample.damage +=
+        input.weapon.damage * hit->multiplier * range_falloff(input.weapon.range_modifier, nearest);
+    if (!have_nearest || nearest < sample.distance) {
+      have_nearest = true;
+      sample.distance = nearest;
+      sample.target = hit->target;
+      sample.hitgroup = hit->group;
+    }
+  }
+  return sample;
+}
+
+auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
+    -> std::expected<HitChance, MonteCarloError> {
+  if (input.hitboxes.empty()) {
+    return std::unexpected(MonteCarloError::no_hitboxes);
+  }
+  if (input.samples <= 0 || input.kernel.pellets <= 0) {
+    return std::unexpected(MonteCarloError::invalid_samples);
+  }
+  if (input.kernel.pellets > MAX_PELLETS) {
+    return std::unexpected(MonteCarloError::too_many_pellets);
+  }
+
+  HitChance chance{};
+  chance.samples = input.samples;
+  float damage_total = 0.0F;
+  float nearest = 0.0F;
+  bool have_nearest = false;
+  for (int index = 0; index < input.samples; ++index) {
+    const std::int32_t seed = sample_seed(input.seed, aim, index, input.samples);
+    const Sample sample = evaluate_sample(input, aim, seed);
+    if (!sample.hit) {
+      continue;
+    }
+    ++chance.hits;
+    damage_total += sample.damage;
+    if (!have_nearest || sample.distance < nearest) {
+      have_nearest = true;
+      nearest = sample.distance;
+      chance.target = sample.target;
+      chance.hitgroup = sample.hitgroup;
+    }
+  }
+  chance.probability = static_cast<float>(chance.hits) / static_cast<float>(input.samples);
+  chance.expected_damage = damage_total / static_cast<float>(input.samples);
+  return chance;
+}
+
+auto solve_montecarlo(const MonteCarloInput& input, std::span<const Cell> cells,
+                      const CandidateBudget& budget) noexcept
+    -> std::expected<MonteCarloChoice, MonteCarloError> {
+  if (!pattern_supported(input.weapon)) {
+    return std::unexpected(MonteCarloError::unsupported_pattern);
+  }
+  if (input.hitboxes.empty()) {
+    return std::unexpected(MonteCarloError::no_hitboxes);
+  }
+  if (input.samples <= 0 || input.kernel.pellets <= 0) {
+    return std::unexpected(MonteCarloError::invalid_samples);
+  }
+  if (input.kernel.pellets > MAX_PELLETS) {
+    return std::unexpected(MonteCarloError::too_many_pellets);
+  }
+
+  // The candidate set: the field's best cells, by descending value. Each contributes
+  // its Chebyshev centre and its centroid — the same two candidates the existing
+  // solver's `field_candidates` builds (`payload/aim/src/field.cpp`; that generator is
+  // file-static, so the primitives are reused here instead of it).
+  std::vector<std::size_t> order(cells.size());
+  std::iota(order.begin(), order.end(), std::size_t{0});
+  const std::size_t cell_count =
+      std::min<std::size_t>(cells.size(), static_cast<std::size_t>(std::max(budget.max_cells, 0)));
+  std::partial_sort(
+      order.begin(), order.begin() + static_cast<std::ptrdiff_t>(cell_count), order.end(),
+      [&](std::size_t a, std::size_t b) -> bool { return cells[a].value > cells[b].value; });
+  std::vector<Vec2> candidates;
+  candidates.reserve(cell_count * 2);
+  for (std::size_t i = 0; i < cell_count; ++i) {
+    const Cell& cell = cells[order[i]];
+    candidates.push_back(chebyshev_center(cell.polygon));
+    candidates.push_back(polygon_centroid(cell.polygon));
+  }
+  if (static_cast<int>(candidates.size()) > budget.max_candidates) {
+    candidates.resize(static_cast<std::size_t>(std::max(budget.max_candidates, 0)));
+  }
+  if (candidates.empty()) {
+    return std::unexpected(MonteCarloError::no_candidates);
+  }
+
+  MonteCarloChoice best;
+  for (const Vec2& candidate : candidates) {
+    const auto chance = evaluate_hit_chance(input, candidate);
+    if (!chance.has_value()) {
+      return std::unexpected(chance.error());
+    }
+    // Can kill: the candidate's expected damage reaches the target's remaining
+    // health. An unknown target's health is not a proof, so it does not kill.
+    bool kills = false;
+    if (const auto health = remaining_health(input, chance->target); health.has_value()) {
+      kills = chance->expected_damage >= *health;
+    }
+    if (!best.valid || better(*chance, kills, best.chance, best.can_kill)) {
+      best.valid = true;
+      best.aim = candidate;
+      best.chance = *chance;
+      best.target = chance->target;
+      best.hitgroup = chance->hitgroup;
+      best.can_kill = kills;
+    }
+  }
+  return best;
+}
+
+auto hitgroup_preference(int group) noexcept -> int {
+  switch (group) {
+    case HITGROUP_HEAD:
+      return 0;
+    case HITGROUP_CHEST:
+      return 1;
+    case HITGROUP_STOMACH:
+      return 2;
+    case HITGROUP_GENERIC:
+      return 3;
+    case HITGROUP_LEFT_ARM:
+    case HITGROUP_RIGHT_ARM:
+      return 4;
+    case HITGROUP_LEFT_LEG:
+    case HITGROUP_RIGHT_LEG:
+      return 5;
+    default:
+      return 6;
+  }
+}
+
+}  // namespace cs2::aim

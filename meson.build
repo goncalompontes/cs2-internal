@@ -136,6 +136,45 @@ aim_spread_test = executable('aim_spread_test',
 )
 test('aim-spread', aim_spread_test)
 
+# The Monte-Carlo hit-chance solver (docs/orchestration/spec-t34-montecarlo.md): the
+# engine's own spread kernel, the nearest-hit ray test and the lexicographic
+# selection rule. Platform-independent, so it builds here as well as into the
+# payload.
+aim_montecarlo_test = executable('aim_montecarlo_test',
+  files(
+    'payload/aim/tests/test_aim_montecarlo.cpp',
+    'payload/aim/src/montecarlo.cpp',
+    'payload/aim/src/spread.cpp',
+    'payload/aim/src/geometry.cpp',
+    'payload/aim/src/hitbox.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-montecarlo', aim_montecarlo_test)
+
+# The Monte-Carlo solver's **benchmark** (not a test: a benchmark must not slow the
+# suite). It replays the committed saved cell set (`artifacts/live-heatmap.json`) and
+# publishes the solver's p50/p95/p99 next to the existing objective's cost. The data
+# path is relative to the repository root, so the benchmark is run from there.
+aim_bench = executable('aim_bench',
+  files(
+    'payload/aim/bench/bench_montecarlo.cpp',
+    'payload/aim/src/montecarlo.cpp',
+    'payload/aim/src/spread.cpp',
+    'payload/aim/src/geometry.cpp',
+    'payload/aim/src/field.cpp',
+    'payload/control/src/json.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+    include_directories('payload/control/include'),
+  ],
+)
+
 aim_solver_test = executable('aim_solver_test',
   files(
     'payload/aim/tests/test_aim_solver.cpp',
