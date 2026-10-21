@@ -1476,7 +1476,11 @@ void __fastcall Input::create_move_input_detour(void* self, int slot, char activ
 // **re-applies** them into the graph's parameters in the **anim tick**
 // (`CAnimGraphGameSystem::AnimTickUpdate`, `0x35aeb0`), which runs *after*
 // the prediction in the same tick (§9.3) and *contains* the AG2 evaluation:
-// the values written there are the ones the pose is computed from.
+// the values written there are the ones the pose is computed from. (That the
+// anim tick runs after the client's prediction in the same tick is
+// **inferred**, `docs/re/animfix.md` §9.3 — and the fix does not depend
+// on it: the correction is written at the start of the anim tick and the
+// evaluation happens inside it.)
 //
 // **Why not the setter** (`0x8492a0`), which is where the prediction writes
 // and would be the natural seam? Its third prologue instruction is a

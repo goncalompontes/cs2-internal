@@ -27,9 +27,13 @@
 // instead of the client's, for the local player's four float slots.
 //
 // **Where the correction goes.** The graph is evaluated in
-// `CAnimGraphGameSystem::AnimTickUpdate` (`0x35aeb0`), which is *after* the
-// client's prediction in the same tick (§9.3), so the correction is applied
-// there — in the anim tick, before the evaluation. The parameter write is
+// `CAnimGraphGameSystem::AnimTickUpdate` (`0x35aeb0`), and the correction is
+// applied there — in the anim tick, before the evaluation, so the graph is
+// evaluated from the server's values. (That the anim tick runs *after* the
+// client's prediction in the same tick is **inferred**, not measured —
+// `docs/re/animfix.md` §9.3 — but the fix does not depend on it: the
+// correction is written at the start of the anim tick and the evaluation
+// happens inside it.) The parameter write is
 // the setter's own (`*(float *)(*(node + 0x10)[index] + 0x18) = value`),
 // replicated here because the setter itself is **not hookable**: its third
 // prologue instruction is a RIP-relative load whose displacement cannot be
@@ -187,7 +191,11 @@ inline constexpr double k_engine_value_limit = 2.1474836e9;
 // True when the engine would write `value` into a graph parameter.
 [[nodiscard]] inline auto value_is_writable(float value) noexcept -> bool {
   if (!std::isfinite(value)) {
-    return false;  // NaN or +-infinity: the engine's mask test refuses those
+    // The engine's mask test refuses the NaNs and the infinities. (The
+    // range test below would refuse them too - every comparison with a NaN
+    // is false - so this branch is the defence in depth, not the only thing
+    // that stands between a NaN and the graph.)
+    return false;
   }
   return std::fabs(static_cast<double>(value)) < k_engine_value_limit;
 }

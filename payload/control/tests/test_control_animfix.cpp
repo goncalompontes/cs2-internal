@@ -376,16 +376,30 @@ void test_the_four_slots_must_be_distinct() {
 // hook.
 auto probe_detour(void*) -> void {}
 
-// The prologues the animfix's seams have on the live build (sha256
-// 659940c1...): `CAnimGraphGameSystem::AnimTickUpdate` (0x35aeb0), the netvar
-// codec (0x8d9740) and the AG2 parameter setter (0x8492a0).
-constexpr unsigned char k_anim_tick_prologue[] = {0x89, 0x54, 0x24, 0x10, 0x48, 0x89, 0x4c, 0x24,
-                                                  0x08, 0x55, 0x57, 0x41, 0x54, 0x41, 0x55};
-constexpr unsigned char k_codec_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x08, 0x55, 0x56,
-                                              0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56};
-// The setter's prologue - the one with the RIP-relative load.
-constexpr unsigned char k_setter_prologue[] = {0xf3, 0x41, 0x0f, 0x10, 0x08, 0x4c, 0x8b, 0xc9,
-                                               0xf3, 0x0f, 0x10, 0x05, 0xa0, 0x0f, 0x3c, 0x01};
+// The **whole** dumper signatures of the animfix's seams, byte for byte (the
+// live build, sha256 659940c1...): `CAnimGraphGameSystem::AnimTickUpdate`
+// (0x35aeb0), the netvar codec (0x8d9740) and the AG2 parameter setter
+// (0x8492a0).
+//
+// The **whole** pattern is pinned, not just the prologue: the payload
+// resolves the seam through the whole pattern, so a signature whose tail is
+// wrong resolves nothing - and the animfix would be silently inert. The
+// prologue (the first bytes, the window the inline hook copies) is the
+// prefix of the pattern.
+constexpr unsigned char k_anim_tick_pattern[] = {0x89, 0x54, 0x24, 0x10, 0x48, 0x89, 0x4c,
+                                                 0x24, 0x08, 0x55, 0x57, 0x41, 0x54, 0x41,
+                                                 0x55, 0x41, 0x57, 0x48, 0x8d, 0xac, 0x24};
+constexpr unsigned char k_codec_pattern[] = {
+    0x48, 0x89, 0x5c, 0x24, 0x08, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
+    0x48, 0x8d, 0xac, 0x24, 0xf0, 0xf9, 0xff, 0xff, 0x48, 0x81, 0xec, 0x10, 0x07, 0x00, 0x00};
+// The setter's pattern - the one with the RIP-relative load.
+constexpr unsigned char k_setter_pattern[] = {0xf3, 0x41, 0x0f, 0x10, 0x08, 0x4c, 0x8b, 0xc9,
+                                              0xf3, 0x0f, 0x10, 0x05, 0xa0, 0x0f, 0x3c, 0x01};
+
+// The window the inline hook copies: the first bytes of the pattern.
+constexpr std::size_t k_anim_tick_prologue_size = 15;
+constexpr std::size_t k_codec_prologue_size = 14;
+constexpr std::size_t k_setter_prologue_size = 16;
 
 // The repository's root, so the test can read the dumper's own source.
 auto test_repository_root(int argc, char** argv) -> std::string {
@@ -441,17 +455,19 @@ void test_the_pinned_prologues_are_the_dumpers_signatures(const std::string& roo
   assert(dumper.good());
   const std::string source((std::istreambuf_iterator<char>(dumper)),
                            std::istreambuf_iterator<char>());
-  const auto matches = [&source](const std::string& name, const unsigned char* prologue,
+  const auto matches = [&source](const std::string& name, const unsigned char* pattern,
                                  std::size_t size) -> bool {
     const std::vector<unsigned char> bytes = signature_bytes(source, name);
-    if (bytes.size() < size) {
+    // The **whole** pattern: the payload resolves the seam through all of
+    // it, so a signature whose tail is wrong would resolve nothing.
+    if (bytes.size() != size) {
       return false;
     }
-    return std::memcmp(bytes.data(), prologue, size) == 0;
+    return std::memcmp(bytes.data(), pattern, size) == 0;
   };
-  assert(matches("animfix_anim_tick", k_anim_tick_prologue, sizeof(k_anim_tick_prologue)));
-  assert(matches("animfix_graph_codec", k_codec_prologue, sizeof(k_codec_prologue)));
-  assert(matches("animfix_param_setter", k_setter_prologue, sizeof(k_setter_prologue)));
+  assert(matches("animfix_anim_tick", k_anim_tick_pattern, sizeof(k_anim_tick_pattern)));
+  assert(matches("animfix_graph_codec", k_codec_pattern, sizeof(k_codec_pattern)));
+  assert(matches("animfix_param_setter", k_setter_pattern, sizeof(k_setter_pattern)));
 }
 
 // **The seam must be hookable by the repository's own relocator, at any
@@ -507,16 +523,16 @@ void test_the_seams_prologues_are_hookable() {
 
   // The two seams the animfix uses: accepted, and **nothing to rewrite** -
   // so the hook works at any address distance.
-  const Outcome anim_tick = probe(k_anim_tick_prologue, sizeof(k_anim_tick_prologue));
+  const Outcome anim_tick = probe(k_anim_tick_pattern, k_anim_tick_prologue_size);
   assert(anim_tick.installed);
   assert(!anim_tick.rewritten);
-  const Outcome codec = probe(k_codec_prologue, sizeof(k_codec_prologue));
+  const Outcome codec = probe(k_codec_pattern, k_codec_prologue_size);
   assert(codec.installed);
   assert(!codec.rewritten);
   // The setter's prologue **is** rewritten: its displacement depends on where
   // the module and the trampoline live, which in the game is ~141 TB apart.
   // That is why the seam is the anim tick and not the setter.
-  const Outcome setter = probe(k_setter_prologue, sizeof(k_setter_prologue));
+  const Outcome setter = probe(k_setter_pattern, k_setter_prologue_size);
   assert(setter.installed);  // it fits here, where both live close together
   assert(setter.rewritten);
 }
