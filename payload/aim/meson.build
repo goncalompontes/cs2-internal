@@ -19,6 +19,7 @@ aim_lib = static_library('cs2_aim',
     'src/penetration.cpp',
     'src/spread.cpp',
     'src/bvh.cpp',
+    'src/montecarlo.cpp',
   ),
   include_directories : [aim_inc, game_inc],
 )

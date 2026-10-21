@@ -1,32 +1,174 @@
 # cs2-internal — the protection pass: handover
 
-> Written at the end of the T18/T19 session (2026-10-21). The next session
-> starts here. Read this, then `docs/orchestration/plan-protect.md` for the
-> map, then `docs/orchestration/spec-t20-protect-virtualization.md` for the
-> next task.
+> Written at the end of the T20a/T21 session (2026-10-21, evening). The next
+> session starts here. Read this, then
+> `docs/orchestration/plan-protect.md` for the map and the ranking, then the
+> spec of the task you pick up.
 
-## 1. What exists
+## 1. What exists now
 
 An **LLVM pass plugin** (`tools/protect/`, built by CMake) that the payload
-build loads with clang-cl. It selects functions to protect and rewrites the
-calls inside them into indirect dispatches through an encrypted descriptor, so
-the static call graph of those calls is no longer readable in the binary.
+build loads with clang-cl. It selects functions, rewrites their calls into
+indirect dispatches through an encrypted descriptor, encrypts the payload's
+string literals, and analyses whether a function *could* be virtualized.
 
-| Task | State | Where |
+| task | state | what it delivered |
 |---|---|---|
-| **T18** — the foundation: the plugin, the env-var policy, the selection, the report, the Meson wiring | **merged** | `docs/orchestration/spec-t18-protect-foundation.md` |
-| **T19** — the call encryption | **merged** | `docs/orchestration/spec-t19-protect-call-encryption.md` |
-| **T20** — the virtualization (IR -> bytecode -> a freestanding interpreter) | **spec written, not started** | `docs/orchestration/spec-t20-protect-virtualization.md` |
+| **T18** — the foundation | **merged** | the plugin builds, loads under clang-cl, selects functions (annotation + policy file), reports; the Meson wiring |
+| **T19** — the call encryption | **merged** | a direct call to a same-module callee becomes an indirect dispatch through an encrypted descriptor; relocation-safe |
+| **T20a** — the virtualizer's front end | **merged** | the ISA (one `isa.def`), the fail-closed gate, the IR→bytecode lowering, the encoder (encrypted, per-build opcode permutation). **Read-only**: the image does not change |
+| **T21** — the string encryption | **merged** | the string selection, the gate, the encryption, the decode emitted into the using function, the salted coverage, the image scan — **and the measurement that says the strings do not leave the image** (§3.2) |
+| **T23a** — the cross-TU routing | **in review** | a call to a declaration the policy's `cross_module` list names goes through the caller's own table; the dispatch count 37 → 51 |
+| **T24** — the per-build polymorphism | **in flight** | the seed becomes mandatory, the mixer's constants and rotation become per-build, the pass permutes the module's function list |
 
-The merge commits are `03504fd` (T19) and `a3403ee` (the T19 fix round).
+**T20b (the interpreter) and T20c (the VM in the payload) are deferred** — the
+gate measured the eligible set and it is **empty** for the payload's real code
+(§3.1). T22 (integrity) and T23b (the `sret` edges) are not started.
 
-## 2. How to use it
+## 2. Where the work is
+
+The plan is `docs/orchestration/plan-protect.md`. The **task sequence** it
+carries now: T20a ✓ → **T23a** → **T24** → T22 → T23b. T21 is done; the
+string line is closed (§3.2).
+
+Every task goes through the same loop: `orchestrate.plan` → an implementer
+sub-agent → `orchestrate.verify` → an **adversarial** reviewer sub-agent that
+reads the same spec → `orchestrate.fix` → `orchestrate.merge` (which runs the
+verify loop on the merged tree before it commits). The mechanics are in
+`docs/orchestration/README.md` and in the plugin's own repository
+(`C:\Users\gpmpo\orchestration-plugin`).
+
+**The reviews earned their keep.** Three of the five tasks went back for a
+fix round, and the reviewers found real defects that every other check had
+missed — a bytecode that computed the wrong values, an image check that
+printed a number it had not measured, a gate that refused every `switch`. The
+reviewer's own instrument was the decisive thing: it **wrote an interpreter
+from the documented contract and executed the bytecode** against it, and it
+**hashed every NUL-terminated run of the built image** to measure the leak.
+Both are worth repeating: *the contract is the deliverable, so test the
+contract, not the shape.*
+
+## 3. The three measurements that reshaped the plan
+
+### 3.1 The VM cannot protect the aim maths
+
+T20a's gate says **none** of the six protected functions is virtualizable:
+four are refused `eh_pad` (they have an EH edge) and two `unsupported_type`
+(they return a `float`). The aim maths is a **float pipeline with exception
+edges**, and the machine handles integers and pointers only. Over the whole
+`payload/aim` module the gate admits 1878 of 2490 functions — but what it
+admits is the small integer helpers, not anything an analyst would care about.
+
+**So the interpreter (T20b) would protect nothing.** T20a is merged anyway: it
+changes no image, it is the precondition for any future VM work, and it is the
+artefact that says *the VM cannot help here*.
+
+### 3.2 The strings do not leave the image
+
+T21's mechanism works — the literal's own symbol is deleted and the decode is
+correct — but the **bytes survive**:
+
+* the **MSVC ABI merges a literal with a longer literal that ends with it**
+  (`movement_thirdperson_fov` holds `thirdperson_fov` at offset 9), so
+  deleting the literal's symbol does not delete its bytes;
+* the payload's own data model **pins the feature keys** into a global
+  initializer (`overlay/include/cs2/overlay/settings_table.hpp` holds
+  `inline constexpr std::array<SettingInfo, 87> SETTING_TABLE`), and a
+  literal that **any** module refuses survives the link (`linkonce_odr`).
+
+Measured: **0 of 77** protected literals are absent from the shipped image;
+858 plaintext occurrences survive against 952 in the unprotected one. The
+cause split: **35** are refused in another module, **42** survive as the tail
+of a longer literal.
+
+**And the feature-key names are displayed** — the in-process menu draws them
+and so does the overlay's fallback menu — so a name that is displayed **must
+exist in a shipped image**. The feature list is the payload's **data**, not its
+code: hiding it is a **product** decision, not a pass decision. That is why
+the "strings leave the image" follow-up was **dropped** rather than scheduled.
+
+### 3.3 The cross-TU hole is 26 edges, and the seed changes 441 bytes
+
+Of the 332 call sites of the six protected functions, 37 are rewritten and 295
+are skipped — but 179 of those are **intrinsics** and 59 are **CRT calls**.
+The hole that matters is **26 cross-TU call sites to 24 payload functions**:
+the aim graph. T23a closes the 14 ordinary ones; T23b (the `sret` edges) is
+not started.
+
+And the seed: two builds with different seeds differ in **441 bytes** of
+`.rdata` and **not one byte** of the 1.7 MB `.text` — so a scanner that hashed
+the code would match every build. Two builds with **no** seed are
+byte-identical: the fallback is a constant of the payload. That is T24.
+
+## 4. The environment
+
+- **LLVM 22.1.8** at `C:\Program Files\LLVM` is a **clangd-only** install: no
+  headers, no `LLVMConfig.cmake`, no `opt.exe`. The dev SDK is the release
+  **tarball** at `F:\llvm-sdk\clang+llvm-22.1.8-x86_64-pc-windows-msvc`
+  (`scripts/build-protect-plugin.py` finds it and **fails loudly** with the
+  download URL and the SHA-256 if it is missing).
+- `cmake` and `ctest` are **not** on PATH: they are in
+  `C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\`.
+- The payload's compiler is **clang-cl 22.1.8** (`vcvars64` + `set CC=clang-cl`).
+  The plugin must be built with the same one (the ABI and the CRT must match).
+- The **host** build must use **gcc** on this machine (`hooks-inline` fails
+  under MSVC).
+
+### The shared assets move under the build
+
+`calibration/` and `external/Vulkan-Headers` are **junctions** to
+`C:\Users\gpmpo\assets\cs2\`, and **`calibration/offsets.json` changes during
+a session** (it was rewritten twice while the reviews were running: 29
+offsets → 28). It **regenerates the SDK headers**, so the payload's base
+relocation count moves with it (13,025 → 13,035 → 13,053 in one evening).
+
+**What that means for you:** the relocation count is **not** a constant of the
+tree, and two builds taken minutes apart can differ for that reason alone.
+**Freeze the calibration** (check its SHA-256 before and after) when you
+compare two images, and treat the relocation count as the tell that the input
+moved. The T24 spec's §1 does exactly this and is the model.
+
+## 5. The facts that cost a day to find
+
+Do not re-derive these. They are all in `tools/protect/README.md` §12 and §14.
+
+- The plugin header is `llvm/Plugins/PassPlugin.h` (moved in LLVM 22) and
+  `LLVM_PLUGIN_API_VERSION` is **2**.
+- `add_llvm_pass_plugin()` is a **no-op on Windows** (CMake's `MODULE` type
+  is unsupported by the MSVC toolchain). The plugin is a `SHARED` library.
+- The SDK's exported CMake targets hardcode a **dead VS 2022 DIA SDK path**;
+  the imported target's `INTERFACE_LINK_LIBRARIES` has to be rewritten.
+- `llvmGetPassPluginInfo` needs an explicit `__declspec(dllexport)`.
+- **clang-cl ignores `-fpass-plugin=`**; the working spelling is
+  **`/clang:-fpass-plugin=<dll>`**.
+- A plugin's `cl::opt` is **not reachable via `-mllvm`** (a statically linked
+  plugin has its own `cl` registry) → the configuration channel is the
+  **environment**: `CS2_PROTECT_CONFIG`, `CS2_PROTECT_SEED`,
+  `CS2_PROTECT_VERBOSE`, `CS2_PROTECT_COVERAGE`.
+- The release LLVM is `-fno-rtti` + static CRT; the plugin must match.
+- **LLVM 22.1.8's X86 backend mis-materialises a 64-bit constant** in some IR
+  shapes (bit 32 flipped). Every 64-bit constant the pass needs therefore
+  lives in a **global** and is read with a **volatile load** — never in the
+  instruction stream.
+- `registerPipelineStartEPCallback` sees **raw** IR; the rewriting passes use
+  **`registerOptimizerLastEPCallback`** (optimised IR, before codegen).
+- A plain `PassInfoMixin` is an *optional* pass and is skipped on `optnone`
+  functions — the pass needs `isRequired() { return true; }`.
+- `OptimizerLast` also fires in the **LTO pre-link** phase → the per-phase
+  module flags keep a module from being transformed twice.
+- The **order of the passes inside the transform phase matters**: the
+  virtualizer's analysis must run **before** the call encryption (the
+  encryption rewrites the calls into indirect ones, and an indirect call is a
+  refusal) — see `tools/protect/src/plugin.cpp`.
+
+## 6. The commands
 
 ```powershell
 cd C:\Users\gpmpo\cs2-internal
 
-# the plugin (the LLVM dev SDK must be present - see section 4)
-$plugin = python scripts\build-protect-plugin.py      # prints only the DLL path
+# the plugin
+$plugin = python scripts\build-protect-plugin.py      # prints only the DLL's path
+ctest --test-dir tools/protect\build --output-on-failure
 
 # a protected payload
 $vc='C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat'
@@ -36,150 +178,47 @@ cmd /c "call `"$vc`" >nul 2>&1 && set CC=clang-cl && set CXX=clang-cl && set CS2
 ```
 
 `CS2_PROTECT_CONFIG` must be set for **both** the configure and the compile
-step: the plugin reads it in the compiler process. The build fails at the
-configure step if it is missing (a protected build that protects nothing is
-indistinguishable from an unprotected one, so the wiring refuses it).
+step: the plugin reads it in the compiler process. Use a **fresh** build
+directory name; do **not** `meson setup --wipe` on `build`, `build-payload`,
+`build-overlay` or `build-injector`.
 
-`tools/protect/policy.local.json` is **gitignored** and is this machine's
-choice of what to protect. It currently selects six `cs2::aim::*` functions and
-denies `cs2::loader::self_unmap`.
+`tools/protect/policy.local.json` is **gitignored** — it is the operator's
+file, and it carries the `seed`. `tools/protect/policy.example.json` is the
+shipped one.
 
-The full documentation is `tools/protect/README.md` - read it before changing
-the pass.
+## 7. Not verified
 
-## 3. The checks
+- **The game.** The agent runs in session 0 with no GPU, so the payload has
+  **never been injected** with the protection active. To exercise it for real:
+  `schtasks /run /tn CS2Launch`, then
+  `build-injector\injector.exe cs2.exe build-payload-protect\payload.dll --load-missing`
+  (**inject once** — a second injection into a running game double-hooks it).
+- The **bytecode has never been executed**: T20a checks the bytecode's
+  *shape* and its *values* (the value test runs it in an interpreter written
+  from the contract), but no interpreter runs it **in the payload**.
+- The **run-time cost** of the extra dispatches (T23a) and of the virtualizer
+  (T20c) is **not measured** by this repository.
 
-The protected build **checks itself**. `meson compile` on a protected build
-runs `check_policy.py` and `check_payload.py`, and fails if either fails:
+## 8. The next task
 
-```
-check_payload: the exports are the same
-check_payload: the imports are the same
-check_payload: the base relocation table has 13025 DIR64 entries
-check_payload: the unwind table has 3300 entries
-check_payload: the protected image has 37 encrypted dispatches, the unprotected one 0
-check_payload: 37 dispatches decode to a callee of the image
-```
+Pick the first of these that is not in flight:
 
-The last line is the one that matters: the image's **own** descriptor, decoded
-with the image's **own** key, resolves at every dispatch site to a real callee
-inside the image. It is what catches a wrong call target - a failure mode that
-does **not** crash, so nothing else would notice it.
+1. **T23a** — the cross-TU routing: 37 → 51 dispatches. *In review.*
+2. **T24** — the per-build polymorphism: the seed becomes mandatory, the
+   mixer's constants and rotation become per-build, the module's function list
+   is permuted. The acceptance criterion is a **measurement**:
+   `compare_builds.py --section .text` must report that two seeded builds
+   differ. *In flight.*
+3. **T23b** — the `sret` edges: T19's refusal of a struct-returning callee is
+   a **policy, not a target limit** (`llc` accepts an indirect `sret` call on
+   `x86_64-pc-windows-msvc`), so the rule can be narrowed. It changes the
+   **call ABI**, so it needs its own differential test. The spec is
+   `docs/orchestration/spec-t23-protect-cross-tu.md` §5.3.
+4. **T22** — the integrity check (anti-tamper, not anti-reversing). The
+   survey's §7 has the model and the cost: a post-link binder over a
+   self-checksum. **Do not ship a pre-codegen check** — a fake check "looks
+   like protection while providing none".
 
-To compare against an unprotected image, pass one:
-`-Dprotect_reference=<path to an unprotected payload.dll>`.
-
-The plugin's own tests: `ctest --test-dir tools/protect/build` (4 tests).
-
-## 4. The environment
-
-- **LLVM 22.1.8** at `C:\Program Files\LLVM` is a **clangd-only** install: no
-  headers, no `LLVMConfig.cmake`, no `opt.exe`. The dev SDK is the release
-  **tarball**, extracted at
-  `F:\llvm-sdk\clang+llvm-22.1.8-x86_64-pc-windows-msvc`. `scripts/build-protect-plugin.py`
-  looks for it at `$CS2_LLVM_SDK` and then at that default path, and **fails
-  loudly** with the download URL and the SHA-256 if it is missing.
-  Re-download:
-  `https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/clang%2Bllvm-22.1.8-x86_64-pc-windows-msvc.tar.xz`
-  (sha256 `d96c2cc1736f4eb7fa43cb9bbdf56d93551a9ae0a9aadb9c99c3c3b2b712a234`).
-- `cmake` and `ctest` are **not** on PATH: they are in
-  `C:\Program Files\Microsoft Visual Studio\18\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin`.
-- The payload's compiler is **clang-cl 22.1.8**, which is what `vcvars64` +
-  `set CC=clang-cl` resolves to. The plugin must be built with the same one
-  (the ABI and the CRT must match).
-- The **host** build must use **gcc** on this machine: `hooks-inline` fails
-  under MSVC (a pre-existing `noinline` attribute with no MSVC branch).
-  Unrelated to the protection work, but it will bite if you switch compilers.
-
-## 5. The facts that cost a day to find
-
-Do not re-derive these. They are all in `tools/protect/README.md` section 11.
-
-- The plugin header is `llvm/Plugins/PassPlugin.h` (moved in LLVM 22) and
-  `LLVM_PLUGIN_API_VERSION` is **2**.
-- `add_llvm_pass_plugin()` is a **no-op on Windows** (CMake's `MODULE` library
-  type is unsupported by the MSVC toolchain). The plugin is a `SHARED` library.
-- The SDK's exported CMake targets hardcode a **dead VS 2022 DIA SDK path**;
-  the imported target's `INTERFACE_LINK_LIBRARIES` has to be rewritten.
-- `llvmGetPassPluginInfo` needs an explicit `__declspec(dllexport)`.
-- **clang-cl ignores `-fpass-plugin=`**; the working spelling is
-  **`/clang:-fpass-plugin=<dll>`**.
-- A plugin's `cl::opt` is **not reachable via `-mllvm`** (a statically linked
-  plugin has its own `cl` registry) => the configuration channel is
-  **environment variables**.
-- The release LLVM is `-fno-rtti` + static CRT; the plugin must match.
-- **LLVM 22.1.8's X86 backend mis-materialises a 64-bit immediate** in some IR
-  shapes (bit 32 flipped). The mixer constants therefore live in **globals**,
-  read with volatile loads, and never in the instruction stream. See below.
-
-## 6. The two bugs worth remembering
-
-**The optimiser folded the whole dispatch away.** Because the key was a
-compile-time constant, the optimiser could fold the index, the table load and
-the indirect call back into a **direct** call. The "protected" image was
-byte-identical to the unprotected one and the protection was **void**. The
-fix: the mixer constants live in module globals (`cs2.protect.mixmul`,
-`cs2.protect.mixxor`), read with volatile loads, so no 64-bit immediate has to
-survive codegen. A global is written by the object writer, so the value that
-reaches the image is by construction the value the pass encrypted with.
-
-The image only worked before that fix by a **three-fold coincidence**: the
-backend's error landed in bit 32, the mixer rotated by exactly 31, and the
-table stride was exactly 8 (`bit63 * 8 = 0 mod 2^64`). Change any one and the
-dispatch calls a garbage address - in a manually mapped payload, with no
-exception tables, that kills the game.
-
-**The `inbounds` promise was broken.** The GEP into the table used
-`inbounds` with an out-of-range index, which is poison by the letter of the
-LangRef. The `inbounds` is gone: a wrong index is now a wrong address rather
-than poison (a load from an out-of-range pointer is still UB, but not poison).
-
-## 7. What the protection is worth - honestly
-
-The rewrite applies to **same-module callees only**. In the current payload
-that is **37 of 332** call sites of the selected functions, and they are
-predominantly **destructors and constructors**. The cross-TU calls that carry
-the real aim call graph stay direct in the image.
-
-So the static call graph of the *interesting* code is still readable; what
-leaves the binary is the cleanup code. Making the stronger claim true needs a
-follow-up: hoist the shared aim code into one TU, or route cross-TU calls
-through a per-module table.
-
-Against a reverser **with a debugger**, none of this is a wall - it is a tax on
-their time. Against an **offline** analyst (a dump and IDA), the runtime
-anchoring is what pays.
-
-## 8. Not verified
-
-**The game.** Session 0 has no GPU, so the payload has **never been injected
-with the protection active**. Everything above is static analysis of the built
-image plus a host-level differential test. To exercise it for real:
-`schtasks /run /tn CS2Launch`, then inject with
-`build-injector\injector.exe cs2.exe build-payload-protect\payload.dll --load-missing`
-(**inject once** - a second injection into a running game double-hooks it).
-
-Also unverified: the Linux -> Windows cross build (the protected build now
-needs the SDK's `llvm-objdump` at configure time; `$CS2_LLVM_SDK` works
-everywhere, but the default path in `find_objdump.py` is Windows-specific), the
-LTO pre-link behaviour of the two module flags (the payload is not an LTO
-build), and the mapper's handling of the new `.rdata` fixups at run time (the
-DIR64 entries and the table entries were checked at the image level only).
-
-## 9. The next task
-
-**T20 — the virtualization.** The spec is
-`docs/orchestration/spec-t20-protect-virtualization.md`; the map is
-`docs/orchestration/plan-protect.md`. Summary: a selected function's body is
-compiled to a custom bytecode and executed by an interpreter **emitted as LLVM
-IR** (so it needs no CRT, no global constructors and no unwind tables - the
-payload is manually mapped). Scope it to **integers and pointers only**, with a
-fixed slot budget and **fail-closed** eligibility: a function the pass cannot
-lower completely is left completely untouched and reported, never half-lowered.
-
-It is the expensive one: 5-50x at run time, a multi-week build in its full
-form, and a miscompile risk. Get one function right and provably first.
-
-Run it through the same loop: `orchestrate.plan` -> an implementer sub-agent
--> an **adversarial** reviewer sub-agent that reads the same spec -> a fix
-round -> `orchestrate.merge`.
+And when you take a task: **read the spec, then measure**. Every task in
+this list was reshaped by a measurement that contradicted the plan, and every
+one of those measurements is in the plan now (§1.1-§1.4) with the evidence.

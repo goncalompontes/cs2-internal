@@ -408,6 +408,16 @@ class Coverage:
         #: The cross-TU callees that stayed direct: the symbol -> the reason.
         #: The section is new, like the `vm` one.
         self.direct: dict[str, str] = {}
+        #: The literals of the string protection: the length and the digest
+        #: of the content, never the content itself.
+        self.strings: list[StringLiteral] = []
+        #: The salt the digests of the literals were computed with ("" when
+        #: the coverage has no salt line: an older build, or a build without
+        #: a seed). The salt itself is not in the coverage.
+        self.str_salt: str = ""
+        #: The proof that a salt is the salt of the build: a digest of a
+        #: fixed text with the salt. It is in the coverage, the salt is not.
+        self.str_salt_proof: str = ""
 
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -450,6 +460,10 @@ class Coverage:
                     self._read_direct(value)
                 elif key == "vm":
                     self._read_vm(value)
+                elif key == "str":
+                    self._read_str(value)
+                elif key == "str-salt":
+                    self._read_str_salt(value)
                 elif key == "content-sha256":
                     digest = value.strip().lower()
         except ValueError as error:
@@ -552,6 +566,57 @@ class Coverage:
             verdict[name] = number
         self.vm[symbol.strip()] = verdict
 
+    def _read_str(self, value: str) -> None:
+        """A `str` line: one literal of the string protection.
+
+        The line carries the length and the digest of the content, never the
+        content: the coverage is a file, and a file holds the strings.
+
+        The digest is **salted** with the seed of the build, and the field
+        says so (`digest=`).  A coverage of an older build names it
+        `sha256=`, and that name is still read: the digest it carries is the
+        unsalted one. Which form a digest is in is decided by the coverage's
+        `str-salt` line, not by the field's name.
+        """
+        state, _, rest = value.partition(" ")
+        length = 0
+        sha256 = ""
+        uses = 0
+        functions = 0
+        reason = ""
+        for part in rest.split():
+            name, _, number = part.partition("=")
+            if name == "len":
+                length = int(number)
+            elif name in ("digest", "sha256"):
+                sha256 = number.strip().upper()
+            elif name == "uses":
+                uses = int(number)
+            elif name == "functions":
+                functions = int(number)
+            elif name == "reason":
+                reason = number.strip()
+        self.strings.append(
+            StringLiteral(state.strip(), length, sha256, uses, functions, reason)
+        )
+
+    def _read_str_salt(self, value: str) -> None:
+        """The `str-salt` line: the salt the digests were computed with.
+
+        The line names the salt and carries its proof; the salt itself is
+        not in the coverage. A coverage of an older build has no such line,
+        and its digests are unsalted.
+
+        The proof is a **salted** digest as well, so the field says so
+        (`digest=`); the older name (`sha256=`) is still read.
+        """
+        parts = value.split()
+        self.str_salt = parts[0].strip() if parts else ""
+        for part in parts[1:]:
+            name, _, number = part.partition("=")
+            if name in ("digest", "sha256"):
+                self.str_salt_proof = number.strip().upper()
+
     def _check_digest(self, lines: list[str], digest: str) -> bool:
         """Whether the file still is the one the plugin wrote.
 
@@ -636,6 +701,30 @@ def belongs_to_tree(coverage: Coverage, root: Path) -> bool:
         return False
 
 
+class StringLiteral(NamedTuple):
+    """One literal of the string protection, as the coverage records it.
+
+    The coverage carries the length and the digest of the content, never the
+    content: the coverage is a file, and a file holds the strings.
+    """
+
+    #: "protected" or "refused".
+    state: str
+    #: The length of the content, without the trailing NUL.
+    length: int
+    #: The digest of the content, in upper case.
+    #:
+    #: The digest is **salted** with the seed of the build
+    #: (`sha256(seed || content)`), and a coverage of an older build carries
+    #: the unsalted form.  The field does not say which: the salt line of the
+    #: coverage does.
+    digest: str
+    uses: int
+    functions: int
+    #: The refusal reason ("" when the literal was protected).
+    reason: str
+
+
 class CoverageRead(NamedTuple):
     """What the coverage directory holds."""
 
@@ -647,6 +736,20 @@ class CoverageRead(NamedTuple):
     malformed: list[tuple[str, str]]
 
 
+def policy_key(policy_path: str) -> str:
+    """The spelling of the policy path the coverage directory is keyed by.
+
+    The plugin and the checkers have to compute the **same** directory, and
+    the path they are given is spelled in two ways: the environment carries
+    it as the operator spelled it (``C:/tools/protect/policy.json``), and a
+    reader that goes through a path object turns the forward slashes into
+    backslashes on Windows.  The key is therefore the path with the
+    separators normalised to forward slashes -- the same spelling on every
+    platform, and the one the plugin computes.
+    """
+    return policy_path.replace("\\", "/")
+
+
 def default_coverage_dir(policy_path: str) -> Path:
     """The directory the plugin writes the coverage to.
 
@@ -655,7 +758,7 @@ def default_coverage_dir(policy_path: str) -> Path:
     and the two have to name the same directory on a file system whose case
     matters.
     """
-    digest = hashlib.sha256(policy_path.encode()).hexdigest().upper()[:16]
+    digest = hashlib.sha256(policy_key(policy_path).encode()).hexdigest().upper()[:16]
     root = os.environ.get("TEMP") or os.environ.get("TMP") or "."
     return Path(root) / "cs2-protect-coverage" / digest
 

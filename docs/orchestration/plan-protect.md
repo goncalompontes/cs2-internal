@@ -124,13 +124,35 @@ So the honest statement of T21's value is: **the payload's own feature-key
 list is not protectable in place.** What T21 delivers is the machinery and
 about half the literals; what the payload needs is a **data-model change** —
 the names arriving at run time (from the injector, or hashed and looked up in
-a table the payload builds at run time). That is **T21b**, and it is now the
-highest value string task, not an optional extra.
+a table the payload builds at run time).
 
 The lesson generalises, and it is the same one the cross-TU task hit: **a
 per-module pass cannot decide anything about a symbol the linker may keep.**
 Both tasks now make the *image-level* check the authority, and the per-module
 claim says "in this module".
+
+> **Corrected later the same day (the orchestrator).** The plan first called
+> a follow-up — "the strings leave the image" — the highest value string
+> task. **That was wrong, and the reason is the payload's product.** The
+> feature-key names are **displayed**: the in-process menu draws them
+> (`payload/features/src/menu.cpp`) and so does the overlay's fallback menu.
+> A name that is displayed **must exist in a shipped image**, so it cannot
+> be kept out of the payload's image — the best that can be done is to hold
+> it in **one** artifact instead of two.
+>
+> So the strings line is **done**, and its conclusion is:
+>
+> - the feature-key list is the payload's **data**, not its code. Hiding it
+>   is a **product decision** (what the menu shows), not a pass decision.
+> - what *is* worth protecting in the string domain is the **internal** keys
+>   (the JSON keys, the convar names, the console commands) — they are never
+>   displayed and could be compared by hash. That is a small task.
+> - the **event/field tables** (364 literals) are Valve's own names and are
+>   public; the payload could read them from the game's resource files at
+>   run time instead of shipping a generated copy
+>   (`scripts/extract-gameevents.py` is the build-time counterpart). Low
+>   value, small cost — a candidate, not a priority.
+
 
 
 ### 1.3 The measurement: the VM cannot protect the aim maths
@@ -184,8 +206,7 @@ by looking at the module — the operator declares, the payload check proves).
 | **T20b** | `protect-vm-interpreter` | the interpreter emitted as IR, the per-call-site thunks, the rewrite of the function's body, the `virtualized` level made real, the differential test | T20a |
 | **T20c** | `protect-vm-payload` | the virtualization applied to the payload's real aim helpers, with the slowdown measured | T20b |
 | **T21** | `protect-strings` | string/constant encryption with a **runtime-derived** key (the mapped image base) | T18 |
-| **T21b** | `protect-strings-out` | the strings leave the image **entirely**: the injector delivers them, or the payload reads them from the host | T21 |
-| **T22** | `protect-integrity` | post-link binder + runtime self-check | T19, T21 |
+| **T21b** | `protect-strings-out` | ~~the strings leave the image entirely~~ — **dropped**, see §1.2: the feature-key names are *displayed*, so they must exist in a shipped image. What remains is small: the internal keys by hash, the event table read from the game | T21 || **T22** | `protect-integrity` | post-link binder + runtime self-check | T19, T21 |
 | **T23** | `protect-cross-tu` | the cross-TU call graph of the protected functions leaves the image (today 295 of 332 call sites stay direct) | T19 |
 | **T24** | `protect-polymorphism` | the shipped DLL is not signaturable: the build seed is mandatory and drives the layout, the keys and the tables | T19 |
 
@@ -193,14 +214,18 @@ T18-T19 are done. **T20a is done; T20b and T20c are deferred** — the gate
 measured the eligible set and it is **empty** for the payload's real code
 (§1.3), so the interpreter would protect nothing.
 
-**T21 is the next task** and **T23a** follows it. The **order changed** in
-2026-10-21 after the survey (§1.1): **T21 is now the highest-value task**,
-and T20 is deliberately scoped down. T21 and T23 are independent of the VM and
-can be interleaved with it.
+**T21 is done** and the string line is closed (§1.2). **T23a** and **T24**
+are in flight; **T23b** (the `sret` edges) and **T22** (the integrity check)
+are specced. The **order changed** in 2026-10-21 after the survey (§1.1):
+**T21 is now the highest-value task**, and T20 is deliberately scoped down.
+T21 and T23 are independent of the VM and can be interleaved with it.
 
 **T21b is the task that would deliver what T21 could not**: the strings are
 encrypted in place, so the image still decrypts itself (§1.2). Getting them
-**out of the image** is what makes a dumped file useless.
+**out of the image** is what makes a dumped file useless — but the feature
+names are *displayed*, so they must exist in a shipped image. **Dropped**, and
+the reasoning is in §1.2.
+
 
 ## 3. The verified toolchain facts (all measured on this machine)
 
@@ -257,6 +282,19 @@ The payload is **manually mapped** into `cs2.exe` by the injector
   code the pass injects must be freestanding**: no `new`, no `std::vector`, no
   global constructors, no unwind tables it cannot justify. This is why the VM
   interpreter is **emitted as LLVM IR** rather than linked in as C++.
+
+  > **Corrected (2026-10-22, by the T22 investigation).** The **mechanism**
+  > was wrong: the built image's entry point **is** `_DllMainCRTStartup` and
+  > the injector calls it (`injector/src/main.cpp` uses the PE's
+  > `entry_point_rva`), so **the CRT startup does run**. What does *not* run
+  > is the payload's **own** C++ global construction: the image references
+  > neither `__xc_a` nor `__xc_z`, so the CRT never walks the user module's
+  > `.CRT$XCU`, and the payload's globals stay **zero-initialised**. The
+  > **conclusion** is unchanged — a pass must not add a global with a dynamic
+  > initialiser, and the injected runtime code must be freestanding — but the
+  > reason is that the payload has no such globals today, not that the CRT is
+  > absent. Adding one would make the CRT walk it, which changes the image's
+  > initialisation semantics and is not wanted.
 
 > **Corrected on 2026-10-21** (the survey found these, and the built image
 > confirms them): the payload is built **`/MD`** (dynamic CRT — the image

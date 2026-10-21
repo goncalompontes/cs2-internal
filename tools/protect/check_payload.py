@@ -52,12 +52,15 @@ dispatch") are skipped, and the rest of the checks still run.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import struct
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 from protect_checks import (
     MIX_MULTIPLIER,
@@ -575,6 +578,377 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
     return len(excepted), left_alone
 
 
+# --- The protected strings ---------------------------------------------------
+
+
+def image_runs(data: bytes) -> list[bytes]:
+    """The NUL-terminated byte sequences of an image.
+
+    A string literal is a NUL-terminated sequence of bytes in the data of the
+    image, so splitting the image on the NUL bytes yields the candidates.
+
+    The **duplicates** are dropped: the scan below only asks whether a
+    literal is in the image, and the same run twice is the same answer.
+    """
+    return list({part for part in data.split(b"\0") if part})
+
+
+def printable(byte: int) -> bool:
+    """Whether a byte is a printable ASCII character."""
+    return 0x20 <= byte < 0x7F
+
+
+def nul_positions(data: bytes) -> list[int]:
+    """The positions of the NUL bytes that can **split a string**.
+
+    The scan needs them: a window that spans a NUL is not inside a run, and
+    a literal whose content holds an embedded NUL lives in such a window.
+
+    The image holds half a million NUL bytes -- alignment padding, GUIDs,
+    other binary data -- and the windows around every one of them would cost
+    two minutes per build. A NUL that splits a **string** has a printable
+    byte on both sides; the binary data does not.
+    """
+    positions: list[int] = []
+    index = data.find(b"\0")
+    while index >= 0:
+        if 0 < index < len(data) - 1 and printable(data[index - 1]) and printable(data[index + 1]):
+            positions.append(index)
+        index = data.find(b"\0", index + 1)
+    return positions
+
+
+#: The text the proof of the salt is computed over. It is the plugin's
+#: constant (tools/protect/src/strings.cpp).
+SALT_PROOF_TEXT = b"cs2.protect.salt.proof"
+
+
+def build_seed(policy: Path | None) -> int | None:
+    """The seed of the build: the environment's, else the policy's.
+
+    The digests of the literals are salted with it, so the check needs it to
+    recognise a literal in the image. A build without a seed has no salt,
+    and the digests are unsalted.
+    """
+    text = os.environ.get("CS2_PROTECT_SEED", "").strip()
+    if not text and policy is not None and policy.is_file():
+        try:
+            document = json.loads(policy.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            document = {}
+        seed = document.get("seed") if isinstance(document, dict) else None
+        if isinstance(seed, str):
+            text = seed.strip()
+        elif isinstance(seed, int):
+            text = f"0x{seed:x}"
+    if not text:
+        return None
+    digits = text
+    if len(digits) > 2 and digits[0] == "0" and digits[1] in "xX":
+        digits = digits[2:]
+    try:
+        # The seed is hexadecimal, and only its low 64 bits count.
+        return int(digits, 16) & 0xFFFFFFFFFFFFFFFF
+    except ValueError:
+        return None
+
+
+def salt_proof(seed: int | None) -> str:
+    """The proof that a seed is the seed of the build."""
+    if seed is None:
+        return ""
+    return hashlib.sha256(seed.to_bytes(8, "little") + SALT_PROOF_TEXT).hexdigest().upper()
+
+
+class DigestForms(NamedTuple):
+    """Which forms of the digest the coverage of this build holds."""
+
+    #: The coverage names the salt: its digests are `sha256(seed || content)`.
+    salted: bool
+    #: The coverage names no salt: its digests are the unsalted `sha256(content)`.
+    plain: bool
+
+
+def digest_forms(coverage: list[Coverage]) -> DigestForms:
+    """Which forms of the digest the coverage of this build holds.
+
+    A coverage that names the salt carries **salted** digests, and a coverage
+    of an older build carries the unsalted ones. The scan computes only the
+    forms the coverage holds: the scan is the expensive part of this check,
+    and a digest that cannot match is wasted work.
+    """
+    salted = False
+    plain = False
+    for entry in coverage:
+        if not entry.strings:
+            continue
+        if entry.str_salt:
+            salted = True
+        else:
+            plain = True
+    return DigestForms(salted, plain)
+
+
+def scan_literals(data: bytes, runs: list[bytes], by_length: dict[int, set[str]],
+                  seed: int | None, forms: DigestForms) -> tuple[set[str], set[str]]:
+    """The wanted literals the image holds: as a whole run, and inside a run.
+
+    The scan is at **every offset** of every run. A literal that is in the
+    image as a substring *is* in the image, and the MSVC ABI merges a literal
+    with a longer literal that **ends with it**: the bytes of the deleted
+    literal survive as the tail of the longer one, and a scan that only looks
+    at the start of the runs cannot see it. A scan that cannot see it counts
+    it as absent, and the number it publishes is the number it did not look
+    at.
+
+    Two sets are returned, and they are not the same failure:
+
+    * the literals that are in the image as a **whole run** -- a
+      NUL-terminated string of their own: a copy of the literal itself;
+    * the literals that are only **inside** a run -- as its prefix or as its
+      tail: the bytes of another string of the image.
+
+    The scan also looks at the windows that **span** a NUL: a literal whose
+    content holds an embedded NUL is not inside a run (the run is cut at the
+    NUL), and a scan that only looks at the runs calls it absent -- the same
+    mistake the prefix-only scan made, one level down.
+    """
+    whole: set[str] = set()
+    part: set[str] = set()
+    salt = seed.to_bytes(8, "little") if seed is not None else b""
+    sha256 = hashlib.sha256
+    for length, digests in by_length.items():
+        wanted: set[bytes] = set()
+        for digest in digests:
+            try:
+                wanted.add(bytes.fromhex(digest))
+            except ValueError:
+                continue
+        if not wanted:
+            continue
+        for run in runs:
+            size = len(run)
+            if size < length:
+                continue
+            for offset in range(size - length + 1):
+                piece = run[offset:offset + length]
+                if forms.salted:
+                    raw = sha256(salt + piece).digest()
+                    if raw in wanted:
+                        name = raw.hex().upper()
+                        if offset == 0 and size == length:
+                            whole.add(name)
+                        else:
+                            part.add(name)
+                if forms.plain:
+                    raw = sha256(piece).digest()
+                    if raw in wanted:
+                        name = raw.hex().upper()
+                        if offset == 0 and size == length:
+                            whole.add(name)
+                        else:
+                            part.add(name)
+
+        # The windows that span a NUL. A literal with an embedded NUL is cut
+        # in two by the run split, so the run scan cannot see it.
+        for position in nul_positions(data):
+            first = position - length + 1
+            if first < 0:
+                first = 0
+            for start in range(first, position + 1):
+                piece = data[start:start + length]
+                if len(piece) < length:
+                    continue
+                if forms.salted:
+                    raw = sha256(salt + piece).digest()
+                else:
+                    raw = sha256(piece).digest()
+                if raw in wanted:
+                    part.add(raw.hex().upper())
+    return whole, part
+
+
+def protected_literals(coverage: list[Coverage]) -> tuple[dict[int, set[str]], set[str], int]:
+    """The digests of the literals the pass protected, and the refused ones.
+
+    The digests are grouped by length: a run is only hashed with the lengths
+    that are actually wanted. The third value is the number of literals the
+    coverage records, protected or refused: a coverage with no literal at
+    all is a coverage of a build without the string protection.
+    """
+    by_length: dict[int, set[str]] = {}
+    refused: set[str] = set()
+    total = 0
+    for entry in coverage:
+        for literal in entry.strings:
+            total += 1
+            digest = literal.digest
+            if not digest:
+                continue
+            if literal.state == "protected":
+                by_length.setdefault(literal.length, set()).add(digest)
+            else:
+                refused.add(digest)
+    return by_length, refused, total
+
+
+def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
+                             coverage: list[Coverage], policy: Path | None) -> int:
+    """The plaintext of the protected strings has to be out of the image.
+
+    The check is a byte scan: the coverage carries the length and the digest
+    of every protected literal (never the content), and the scan hashes the
+    candidates of the image and compares. The scan is at **every offset** of
+    every run of the image, because a literal that is in the image as a
+    substring is in the image -- the MSVC ABI merges a literal with a longer
+    literal that ends with it, and the bytes of the deleted literal survive
+    as the tail of the longer one.
+
+    The number the check reports is the number the scan produced: the
+    literals whose plaintext is not in the protected image, and the ones
+    whose plaintext **is**. A literal that is protected in one module and
+    **refused** in another is legitimately still in the image -- the gate
+    does not half-protect -- and a literal whose bytes survive as the tail
+    of another string of the image is greppable too. Both are reported with
+    their coverage hash, and neither is a failure: the pass did its work on
+    the literal it protected, and the two causes are properties of the ABI
+    and of the payload's data model, not of the pass.
+
+    What **is** a failure is a literal that is in the image as a whole
+    string and that nobody refused: that is the pass's own copy, and it
+    means the protection did nothing.
+    """
+    by_length, refused, total = protected_literals(coverage)
+    if not by_length:
+        # The policy may select nothing, in which case there is nothing to
+        # check. A policy that selects strings and protected none is a
+        # failure -- unless the coverage has no string section at all, which
+        # means the coverage is from a build without the string protection.
+        if not policy_selects_strings(policy):
+            print("check_payload: no protected string in the coverage: the strings are not checked")
+            return 0
+        if total == 0:
+            check(
+                False,
+                "the policy selects strings, but the coverage of this build carries no string "
+                "section: the coverage is from a build without the string protection, and the "
+                "strings are not checked",
+            )
+        check(
+            False,
+            "the policy selects strings, but no literal was protected: the protection did "
+            "nothing",
+        )
+
+    # The salt: the digests of the literals are salted with the seed of the
+    # build, and the coverage does not carry the salt. A check with the
+    # wrong salt would find nothing in the image and would report a
+    # protection that works, so the proof is verified first.
+    seed = build_seed(policy)
+    for entry in coverage:
+        if not entry.str_salt:
+            continue
+        if entry.str_salt != "build-seed":
+            check(
+                False,
+                f"the coverage is salted with '{entry.str_salt}', which this check does not "
+                "know: the strings cannot be checked",
+            )
+        if seed is None:
+            check(
+                False,
+                "the coverage is salted with the seed of the build, and this check does not "
+                "have the seed: set CS2_PROTECT_SEED, or give the check the policy that "
+                "carries it",
+            )
+        if entry.str_salt_proof and entry.str_salt_proof != salt_proof(seed):
+            check(
+                False,
+                "the seed of this check is not the seed of the build: the digests of the "
+                "coverage cannot be matched against the image",
+            )
+
+    forms = digest_forms(coverage)
+    runs = image_runs(protected.data)
+    everywhere = {digest for digests in by_length.values() for digest in digests}
+    whole, part = scan_literals(protected.data, runs, by_length, seed, forms)
+    survivors = (whole | part) & everywhere
+    absent = everywhere - survivors
+
+    # A literal that is protected in one module and refused in another is
+    # legitimately still in the image: the refused module keeps its copy,
+    # and the linker keeps the COMDAT. A literal that nobody refused and
+    # that is in the image as a **whole string** is a failure: that is the
+    # pass's own copy, and it means the pass did not remove it. A literal
+    # that is only *inside* another string of the image is greppable, but
+    # the pass cannot remove another string's bytes -- it is reported.
+    for digest in sorted(whole - refused):
+        check(
+            False,
+            f"the protected image still holds the plaintext of a protected string "
+            f"(digest {digest[:12]}): the protection did nothing",
+        )
+
+    print(f"check_payload: {len(absent)} of the {len(everywhere)} protected strings are absent "
+          "from the protected image")
+    if survivors:
+        print(f"check_payload: {len(survivors)} of the {len(everywhere)} protected strings are "
+              "still in the protected image")
+        refused_elsewhere = survivors & refused
+        merged = survivors - refused_elsewhere
+        print(f"check_payload:   {len(refused_elsewhere)} of them are refused in another module: "
+              "that module's copy of the literal survives the link")
+        print(f"check_payload:   {len(merged)} of them are protected in every module: their "
+              "bytes survive as the tail of another string of the image (the MSVC ABI merges a "
+              "literal with a longer one that ends with it)")
+        for digest in sorted(survivors):
+            if digest in refused:
+                print(
+                    f"check_payload:   digest {digest[:12]}: refused in another module: that "
+                    "module's copy of the literal survives the link"
+                )
+                continue
+            print(
+                f"check_payload:   digest {digest[:12]}: the bytes are the tail of another "
+                "string of the image: the pass cannot remove another string's bytes"
+            )
+
+    if unprotected is not None:
+        plain_runs = image_runs(unprotected.data)
+        # The same scan as on the protected side, at every offset: the
+        # unprotected image has to hold the plaintext of every protected
+        # literal, or the comparison would be vacuous for that literal. A
+        # scan that only looks at the start of the runs would fail a build
+        # whose image holds the plaintext as the tail of another string --
+        # a verdict that depends on the layout of the image and not on the
+        # protection.
+        plain_whole, plain_part = scan_literals(unprotected.data, plain_runs, by_length,
+                                         seed, forms)
+        missing = everywhere - (plain_whole | plain_part)
+        if missing:
+            check(
+                False,
+                f"the unprotected image does not hold the plaintext of {len(missing)} protected "
+                f"strings (digest {sorted(missing)[0][:12]}): the check would be vacuous",
+            )
+        print(f"check_payload: the unprotected image holds the plaintext of all the "
+              f"{len(everywhere)} protected strings")
+
+    return len(absent)
+
+
+def policy_selects_strings(policy: Path | None) -> bool:
+    """Whether the policy's `strings` section selects anything."""
+    if policy is None or not policy.is_file():
+        return False
+    try:
+        document = json.loads(policy.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return False
+    strings = document.get("strings")
+    return isinstance(strings, list) and bool(strings)
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protected", type=Path, required=True)
@@ -589,15 +963,20 @@ def main(argv: list[str]) -> int:
     if coverage_dir is None:
         env = os.environ.get("CS2_PROTECT_COVERAGE", "").strip()
         coverage_dir = Path(env) if env else None
+    # The policy, and the **spelling** the plugin was given: the coverage
+    # directory is keyed by the path of the policy, and the plugin hashes the
+    # environment's string -- not the path a reader builds out of it, which
+    # spells the forward slashes as backslashes on Windows. The two have to
+    # compute the same directory, so the key is the environment's spelling.
+    policy_env = os.environ.get("CS2_PROTECT_CONFIG", "").strip()
     policy = args.policy
-    if policy is None:
-        env = os.environ.get("CS2_PROTECT_CONFIG", "").strip()
-        policy = Path(env) if env else None
+    if policy is None and policy_env:
+        policy = Path(policy_env)
     if coverage_dir is None and policy is not None:
         # The same default the plugin computes (the digest of the policy
         # path), so that the two find the same directory without the build
         # having to pass anything around.
-        coverage_dir = default_coverage_dir(str(policy))
+        coverage_dir = default_coverage_dir(policy_env or str(policy))
     source_root = args.source_root
     if source_root is None:
         env = os.environ.get("CS2_PROTECT_SOURCE_ROOT", "").strip()
@@ -702,8 +1081,11 @@ def main(argv: list[str]) -> int:
                 f"{excepted} cross-TU callees stay direct because of the `sret` rule, and "
                 f"{left_alone} direct calls name a symbol the payload does not own"
             )
+
+            check_protected_strings(protected, unprotected, files, policy)
         else:
             print("check_payload: no coverage given: the number of the rewrites is not checked")
+            check_protected_strings(protected, unprotected, [], policy)
     except Failure as error:
         print(f"check_payload: {error}", file=sys.stderr)
         return 1

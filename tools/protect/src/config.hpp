@@ -46,6 +46,11 @@ struct PolicyEntry {
 };
 
 /// The policy file: what to protect, what to refuse, and the build seed.
+///
+/// The `strings` section is a section of its own: the `protect` entries name
+/// *functions*, and a string is not a function. The strings do not go through
+/// the selection phase's function machinery -- they get their own selection
+/// step in the transform phase.
 struct Policy {
   std::vector<PolicyEntry> protect;
   /// The cross-TU callees whose calls may be routed through the caller's
@@ -63,6 +68,20 @@ struct Policy {
   /// apart by looking at the module.
   std::vector<std::string> cross_module;
   std::vector<std::string> deny;
+  /// The literals to protect: a glob (`*` and `?`) matched against the
+  /// *content* of the literal. An exact string is a glob with no wildcard.
+  ///
+  /// Nothing is protected unless this list says so: the default is "protect
+  /// no string", because a surprise is worse than a gap.
+  std::vector<std::string> strings;
+  /// The literals to refuse: a glob matched against the content of the
+  /// literal. A deny entry wins over a select entry.
+  std::vector<std::string> strings_deny;
+  /// The shortest literal that is worth a decode.
+  ///
+  /// A literal shorter than this is refused (`too_short`). The default is
+  /// four: a three-byte string carries too little to be worth the decode.
+  std::size_t strings_min_length{4};
   std::optional<std::uint64_t> seed;
 };
 

@@ -50,7 +50,15 @@ from protect_checks import (  # noqa: E402
 )
 
 #: The keys the policy file may carry.
-POLICY_KEYS = ("protect", "cross_module", "deny", "seed")
+POLICY_KEYS = (
+    "protect",
+    "cross_module",
+    "deny",
+    "seed",
+    "strings",
+    "strings_deny",
+    "strings_min_length",
+)
 
 #: The keys a `protect` entry object may carry.
 ENTRY_KEYS = ("symbol", "module", "level")
@@ -95,12 +103,13 @@ def check_policy_keys(policy: dict[str, Any]) -> None:
         if key not in POLICY_KEYS:
             raise ValueError(
                 f"unknown key in the policy file: '{key}' "
-                "(expected 'protect', 'cross_module', 'deny' or 'seed')"
+                "(expected 'protect', 'cross_module', 'deny', 'seed', 'strings', 'strings_deny' or "
+                "'strings_min_length')"
             )
 
 
 def check_policy_values(policy: dict[str, Any]) -> None:
-    """Reject the `deny`, `cross_module` and `seed` shapes the plugin rejects."""
+    """Reject the `deny`, `cross_module`, `strings` and `seed` shapes the plugin rejects."""
     deny = policy.get("deny", [])
     if not isinstance(deny, list):
         raise ValueError("'deny' must be an array")
@@ -116,6 +125,18 @@ def check_policy_values(policy: dict[str, Any]) -> None:
     seed = policy.get("seed")
     if seed is not None and not isinstance(seed, str):
         raise ValueError("'seed' must be a hexadecimal string")
+    for key in ("strings", "strings_deny"):
+        entries = policy.get(key, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"'{key}' must be an array")
+        for entry in entries:
+            if not isinstance(entry, str):
+                raise ValueError(f"a '{key}' entry must be a string")
+    minimum = policy.get("strings_min_length")
+    if minimum is not None and (not isinstance(minimum, int) or isinstance(minimum, bool)):
+        raise ValueError("'strings_min_length' must be a number")
+    if isinstance(minimum, int) and minimum < 0:
+        raise ValueError("'strings_min_length' must not be negative")
 
 
 def policy_patterns(policy: dict[str, Any]) -> list[str]:

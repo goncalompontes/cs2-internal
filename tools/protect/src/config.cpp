@@ -249,6 +249,27 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
   return entry;
 }
 
+/// Reads a list of strings: the `strings` and `strings_deny` sections.
+[[nodiscard]] auto parse_string_list(const llvm::json::Object& object, std::string_view key)
+    -> std::expected<std::vector<std::string>, std::string> {
+  std::vector<std::string> values;
+  const llvm::json::Array* array = object.getArray(key);
+  if (array == nullptr) {
+    if (object.get(key) != nullptr) {
+      return std::unexpected(std::string("'") + std::string(key) + "' must be an array");
+    }
+    return values;
+  }
+  for (const llvm::json::Value& item : *array) {
+    const auto text = item.getAsString();
+    if (!text.has_value()) {
+      return std::unexpected(std::string("a '") + std::string(key) + "' entry must be a string");
+    }
+    values.emplace_back(*text);
+  }
+  return values;
+}
+
 [[nodiscard]] auto parse_policy(const llvm::json::Value& root)
     -> std::expected<Policy, std::string> {
   const llvm::json::Object* object = root.getAsObject();
@@ -256,9 +277,11 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
     return std::unexpected(std::string("the policy file must contain a JSON object"));
   }
   for (const std::string& key : sorted_keys(*object)) {
-    if (key != "protect" && key != "cross_module" && key != "deny" && key != "seed") {
+    if (key != "protect" && key != "cross_module" && key != "deny" && key != "seed" &&
+        key != "strings" && key != "strings_deny" && key != "strings_min_length") {
       return std::unexpected(std::string("unknown key in the policy file: '") + key +
-                             "' (expected 'protect', 'cross_module', 'deny' or 'seed')");
+                             "' (expected 'protect', 'cross_module', 'deny', 'seed', 'strings', "
+                             "'strings_deny' or 'strings_min_length')");
     }
   }
 
@@ -315,7 +338,43 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
   } else if (object->get("seed") != nullptr) {
     return std::unexpected(std::string("'seed' must be a hexadecimal string"));
   }
+
+  auto strings = parse_string_list(*object, "strings");
+  if (!strings) {
+    return std::unexpected(strings.error());
+  }
+  policy.strings = std::move(*strings);
+
+  auto strings_deny = parse_string_list(*object, "strings_deny");
+  if (!strings_deny) {
+    return std::unexpected(strings_deny.error());
+  }
+  policy.strings_deny = std::move(*strings_deny);
+
+  if (const auto minimum = object->getInteger("strings_min_length"); minimum.has_value()) {
+    if (*minimum < 0) {
+      return std::unexpected(std::string("'strings_min_length' must not be negative"));
+    }
+    policy.strings_min_length = static_cast<std::size_t>(*minimum);
+  } else if (object->get("strings_min_length") != nullptr) {
+    return std::unexpected(std::string("'strings_min_length' must be a number"));
+  }
   return policy;
+}
+
+/// The spelling of the policy path the coverage directory is keyed by.
+///
+/// The plugin and the checkers have to compute the **same** directory, and
+/// the path they are given is spelled in two ways: the environment carries
+/// it as the operator spelled it (`C:/tools/protect/policy.json`), and a
+/// reader that goes through a path object turns the forward slashes into
+/// backslashes on Windows. The key is therefore the path with the
+/// separators normalised to forward slashes -- the same spelling on every
+/// platform, and the one tools/protect/protect_checks.py computes.
+[[nodiscard]] auto policy_key(std::string_view policy_path) -> std::string {
+  std::string key(policy_path);
+  std::ranges::replace(key, '\\', '/');
+  return key;
 }
 
 /// The directory the per-module coverage goes to.
@@ -338,7 +397,7 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
     root = temp;
   }
   llvm::SHA256 hasher;
-  hasher.update(policy_path);
+  hasher.update(policy_key(policy_path));
   const std::string digest = llvm::toHex(hasher.final());
   return root / "cs2-protect-coverage" / digest.substr(0, 16);
 }

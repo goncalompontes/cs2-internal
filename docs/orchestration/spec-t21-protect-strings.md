@@ -58,10 +58,13 @@ wins** — it is the later and the narrower statement.
 - **No absolute address** in anything the pass bakes in. The key is derived
   from a **runtime** value, and the ciphertext is data.
 - **Nothing in the image is ever initialised**: the injector maps the image,
-  the CRT startup never runs. So there is **no constructor-decode** strategy
-  and **no cached-global** strategy: a global with a dynamic initialiser
-  would be silently zero in the mapped image, and a cached plaintext would
-  sit in memory forever.
+  and the payload's **own** C++ global constructors are never run (the image
+  references neither `__xc_a` nor `__xc_z`, so the CRT never walks the user
+  module's `.CRT$XCU` — the CRT startup itself *does* run, the injector's
+  entry point being `_DllMainCRTStartup`). So there is **no
+  constructor-decode** strategy and **no cached-global** strategy: a global
+  with a dynamic initialiser would be silently zero in the mapped image, and
+  a cached plaintext would sit in memory forever.
 - **No TLS.** The injector allocates one TLS block for the whole image and
   sets it on the entry thread only.
 - **The 64-bit-immediate trap.** This backend (LLVM 22.1.8) mis-materialises

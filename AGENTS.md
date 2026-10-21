@@ -135,9 +135,18 @@ agent, each on its own branch) and in the task board
   resolves the same signatures **without the game**, so a new signature
   becomes usable without the operator launching CS2.
 
-**The protection workstream is out of scope** (the operator's decision,
-2026-10-21): `docs/handoff-protect.md`'s T20 (the virtualization) is not a
-task for this repository.
+**The protection workstream is in scope again** (the operator's decision,
+2026-10-21 evening): the tasks in `docs/handoff-protect.md` are tasks for this
+repository — the string encryption (T21), the cross-TU routing (T23a/T23b),
+the per-build polymorphism (T24) and the integrity check (T22).
+
+**The virtualization (T20b, T20c) is not.** That was the operator's decision
+of 2026-10-21, and the **measurement** agrees: T20a's gate says **none** of
+the payload's protected functions is virtualizable (the aim maths is a float
+pipeline with EH edges), so the interpreter would protect nothing. T20a — the
+front end, the ISA, the gate, the lowering, the encoder — **is** merged, and
+it is the precondition for any future VM work. See
+`docs/orchestration/plan-protect.md` §1.3.
 
 **The live run** — the one thing static review cannot close — has its own
 checklist: **[`docs/operator-live-check.md`](docs/operator-live-check.md)**.

@@ -149,14 +149,13 @@ auto pellet_offsets(std::int32_t random_seed, float spread, float inaccuracy, in
   if (pellets <= 0) {
     return offsets;
   }
-  constexpr float k_two_pi = 6.28318530717958647F;
   UniformRandomStream stream(random_seed);
   offsets.reserve(static_cast<std::size_t>(pellets));
   for (int i = 0; i < pellets; ++i) {
     float r1 = stream.random_float(0.0F, 1.0F);
-    const float a1 = stream.random_float(0.0F, k_two_pi);
+    const float a1 = stream.random_float(0.0F, TWO_PI);
     const float r2 = stream.random_float(0.0F, 1.0F);
-    const float a2 = stream.random_float(0.0F, k_two_pi);
+    const float a2 = stream.random_float(0.0F, TWO_PI);
     if (pattern == SpreadPattern::revolver) {
       r1 = 1.0F - r1 * r1;
     }

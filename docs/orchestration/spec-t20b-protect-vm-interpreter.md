@@ -32,8 +32,12 @@ about *behaviour* and not about shape.
 
 - The interpreter is **emitted as LLVM IR**, not linked in as C++: the payload
   is manually mapped, and **nothing in the image is ever initialised by the
-  loader** — the map is done by the injector, the CRT startup never runs.
-  So the image may only contain what is correct **as it is on disk**.
+  loader** — the map is done by the injector, and the payload's **own** C++
+  global constructors are never run (the image references neither `__xc_a` nor
+  `__xc_z`, so the CRT never walks the user module's `.CRT$XCU`; the CRT
+  startup itself *does* run — the injector's entry point is
+  `_DllMainCRTStartup`). So the image may only contain what is correct **as
+  it is on disk**.
 - **No CRT calls**: no `memcpy`, `memset`, `malloc`, `free` — the copies are
   explicit load/store loops written in IR. (The payload is built `/MD` today,
   so the CRT *is* in the import table; the rule stands because the emitted

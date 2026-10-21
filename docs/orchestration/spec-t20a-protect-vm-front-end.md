@@ -44,9 +44,11 @@ Everything in T20 §1 and §4 applies. In particular:
   the *program* computes is a runtime value and may travel in a slot; a
   pointer value that the *pass* bakes in may not.
 - The bytecode is a **`private constant`** global with no dynamic initialiser
-  (in a manual map **nothing** is initialised by the loader — the CRT startup
-  never runs — so a global with a dynamic initialiser would be silently zero
-  in the mapped image).
+  (in a manual map the payload's **own** C++ global constructors are never
+  run — the image references neither `__xc_a` nor `__xc_z`, so the CRT never
+  walks the user module's `.CRT$XCU`; the CRT startup itself *does* run, the
+  injector's entry point being `_DllMainCRTStartup` — so a global with a
+  dynamic initialiser would be silently zero in the mapped image).
 - The pass must not introduce **TLS**. The injector allocates **one** TLS
   block for the whole image and sets it on the **entry thread only**, so a
   `thread_local` read from another thread would read the wrong block.

@@ -29,18 +29,21 @@
 
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include "config.hpp"
 #include "report.hpp"
 #include "selection.hpp"
+#include "strings.hpp"
 #include "transform.hpp"
 #include "vm.hpp"
 
@@ -1532,6 +1535,499 @@ void test_vm_call() {
   }
 }
 
+/// The string transform --------------------------------------------------------
+
+/// A module with one literal per refusal reason.
+///
+/// Every literal has its own user, so that the verdict of the gate is
+/// unambiguous: the gate reports the first reason that holds, and a literal
+/// with two reasons would depend on the order of the use list.
+[[nodiscard]] auto build_string_module(llvm::LLVMContext& context)
+    -> std::unique_ptr<llvm::Module> {
+  static constexpr std::string_view k_ir = R"(
+target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+
+@.str.plain = private unnamed_addr constant [8 x i8] c"healthy\00"
+@.str.short = private unnamed_addr constant [4 x i8] c"abc\00"
+@.str.empty = private unnamed_addr constant [1 x i8] c"\00"
+@.str.shape = private unnamed_addr constant [2 x i32] [i32 7, i32 9]
+@.str.escapes = private unnamed_addr constant [7 x i8] c"escape\00"
+@.str.optnone = private unnamed_addr constant [9 x i8] c"optnones\00"
+@.str.virtual = private unnamed_addr constant [8 x i8] c"virtual\00"
+@.str.eh = private unnamed_addr constant [5 x i8] c"ehxy\00"
+@.str.compare = private unnamed_addr constant [9 x i8] c"compared\00"
+@.str.address = private unnamed_addr constant [8 x i8] c"address\00"
+@.str.twoblock = private unnamed_addr constant [9 x i8] c"twoblock\00"
+@.str.tworeasons = private unnamed_addr constant [10 x i8] c"tworeason\00"
+@.str.aspace = internal addrspace(1) constant [8 x i8] c"aspace1\00"
+
+@global.init = private constant { ptr, i64 } { ptr @.str.escapes, i64 7 }
+
+declare void @may_throw()
+declare i32 @__gxx_personality_v0(...)
+declare i64 @use_address(i64)
+
+define void @uses_plain(ptr %out) {
+entry:
+  %c = load i8, ptr @.str.plain
+  store i8 %c, ptr %out
+  ret void
+}
+
+define void @uses_short(ptr %out) {
+entry:
+  %c = load i8, ptr @.str.short
+  store i8 %c, ptr %out
+  ret void
+}
+
+define void @uses_empty(ptr %out) {
+entry:
+  %c = load i8, ptr @.str.empty
+  store i8 %c, ptr %out
+  ret void
+}
+
+define void @uses_shape(ptr %out) {
+entry:
+  %c = load i32, ptr @.str.shape
+  store i32 %c, ptr %out
+  ret void
+}
+
+define void @uses_optnone(ptr %out) noinline optnone {
+entry:
+  %c = load i8, ptr @.str.optnone
+  store i8 %c, ptr %out
+  ret void
+}
+
+define void @uses_two_reasons_optnone(ptr %out) noinline optnone {
+entry:
+  %c = load i8, ptr @.str.tworeasons
+  store i8 %c, ptr %out
+  ret void
+}
+
+define i1 @compares_two_reasons() {
+entry:
+  %c = icmp eq ptr @.str.tworeasons, null
+  ret i1 %c
+}
+
+define void @uses_virtual(ptr %out) {
+entry:
+  %c = load i8, ptr @.str.virtual
+  store i8 %c, ptr %out
+  ret void
+}
+
+define void @uses_eh(ptr %out) personality ptr @__gxx_personality_v0 {
+entry:
+  %c = load i8, ptr @.str.eh
+  store i8 %c, ptr %out
+  invoke void @may_throw() to label %cont unwind label %lpad
+
+cont:
+  ret void
+
+lpad:
+  %l = landingpad { ptr, i32 } cleanup
+  ret void
+}
+
+define i1 @compares_addresses() {
+entry:
+  %c = icmp eq ptr @.str.compare, null
+  ret i1 %c
+}
+
+define i64 @takes_the_address() {
+entry:
+  %a = call i64 @use_address(i64 ptrtoint (ptr @.str.address to i64))
+  ret i64 %a
+}
+
+define void @uses_two_blocks(ptr %out, i1 %cond) {
+entry:
+  %c = load i8, ptr @.str.twoblock
+  store i8 %c, ptr %out
+  br i1 %cond, label %then, label %else
+
+then:
+  %d = load i8, ptr @.str.twoblock
+  store i8 %d, ptr %out
+  ret void
+
+else:
+  ret void
+}
+
+define void @uses_aspace(ptr addrspace(1) %out) {
+entry:
+  %c = load i8, ptr addrspace(1) @.str.aspace
+  store i8 %c, ptr addrspace(1) %out
+  ret void
+}
+)";
+  llvm::SMDiagnostic error;
+  auto module = llvm::parseAssemblyString(k_ir, error, context);
+  if (module == nullptr) {
+    std::string message;
+    llvm::raw_string_ostream stream(message);
+    error.print("protect_tests", stream);
+    std::fprintf(stderr, "FAIL: the string module does not parse: %s\n", stream.str().c_str());
+    ++g_failures;
+    return nullptr;
+  }
+  module->setModuleIdentifier("strings.obj");
+  module->setSourceFileName("strings.obj");
+  return module;
+}
+
+/// The policy's selection of the strings.
+void test_string_policy() {
+  cs2::protect::Policy policy;
+  policy.strings = {"healthy", "cs2_*"};
+  check(cs2::protect::string_selected(policy, "healthy"), "an exact glob selects the literal");
+  check(cs2::protect::string_selected(policy, "cs2_esp"), "a wildcard glob selects the literal");
+  check(!cs2::protect::string_selected(policy, "other"),
+        "a literal that matches nothing is not selected");
+
+  policy.strings_deny = {"cs2_*"};
+  check(!cs2::protect::string_selected(policy, "cs2_esp"),
+        "the deny glob wins over the select glob");
+  check(cs2::protect::string_selected(policy, "healthy"),
+        "the deny glob does not touch the other literals");
+
+  // The policy reader: the new section, and its default.
+  auto parsed = cs2::protect::parse_policy_text(
+      R"({"strings": ["box", "cs2_*"], "strings_deny": ["CS2_*"], "strings_min_length": 3})");
+  check(parsed.has_value(), "a policy with a strings section parses");
+  if (parsed.has_value()) {
+    check(parsed->strings.size() == 2, "the policy has two strings");
+    check(parsed->strings_deny.size() == 1, "the policy has one denied string");
+    check(parsed->strings_min_length == 3, "the minimum length is read");
+  }
+
+  auto defaults = cs2::protect::parse_policy_text(R"({"protect": []})");
+  check(defaults.has_value(), "a policy without a strings section parses");
+  if (defaults.has_value()) {
+    check(defaults->strings_min_length == 4, "the default minimum length is four");
+    check(defaults->strings.empty(), "no string is selected by default");
+  }
+
+  // A malformed section is an error, not a warning.
+  auto malformed = cs2::protect::parse_policy_text(R"({"strings": "box"})");
+  check(!malformed.has_value(), "a strings section that is not an array is rejected");
+  auto negative = cs2::protect::parse_policy_text(R"({"strings_min_length": -1})");
+  check(!negative.has_value(), "a negative minimum length is rejected");
+}
+
+/// The gate: one fixture per refusal reason.
+void test_string_gate() {
+  llvm::LLVMContext context;
+  const auto module = build_string_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  cs2::protect::Policy policy;
+  policy.strings_min_length = 4;
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  // The function that is selected at the `virtualized` level: the VM's blob
+  // format and the string blob format must not meet.
+  cs2::protect::RecordedSelection selection;
+  selection.functions.push_back({"uses_virtual", "", cs2::protect::ProtectionLevel::virtualized});
+
+  const auto verdict = [&](const char* name) -> std::optional<cs2::protect::StringSkipReason> {
+    llvm::GlobalVariable* global = module->getGlobalVariable(name, /*AllowLocal=*/true);
+    if (global == nullptr) {
+      std::fprintf(stderr, "FAIL: the fixture has no global '%s'\n", name);
+      ++g_failures;
+      return std::nullopt;
+    }
+    return cs2::protect::string_gate(*global, config, selection);
+  };
+
+  check(!verdict(".str.plain").has_value(), "a plain literal passes the gate");
+
+  const auto check_reason = [&](const char* name, cs2::protect::StringSkipReason expected,
+                                const char* what) {
+    const auto actual = verdict(name);
+    if (actual.has_value() && *actual == expected) {
+      return;
+    }
+    std::fprintf(stderr, "FAIL: %s (expected '%s', got '%s')\n", what,
+                 cs2::protect::to_string(expected),
+                 actual.has_value() ? cs2::protect::to_string(*actual) : "none");
+    ++g_failures;
+  };
+
+  check_reason(".str.escapes", cs2::protect::StringSkipReason::escapes_to_initializer,
+               "a literal in a global initializer is refused");
+  check_reason(".str.shape", cs2::protect::StringSkipReason::unsupported_shape,
+               "a literal that is not a sequence of bytes is refused");
+  check_reason(".str.empty", cs2::protect::StringSkipReason::empty, "an empty literal is refused");
+  check_reason(".str.short", cs2::protect::StringSkipReason::too_short,
+               "a literal that is shorter than the minimum is refused");
+  check_reason(".str.optnone", cs2::protect::StringSkipReason::optnone_function,
+               "a literal used by an optnone function is refused");
+  check_reason(".str.virtual", cs2::protect::StringSkipReason::virtualized_function,
+               "a literal used by a virtualized function is refused");
+  check_reason(".str.eh", cs2::protect::StringSkipReason::eh_use,
+               "a literal used by a function with an EH pad is refused");
+  check_reason(".str.compare", cs2::protect::StringSkipReason::unsupported_use,
+               "a literal whose address is compared is refused");
+  check_reason(".str.address", cs2::protect::StringSkipReason::unsupported_use,
+               "a literal whose address is taken as an integer is refused");
+  check_reason(".str.aspace", cs2::protect::StringSkipReason::unsupported_address_space,
+               "a literal in another address space is refused");
+  // A literal with **two** reasons has one verdict: the first *rule* of the
+  // table that holds. The use list of the literal is the module's, and the
+  // last use comes first, so the use the old gate answered with (the
+  // unrewritable one) is the first of the list.
+  check_reason(".str.tworeasons", cs2::protect::StringSkipReason::optnone_function,
+               "a literal with two reasons is refused with the first rule that holds");
+}
+
+/// The transform: the literal leaves the image, the blob and the decode are
+/// there, and the coverage does not carry the content.
+void test_string_transform() {
+  llvm::LLVMContext context;
+  const auto module = build_string_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  cs2::protect::Policy policy;
+  policy.strings = {"healthy"};
+  policy.strings_min_length = 4;
+  cs2::protect::Config config;
+  config.policy = policy;
+  config.policy_digest = "0123456789ABCDEF";
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() / "cs2-protect-tests-strings";
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+  config.coverage_dir = directory;
+
+  const cs2::protect::StringResult result = cs2::protect::transform_strings(*module, config, {});
+  check(result.protected_count == 1, "one literal is protected");
+  check(result.refused_count == 0, "no literal is refused");
+  check(result.decodes == 1, "one decode is emitted");
+  check(result.plaintext_bytes == 7, "seven bytes of plaintext left the image");
+
+  // The plaintext is gone: the literal does not exist any more.
+  check(module->getGlobalVariable(".str.plain", /*AllowLocal=*/true) == nullptr,
+        "the plaintext literal is deleted");
+  // The blob and the decode are there.
+  check(module->getGlobalVariable("cs2.protect.strblob.0", /*AllowLocal=*/true) != nullptr,
+        "the blob is added");
+  check(module->getFunction("cs2.protect.strdecode") != nullptr, "the decode helper is added");
+  // The blob is not the plaintext.
+  llvm::GlobalVariable* blob = module->getGlobalVariable("cs2.protect.strblob.0", true);
+  if (blob != nullptr) {
+    const auto* data = llvm::dyn_cast<llvm::ConstantDataSequential>(blob->getInitializer());
+    check(data != nullptr, "the blob is a sequence of bytes");
+    if (data != nullptr) {
+      bool differs = false;
+      for (unsigned index = 0; index < data->getNumElements(); ++index) {
+        const auto* value = llvm::cast<llvm::ConstantInt>(data->getElementAsConstant(index));
+        if (value->getValue().getZExtValue() != static_cast<std::uint64_t>("healthy\0"[index])) {
+          differs = true;
+        }
+      }
+      check(differs, "the blob does not hold the plaintext");
+    }
+  }
+
+  // The using function has the buffer and the decode call.
+  llvm::Function* user = module->getFunction("uses_plain");
+  check(user != nullptr, "the using function is there");
+  if (user != nullptr) {
+    std::size_t allocas = 0;
+    std::size_t calls = 0;
+    for (llvm::BasicBlock& block : *user) {
+      for (llvm::Instruction& instruction : block) {
+        if (llvm::isa<llvm::AllocaInst>(&instruction)) {
+          ++allocas;
+        }
+        if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+          if (call->getCalledFunction() != nullptr &&
+              call->getCalledFunction()->getName() == "cs2.protect.strdecode") {
+            ++calls;
+          }
+        }
+      }
+    }
+    check(allocas == 1, "the using function has one buffer");
+    check(calls == 1, "the using function has one decode call");
+  }
+
+  // The coverage carries the length and the digest, never the content.
+  const std::vector<cs2::protect::CoverageString> covered = cs2::protect::coverage_strings(result);
+  check(covered.size() == 1, "the coverage has one literal");
+  if (!covered.empty()) {
+    check(covered[0].length == 7, "the coverage records the length");
+    check(covered[0].digest.size() == 64, "the coverage records a digest");
+    check(covered[0].digest != "healthy", "the coverage does not carry the content");
+  }
+  check(!cs2::protect::write_coverage(config, *module, {}, {}, {}, {}, covered).has_value(),
+        "the coverage is written");
+  for (const auto& path : std::filesystem::directory_iterator(directory)) {
+    for (const std::string& line : read_lines(path)) {
+      check(line.find("healthy") == std::string::npos,
+            "the coverage file does not carry the plaintext");
+    }
+  }
+
+  // The digest is salted with the build seed: the same literal, hashed
+  // with a seed and without one, gives two digests, and a coverage (or a
+  // build log) that carried the unsalted one would yield the strings.
+  llvm::LLVMContext salted_context;
+  const auto salted_module = build_string_module(salted_context);
+  cs2::protect::Policy salted_policy;
+  salted_policy.strings = {"healthy"};
+  salted_policy.strings_min_length = 4;
+  salted_policy.seed = 0x0123456789ABCDEFULL;
+  cs2::protect::Config salted_config;
+  salted_config.policy = salted_policy;
+  const cs2::protect::StringResult salted =
+      cs2::protect::transform_strings(*salted_module, salted_config, {});
+  check(!cs2::protect::salt_proof(salted_config).empty(),
+        "a build with a seed has a proof of its salt");
+  const std::vector<cs2::protect::CoverageString> salted_covered =
+      cs2::protect::coverage_strings(salted);
+  check(salted_covered.size() == 1, "the salted coverage has one literal");
+  if (!salted_covered.empty() && !covered.empty()) {
+    check(salted_covered[0].digest != covered[0].digest,
+          "the digest of a literal is not salted with the build seed");
+  }
+
+  std::filesystem::remove_all(directory, error);
+}
+
+/// The transform: a literal in another address space is refused, and the
+/// module comes out whole.
+///
+/// The blob and the buffer are created in the **default** address space, so
+/// a literal in another one cannot be replaced by them: the users would
+/// point at a buffer of the wrong address space and the module would come
+/// out broken ("Broken module found"). The gate refuses such a literal, and
+/// the refusal leaves it exactly as it is.
+void test_string_address_space() {
+  llvm::LLVMContext context;
+  const auto module = build_string_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  cs2::protect::Policy policy;
+  policy.strings = {"aspace1"};
+  policy.strings_min_length = 4;
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const cs2::protect::StringResult result = cs2::protect::transform_strings(*module, config, {});
+  check(result.protected_count == 0, "a literal in another address space is not protected");
+  check(result.refused_count == 1, "the literal in another address space is refused");
+  if (!result.literals.empty()) {
+    check(result.literals[0].reason.has_value(), "the refusal has a reason");
+    if (result.literals[0].reason.has_value()) {
+      check_equal(cs2::protect::to_string(*result.literals[0].reason), "unsupported_address_space",
+                  "the refusal names the address space");
+    }
+  }
+  // The literal is left exactly as it is.
+  check(module->getGlobalVariable(".str.aspace", /*AllowLocal=*/true) != nullptr,
+        "the refused literal is still in the module");
+  // And the module is whole: a broken module is the failure this refusal
+  // exists to avoid.
+  std::string message;
+  llvm::raw_string_ostream stream(message);
+  const bool broken = llvm::verifyModule(*module, &stream);
+  check(!broken, "the module of a refused address space verifies");
+  if (broken) {
+    std::fprintf(stderr, "FAIL: the module does not verify: %s\n", stream.str().c_str());
+  }
+}
+
+/// The transform: the decode runs before **every** use of the literal.
+///
+/// A literal that is used in two blocks of one function -- one of them the
+/// entry block -- is the case that breaks a naive placement: a decode that
+/// is emitted after a use of the entry block leaves that use reading an
+/// uninitialised stack slot, which is a *wrong string* and not a crash.
+void test_string_decode_dominance() {
+  llvm::LLVMContext context;
+  const auto module = build_string_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  cs2::protect::Policy policy;
+  policy.strings = {"twoblock"};
+  policy.strings_min_length = 4;
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const cs2::protect::StringResult result = cs2::protect::transform_strings(*module, config, {});
+  check(result.protected_count == 1, "the literal of the two-block function is protected");
+  check(result.decodes == 1, "one decode is emitted");
+
+  llvm::Function* function = module->getFunction("uses_two_blocks");
+  check(function != nullptr, "the two-block function is there");
+  if (function == nullptr) {
+    return;
+  }
+
+  // The buffer, the decode and the uses of the buffer.
+  llvm::Value* buffer = nullptr;
+  llvm::Instruction* decode = nullptr;
+  for (llvm::BasicBlock& block : *function) {
+    for (llvm::Instruction& instruction : block) {
+      if (instruction.getName() == "cs2.protect.buffer") {
+        buffer = &instruction;
+      }
+      if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+        if (call->getCalledFunction() != nullptr &&
+            call->getCalledFunction()->getName() == "cs2.protect.strdecode") {
+          decode = &instruction;
+        }
+      }
+    }
+  }
+  check(buffer != nullptr, "the function has a buffer");
+  check(decode != nullptr, "the function has a decode");
+  if (buffer == nullptr || decode == nullptr) {
+    return;
+  }
+
+  std::vector<llvm::Instruction*> uses;
+  for (llvm::User* user : buffer->users()) {
+    auto* instruction = llvm::dyn_cast<llvm::Instruction>(user);
+    if (instruction == nullptr || instruction == decode) {
+      continue;
+    }
+    uses.push_back(instruction);
+  }
+  check(uses.size() == 2, "the function has two uses of the buffer");
+
+  // The decode dominates every use, and it is before the uses of its own
+  // block.
+  llvm::DominatorTree tree(*function);
+  for (const llvm::Instruction* use : uses) {
+    if (use->getParent() == decode->getParent()) {
+      check(decode->comesBefore(use), "the decode is before the use of its own block");
+      continue;
+    }
+    check(tree.dominates(decode->getParent(), use->getParent()),
+          "the decode dominates the use of the other block");  }
+}
+
 }  // namespace
 
 auto main() -> int {
@@ -1555,6 +2051,11 @@ auto main() -> int {
   test_vm_refusals();
   test_vm_call();
   test_vm_vanished();
+  test_string_policy();
+  test_string_gate();
+  test_string_transform();
+  test_string_address_space();
+  test_string_decode_dominance();
   if (g_failures != 0) {
     std::printf("protect: %d check(s) failed\n", g_failures);
     return 1;

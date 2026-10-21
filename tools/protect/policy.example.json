@@ -21,5 +21,18 @@
   "deny": [
     "cs2::loader::self_unmap"
   ],
+  "strings": [
+    "box",
+    "health_bar",
+    "ammo_bar",
+    "only_enemies",
+    "show_dead",
+    "hitbox_mode",
+    "cs2_*"
+  ],
+  "strings_deny": [
+    "CS2_*"
+  ],
+  "strings_min_length": 4,
   "seed": "0xA04252B187478C00A40BC6E8B04F1C9A"
 }

@@ -17,6 +17,7 @@
 
 #include "config.hpp"
 #include "selection.hpp"
+#include "strings.hpp"
 #include "transform.hpp"
 #include "vm.hpp"
 
@@ -89,6 +90,25 @@ struct CoverageVm {
   std::size_t calls{0};
 };
 
+/// One literal of the coverage file.
+///
+/// The coverage **must not** carry the content of a protected string: the
+/// coverage is a file, and a file holds the strings. It carries the length
+/// and a digest of the content instead, which is enough for the payload
+/// check to prove that the plaintext is not in the image. The digest is
+/// **salted with the build seed**, so that the coverage cannot be brute
+/// forced back into the strings.
+struct CoverageString {
+  std::size_t length{0};
+  /// The salted SHA-256 of the content, in hexadecimal.
+  std::string digest;
+  std::size_t uses{0};
+  std::size_t functions{0};
+  bool protected_literal{false};
+  /// The refusal reason ("" when the literal was protected).
+  std::string reason;
+};
+
 /// Prints the selection report of one module to stderr.
 void write_report(const llvm::Module& module, const SelectionResult& result, const Config& config);
 
@@ -113,8 +133,23 @@ void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& 
 /// The coverage entries of the virtualizer's analysis.
 [[nodiscard]] auto coverage_vm(const std::vector<VmFunction>& functions) -> std::vector<CoverageVm>;
 
+/// Prints the string report of one module to stderr.
+///
+/// The report names every literal the policy selected, and whether it was
+/// protected or refused (and why). The report goes to stderr, so it may name
+/// the content: the *coverage* may not.
+void write_string_report(const llvm::Module& module, const StringResult& result,
+                         const Config& config);
+
 /// The coverage entries of a selection result.
 [[nodiscard]] auto coverage_entries(const SelectionResult& result) -> std::vector<CoverageEntry>;
+
+/// The coverage entries of a string result.
+///
+/// The content of a literal is **not** in the coverage: the entry carries the
+/// length and the digest of the content, and that is enough for the payload
+/// check to prove that the plaintext is not in the image.
+[[nodiscard]] auto coverage_strings(const StringResult& result) -> std::vector<CoverageString>;
 
 /// The coverage entries of a recorded selection.
 ///
@@ -146,7 +181,11 @@ void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& 
 /// from one of another build or from a file that was edited by hand.
 ///
 /// The `vm` lines are *new*: a coverage file of an older build has none, and
-/// a reader that does not know them still reads the file.
+/// a reader that does not know them still reads the file. The same is true
+/// of the `str` lines and of the `strings_salt` line, which names the salt
+/// of the digests of the literals ("" when there is none): the salt itself
+/// is **not** in the file, so that the file cannot be brute forced back into
+/// the strings.
 ///
 /// The `cross` and the `direct` lines are new in the same sense: they
 /// record the cross-module routing (the state of every `cross_module` entry
@@ -156,8 +195,11 @@ void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& 
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
                                   const std::vector<CoverageEntry>& entries,
                                   const std::vector<CoverageFunction>& functions,
-                                  const CoverageProtect& protect, std::span<const CoverageVm> vm,
-                                  const CrossModuleState& cross) -> std::optional<std::string>;
+                                  const CoverageProtect& protect,
+                                  std::span<const CoverageVm> vm = {},
+                                  const std::vector<CoverageString>& strings = {},
+                                  std::string_view strings_salt = {},
+                                  const CrossModuleState& cross = {}) -> std::optional<std::string>;
 
 /// Writes the machine-readable coverage of one module from a selection.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
