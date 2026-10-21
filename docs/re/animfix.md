@@ -974,7 +974,9 @@ the prediction -> setter(node, index)     (the client's predicted float)
 the AG2 graph  <- the parameter at +0x18  (whatever the setter wrote last)
 ```
 
-**The prediction is the only writer of the graph's parameters.** The server's
+**The prediction is the only writer of the graph's parameters *through the
+setter*.** (The enum/bool slots are pushed with direct stores — see §9.4.3 —
+and the flinch slots by nobody at all; §9.4.3 has the full list.) The server's
 replicated value is *stored* in the slot and then never used: the client's
 prediction is what the graph is evaluated from. That is mechanism (B) of §5 in
 its sharpest form — and it is **not** a question of which of the two runs
@@ -997,18 +999,27 @@ last: the server's value does not reach the graph at all.
 
 So the order inside a frame is **decode → predict → evaluate**, and the
 prediction's write is the last one before the graph reads the parameters.
-**The prediction wins.** The seam that the RE's §7 step 3 suggested
-(`AnimTickUpdate` / the AG2 update) is on the *wrong side* of the prediction
-for the write-back: a detour on `AnimTickUpdate` that writes **before** the
-original is overwritten by the prediction inside the same call, and one that
-writes **after** it is already too late (the job has been dispatched).
+**The prediction wins.**
 
-**The seam this measurement selects** is therefore the **setter**
-(`0x8492a0`, a 16-byte prologue → hookable, one RIP-relative displacement
-that the repo's relocator handles): the correction is handed to the engine at
-the exact place the prediction writes, so it does not depend on the order at
-all. The codec stays the **capture** point (it is where the server's values
-arrive).
+**The seam this measurement selects** is the **anim tick**
+(`CAnimGraphGameSystem::AnimTickUpdate`, `0x35aeb0`): it runs *after* the
+prediction in the same tick, and it *contains* the AG2 evaluation (the
+per-entity `FUN_18038a070` → `0x12e4f90`), so a correction written there is
+the one the pose is computed from. The correction is the setter's own write,
+replicated by hand:
+`*(float *)(*(node + 0x10)[index] + 0x18) = value`.
+
+> **Why not the setter** (`0x8492a0`), which is where the prediction writes
+> and would be the natural seam? It is **not hookable**: its third prologue
+> instruction is `movss xmm0, [rip+0x13c0fa0]` — a RIP-relative load — and
+> the repo's inline relocator rewrites such a displacement as
+> `disp + (target − trampoline)`. `client.dll` is mapped high under ASLR and
+> the trampoline comes from `VirtualAlloc(nullptr, …)` low, so the rewrite is
+> ~141 TB and can never fit in an `int32`: the hook engine bails with
+> `unsupported_instruction`. The anim tick's prologue is RIP-free, so the
+> correction goes there instead. (The repo has hit this limit before — see
+> `docs/control-harness.md` — and the workaround there was a vtable patch,
+> not an inline hook.)
 
 ### 9.4 Corrections to the sections above
 
@@ -1083,36 +1094,32 @@ arrive).
 ### 9.6 The animfix's validity rule (and why it is not the bone seam)
 
 The implementation (`payload/control/include/cs2/control/animfix.hpp`) captures
-the server's values at the codec and re-applies them **at the setter** — the
-place the prediction writes. The rule that decides whether a captured value
-may be re-applied is the **freshness** rule:
+the server's values at the codec and re-applies them **in the anim tick** -
+the place the graph is evaluated (§9.3). The rule that decides whether a
+captured value may be re-applied is the specification's own:
 
-> A captured value may be re-applied only while the capture is **fresh**: it
-> must exist, and it must not be older than `k_max_capture_age_ms` (32 ms —
-> about two of the server's 64 Hz ticks) on the caller's monotonic clock. A
-> decode **replaces** the capture, so the value re-applied is always the last
-> one the server sent.
+> A captured value may only be re-applied if it was captured **this frame**.
+> A capture corrects a slot **at most once**; only a newer decode (a newer
+> generation) can correct it again. A capture that has **aged out** - older
+> than one client frame (16 ms, which is also one of the server's 64 Hz
+> ticks) - is refused outright.
 
-The bound is the "captured *this* frame" rule in the only units the client
-has. It is what refuses a capture that aged out — a stalled connection, a
-dead player, a paused game — where the server's value describes a pose the
-server left behind: writing it over the client's fresh prediction would move
-the local hitboxes *backwards*, which is worse than not fixing them at all.
-The refusals are counted (`animfix_skips`).
+The first clause is what keeps a capture from being written over the
+client's fresh prediction again and again; the second refuses a capture that
+aged out (a stalled connection, a dead player, a paused game), where the
+server's value describes a pose the server has long left behind: writing it
+over the client's fresh prediction would move the local hitboxes
+*backwards*, which is worse than not fixing them at all. The refusals are
+counted (`animfix_skips`).
 
-The capture is deliberately **not** consumed by a re-apply. The engine writes
-a graph parameter more than once per decode (the prediction runs from the
-command path *and* from the frame path), and only the **last** write before
-the graph is evaluated matters — a consume-once rule would leave the client's
-own value in the graph, and the animfix would do nothing at all. (This was
-the first cut of the rule; it was wrong for this seam, and the correction is
-in the commit history.)
+Because the correction lands in the **same tick** as the decode, the bound
+can be tight: the capture is at most one tick old when it is used.
 
 **The bone seam was not used.** `CSkeletonInstance::SetupBones` (`0xaa0f80`)
 would have been the wrong place for this fix: it runs on the AG2 job's
 **worker thread**, it would have to rewrite a **full `CTransform`** (position
-*and* quaternion) or the hitboxes stretch (`docs/re/aim.md`), and — the
-decisive point — the graph-input seam already fixes the values **before** the
+*and* quaternion) or the hitboxes stretch (`docs/re/aim.md`), and - the
+decisive point - the graph-input seam already fixes the values **before** the
 pose is computed, so a bone write would only be a second, riskier copy of the
 same fix.
 
