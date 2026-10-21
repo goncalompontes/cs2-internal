@@ -38,6 +38,26 @@ play/injection testing — it will land in session 0 and there will be no GPU.
   (one check group per commit; verify with all four `meson compile` targets plus
   `meson test -C build`). See §7 of the style guide.
 
+## The offsets do not need the game
+
+A new **signature** (in `external/dumper/src/analysis.rs::known_signatures()`)
+becomes usable with an **offline** refresh — no CS2, no process:
+
+```powershell
+python scripts\resolve-offsets-offline.py          # writes calibration/offsets.json
+python scripts\resolve-offsets-offline.py --check  # compares, writes nothing
+```
+
+The dumper resolves the very same curated signatures from the module's file on
+disk that the live calibration resolves in the process' memory, so the two
+agree byte for byte. A signature that stops matching is **named**
+(`unresolved: <name>`), not dropped.
+
+The **live** calibration (`scripts/calibrate-live.py`, a running game) is still
+needed for the **interfaces** and the **schema** — they are runtime state, not
+patterns in a binary. See [`docs/re/offsets.md`](docs/re/offsets.md) and
+`docs/setup-windows.md` §11a.
+
 ## Where to resume (current work)
 
 **Start at [`NEXT_SESSION_WAVE2.md`](NEXT_SESSION_WAVE2.md) →
