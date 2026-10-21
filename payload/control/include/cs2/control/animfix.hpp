@@ -131,24 +131,6 @@ struct Target {
   std::int16_t index{0};
 };
 
-// The tracked slot a write to `(node, index)` belongs to, if any.
-//
-// A slot whose node is null is not bound to a graph parameter yet, so it
-// cannot be recognised (and a null node must not match an unbound slot).
-[[nodiscard]] inline auto find_slot(const std::array<Target, k_tracked_slot_count>& targets,
-                                    std::uintptr_t node, std::int16_t index) noexcept
-    -> std::optional<Slot> {
-  if (node == 0) {
-    return std::nullopt;
-  }
-  for (std::size_t i = 0; i < k_tracked_slot_count; ++i) {
-    if (targets[i].node == node && targets[i].index == index) {
-      return k_tracked_slots[i];
-    }
-  }
-  return std::nullopt;
-}
-
 // True when the four tracked slots point at four **different** graph
 // parameters. Two slots that share a `(node, index)` pair would collide in
 // `find_slot` (the first match wins) and one of them would silently never
@@ -312,7 +294,11 @@ inline constexpr std::uint64_t k_bound_margin = 2;
 // accumulation and never a superseded one.
 struct Capture {
   std::array<float, k_tracked_slot_count> values{};
-  std::uint64_t generation{0};
+  /// How many times this capture has been re-applied. **Diagnostic only**:
+  /// the decision must never depend on it - the capture is re-applied on every
+  /// anim tick while it is fresh, and a "consume once" rule is what made the
+  /// feature fragile (see `decide`).
+  std::uint64_t reapply_count{0};
   std::uint64_t captured_at_ms{0};
   std::uintptr_t controller{0};
   bool valid{false};
@@ -330,10 +316,24 @@ inline void store(Capture& capture, std::uintptr_t controller,
                   const std::array<float, k_tracked_slot_count>& values,
                   std::uint64_t now_ms) noexcept {
   capture.values = values;
-  capture.generation += 1;
+  capture.reapply_count = 0;
   capture.captured_at_ms = now_ms;
   capture.controller = controller;
   capture.valid = true;
+}
+
+// Note that the capture was re-applied.
+//
+// **This must never gate the decision.** The engine calls it after a write,
+// and the *next* anim tick must still be allowed to re-apply the same fresh
+// capture: the engine writes the graph's parameters on the command path (the
+// prediction) and evaluates the graph on the anim path, so a capture that is
+// consumed by the first anim tick would leave the graph with the client's
+// prediction for every later anim tick of the same tick - and the pose would
+// oscillate between the server's and the client's aim yaw at the server's
+// tick rate.
+inline void mark_applied(Capture& capture) noexcept {
+  capture.reapply_count += 1;
 }
 
 // True when the capture still belongs to the controller the animfix is

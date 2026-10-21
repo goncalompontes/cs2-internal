@@ -355,6 +355,12 @@ void test_the_refusal_reasons_are_distinguishable() {
 // anim tick while it is fresh, so the server's value stays in the graph
 // between the decodes.
 //
+// The engine notes every write (`mark_applied`), and the **next** anim tick
+// must still be allowed to re-apply the same capture. This is the pin for
+// the property: a "consume once" rule - the one that made the feature
+// fragile - would refuse the second apply, and the engine would then leave
+// the client's prediction in the graph for the rest of the tick.
+//
 // A consume-once rule would leave the graph with the client's prediction for
 // every later anim tick of the same tick - the pose would oscillate between
 // the server's and the client's aim yaw at the server's tick rate - and in a
@@ -369,6 +375,16 @@ void test_a_fresh_capture_is_reapplied_on_every_tick() {
                         k_interval_ms, k_controller);
     assert(decision.reapply);
   }
+  // The engine notes the write; the capture must **not** be consumed by it.
+  animfix::mark_applied(capture);
+  assert(
+      animfix::decide(capture, animfix::Slot::aim_yaw, 1001, k_interval_ms, k_controller).reapply);
+  assert(
+      animfix::decide(capture, animfix::Slot::aim_yaw, 1002, k_interval_ms, k_controller).reapply);
+  animfix::mark_applied(capture);
+  assert(
+      animfix::decide(capture, animfix::Slot::aim_yaw, 1002, k_interval_ms, k_controller).reapply);
+  assert(capture.reapply_count == 2);
   // And it stops when the capture ages out - that is the protection the
   // specification's rule is for.
   const animfix::Decision late = animfix::decide(
@@ -411,31 +427,6 @@ void test_the_capture_must_belong_to_the_live_controller() {
 }
 
 // --- the target lookup ----------------------------------------------------
-
-// The animfix recognises **its own** four slots by the (node, index) pair
-// the parameter lives at; a write to any other parameter (a remote
-// player's, another class's) is left alone.
-void test_only_the_animfixs_own_slots_are_recognised() {
-  std::array<animfix::Target, animfix::k_tracked_slot_count> targets{};
-  for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
-    targets[i] = animfix::Target{0x1000 + i * 0x10, static_cast<std::int16_t>(i)};
-  }
-  const auto found = animfix::find_slot(targets, 0x1000 + 2 * 0x10, 2);
-  assert(found.has_value());
-  assert(*found == animfix::Slot::aim_pitch);
-  // Another entity's parameter: not ours.
-  assert(!animfix::find_slot(targets, 0x2000, 0).has_value());
-  // The right node, the wrong index: not ours.
-  assert(!animfix::find_slot(targets, 0x1000, 7).has_value());
-  // A null node is never a target: an unbound slot must not match a write to
-  // a null parameter (which would be a null dereference inside the engine).
-  assert(!animfix::find_slot(targets, 0, 0).has_value());
-  // The same, with an **unbound** slot in the table: a null node must not
-  // match it either.
-  std::array<animfix::Target, animfix::k_tracked_slot_count> unbound{};
-  unbound[1] = animfix::Target{0, 0};
-  assert(!animfix::find_slot(unbound, 0, 0).has_value());
-}
 
 // The four tracked slots must point at four **different** graph parameters:
 // two slots that shared one would collide in the lookup (the first match
@@ -652,7 +643,6 @@ auto main(int argc, char** argv) -> int {
   test_a_fresh_capture_is_reapplied_on_every_tick();
   test_the_capture_keeps_its_own_copy();
   test_the_capture_must_belong_to_the_live_controller();
-  test_only_the_animfixs_own_slots_are_recognised();
   test_the_four_slots_must_be_distinct();
   test_the_pinned_prologues_are_the_dumpers_signatures(repository_root);
   test_the_seams_prologues_are_hookable();

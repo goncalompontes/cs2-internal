@@ -1691,6 +1691,12 @@ void Input::animfix_apply() noexcept {
     if (!cs2::game::write_bytes(value_address, &server, sizeof(server))) {
       continue;
     }
+    {
+      const std::lock_guard<std::mutex> lock(animfix_mutex_);
+      // Diagnostic only: the next anim tick must still be allowed to
+      // re-apply this fresh capture.
+      animfix::mark_applied(animfix_capture_);
+    }
     animfix_applies_.fetch_add(1);
     corrected = true;
   }
