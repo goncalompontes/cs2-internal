@@ -92,7 +92,14 @@ struct FilePolicy {
   void close(void* handle) const noexcept {
     if (close_handle != nullptr) {
       close_handle(static_cast<HANDLE>(handle));
+      return;
     }
+    // A null closer is a programming error, not a state to recover from: the
+    // callers resolve the entry points and check them before they open a
+    // file, so this cannot happen on a path that exists. Say so in the
+    // payload's log instead of leaking the handle in silence.
+    cs2::game::append_log(
+        "rage config: the resolved CloseHandle is null; the file handle leaks");
   }
 };
 #endif
