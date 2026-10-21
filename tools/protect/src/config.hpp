@@ -48,6 +48,20 @@ struct PolicyEntry {
 /// The policy file: what to protect, what to refuse, and the build seed.
 struct Policy {
   std::vector<PolicyEntry> protect;
+  /// The cross-TU callees whose calls may be routed through the caller's
+  /// own table.
+  ///
+  /// A glob, matched exactly like a `protect` entry: against the mangled
+  /// symbol and against the demangled qualified name. The entry is matched
+  /// against a **declaration** -- a function with no body in this module --
+  /// because a same-module callee is routed by the ordinary rule and needs
+  /// no entry.
+  ///
+  /// The list is the operator's declaration of "these cross-TU edges must
+  /// not be readable": at the IR level an import and an internal
+  /// cross-TU declaration are the same thing, so the pass cannot tell them
+  /// apart by looking at the module.
+  std::vector<std::string> cross_module;
   std::vector<std::string> deny;
   std::optional<std::uint64_t> seed;
 };

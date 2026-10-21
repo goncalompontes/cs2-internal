@@ -50,6 +50,7 @@ struct CoverageFunction {
   std::string symbol;
   std::size_t rewritten{0};
   std::size_t skipped{0};
+  std::size_t cross{0};  ///< the rewrites that were cross-TU (routed).
 };
 
 /// What the transform put into the module.
@@ -146,11 +147,17 @@ void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& 
 ///
 /// The `vm` lines are *new*: a coverage file of an older build has none, and
 /// a reader that does not know them still reads the file.
+///
+/// The `cross` and the `direct` lines are new in the same sense: they
+/// record the cross-module routing (the state of every `cross_module` entry
+/// and the cross-TU callees that stayed direct). A coverage file of an older
+/// build has none, and a reader that does not know them still reads the
+/// file.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
                                   const std::vector<CoverageEntry>& entries,
                                   const std::vector<CoverageFunction>& functions,
-                                  const CoverageProtect& protect, std::span<const CoverageVm> vm)
-    -> std::optional<std::string>;
+                                  const CoverageProtect& protect, std::span<const CoverageVm> vm,
+                                  const CrossModuleState& cross) -> std::optional<std::string>;
 
 /// Writes the machine-readable coverage of one module from a selection.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,

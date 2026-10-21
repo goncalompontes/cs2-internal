@@ -17,7 +17,13 @@ through an encrypted descriptor. The image has to survive that:
   * every dispatch **decodes to a callee of the image**: the check decodes
     the descriptor of the image with the key the pass used, resolves the
     index in the table of the image, and checks that the address is code of
-    the image.
+    the image;
+  * no protected function calls the payload's own code **directly**: the
+    cross-TU callees that stayed direct are compared with the symbols the
+    payload's own libraries define (read with the SDK's `llvm-nm`);
+  * every `cross_module` entry of the policy names a symbol the payload
+    defines: an entry that names a symbol that is gone is a stale entry,
+    and it protects nothing.
 
 The last two are the ones that catch the dangerous failures. The key is a
 compile-time key, so the whole dispatch is a compile-time constant, and a
@@ -47,7 +53,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -74,6 +82,17 @@ EXCEPTION_DIRECTORY = 3
 
 #: The base relocation directory of a PE.
 BASE_RELOCATION_DIRECTORY = 5
+
+#: The reason a cross-TU callee may stay direct without failing the build.
+#:
+#: The `sret` rule is not narrowed by this task (that is the other half of
+#: the cross-TU work): a callee that returns a big aggregate keeps its
+#: `sret` parameter, and the call stays direct. The check names those
+#: callees instead of failing on them.
+SRET_REASON = "indirect_parameter"
+
+#: A symbol of a `llvm-nm` listing: "0000000000000000 T ?solve@aim@cs2@@…".
+NM_SYMBOL = re.compile(r"^(?:[0-9a-fA-F]+)?\s+(?P<type>[A-Za-z])\s+(?P<name>\S+)\s*$")
 
 
 def check(condition: bool, what: str) -> None:
@@ -289,7 +308,10 @@ def check_dispatch_targets(image: PeImage, sites: list[DispatchSite],
         check(
             image.is_code_address(resolved),
             f"the dispatch at 0x{site.address:x} calls 0x{resolved:x}, which is not code "
-            "in this image",
+            "in this image: the table entry does not hold the callee. If the entry names "
+            "an import, the table holds the import's IAT slot instead of the function, "
+            "and the dispatch calls the slot: a `cross_module` entry must not name an "
+            "import",
         )
         total += 1
     return total
@@ -337,6 +359,119 @@ def resolve_site(image: PeImage, site: DispatchSite, entry: Coverage) -> int | N
 def reported_rewrites(coverage: list[Coverage]) -> int:
     """The number of the calls the pass reports having rewritten."""
     return sum(entry.rewritten for entry in coverage)
+
+
+# --- The payload's own code --------------------------------------------------
+
+
+def find_nm(objdump: Path) -> Path | None:
+    """The `llvm-nm` of the SDK the objdump came from.
+
+    The `llvm-nm` is in the same directory as the `llvm-objdump` the check
+    is given, so no build wiring changes: the check finds the tool of the
+    SDK it already knows.
+    """
+    for name in ("llvm-nm.exe", "llvm-nm"):
+        candidate = objdump.parent / name
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def library_symbols(nm: Path, directory: Path) -> set[str]:
+    """The symbols the payload's own libraries define.
+
+    The libraries are the ones in the build directory the check runs in:
+    the check is part of the build, and the build directory is where they
+    are.
+    """
+    symbols: set[str] = set()
+    libraries = sorted(directory.rglob("*.lib")) + sorted(directory.rglob("*.a"))
+    for library in libraries:
+        completed = subprocess.run([str(nm), str(library)], capture_output=True, text=True)
+        if completed.returncode != 0:
+            continue
+        for line in completed.stdout.splitlines():
+            matched = NM_SYMBOL.match(line)
+            if matched is None:
+                continue
+            if matched.group("type") == "U":
+                # An undefined symbol: the library does not define it.
+                continue
+            symbols.add(matched.group("name"))
+    return symbols
+
+
+def check_cross_module_entries(coverage: list[Coverage], symbols: set[str]) -> None:
+    """Every `cross_module` entry has to name a symbol the payload defines.
+
+    The entry is the operator's declaration of "this cross-TU edge must not
+    be readable". An entry that names a symbol the payload does not define
+    is a **stale** entry: the function is gone (or was never there), and
+    the entry protects nothing. The build has to say so.
+    """
+    stale: list[tuple[str, str]] = []
+    for entry in coverage:
+        for pattern, symbol in entry.cross_symbols():
+            if symbol in symbols:
+                continue
+            stale.append((pattern, symbol))
+    if not stale:
+        return
+    names = ", ".join(f"{pattern} ({symbol})" for pattern, symbol in sorted(set(stale)))
+    raise Failure(
+        f"{len(set(stale))} cross_module entries name a symbol the payload's own libraries "
+        f"do not define: {names}. The entries are stale: add the symbol to the payload, or "
+        "take the entry out of the policy"
+    )
+
+
+def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[int, int]:
+    """No protected function may call the payload's own code directly.
+
+    The cross-TU callees that stayed direct are the ones the coverage's
+    `direct` lines name. A symbol the payload's own libraries define is
+    the payload's own code, and the edge is still a direct call in the
+    image.
+
+    The `sret` edges are excepted: this task does not narrow the `sret`
+    rule, so a callee that returns a big aggregate keeps its direct call.
+    The check names those callees instead of failing on them.
+
+    The number of the calls it left alone is returned too: the operator
+    sees the CRT's symbols that the image still calls directly.
+    """
+    direct: dict[str, str] = {}
+    for entry in coverage:
+        for symbol, reason in entry.direct_callees().items():
+            direct.setdefault(symbol, reason)
+
+    failures: list[tuple[str, str]] = []
+    excepted: list[str] = []
+    left_alone = 0
+    for symbol, reason in sorted(direct.items()):
+        if symbol not in symbols:
+            # An import or a CRT symbol the payload does not own: it names
+            # no aim function, and it is left alone.
+            left_alone += 1
+            continue
+        if reason == SRET_REASON:
+            excepted.append(symbol)
+            continue
+        failures.append((symbol, reason))
+
+    if failures:
+        names = ", ".join(f"{symbol} ({reason})" for symbol, reason in failures)
+        raise Failure(
+            f"{len(failures)} cross-TU callees that a protected function calls directly are "
+            f"the payload's own code: {names}. Add them to the policy's `cross_module` list"
+        )
+    if excepted:
+        print(
+            f"check_payload: {len(excepted)} cross-TU callees stay direct because of the "
+            "`sret` rule (this task does not narrow it): " + ", ".join(excepted)
+        )
+    return len(excepted), left_alone
 
 
 def main(argv: list[str]) -> int:
@@ -432,6 +567,40 @@ def main(argv: list[str]) -> int:
             print(f"check_payload: the pass reported {expected} rewrites, and the image has them")
             resolved = check_dispatch_targets(protected, protected_sites, files)
             print(f"check_payload: {resolved} dispatches decode to a callee of the image")
+
+            # The cross-TU edges: a protected function must not call the
+            # payload's own code directly, and a `cross_module` entry must
+            # name a symbol the payload still defines.
+            #
+            # The rules need the payload's own symbol set, and it is read
+            # with the SDK's `llvm-nm` over the payload's own libraries --
+            # the ones in the build directory the check runs in. When they
+            # cannot be found, the check fails: a rule that cannot be
+            # evaluated must not be reported as passed.
+            nm = find_nm(args.objdump)
+            if nm is None:
+                raise Failure(
+                    f"the llvm-nm of the LLVM SDK was not found next to the objdump "
+                    f"('{args.objdump}'): the check cannot tell the payload's own code from "
+                    "the CRT's, and a rule that cannot be evaluated must not be reported as "
+                    "passed"
+                )
+            build_directory = Path.cwd()
+            symbols = library_symbols(nm, build_directory)
+            if not symbols:
+                raise Failure(
+                    f"the payload's own libraries were not found in the build directory "
+                    f"('{build_directory}'): the check cannot tell the payload's own code "
+                    "from the CRT's, and a rule that cannot be evaluated must not be "
+                    "reported as passed"
+                )
+            check_cross_module_entries(files, symbols)
+            excepted, left_alone = check_direct_callees(files, symbols)
+            print(
+                f"check_payload: {len(symbols)} symbols of the payload's own libraries; "
+                f"{excepted} cross-TU callees stay direct because of the `sret` rule, and "
+                f"{left_alone} direct calls name a symbol the payload does not own"
+            )
         else:
             print("check_payload: no coverage given: the number of the rewrites is not checked")
     except Failure as error:

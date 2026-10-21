@@ -262,6 +262,11 @@ void write_transform_report(const llvm::Module& module, const TransformResult& r
     for (const auto& [reason, count] : counts) {
       llvm::errs() << " " << to_string(reason) << "=" << count;
     }
+    if (transform.cross > 0) {
+      // The rewrites that were cross-TU: the calls the policy's
+      // `cross_module` list routed through the module's own table.
+      llvm::errs() << " cross_module=" << transform.cross;
+    }
     llvm::errs() << "\n";
   }
 
@@ -289,6 +294,23 @@ void write_transform_report(const llvm::Module& module, const TransformResult& r
                      << " skip reason=" << to_string(transform.skipped[index])
                      << " callee=" << transform.skipped_callees[index] << "\n";
       }
+    }
+    // The state of every `cross_module` entry of the policy in this module,
+    // and the cross-TU callees that stayed direct.
+    for (const CrossEntry& entry : result.cross.entries) {
+      llvm::errs() << "[cs2-protect] " << tag << ": cross " << entry.pattern << " "
+                   << to_string(entry.state);
+      if (!entry.reason.empty()) {
+        llvm::errs() << " reason=" << entry.reason;
+      }
+      if (!entry.symbol.empty()) {
+        llvm::errs() << " symbol=" << entry.symbol;
+      }
+      llvm::errs() << "\n";
+    }
+    for (const DirectCallee& callee : result.cross.direct) {
+      llvm::errs() << "[cs2-protect] " << tag << ": direct " << callee.symbol
+                   << " reason=" << callee.reason << "\n";
     }
   }
 
@@ -409,7 +431,8 @@ auto coverage_entries(const RecordedSelection& selection, std::string_view modul
 auto write_coverage(const Config& config, const llvm::Module& module,
                     const std::vector<CoverageEntry>& entries,
                     const std::vector<CoverageFunction>& functions, const CoverageProtect& protect,
-                    std::span<const CoverageVm> vm) -> std::optional<std::string> {
+                    std::span<const CoverageVm> vm, const CrossModuleState& cross)
+    -> std::optional<std::string> {
   if (!config.policy) {
     return std::nullopt;
   }
@@ -480,6 +503,35 @@ auto write_coverage(const Config& config, const llvm::Module& module,
     text += std::to_string(function.rewritten);
     text += " skipped=";
     text += std::to_string(function.skipped);
+    text += " cross=";
+    text += std::to_string(function.cross);
+    text += "\n";
+  }
+  // The cross-module routing: the state of every `cross_module` entry of the
+  // policy in this module, and the cross-TU callees that stayed direct.
+  //
+  // The lines are new: a coverage file of an older build has none, and a
+  // reader that does not know them still reads the file.
+  for (const CrossEntry& entry : cross.entries) {
+    text += "cross ";
+    text += to_string(entry.state);
+    if (entry.state == CrossState::blocked && !entry.reason.empty()) {
+      text += ":";
+      text += entry.reason;
+    }
+    text += " ";
+    text += entry.pattern;
+    if (!entry.symbol.empty()) {
+      text += " ";
+      text += entry.symbol;
+    }
+    text += "\n";
+  }
+  for (const DirectCallee& callee : cross.direct) {
+    text += "direct ";
+    text += callee.symbol;
+    text += " ";
+    text += callee.reason;
     text += "\n";
   }
   // What the virtualizer's analysis decided. The lines are new: a coverage
@@ -531,7 +583,8 @@ auto write_coverage(const Config& config, const llvm::Module& module,
 
 auto write_coverage(const Config& config, const llvm::Module& module, const SelectionResult& result)
     -> std::optional<std::string> {
-  return write_coverage(config, module, coverage_entries(result), {}, CoverageProtect{}, {});
+  return write_coverage(config, module, coverage_entries(result), {}, CoverageProtect{}, {},
+                        CrossModuleState{});
 }
 
 }  // namespace cs2::protect
