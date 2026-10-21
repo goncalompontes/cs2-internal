@@ -1,0 +1,14 @@
+{
+  "strings": [
+    "healthy",
+    "shared",
+    "formatted",
+    "four",
+    "denied*"
+  ],
+  "strings_deny": [
+    "denied*"
+  ],
+  "strings_min_length": 4,
+  "seed": "0xA04252B187478C00A40BC6E8B04F1C9A"
+}

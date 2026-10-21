@@ -170,6 +170,20 @@ add_test(NAME protect-diff-test
           --policy ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diff.policy.json
           --work ${CMAKE_CURRENT_BINARY_DIR}/diff-test)
 
+# The string protection has its own IR-level test: the literal has to be
+# gone from the emitted IR, the blob and the decode have to be there, and a
+# refused literal has to be byte for byte unchanged. It exercises the
+# production path (clang-cl loads the plugin) as well as the `opt` path,
+# because `opt` does not invoke the extension points.
+add_test(NAME protect-str-ir-test
+  COMMAND ${CS2_PROTECT_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/str_ir_test.py
+          --opt ${LLVM_TOOLS_BINARY_DIR}/opt.exe
+          --clang ${LLVM_TOOLS_BINARY_DIR}/clang.exe
+          --plugin $<TARGET_FILE:Cs2Protect>
+          --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/str_fixture.cpp
+          --policy ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/str.policy.json
+          --work ${CMAKE_CURRENT_BINARY_DIR}/str-ir-test)
+
 # The readers of the coverage: a malformed file has to be reported and
 # ignored (never a traceback), and the coverage of another tree has to be
 # skipped (it would count every rewrite twice).

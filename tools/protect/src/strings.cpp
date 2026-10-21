@@ -79,6 +79,20 @@ constexpr std::string_view k_blob_prefix = "cs2.protect.strblob.";
 
 // --- The uses ----------------------------------------------------------------
 
+/// Whether a global is a literal the pass may replace.
+///
+/// A string literal is `private` in the Itanium ABI, but the MSVC ABI (the
+/// one the payload is built with) gives it `linkonce_odr` linkage, so that
+/// the linker can fold the identical strings of two translation units. The
+/// ODR-safe linkages are therefore accepted as well: the literal is deleted
+/// and replaced by a private blob, and every translation unit that uses the
+/// string protects it as well, so no reference to the deleted symbol is left
+/// behind.
+[[nodiscard]] auto is_protectable_linkage(const llvm::GlobalVariable& literal) -> bool {
+  return literal.hasPrivateLinkage() || literal.hasInternalLinkage() ||
+         literal.hasLinkOnceODRLinkage() || literal.hasWeakODRLinkage();
+}
+
 /// The bytes of a literal, if it is a blob of bytes.
 ///
 /// Two shapes carry bytes: a `ConstantDataSequential` of `i8`, and a
@@ -466,8 +480,9 @@ struct Decoder {
     return StringSkipReason::escapes_to_initializer;
   }
 
-  // The shape: a `ConstantDataSequential` of `i8`, in a local global.
-  if (!literal.hasLocalLinkage() || !literal.isConstant()) {
+  // The shape: a `ConstantDataSequential` of `i8`, in a global the pass may
+  // replace.
+  if (!is_protectable_linkage(literal) || !literal.isConstant()) {
     return StringSkipReason::unsupported_shape;
   }
   const auto content = string_content(literal);
@@ -531,7 +546,7 @@ struct Decoder {
   // The candidates: the local constants of the module.
   std::vector<llvm::GlobalVariable*> candidates;
   for (llvm::GlobalVariable& global : module.globals()) {
-    if (!global.hasLocalLinkage() || !global.isConstant()) {
+    if (!is_protectable_linkage(global) || !global.isConstant()) {
       continue;
     }
     candidates.push_back(&global);
