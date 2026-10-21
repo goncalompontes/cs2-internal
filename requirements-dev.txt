@@ -8,6 +8,12 @@
 #
 # Pinned: a gate that changes its mind between runs is not a gate.
 
+# The build system. Pinned like the rest: a build that changes its mind
+# between runs is not a build either. These are the versions this repository
+# is verified with (the CI installs them from this file).
+meson==1.11.2
+ninja==1.13.0
+
 # The type checker. `scripts/typecheck.py` runs it over `scripts/scenario` and
 # exits non-zero on an error — the configuration lives in `pyproject.toml`
 # (`[tool.mypy]`).
