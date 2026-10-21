@@ -369,6 +369,25 @@ pub fn known_signatures() -> Vec<Signature> {
             None,
             None,
         ),
+        // ---- scenesystem.dll ----------------------------------------------
+        // `CAnimatableSceneObjectDesc::DrawPrimitive` — the scene system's draw,
+        // the hook target of the chams. Resolved as a function entry (the match
+        // start): the prologue is `MOV [RSP+0x20], R9; MOV [RSP+0x10], RDX; PUSH
+        // RBP; PUSH RBX; PUSH RSI; PUSH RDI; PUSH R12; PUSH R13; PUSH R15` — no
+        // RIP-relative operand and no relative branch in the first 14 bytes, so
+        // the repo's inline hook can displace them.
+        //
+        // The 20-byte prologue is unique in `scenesystem.dll` on the build the
+        // RE measured (sha256 040eb851…, PE timestamp 0x6ACFCD4F); the 12-,
+        // 14-, 16- and 20-byte prefixes are each unique as well.
+        // `docs/re/chams.md` §8 records the measurement.
+        sig(
+            "scenesystem.dll",
+            "scene_draw_primitive",
+            "4C 89 4C 24 20 48 89 54 24 10 55 53 56 57 41 54 41 55 41 57",
+            None,
+            None,
+        ),
     ]
 }
 

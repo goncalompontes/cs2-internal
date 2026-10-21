@@ -470,6 +470,45 @@ test('features-thirdperson-guard', features_thirdperson_guard_test,
   args : [meson.current_source_dir()],
 )
 
+# The chams' draw-hook **target guard**: the rule that decides whether a
+# function entry may be patched. It is a pure function (the bytes are an
+# argument), so the host build can prove it: the right prologue is accepted, a
+# changed, a truncated or an unreadable one is refused, and a missing offset
+# is refused. The previous target came from an RTTI *lambda* type and took the
+# game down with an access violation, so the rule needs a test of its own.
+features_chams_target_test = executable('features_chams_target_test',
+  files(
+    'payload/features/tests/test_chams_target.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/features/include'),
+  ],
+)
+test('features-chams-target', features_chams_target_test)
+
+# The chams' draw detour's **re-entrancy guard** and its **status line**. The
+# scene system renders its draw list in jobs on the tier0 thread pool, so two
+# threads can be inside the detour at once: a process-wide depth counter read
+# the other job's draw as a recursion and **dropped** it (a hole in the model,
+# in silence). The guard is per owner (the thread id) and is shared with the
+# third-person camera's hook, so the tree holds exactly one implementation of
+# it. Both headers are pure (no engine, no Windows), so the host test drives
+# the whole decision; the test also reads the repository's own sources and
+# fails when the detour stops holding the shared guard, when a second
+# implementation appears, when a `thread_local` comes back, or when the
+# status line starts allocating on the game's render thread.
+features_chams_draw_hook_test = executable('features_chams_draw_hook_test',
+  files(
+    'payload/features/tests/test_chams_draw_hook.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/features/include'),
+  ],
+)
+test('features-chams-draw-hook', features_chams_draw_hook_test,
+  args : [meson.current_source_dir()],
+)
+
 # The material system's parameter-name hash and the chams' "is this entity one
 # of ours" decision. Both are pure (no engine, no Windows), so they are built
 # natively here and regression-tested: the hash is keyed by the engine's own

@@ -33,11 +33,24 @@
 // **Fail closed.** If the scene system is not up, the hook target is not
 // where it should be, the material is not resolved, or the entity cannot be
 // recovered, the draw is forwarded **untouched**.
+//
+// **The target is verified, not assumed.** The draw's address comes from the
+// dumper's `scene_draw_primitive` signature (ADR-0012: no hard-coded RVA) and
+// the bytes at the resolved address are read through the fault-safe reader
+// and compared with the prologue the RE measured before anything is patched
+// (`cs2/features/hook_target.hpp`). A mismatch refuses the hook and says
+// why — the previous target came from an MSVC RTTI *lambda* type, and
+// patching a static function with a member function's argument list took the
+// game down with an access violation.
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 #include "cs2/features/esp.hpp"
+#include "cs2/features/hook_target.hpp"
+#include "cs2/features/recursion_guard.hpp"
 #include "cs2/game/material.hpp"
 #include "cs2/game/snapshot.hpp"
 #include "cs2/hooks/inline.hpp"
@@ -46,21 +59,27 @@ namespace cs2::features {
 
 // The scene system's `CAnimatableSceneObjectDesc::DrawPrimitive`.
 //
-// Provenance (scenesystem.dll sha 040eb851..., image base 0x180000000):
+// **Provenance** (scenesystem.dll sha256 040eb851…, image base 0x180000000,
+// PE timestamp 0x6ACFCD4F):
 //
-//   * the mangled name recovered from the module's RTTI lambda types is
-//     `CAnimatableSceneObjectDesc::DrawPrimitive(IRenderContext*,
-//     CMeshDrawPrimitive_t*, const IMaterial2*, const IMaterialMode*,
-//     DrawValues_t&, bool, SceneSystemPerFrameStats_t*, ISceneLayer*)`;
-//   * the *implementation* was pinned through the lambda's
-//     `std::_Func_impl_no_alloc` vftable: the only code that constructs that
-//     closure is the enclosing member function, which is therefore
-//     `DrawPrimitive` — the address below;
-//   * the class's vtable is at scenesystem.dll + 0x5E5C90 (the RTTI chain
-//     TypeDescriptor -> CompleteObjectLocator -> the vftable pointer at
-//     +0x5E5C88), and the derived class's `DrawInstances` override — the
-//     virtual that calls `DrawPrimitive` — is vtable slot 1.
-inline constexpr std::uintptr_t k_draw_primitive_rva = 0x592C0;
+//   * the class's own RTTI chain puts its vftable at `scenesystem.dll +
+//     0x5E5C90`, and the vftable's slot 1 holds the *batch* wrapper — the
+//     virtual that loops over the primitives and calls the real draw once per
+//     primitive. The wrapper's own arguments put the material in the **fifth**
+//     position, not the fourth;
+//   * the real draw — the one the wrapper calls — is at `scenesystem.dll +
+//     0x580A0`, and it is a **nine**-argument member function: `this`, the
+//     render context, the mesh primitive, the `const IMaterial2*` (the
+//     **fourth** argument), the material mode, the draw values, the deferred
+//     flag, the per-frame stats and the scene layer. That is exactly the
+//     signature the payload's detour uses, so **the detour and the typedef
+//     never changed — only the address did**;
+//   * the prologue at that address is the 20 bytes in
+//     `hook_target::SCENE_DRAW_PROLOGUE`, and it is **unique** in the module.
+//
+// The address itself is **not** a constant here: it is resolved through the
+// dumper's signature, so it is re-resolved on every build
+// (`docs/re/chams.md` §8).
 
 class Chams {
  public:
@@ -94,18 +113,58 @@ class Chams {
   [[nodiscard]] auto hook_installed() const noexcept -> bool {
     return hook_.installed();
   }
+  // Whether the operator has the chams on.
+  [[nodiscard]] auto enabled() const noexcept -> bool {
+    return enabled_.load(std::memory_order_relaxed);
+  }
   [[nodiscard]] auto material() const noexcept -> game::Material {
     return material_.load(std::memory_order_relaxed);
   }
+  // The draws the detour saw (every draw that reached the feature).
+  [[nodiscard]] auto seen() const noexcept -> std::uint64_t {
+    return seen_.load(std::memory_order_relaxed);
+  }
+  // The draws that were re-drawn with the chams' material.
   [[nodiscard]] auto drawn() const noexcept -> std::uint64_t {
     return drawn_.load(std::memory_order_relaxed);
   }
+  // The draws that were forwarded untouched.
   [[nodiscard]] auto skipped() const noexcept -> std::uint64_t {
     return skipped_.load(std::memory_order_relaxed);
   }
   [[nodiscard]] auto original() const noexcept -> void* {
     return hook_.original();
   }
+
+  // The draw hook's state: `installed` while the hook is in place, and the
+  // reason it is not when it is not (no offset, no module, a prologue
+  // mismatch, a refused patch).
+  [[nodiscard]] auto hook_status() const noexcept -> hook_target::Status {
+    return hook_status_.load(std::memory_order_relaxed);
+  }
+
+  // The re-entrancy guard the draw detour holds.
+  //
+  // It is the **shared** guard (`cs2/features/recursion_guard.hpp`): a
+  // per-owner (per-thread) depth, so the scene system's other threads are
+  // never mistaken for a recursion, and no `thread_local` is read on a path
+  // the manually mapped payload has no TLS block for.
+  //
+  // The detour holds it in a `guard::Scope`, so it is released on every path.
+  [[nodiscard]] auto draw_guard() noexcept -> guard::RecursionGuard& {
+    return draw_guard_;
+  }
+
+  // The one-line status the payload's status block and the overlay's chams
+  // line show: the hook's state, the draws seen, the draws chamsed and the
+  // draws skipped.
+  //
+  // It is written into the caller's buffer and **never allocates**: the line
+  // is built on the game's render thread, once per frame, and a heap
+  // allocation there is a heap allocation in the game's frame budget.
+  //
+  // Returns false when the buffer cannot hold the line (it was truncated).
+  [[nodiscard]] auto status_line(char* out, std::size_t size) const noexcept -> bool;
 
  private:
   // The material the current mode uses (0 when none could be resolved).
@@ -125,6 +184,15 @@ class Chams {
   // Is the entity one of the players the visibility filter lets through?
   [[nodiscard]] auto is_visible(std::uintptr_t entity) const noexcept -> bool;
 
+  // Record the hook's state and **latch** the log: a line is written only
+  // when the state changes, so a refused hook cannot write a line per frame
+  // (`game::append_log` opens, writes and closes a file per call).
+  //
+  // An empty `message` records the state without writing a line (the states
+  // that are a normal part of the start-up, e.g. "the module is not loaded
+  // yet").
+  void report(hook_target::Status status, std::string_view message) noexcept;
+
   // The facts about a player, packed into one word so the table can be
   // published with a single atomic store (a reader never sees a torn pair).
   //
@@ -136,6 +204,10 @@ class Chams {
   static constexpr int k_target_facts_shift = 47;
 
   hooks::InlineHook hook_;
+  // The draw detour's re-entrancy guard (the shared one). It belongs to the
+  // feature, not to the file scope: a detour has no context parameter, and
+  // the guard is state (ADR-0010).
+  guard::RecursionGuard draw_guard_{};
   game::MaterialSystem materials_{};
   // The material system's handle for the chams material: the draw takes the
   // material, the material system's parameter setter takes the handle.
@@ -162,6 +234,13 @@ class Chams {
   // material's own colour and the payload stops asking for it.
   bool colour_failed_ = false;
   std::atomic<bool> install_failed_{false};
+  // The draw hook's state, and the state the log last reported (the latch).
+  std::atomic<hook_target::Status> hook_status_{hook_target::Status::idle};
+  std::atomic<hook_target::Status> reported_status_{hook_target::Status::idle};
+  // The counters: every draw the detour saw, the draws re-drawn with the
+  // chams' material and the draws forwarded untouched. `seen == drawn +
+  // skipped` always.
+  std::atomic<std::uint64_t> seen_{0};
   std::atomic<std::uint64_t> drawn_{0};
   std::atomic<std::uint64_t> skipped_{0};
   // --- The desc cache --------------------------------------------------------
