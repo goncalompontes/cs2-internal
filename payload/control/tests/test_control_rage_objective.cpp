@@ -32,6 +32,78 @@ void expect(bool condition, const char* what) {
   }
 }
 
+// Whether `haystack` contains `needle`, ignoring the case.
+//
+// The disclosure's notes are prose, so the test asks for the **word** the
+// operator has to read ("fallback", "indicative") rather than for the whole
+// sentence: a reworded note is still a disclosure, and a note that lost the
+// word is not.
+auto contains(std::string_view haystack, std::string_view needle) -> bool {
+  if (needle.empty() || needle.size() > haystack.size()) {
+    return false;
+  }
+  const auto lower = [](char c) -> char {
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+  };
+  for (std::size_t i = 0; i + needle.size() <= haystack.size(); ++i) {
+    bool match = true;
+    for (std::size_t j = 0; j < needle.size(); ++j) {
+      if (lower(haystack[i + j]) != lower(needle[j])) {
+        match = false;
+        break;
+      }
+    }
+    if (match) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The source with its **comments removed**, so a source check looks at the code
+// and not at the prose around it.
+//
+// A comment that quotes the old inline mapping used to fail the check
+// spuriously; the check is about the code.
+auto strip_comments(const std::string& source) -> std::string {
+  std::string out;
+  out.reserve(source.size());
+  bool in_line = false;
+  bool in_block = false;
+  for (std::size_t i = 0; i < source.size(); ++i) {
+    const char c = source[i];
+    const char next = (i + 1 < source.size()) ? source[i + 1] : '\0';
+    if (in_line) {
+      if (c == '\n') {
+        in_line = false;
+        out.push_back(c);
+      }
+      continue;
+    }
+    if (in_block) {
+      if (c == '*' && next == '/') {
+        in_block = false;
+        ++i;
+      } else if (c == '\n') {
+        out.push_back(c);
+      }
+      continue;
+    }
+    if (c == '/' && next == '/') {
+      in_line = true;
+      ++i;
+      continue;
+    }
+    if (c == '/' && next == '*') {
+      in_block = true;
+      ++i;
+      continue;
+    }
+    out.push_back(c);
+  }
+  return out;
+}
+
 // The service's call sites must **use** the rules, not re-implement them: the
 // mapping that is tested here has to be the mapping that runs, and a second
 // copy inline in the service would be a second truth.
@@ -55,13 +127,22 @@ void test_the_service_uses_the_rules(const std::string& root) {
          "the aim command uses the name -> objective rule");
   expect(source.find("objective_name_for(") != std::string::npos,
          "the status uses the value -> name rule");
+  expect(source.find("seed_source_is_fallback(") != std::string::npos,
+         "the status uses the seed's fallback rule");
+  expect(source.find("seed_source_note(") != std::string::npos,
+         "the status uses the seed's note rule");
   expect(source.find("AimObjective::monte_carlo") != std::string::npos,
          "the service dispatches the Monte-Carlo objective");
   // The **inline** mapping must be gone: a second copy of the truth in the
   // service is a second truth.
-  expect(source.find("name == \"damage\" ? 0") == std::string::npos,
+  //
+  // **The comments are stripped first** (`strip_comments`): a comment that
+  // quotes the old mapping would otherwise fail the check spuriously, and the
+  // check is about the *code*.
+  const std::string code = strip_comments(source);
+  expect(code.find("name == \"damage\" ? 0") == std::string::npos,
          "the inline name -> value mapping is gone");
-  expect(source.find("name == \"hitchance\"") == std::string::npos,
+  expect(code.find("name == \"hitchance\"") == std::string::npos,
          "the inline name -> objective mapping is gone");
 }
 
@@ -130,7 +211,7 @@ auto main(int argc, char** argv) -> int {
   // --- 3. the round trip ----------------------------------------------------
   {
     for (const int value : {OBJECTIVE_VALUE_DAMAGE, OBJECTIVE_VALUE_HITCHANCE,
-                             OBJECTIVE_VALUE_EXPECTED, OBJECTIVE_VALUE_MONTE_CARLO}) {
+                            OBJECTIVE_VALUE_EXPECTED, OBJECTIVE_VALUE_MONTE_CARLO}) {
       const std::string_view name = cs2::control::objective_name_for(value);
       expect(cs2::control::objective_value_for(name) == value,
              "the objective's name and value round-trip");
@@ -202,6 +283,37 @@ auto main(int argc, char** argv) -> int {
            "the stored sequence value is the core's");
     expect(SEED_SOURCE_ANGLE_GRID == static_cast<int>(cs2::aim::SeedSource::angle_grid),
            "the stored angle_grid value is the core's");
+
+    // --- the disclosure -----------------------------------------------------
+    //
+    // **These two functions are the whole mechanism** by which the spec's
+    // §2.3 ("the status must say the seed is a fallback") and §2.4 ("the
+    // `angle_grid` number is indicative, not exact") are met. They had **no
+    // test at all**: inverting `seed_source_is_fallback` and replacing
+    // `seed_source_note`'s body with "the numbers are exact" left the whole
+    // suite green, so the operator could be told the opposite of the truth —
+    // that a stand-in number is the engine's own seed.
+    expect(cs2::control::seed_source_is_fallback(SEED_SOURCE_SEQUENCE),
+           "the sequence policy's seed is a fallback (the tick stands in)");
+    expect(!cs2::control::seed_source_is_fallback(SEED_SOURCE_ANGLE_GRID),
+           "the angle_grid policy uses no sequence at all, so it is no fallback");
+    // An unknown policy value behaves like the default: the sequence policy,
+    // whose seed **is** a fallback.
+    expect(cs2::control::seed_source_is_fallback(99),
+           "an unknown policy value is treated as the sequence policy");
+    expect(contains(cs2::control::seed_source_note(SEED_SOURCE_SEQUENCE), "fallback"),
+           "the sequence policy's note says the seed is a fallback");
+    expect(contains(cs2::control::seed_source_note(SEED_SOURCE_SEQUENCE), "sequence"),
+           "the sequence policy's note names what stands in");
+    expect(contains(cs2::control::seed_source_note(SEED_SOURCE_ANGLE_GRID), "indicative"),
+           "the angle_grid policy's note says the number is indicative");
+    expect(contains(cs2::control::seed_source_note(SEED_SOURCE_ANGLE_GRID), "not exact"),
+           "the angle_grid policy's note says the number is not exact");
+    // The two notes must not be the same sentence: one discloses the fallback,
+    // the other the stand-in hash.
+    expect(cs2::control::seed_source_note(SEED_SOURCE_SEQUENCE) !=
+               cs2::control::seed_source_note(SEED_SOURCE_ANGLE_GRID),
+           "the two policies carry different notes");
   }
 
   // --- 7. the weapon's spread pattern ---------------------------------------
