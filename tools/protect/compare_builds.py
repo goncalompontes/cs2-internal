@@ -32,13 +32,24 @@ which function that is. The report then names the functions the differences
 are in, and the bytes that are outside any function (the new globals, which
 live in the read-only data).
 
+With --section the comparison is **per section**: the acceptance criterion
+of the protection is about the .text alone, and the whole-file comparison
+would be satisfied by a handful of bytes in the read-only data. The section
+is compared with the linker's per-link stamps normalised out (the PE
+timestamp, the debug directory's own stamp and the CodeView GUID, age and
+PDB path), so that the PDB path of the two builds does not count as a
+difference. The exit code is 0 when the two sections are identical and 1
+when they differ -- the same sense as the whole-file mode.
+
 Usage: compare_builds.py [--ignore-link-stamps] [--attribute]
-                          [--pdb FILE] [--pdbutil FILE] A.dll B.dll
+                          [--section NAME] [--pdb FILE] [--pdbutil FILE] A.dll B.dll
 
   --ignore-link-stamps  also compare with the linker's per-link stamps
                         normalised out
   --attribute           name the functions the differences are in (and the
                         bytes that are outside any function)
+  --section             compare one section only (e.g. .text) and report
+                        its size in both images and the bytes that differ
   --pdb                 the PDB of the *second* image (for the names)
   --pdbutil             llvm-pdbutil.exe (the SDK's)
 
@@ -274,6 +285,89 @@ def functions_of(image: Image) -> list[tuple[int, int]]:
     return sorted(image.functions())
 
 
+def section_of(image: Image, name: str) -> Section | None:
+    """The section with a name, or None when the image has none."""
+    for section in image.sections:
+        if section.name == name:
+            return section
+    return None
+
+
+def bytes_of_section(image: Image, section: Section) -> bytes:
+    """The bytes of a section."""
+    return image.data[section.raw_offset : section.raw_offset + section.raw_size]
+
+
+def differing_bytes(first: bytes, second: bytes) -> int:
+    """The number of the bytes that differ between two blobs.
+
+    A blob that is longer than the other one differs in the bytes it has
+    and the other one does not: the section grew.
+    """
+    shared = min(len(first), len(second))
+    count = sum(1 for index in range(shared) if first[index] != second[index])
+    return count + abs(len(first) - len(second))
+
+
+def compare_section(first: bytes, second: bytes, name: str) -> int:
+    """Compares one section of the two images and reports the verdict.
+
+    The linker's per-link stamps are normalised out: the PDB path of two
+    builds is not a difference of the section, and the CodeView record lives
+    in the read-only data.
+    """
+    left = Image(normalise(first))
+    right = Image(normalise(second))
+    left_section = section_of(left, name)
+    right_section = section_of(right, name)
+    if left_section is None or right_section is None:
+        missing = name if left_section is None else right_section
+        print(f"compare_builds: the image has no section '{missing}'")
+        return 1
+
+    left_bytes = bytes_of_section(left, left_section)
+    right_bytes = bytes_of_section(right, right_section)
+    count = differing_bytes(left_bytes, right_bytes)
+    print(f"compare_builds: the section {name}: {len(left_bytes)} bytes in the first image, "
+          f"{len(right_bytes)} in the second")
+    share = (100.0 * count / max(len(left_bytes), len(right_bytes))) if left_bytes else 0.0
+    print(f"compare_builds: {count} of them differ ({share:.2f}% of the section)")
+    if count == 0:
+        print(f"compare_builds: the two {name} sections are identical")
+        return 0
+    print(f"compare_builds: the two {name} sections differ")
+    return 1
+
+
+def print_sections(first: bytes, second: bytes) -> None:
+    """Prints the section list of the two images, and what differs in each.
+
+    The list is printed in every mode: a section that is not named is a
+    section nobody looked at, and the acceptance criterion of the protection
+    is about one section.
+
+    The linker's per-link stamps are normalised out, exactly as the
+    `--section` verdict does it, so that the table and the verdict agree.
+    """
+    left = Image(normalise(first))
+    right = Image(normalise(second))
+    print("compare_builds: the sections of the two images "
+          "(the linker's per-link stamps are normalised out):")
+    for section in left.sections:
+        other = section_of(right, section.name)
+        if other is None:
+            print(f"  {section.name:10} {section.raw_size:>10} bytes "
+                  f"(only in the first image)")
+            continue
+        count = differing_bytes(bytes_of_section(left, section), bytes_of_section(right, other))
+        print(f"  {section.name:10} {section.raw_size:>10} / {other.raw_size:<10} bytes "
+              f"{count:>10} differ")
+    for section in right.sections:
+        if section_of(left, section.name) is None:
+            print(f"  {section.name:10} {section.raw_size:>10} bytes "
+                  f"(only in the second image)")
+
+
 def attribute(first: Image, second: Image) -> None:
     """Prints which functions changed, and how much the sections grew.
 
@@ -318,12 +412,22 @@ def main(argv: list[str]) -> int:
     parser.add_argument("second", type=Path)
     parser.add_argument("--ignore-link-stamps", action="store_true")
     parser.add_argument("--attribute", action="store_true")
+    parser.add_argument("--section", default=None,
+                        help="compare one section only (e.g. .text)")
     parser.add_argument("--pdb", type=Path, default=None)
     parser.add_argument("--pdbutil", type=Path, default=None)
     args = parser.parse_args(argv)
 
     first = args.first.read_bytes()
     second = args.second.read_bytes()
+
+    # The per-section mode: the acceptance criterion of the protection is
+    # about the .text alone, and the whole-file comparison would be
+    # satisfied by a handful of bytes in the read-only data.
+    if args.section is not None:
+        print_sections(first, second)
+        return compare_section(first, second, args.section)
+
     if len(first) != len(second):
         print(f"compare_builds: the sizes differ ({len(first)} vs {len(second)})")
         first_paths = path_lengths(first)
@@ -340,9 +444,16 @@ def main(argv: list[str]) -> int:
                 "compare_builds: the transform changed the size of the image, so a "
                 "byte-for-byte comparison says nothing: use --attribute."
             )
+        print_sections(first, second)
         if not args.attribute:
             return 1
-    differing = [i for i in range(len(first)) if first[i] != second[i]]
+    shared = min(len(first), len(second))
+    differing = [i for i in range(shared) if first[i] != second[i]]
+    if len(first) != len(second):
+        # The bytes the longer image has and the shorter one does not are
+        # differences too.
+        differing.extend(range(shared, max(len(first), len(second))))
+    print_sections(first, second)
     if not differing:
         print(f"compare_builds: {args.first} and {args.second} are byte-identical")
         return 0

@@ -32,10 +32,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from protect_checks import (  # noqa: E402
-    MIX_MULTIPLIER,
-    MIX_XOR,
+    Mixer,
     PeImage,
     count_dispatches,
+    read_coverage,
 )
 
 VSWHERE = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
@@ -134,7 +134,7 @@ def compile_fixture(
     return run(command, environment, vcvars)
 
 
-def check_constants(binary: Path) -> None:
+def check_constants(binary: Path, mixers: list[Mixer]) -> None:
     """The constants of the mixer must be in the data and not in the code.
 
     The X86 backend of this LLVM loses a bit of a 64-bit immediate in the
@@ -142,6 +142,9 @@ def check_constants(binary: Path) -> None:
     the constant the pass encrypted the descriptor with, and the dispatch
     then calls a wrong address -- without a crash. The constants therefore
     live in globals, and this is the assertion that they stay there.
+
+    The constants are **per build**: the coverage names them, and the image
+    has to hold the ones the coverage names.
     """
     image = PeImage(binary.read_bytes())
     data = image.section_of(".rdata")
@@ -150,19 +153,21 @@ def check_constants(binary: Path) -> None:
         raise Failure("the binary has no .text or no .rdata section")
     data_bytes = image.data[data.raw_offset : data.raw_offset + data.raw_size]
     code_bytes = image.data[code.raw_offset : code.raw_offset + code.raw_size]
-    for name, value in (("the multiplier", MIX_MULTIPLIER), ("the xor constant", MIX_XOR)):
-        needle = value.to_bytes(8, "little")
-        if needle not in data_bytes:
-            raise Failure(
-                f"{name} (0x{value:016x}) is not in the read-only data of the binary: the "
-                "call site does not read it from a global, and the backend may have "
-                "materialised it as a different value"
-            )
-        if needle in code_bytes:
-            raise Failure(
-                f"{name} (0x{value:016x}) is materialised as an instruction immediate: the "
-                "backend may have got it wrong, and the dispatch would call a wrong address"
-            )
+    for mixer in mixers:
+        for name, value in (("the multiplier", mixer.multiplier),
+                            ("the xor constant", mixer.xor_constant)):
+            needle = value.to_bytes(8, "little")
+            if needle not in data_bytes:
+                raise Failure(
+                    f"{name} (0x{value:016x}) is not in the read-only data of the binary: the "
+                    "call site does not read it from a global, and the backend may have "
+                    "materialised it as a different value"
+                )
+            if needle in code_bytes:
+                raise Failure(
+                    f"{name} (0x{value:016x}) is materialised as an instruction immediate: the "
+                    "backend may have got it wrong, and the dispatch would call a wrong address"
+                )
 
 
 def main(argv: list[str]) -> int:
@@ -237,9 +242,17 @@ def check_result(args: argparse.Namespace) -> None:
     # folds it away leaves a direct call behind, the program still behaves
     # the same, and the protection is void. The differential check below
     # would not notice -- this one does.
+    #
+    # The mixers are per build: the coverage of the protected build names
+    # them, and the check has to know them to count the tail jumps.
+    read = read_coverage(work / "coverage", args.policy, None)
+    mixers = [entry.mixer() for entry in read.files if entry.table_size > 0]
+    check(bool(mixers), "the coverage of the build names no mixer of the protection")
+    mixer_values = {value for mixer in mixers
+                    for value in (mixer.multiplier, mixer.xor_constant)}
     plain_dispatches = count_dispatches(args.objdump, plain)
-    protected_dispatches = count_dispatches(args.objdump, protected)
-    check_constants(protected)
+    protected_dispatches = count_dispatches(args.objdump, protected, mixer_values)
+    check_constants(protected, mixers)
     check(
         protected_dispatches == plain_dispatches + rewritten,
         f"the protected binary has {protected_dispatches} dispatches and the unprotected one "

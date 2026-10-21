@@ -55,11 +55,10 @@ from pathlib import Path
 from typing import NamedTuple
 
 from protect_checks import (
-    MIX_MULTIPLIER,
-    MIX_XOR,
     Coverage,
     Failure,
     DispatchSite,
+    Mixer,
     PeImage,
     count_dispatches,
     default_coverage_dir,
@@ -194,7 +193,8 @@ def check_unwind_table(image: PeImage) -> int:
     return entries
 
 
-def check_constants(image: PeImage, sites: list[DispatchSite]) -> None:
+def check_constants(image: PeImage, sites: list[DispatchSite],
+                    mixers: list[Mixer]) -> None:
     """The constants of the mixer have to be in the read-only data.
 
     The call site reads them from the globals of the image, so the value the
@@ -204,18 +204,80 @@ def check_constants(image: PeImage, sites: list[DispatchSite]) -> None:
     bit of a 64-bit immediate in the shape the transform emits -- and the
     dispatch would then reach a wrong address without a crash. The constant
     is therefore in the data of the image, and the data holds it exactly.
+
+    The constants are **per build**: the coverage names them, and the image
+    has to hold the ones the coverage names.
     """
     data = image.section_of(".rdata")
     check(data is not None, "the image has no read-only data section")
     assert data is not None
     blob = image.data[data.raw_offset : data.raw_offset + data.raw_size]
-    for name, expected in (("the multiplier", MIX_MULTIPLIER), ("the xor constant", MIX_XOR)):
-        needle = expected.to_bytes(8, "little")
+    for mixer in mixers:
+        for name, expected in (("the multiplier", mixer.multiplier),
+                               ("the xor constant", mixer.xor_constant)):
+            needle = expected.to_bytes(8, "little")
+            check(
+                needle in blob,
+                f"{name} (0x{expected:016x}) is not in the read-only data of the image: the call "
+                "site does not read it from a global, and the backend may have materialised it "
+                "as a different value",
+            )
+
+
+def check_rotations(sites: list[DispatchSite], mixers: list[Mixer]) -> None:
+    """The rotation of the mixer in the image has to be the one the coverage names.
+
+    The multiplier and the xor constant live in the data of the image, but the
+    **rotation** is the one value of the mixer that is in the instruction
+    stream (`rolq $imm8`). It is what makes the `.text` of two builds with
+    two seeds differ, and the check has to prove that the image's
+    instruction stream uses the rotation the pass encrypted with.
+    """
+    for mixer in mixers:
+        if mixer.rotate < 1 or mixer.rotate > 63:
+            raise Failure(
+                f"the coverage names the rotation {mixer.rotate}, and it is not in [1, 63]: a "
+                "rotation of 0 makes the `lshr` by 64 of the decode undefined behaviour"
+            )
+    for site in sites:
+        if site.rotation is None:
+            raise Failure(
+                f"the dispatch at 0x{site.address:x} has no rotation in front of it: the "
+                "instruction stream does not hold the rotation of the mixer"
+            )
+        if site.rotation < 1 or site.rotation > 63:
+            raise Failure(
+                f"the dispatch at 0x{site.address:x} rotates by {site.rotation}, and it is not "
+                "in [1, 63]"
+            )
+    # The rotation of every dispatch has to be the one of its module. The
+    # modules of one build have different mixers, so the check accepts any
+    # of the rotations the coverage names -- and nothing else.
+    known = {mixer.rotate for mixer in mixers}
+    for site in sites:
         check(
-            needle in blob,
-            f"{name} (0x{expected:016x}) is not in the read-only data of the image: the call "
-            "site does not read it from a global, and the backend may have materialised it "
-            "as a different value",
+            site.rotation in known,
+            f"the dispatch at 0x{site.address:x} rotates by {site.rotation}, and the coverage "
+            f"names {sorted(known)}: the image does not use the rotation the pass encrypted "
+            "with",
+        )
+
+
+def check_layout(coverage: list[Coverage]) -> None:
+    """Every module with more than one definition has to have moved one.
+
+    The permutation of the function list is what makes the `.text` of two
+    builds with two seeds differ. A module that has more than one definition
+    and moved none is a module the pass did not permute -- and the report of
+    the pass is the evidence the check reads.
+    """
+    for entry in coverage:
+        if entry.layout_functions < 2:
+            continue
+        check(
+            entry.layout_moved > 0,
+            f"the coverage '{entry.path.name}' names {entry.layout_functions} definitions and "
+            f"{entry.layout_moved} moved: the layout of the module was not permuted",
         )
 
 
@@ -302,13 +364,14 @@ def resolve_site(image: PeImage, site: DispatchSite, entry: Coverage) -> int | N
     """The address the dispatch at a site calls, or None when it does not decode.
 
     The decode is the one the call site performs: the key is the xor of the
-    three key constants, the mixer is the one of the plugin, and the index
-    selects the entry of the table.
+    three key constants, the mixer is the one of the plugin -- the one the
+    coverage names, which is the one the pass encrypted the descriptor with
+    -- and the index selects the entry of the table.
     """
     key = 0
     for part in entry.key_parts:
         key ^= part
-    mixed = mix64(key)
+    mixed = mix64(key, entry.mixer())
 
     if site.table is None:
         return None
@@ -763,20 +826,9 @@ def main(argv: list[str]) -> int:
         entries = check_unwind_table(protected)
         print(f"check_payload: the unwind table has {entries} entries")
 
-        protected_sites = find_dispatch_sites(disassemble(args.objdump, args.protected),
-                                              protected.image_base, protected)
-        if unprotected is not None:
-            plain_sites = find_dispatch_sites(disassemble(args.objdump, args.unprotected),
-                                              unprotected.image_base, unprotected)
-            print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
-                  f"dispatches, the unprotected one {len(plain_sites)}")
-            check(len(plain_sites) == 0, "the unprotected image has an encrypted dispatch")
-        else:
-            print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
-                  "dispatches")
-
-        check_constants(protected, protected_sites)
-
+        # The coverage comes first: the constants of the mixer are per
+        # build, and the check has to know them to tell a dispatch from a
+        # switch table jump and to decode the descriptor.
         files: list[Coverage] = []
         if coverage_dir and policy:
             read = read_coverage(coverage_dir, policy, source_root)
@@ -802,6 +854,30 @@ def main(argv: list[str]) -> int:
                 "coverage of a build is written by the plugin while it compiles; re-run the "
                 "Meson configure step and the build.",
             )
+
+        # The mixers the coverage names: the values the pass encrypted the
+        # descriptors with.
+        mixers = [entry.mixer() for entry in files if entry.table_size > 0]
+        mixer_values = {value for mixer in mixers for value in (mixer.multiplier,
+                                                                mixer.xor_constant)}
+
+        protected_sites = find_dispatch_sites(disassemble(args.objdump, args.protected),
+                                              protected.image_base, protected, mixer_values)
+        if unprotected is not None:
+            plain_sites = find_dispatch_sites(disassemble(args.objdump, args.unprotected),
+                                              unprotected.image_base, unprotected)
+            print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
+                  f"dispatches, the unprotected one {len(plain_sites)}")
+            check(len(plain_sites) == 0, "the unprotected image has an encrypted dispatch")
+        else:
+            print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
+                  "dispatches")
+
+        if mixers:
+            check_constants(protected, protected_sites, mixers)
+            check_rotations(protected_sites, mixers)
+
+        if files:
             expected = reported_rewrites(files)
             check(
                 len(protected_sites) == expected,
@@ -811,6 +887,7 @@ def main(argv: list[str]) -> int:
             print(f"check_payload: the pass reported {expected} rewrites, and the image has them")
             resolved = check_dispatch_targets(protected, protected_sites, files)
             print(f"check_payload: {resolved} dispatches decode to a callee of the image")
+            check_layout(files)
             check_protected_strings(protected, unprotected, files, policy)
         else:
             print("check_payload: no coverage given: the number of the rewrites is not checked")

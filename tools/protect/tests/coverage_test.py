@@ -51,12 +51,14 @@ def digest_of(data: bytes) -> str:
 
 
 def write_coverage(path: Path, policy_digest: str, source: Path, rewritten: int,
-                   vm: str | None = None) -> None:
+                   vm: str | None = None, layout: str | None = None) -> None:
     """Writes a coverage file the way the plugin writes it.
 
     The `vm` line is the verdict of the virtualizer's analysis. It is
     optional: a coverage file of an older build has none, and a reader that
-    does not know the section still reads the file.
+    does not know the section still reads the file. The `layout` line is the
+    permutation of the module's function list, and it is optional in the same
+    way.
     """
     body = (
         f"policy-sha256 {policy_digest}\n"
@@ -64,12 +66,14 @@ def write_coverage(path: Path, policy_digest: str, source: Path, rewritten: int,
         f"source-path {source.as_posix()}\n"
         f"source-sha256 {digest_of(source.read_bytes())}\n"
         "protect table=2 descriptor=3 multiplier=0x9e3779b97f4a7c15 "
-        "xor=0xbf58476d1ce4e5b9 key=0x1 key=0x2 key=0x3\n"
+        "xor=0xbf58476d1ce4e5b9 rotate=31 key=0x1 key=0x2 key=0x3\n"
         "entry matched cs2::aim::solve\n"
         f"fn ?solve rewritten={rewritten} skipped=0\n"
     )
     if vm is not None:
         body += vm
+    if layout is not None:
+        body += layout
     path.write_text(body + f"content-sha256 {digest_of(body.encode('utf-8'))}\n",
                     encoding="utf-8")
 
@@ -127,10 +131,23 @@ def check_the_readers(root: Path) -> None:
     # The coverage of this build.
     write_coverage(coverage / "0x1.cov", policy_digest, tree / "payload" / "solver.cpp", 7,
                    "vm ?solve verdict=virtualizable slots=42 frame=3072 bytecode=268 "
-                   "instructions=57 calls=17\n")
+                   "instructions=57 calls=17\n",
+                   "layout functions=42 moved=40 seed=0x0123456789abcdef\n")
     # The coverage of another worktree that shares the policy. It has no
-    # `vm` line: it is the coverage of an older build.
-    write_coverage(coverage / "0x2.cov", policy_digest, other, 3)
+    # `vm` line, no `layout` line and no rotation in its `protect` line:
+    # it is the coverage of an older build, and a reader has to read it.
+    old_body = (
+        f"policy-sha256 {policy_digest}\n"
+        f"module {other.name}\n"
+        f"source-path {other.as_posix()}\n"
+        f"source-sha256 {digest_of(other.read_bytes())}\n"
+        "protect table=2 descriptor=3 multiplier=0x9e3779b97f4a7c15 "
+        "xor=0xbf58476d1ce4e5b9 key=0x1 key=0x2 key=0x3\n"
+        "entry matched cs2::aim::solve\n"
+        "fn ?solve rewritten=3 skipped=0\n"
+    )
+    (coverage / "0x2.cov").write_text(
+        old_body + f"content-sha256 {digest_of(old_body.encode('utf-8'))}\n", encoding="utf-8")
     # A file whose count is not a number.
     (coverage / "0x3.cov").write_text(
         f"policy-sha256 {policy_digest}\nsource-path "
@@ -191,6 +208,22 @@ def check_the_readers(root: Path) -> None:
     check(not old.malformed, f"a coverage file without a vm section is malformed: {old.malformed}")
     check(old.intact, "a coverage file without a vm section is not intact")
     check(old.vm == {}, "a coverage file without a vm section has verdicts")
+
+    # The mixer of the build: the multiplier, the xor constant and the
+    # rotation are per build, and the coverage names them.
+    mixer = read.files[0].mixer()
+    check(mixer.multiplier == 0x9E3779B97F4A7C15, "the reader did not read the multiplier")
+    check(mixer.xor_constant == 0xBF58476D1CE4E5B9, "the reader did not read the xor constant")
+    check(mixer.rotate == 31, "the reader did not read the rotation")
+
+    # The layout: the permutation of the module's function list. The section
+    # is new, and a coverage file of an older build has none.
+    check(read.files[0].layout_functions == 42, "the reader did not read the number of the "
+                                                  "definitions")
+    check(read.files[0].layout_moved == 40, "the reader did not read the number of the moved "
+                                            "definitions")
+    check(old.layout_functions == 0, "a coverage file of an older build has a layout")
+    check(old.mix_rotate == 0, "a coverage file of an older build has a rotation")
 
     # The policy checker reads the same directory, and its pruning must not
     # choke on the malformed files either.

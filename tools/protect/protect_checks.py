@@ -26,21 +26,36 @@ import sys
 from pathlib import Path
 from typing import NamedTuple
 
-#: The multiplier of the mixer.
-MIX_MULTIPLIER = 0x9E3779B97F4A7C15
-#: The xor constant of the mixer.
-MIX_XOR = 0xBF58476D1CE4E5B9
-#: How far the mixer rotates its result.
-MIX_ROTATE = 31
 #: The mask of a 64-bit value.
 MASK64 = (1 << 64) - 1
 
 
-def mix64(value: int) -> int:
+class Mixer(NamedTuple):
+    """The mixer of the protection, as the coverage names it.
+
+    The multiplier, the xor constant and the rotation are **per build**: they
+    come from the module's seed (see `src/cipher.hpp`). The coverage is the
+    contract: the value the pass encrypted the descriptor with is the value
+    the image has to hold, and the value the check decodes it with.
+    """
+
+    #: The multiplier of the mix.
+    multiplier: int
+    #: The xor constant of the mix.
+    xor_constant: int
+    #: How far the mixer rotates its result. In [1, 63].
+    rotate: int
+
+    def mix(self, value: int) -> int:
+        """The mixer itself."""
+        value = (value * self.multiplier) & MASK64
+        value ^= self.xor_constant
+        return ((value << self.rotate) | (value >> (64 - self.rotate))) & MASK64
+
+
+def mix64(value: int, mixer: Mixer) -> int:
     """The mixer of the transform, in Python."""
-    value = (value * MIX_MULTIPLIER) & MASK64
-    value ^= MIX_XOR
-    return ((value << MIX_ROTATE) | (value >> (64 - MIX_ROTATE))) & MASK64
+    return mixer.mix(value)
 
 
 def signed64(value: int) -> int:
@@ -80,6 +95,14 @@ INDIRECT_CALL = re.compile(r"\bcallq\s+\*%(?P<target>r[a-z0-9]+)")
 #: A jump through a table: `jmpq *(%rsi,%rax,8)`.
 DISPATCH_JUMP = re.compile(r"\bjmpq\s+\*\(%(?P<base>r[a-z0-9]+),%r[a-z0-9]+,8\)")
 
+#: The rotation of the mixer: `rolq $0x1f, %rax`.
+#:
+#: The rotation is the one value of the mixer that is in the instruction
+#: stream: the multiplier and the xor constant live in the data of the image
+#: (the backend mis-materialises a 64-bit immediate), but the rotation is an
+#: immediate, and it is what makes the `.text` of two builds differ.
+ROTATE = re.compile(r"\brolq\s+\$(?:0x(?P<hex>[0-9a-f]+)|(?P<dec>[0-9]+))")
+
 #: An instruction of the disassembly: `18011351a:\tcallq\t*(%rsi,%rax,8)`.
 INSTRUCTION = re.compile(r"^\s*([0-9a-f]+):\s+(?P<text>.*)$")
 
@@ -91,14 +114,25 @@ INSTRUCTION = re.compile(r"^\s*([0-9a-f]+):\s+(?P<text>.*)$")
 #: belongs to something else.
 REFERENCE_WINDOW = 24
 
+#: How many rotations the window keeps.
+#:
+#: The rotation of the decode is the **last** one before the call: nothing
+#: between it and the call rotates anything. The ones before it belong to
+#: the code the pass did not touch.
+ROTATION_WINDOW = 32
+
 
 class DispatchSite:
     """One encrypted dispatch in the image."""
 
-    def __init__(self, address: int, table: int | None, references: list[int]) -> None:
+    def __init__(self, address: int, table: int | None, references: list[int],
+                 rotation: int | None = None) -> None:
         self.address = address
         self.table = table
         self.references = references
+        #: The rotation of the mixer at this dispatch, or None when the
+        #: window holds no rotation at all.
+        self.rotation = rotation
 
     def __repr__(self) -> str:
         table = "?" if self.table is None else f"0x{self.table:x}"
@@ -114,7 +148,8 @@ def disassemble(objdump: Path, binary: Path) -> str:
     return completed.stdout
 
 
-def reads_the_mixer(image: "PeImage | None", references: list[int]) -> bool:
+def reads_a_mixer_constant(image: "PeImage | None", references: list[int],
+                            values: set[int]) -> bool:
     """Whether the references hold one of the constants of the mixer.
 
     The decode of a dispatch reads the constants of the mixer from the
@@ -122,20 +157,24 @@ def reads_the_mixer(image: "PeImage | None", references: list[int]) -> bool:
     jump through a table: the backend turns the last call of a function into
     a tail jump, and that jump *is* a dispatch -- but a switch table jump is
     not, and it has no decode before it.
+
+    The constants are **per build**, so the caller has to say which values
+    it is looking for: they come from the coverage.
     """
-    if image is None:
+    if image is None or not values:
         return False
     for reference in references:
         try:
             value = image.u64_at_rva(reference)
         except Failure:
             continue
-        if value == MIX_MULTIPLIER or value == MIX_XOR:
+        if value in values:
             return True
     return False
 
 
-def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = None) \
+def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = None,
+                        mixer_values: set[int] | None = None) \
     -> list[DispatchSite]:
     """The encrypted dispatches of a disassembly.
 
@@ -146,11 +185,17 @@ def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = Non
     A *jump* through a table is a dispatch only when the decode precedes it:
     the backend turns the last call of a function into a tail jump, and that
     jump is a dispatch; a switch table jump is not one, and it has no decode
-    before it.
+    before it. The decode is recognised by the constants of the mixer, and
+    they are per build: the caller passes the values the coverage names.
+
+    The **rotation** of the mixer is the one value of the mixer that is in
+    the instruction stream, and it is the last rotation before the call: the
+    decode rotates its result and nothing after it rotates anything.
     """
     sites: list[DispatchSite] = []
     tables: dict[str, int] = {}
     window: list[int] = []
+    rotations: list[int] = []
     pending: tuple[str, str] | None = None
 
     for line in asm.splitlines():
@@ -163,6 +208,14 @@ def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = Non
         operands = [operand.strip() for operand in text.split(",")]
         destination = operands[-1]
         register = destination[1:] if destination.startswith("%r") else ""
+
+        rotate = ROTATE.search(line)
+        if rotate is not None:
+            if rotate.group("hex") is not None:
+                rotations.append(int(rotate.group("hex"), 16))
+            else:
+                rotations.append(int(rotate.group("dec")))
+            rotations = rotations[-ROTATION_WINDOW:]
 
         rip = RIP_MEMORY.search(line)
         if rip is not None:
@@ -182,15 +235,19 @@ def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = Non
         indirect = INDIRECT_CALL.search(line)
         if call is not None:
             base = call.group("base")
-            sites.append(DispatchSite(int(matched.group(1), 16), tables.get(base), list(window)))
+            sites.append(DispatchSite(int(matched.group(1), 16), tables.get(base), list(window),
+                                      rotations[-1] if rotations else None))
             window = []
+            rotations = []
             pending = None
-        elif jump is not None and reads_the_mixer(image, window):
+        elif jump is not None and reads_a_mixer_constant(image, window, mixer_values or set()):
             # A tail call: the backend jumped to the callee instead of
             # calling it. The decode is right before it.
             base = jump.group("base")
-            sites.append(DispatchSite(int(matched.group(1), 16), tables.get(base), list(window)))
+            sites.append(DispatchSite(int(matched.group(1), 16), tables.get(base), list(window),
+                                      rotations[-1] if rotations else None))
             window = []
+            rotations = []
             pending = None
         elif loaded is not None:
             # The other lowering: the target is loaded into a register and the
@@ -198,8 +255,10 @@ def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = Non
             pending = (loaded.group("base"), loaded.group("target"))
         elif indirect is not None and pending is not None and indirect.group("target") == pending[1]:
             base = pending[0]
-            sites.append(DispatchSite(int(matched.group(1), 16), tables.get(base), list(window)))
+            sites.append(DispatchSite(int(matched.group(1), 16), tables.get(base), list(window),
+                                      rotations[-1] if rotations else None))
             window = []
+            rotations = []
             pending = None
 
         # Any other write to the register invalidates the table it held.
@@ -209,16 +268,19 @@ def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = Non
     return sites
 
 
-def count_dispatches(objdump: Path, binary: Path) -> int:
+def count_dispatches(objdump: Path, binary: Path, mixer_values: set[int] | None = None) -> int:
     """The number of encrypted dispatches in a binary.
 
     A dispatch is an indirect call through the table of the transform: the
     direct call that the pass replaced is gone, so the count is the number
     of the call sites the pass rewrote. (The image base only matters for
-    the table of a site, not for its number.)
+    the table of a site, not for its number.) The constants of the mixer are
+    per build, so the caller passes the values the coverage names: without
+    them a tail jump is not recognised as a dispatch.
     """
     image = PeImage(binary.read_bytes())
-    return len(find_dispatch_sites(disassemble(objdump, binary), image.image_base, image))
+    return len(find_dispatch_sites(disassemble(objdump, binary), image.image_base, image,
+                                    mixer_values))
 
 
 def immediates(asm: str) -> set[int]:
@@ -372,6 +434,16 @@ class Coverage:
         self.key_parts: list[int] = []
         self.mix_multiplier = 0
         self.mix_xor = 0
+        #: The rotation of the mixer, as the call site uses it. It is the one
+        #: value of the mixer that is in the instruction stream. A coverage
+        #: file of an older build has none (0), and the reader reads it.
+        self.mix_rotate = 0
+        #: The layout of the module: the number of the definitions and the
+        #: number of them that moved. The section is new: a coverage file of
+        #: an older build has none.
+        self.layout_functions = 0
+        self.layout_moved = 0
+        self.layout_seed = 0
         self.rewritten = 0
         self.intact = False
         self.malformed = ""
@@ -414,6 +486,8 @@ class Coverage:
                     self.source_sha256 = value.strip().lower()
                 elif key == "protect":
                     self._read_protect(value)
+                elif key == "layout":
+                    self._read_layout(value)
                 elif key == "fn":
                     for part in value.split():
                         if part.startswith("rewritten="):
@@ -458,8 +532,29 @@ class Coverage:
                 self.mix_multiplier = int(number, 0)
             elif name == "xor":
                 self.mix_xor = int(number, 0)
+            elif name == "rotate":
+                self.mix_rotate = int(number)
             elif name == "key":
                 self.key_parts.append(int(number, 0))
+
+    def _read_layout(self, value: str) -> None:
+        """The `layout` line: the permutation of the function list.
+
+        The line is new: a coverage file of an older build has none, and the
+        reader still reads that file.
+        """
+        for part in value.split():
+            name, _, number = part.partition("=")
+            if name == "functions":
+                self.layout_functions = int(number)
+            elif name == "moved":
+                self.layout_moved = int(number)
+            elif name == "seed":
+                self.layout_seed = int(number, 0)
+
+    def mixer(self) -> Mixer:
+        """The mixer of the module, as the coverage names it."""
+        return Mixer(self.mix_multiplier, self.mix_xor, self.mix_rotate)
 
     def _read_vm(self, value: str) -> None:
         """The `vm` line: the verdict of the virtualizer's analysis.
