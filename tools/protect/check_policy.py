@@ -36,11 +36,35 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# The coverage format is shared with the payload check: the plugin writes it
+# and the two readers have to agree on it.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from protect_checks import Coverage, read_coverage as read_coverage_files  # noqa: E402
+
 #: The keys the policy file may carry.
 POLICY_KEYS = ("protect", "deny", "seed")
 
 #: The keys a `protect` entry object may carry.
 ENTRY_KEYS = ("symbol", "module", "level")
+
+#: The priority of the states a policy entry can be in.
+#:
+#: The worst state wins, so that a failure is never masked by a match in
+#: another module: an entry whose selected function did not survive to the
+#: transform phase failed in that module, whatever it did in another one.
+STATE_PRIORITY = {
+    "unmatched": 0,
+    "blocked": 1,
+    "matched": 2,
+    "unimplemented": 3,
+    "vanished": 4,
+}
+
+
+def state_priority(state: str) -> int:
+    """The priority of the state of a policy entry."""
+    return STATE_PRIORITY.get(state.split(":", 1)[0], 0)
 
 
 def no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -120,52 +144,47 @@ def default_coverage_dir(policy_path: str) -> Path:
     return Path(root) / "cs2-protect-coverage" / digest
 
 
-def read_coverage(coverage_dir: Path, digest: str) -> tuple[dict[str, str], bool]:
+def read_coverage(coverage_dir: Path, policy_path: Path) -> tuple[dict[str, str], bool]:
     """The state of every policy entry, over every coverage file of this policy.
 
     The state of an entry is "matched" (it named a function that is
-    protected), "blocked" (it named a function that cannot be protected) or
-    "unmatched" (it named nothing in that module). A blocked entry is not a
-    matched one: it protects nothing.
+    protected), "blocked" (it named a function that cannot be protected),
+    "unimplemented" (it named a function whose protection level is not
+    implemented yet), "vanished" (the selected function did not survive to
+    the transform phase) or "unmatched" (it named nothing in that module).
 
     The second value says whether any coverage file belongs to this policy at
     all: when none does, the coverage is stale (the policy changed after the
     last compile) and the check cannot say anything.
+
+    A coverage file that does not describe *this* build is not evidence about
+    it: a file that was edited by hand (its content digest does not match)
+    and a file of an earlier state of the source (the digest of the source
+    does not match) are skipped, and the reason is reported. Without that, a
+    file left behind by another build would fail the build of a good one.
     """
     states: dict[str, str] = {}
     current = False
     if not coverage_dir.is_dir():
         return states, current
-    for path in sorted(coverage_dir.glob("*.cov")):
-        entries: dict[str, str] = {}
-        policy_digest = ""
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            key, _, value = line.partition(" ")
-            if key == "policy-sha256":
-                policy_digest = value.strip().upper()
-            elif key == "entry":
-                state, _, rest = value.partition(" ")
-                if state == "blocked":
-                    reason, _, pattern = rest.partition(" ")
-                    entries[pattern.strip()] = f"blocked:{reason.strip()}"
-                else:
-                    entries[rest.strip()] = state.strip()
-        if policy_digest != digest:
+    digest = hashlib.sha256(policy_path.read_bytes()).hexdigest().upper()
+    files, skipped = read_coverage_files(coverage_dir, policy_path)
+    for name, reason, rewritten in skipped:
+        if rewritten > 0:
+            print(f"check_policy: the coverage '{name}' is skipped: {reason}", file=sys.stderr)
+    for entry in files:
+        if entry.policy != digest:
             # The coverage of another policy; it says nothing about this one.
             continue
         current = True
-        for pattern, state in entries.items():
-            if state == "matched":
-                states[pattern] = "matched"
-            elif state.startswith("blocked:") and states.get(pattern) != "matched":
+        for pattern, state in entry.states().items():
+            if pattern not in states or state_priority(state) > state_priority(states[pattern]):
                 states[pattern] = state
-            elif pattern not in states:
-                states[pattern] = "unmatched"
     return states, current
 
 
-def prune_stale_coverage(coverage_dir: Path, digest: str) -> int:
-    """Remove the coverage files of the *other* policies.
+def prune_stale_coverage(coverage_dir: Path, policy_path: Path) -> int:
+    """Remove the coverage files that do not describe this build.
 
     The directory is keyed by the policy path, so an edited policy leaves the
     files of the previous version behind. They say nothing about the current
@@ -174,12 +193,18 @@ def prune_stale_coverage(coverage_dir: Path, digest: str) -> int:
     check may run again (a rebuild that compiles nothing) and has to find
     its evidence.
 
+    A file of the current policy that does not describe the current build --
+    an older plugin wrote it, or it was edited by hand -- is removed too:
+    it is not evidence about anything, and leaving it would let it be
+    counted by a later check.
+
     The pruning runs *after* the build, so it cannot race with a compile
     that is writing its coverage.
     """
     removed = 0
     if not coverage_dir.is_dir():
         return removed
+    digest = hashlib.sha256(policy_path.read_bytes()).hexdigest().upper()
     for path in coverage_dir.glob("*.cov"):
         policy_digest = ""
         try:
@@ -190,7 +215,11 @@ def prune_stale_coverage(coverage_dir: Path, digest: str) -> int:
                     break
         except OSError:
             continue
-        if policy_digest != digest:
+        stale = policy_digest != digest
+        if not stale:
+            entry = Coverage(path)
+            stale = not entry.intact or not entry.source_is_current()
+        if stale:
             try:
                 path.unlink()
                 removed += 1
@@ -250,7 +279,7 @@ def main(argv: list[str]) -> int:
         coverage_dir = Path(env) if env else default_coverage_dir(policy_path)
 
     digest = hashlib.sha256(policy_file.read_bytes()).hexdigest().upper()
-    states, current = read_coverage(coverage_dir, digest)
+    states, current = read_coverage(coverage_dir, policy_file)
     if not current:
         print(
             f"check_policy: {policy_path}: no coverage of this policy in "
@@ -270,11 +299,48 @@ def main(argv: list[str]) -> int:
         for pattern, state in states.items()
         if state.startswith("blocked:")
     }
+    unimplemented = {
+        pattern: state.split(":", 1)[1]
+        for pattern, state in states.items()
+        if state.startswith("unimplemented:")
+    }
+    vanished = {pattern for pattern, state in states.items() if state.startswith("vanished")}
     failed = False
+
+    # A selected function that did not survive to the transform phase: the
+    # protection would be silently lost, so the build has to fail.
+    if vanished:
+        noun = "entry" if len(vanished) == 1 else "entries"
+        print(
+            f"check_policy: {policy_path}: {len(vanished)} policy {noun} named a selected "
+            "function that did not survive to the transform phase:",
+            file=sys.stderr,
+        )
+        for pattern in sorted(vanished):
+            print(f"  {pattern}", file=sys.stderr)
+        failed = True
+
+    # A level that is not implemented yet: the entry protects nothing, and a
+    # build that looks protected and is not is the failure mode this project
+    # exists to avoid.
+    if unimplemented:
+        noun = "entry" if len(unimplemented) == 1 else "entries"
+        print(
+            f"check_policy: {policy_path}: {len(unimplemented)} policy {noun} named a function "
+            "whose protection level is not implemented:",
+            file=sys.stderr,
+        )
+        for pattern, level in sorted(unimplemented.items()):
+            print(f"  {pattern} ({level})", file=sys.stderr)
+        failed = True
 
     # An entry that named a function that cannot be protected protects
     # nothing: the build has to fail, and it has to say why.
-    blocked_only = [pattern for pattern in patterns if pattern not in matched and pattern in blocked]
+    blocked_only = [
+        pattern
+        for pattern in patterns
+        if pattern not in matched and pattern in blocked and pattern not in vanished
+    ]
     if blocked_only:
         noun = "entry" if len(blocked_only) == 1 else "entries"
         print(
@@ -286,7 +352,14 @@ def main(argv: list[str]) -> int:
             print(f"  {pattern} ({blocked[pattern]})", file=sys.stderr)
         failed = True
 
-    unmatched = [pattern for pattern in patterns if pattern not in matched and pattern not in blocked]
+    unmatched = [
+        pattern
+        for pattern in patterns
+        if pattern not in matched
+        and pattern not in blocked
+        and pattern not in vanished
+        and pattern not in unimplemented
+    ]
     if unmatched:
         noun = "entry" if len(unmatched) == 1 else "entries"
         print(
@@ -300,7 +373,7 @@ def main(argv: list[str]) -> int:
     if failed:
         return 1
 
-    prune_stale_coverage(coverage_dir, digest)
+    prune_stale_coverage(coverage_dir, policy_file)
     print(f"check_policy: {len(patterns)} policy entries matched")
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)

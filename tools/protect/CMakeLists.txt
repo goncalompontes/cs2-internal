@@ -22,6 +22,7 @@ add_library(Cs2Protect SHARED
   src/config.cpp
   src/selection.cpp
   src/report.cpp
+  src/transform.cpp
 )
 
 # --- The DIA SDK ------------------------------------------------------------
@@ -123,6 +124,7 @@ add_executable(cs2-protect-tests
   src/config.cpp
   src/selection.cpp
   src/report.cpp
+  src/transform.cpp
 )
 target_compile_features(cs2-protect-tests PRIVATE ${CS2_PROTECT_CXX_STANDARD})
 target_include_directories(cs2-protect-tests SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
@@ -132,3 +134,36 @@ target_compile_options(cs2-protect-tests PRIVATE ${LLVM_DEFINITIONS_LIST})
 target_compile_options(cs2-protect-tests PRIVATE ${CS2_PROTECT_COMPILE_OPTIONS})
 target_link_libraries(cs2-protect-tests PRIVATE ${LLVM_LIBS_FIXED})
 add_test(NAME protect-tests COMMAND cs2-protect-tests)
+
+# --- The IR-level test and the differential test -----------------------------
+# The pass rewrites calls, so a mistake shows up as a *wrong call target*,
+# not as a crash. The two tests below are the ones that catch it:
+#
+#   * protect-ir-test runs `opt` over a checked-in fixture and asserts on the
+#     shape of the rewritten IR (the direct call is gone, an indirect call is
+#     there, the function type is unchanged, the descriptor is encrypted, and
+#     the calls that must be skipped are untouched);
+#   * protect-diff-test builds the same fixture twice -- once with the pass
+#     and once without -- runs both and compares their output and their exit
+#     code.
+#
+# The tests need the SDK's `opt` and `clang-cl`, so they use the paths the
+# LLVM package hands down.
+find_program(CS2_PROTECT_PYTHON NAMES python python3 REQUIRED)
+
+add_test(NAME protect-ir-test
+  COMMAND ${CS2_PROTECT_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/ir_test.py
+          --opt ${LLVM_TOOLS_BINARY_DIR}/opt.exe
+          --plugin $<TARGET_FILE:Cs2Protect>
+          --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/calls.ll
+          --policy ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/calls.policy.json
+          --work ${CMAKE_CURRENT_BINARY_DIR}/ir-test)
+
+add_test(NAME protect-diff-test
+  COMMAND ${CS2_PROTECT_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/diff_test.py
+          --clang-cl ${LLVM_TOOLS_BINARY_DIR}/clang-cl.exe
+          --objdump ${LLVM_TOOLS_BINARY_DIR}/llvm-objdump.exe
+          --plugin $<TARGET_FILE:Cs2Protect>
+          --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diff_fixture.cpp
+          --policy ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diff.policy.json
+          --work ${CMAKE_CURRENT_BINARY_DIR}/diff-test)

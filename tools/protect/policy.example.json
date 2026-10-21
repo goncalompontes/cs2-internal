@@ -1,7 +1,7 @@
 {
   "protect": [
     "cs2::aim::solve",
-    { "symbol": "cs2::game::StateReader::*", "module": "state_reader.cpp", "level": "virtualized" }
+    { "symbol": "cs2::game::StateReader::*", "module": "state_reader.cpp", "level": "call" }
   ],
   "deny": [
     "cs2::loader::self_unmap"

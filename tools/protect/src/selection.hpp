@@ -38,7 +38,8 @@ struct Selection {
   SelectionSource source{SelectionSource::policy};
   ProtectionLevel level{ProtectionLevel::call};
   std::uint64_t seed{0};
-  bool may_inline{false};  ///< the function is not `noinline`: it can be inlined away.
+  bool may_inline{false};       ///< the function is not `noinline`: it can be inlined away.
+  bool marked_noinline{false};  ///< the pass added the `noinline` attribute to it.
 };
 
 /// A function the pass did not select, and why.
@@ -55,12 +56,20 @@ struct Skipped {
 /// `alwaysinline` function, a declaration, a denied function, ...). A
 /// blocked entry is **not** a matched entry: the build has to fail, because a
 /// policy that names a function that cannot be protected protects nothing.
+///
+/// An entry that named a function whose *level* is not implemented yet (the
+/// `virtualized` level of T20) is neither matched nor blocked: it named a
+/// function, but this task does not transform it, so the build has to fail
+/// for it as well.
 struct PolicyMatch {
-  std::string pattern;     ///< the glob of the entry.
-  std::string module;      ///< the scope of the entry ("" = any module).
-  bool applicable{false};  ///< the scope of the entry names this module.
-  bool matched{false};     ///< the entry named a function that is protected.
-  bool blocked{false};     ///< the entry named a function that cannot be protected.
+  std::string pattern;                           ///< the glob of the entry.
+  std::string module;                            ///< the scope of the entry ("" = any module).
+  ProtectionLevel level{ProtectionLevel::call};  ///< the level of the entry.
+  bool applicable{false};                        ///< the scope of the entry names this module.
+  bool matched{false};                           ///< the entry named a function that is protected.
+  bool blocked{false};        ///< the entry named a function that cannot be protected.
+  bool unimplemented{false};  ///< the entry named a function whose level is not
+                              ///< implemented yet.
   std::optional<SkipReason> blocked_reason;  ///< why it cannot be protected.
 };
 
