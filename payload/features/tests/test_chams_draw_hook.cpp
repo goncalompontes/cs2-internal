@@ -32,6 +32,20 @@
 // would not have caught the crash, and a second copy of the guard would be a
 // second implementation of the same rules.
 //
+// The **wiring** is pinned too, because the per-owner guard exposed three
+// gaps that no check covered:
+//
+//   * **H3** — the switch-off has to **clear** the refusal latch. The rule
+//     is pure (`hook_target::refusal_after_switch`), so what was missing was
+//     the call site: deleting the clear of `install_failed_` left the suite
+//     green.
+//   * **H6** — the guard's scope has to be held **across** the trampoline
+//     call. The old check only asked whether the source mentioned
+//     `guard::Scope` (presence, not ordering), so moving the scope after
+//     the call left the suite green.
+//   * **H7** — the chams' guard **fails closed** and the camera's does not.
+//     The policy is per instance, so the camera's behaviour does not change.
+//
 // The checks are **explicit**: the test counts its failures instead of using
 // `assert`, so it still bites in a release build (Meson's `b_ndebug` default
 // is `if-release`, so `NDEBUG` is defined in the configuration
@@ -52,6 +66,7 @@
 #include <vector>
 
 #include "cs2/features/guard_scope.hpp"
+#include "cs2/features/hook_target.hpp"
 #include "cs2/features/recursion_guard.hpp"
 
 namespace {
@@ -488,6 +503,157 @@ void test_the_status_line_does_not_allocate(const std::filesystem::path& base) {
   expect(body.find("hook_status()") != std::string::npos, "the status line uses the hook state");
 }
 
+// The body of the function that starts at `marker`, braces matched.
+//
+// The rules below are about **one function's** body (the switch-off clears
+// the latch in `configure`, the guard is held across the trampoline call in
+// the detour), so the check has to look at that function and not at the
+// whole file: a rule that is satisfied somewhere else in the file is not
+// satisfied at all.
+auto function_body(const std::string& source, const std::string& marker) -> std::string {
+  const std::size_t at = source.find(marker);
+  if (at == std::string::npos) {
+    return {};
+  }
+  const std::size_t open = source.find('{', at);
+  if (open == std::string::npos) {
+    return {};
+  }
+  int depth = 0;
+  for (std::size_t index = open; index < source.size(); ++index) {
+    if (source[index] == '{') {
+      ++depth;
+    } else if (source[index] == '}') {
+      --depth;
+      if (depth == 0) {
+        return source.substr(open, index - open + 1);
+      }
+    }
+  }
+  return {};
+}
+
+// --- H3: the switch-off clears the refusal latch -----------------------------
+//
+// The refusal latch (`install_failed_`) stops a refused install from being
+// retried and re-reported on every frame. It has to be **cleared** when the
+// operator switches the feature off: a latch that survived the switch-off
+// would make the next switch-on never retry the install, so the refusal
+// would never be reported again and the HUD would say "installing" forever
+// — a lie, because no install is being attempted.
+//
+// The rule is pure (`hook_target::refusal_after_switch`), so what is missing
+// is the **wiring**: the `configure()` call site. Deleting the clear of
+// `install_failed_` used to leave the whole suite green.
+void test_the_switch_off_clears_the_refusal_latch(const std::filesystem::path& base) {
+  const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
+  const std::string body = function_body(source, "void Chams::configure(");
+  expect(!body.empty(), "the chams' configure() is there");
+
+  // The latch is stored ...
+  const std::size_t store = body.find("install_failed_.store(");
+  expect(store != std::string::npos, "configure() stores the refusal latch");
+  if (store == std::string::npos) {
+    return;
+  }
+  // ... and the value it stores is the **switch's** answer, not the old
+  // latch: `refusal_after_switch(enabled, refused)` is false when the
+  // feature is off, and that is what clears the latch.
+  const std::size_t rule = body.find("refusal_after_switch", store);
+  expect(rule != std::string::npos && rule - store < 200,
+         "the latch that is stored is the switch's answer (refusal_after_switch)");
+
+  // The rule itself: the switch-off clears it.
+  expect(!cs2::features::hook_target::refusal_after_switch(false, true),
+         "the rule clears the latch when the feature is switched off");
+  expect(cs2::features::hook_target::refusal_after_switch(true, true),
+         "the rule keeps the latch while the feature is on");
+}
+
+// --- H6: the guard is held across the trampoline call -------------------------
+//
+// The guard exists to break the recursion that happens **inside** the call to
+// the original: the trampoline lands back in the detour, and the guard is
+// what refuses that call. A guard that is released before the call protects
+// nothing.
+//
+// The old check only asked whether the source *mentioned* `guard::Scope` —
+// presence, not ordering — so moving the scope after the trampoline call
+// left the suite green.
+void test_the_guard_is_held_across_the_trampoline_call(const std::filesystem::path& base) {
+  const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
+  const std::string body = function_body(source, "draw_primitive_detour");
+  expect(!body.empty(), "the draw detour is there");
+
+  // The guard's scope.
+  const std::size_t scope = body.find("guard::Scope");
+  expect(scope != std::string::npos, "the detour holds the guard in a scope");
+  // The call that reaches the trampoline: `on_draw` is what calls the
+  // original, so the scope has to be declared **before** it.
+  const std::size_t call = body.find("on_draw(");
+  expect(call != std::string::npos, "the detour calls the draw path");
+  if (scope == std::string::npos || call == std::string::npos) {
+    return;
+  }
+  expect(scope < call, "the guard is held across the trampoline call");
+}
+
+// --- H7: the chams' guard fails closed, the camera's does not ----------------
+//
+// The shared guard's fail-open rationale is the **camera's**: refusing a call
+// that is not a recursion would drop a camera update. For the draw path the
+// arithmetic is the other way round: a refusal drops **one primitive**,
+// while failing open lets the recursion run until the stack overflows
+// (0xc00000fd) and takes the renderer with it.
+//
+// The policy is **per instance**, so the camera's behaviour does not change:
+// the camera's guard is built with the default (fail open) and the chams'
+// with `fail_closed`.
+void test_the_chams_fail_closed_and_the_camera_does_not(const std::filesystem::path& base) {
+  const std::string header =
+      strip_comments(read_file(base / "include" / "cs2" / "features" / "chams.hpp"));
+  expect(header.find("RecursionGuard::Policy::fail_closed") != std::string::npos,
+         "the chams' guard fails closed");
+
+  // The shared header's default is the camera's policy.
+  const std::string guard_header =
+      strip_comments(read_file(base / "include" / "cs2" / "features" / "recursion_guard.hpp"));
+  expect(guard_header.find("Policy policy = Policy::fail_open") != std::string::npos,
+         "the guard's default policy is the camera's (fail open)");
+
+  // The camera's guard is built with the default, so it keeps failing open.
+  const std::filesystem::path camera = base / "include" / "cs2" / "features" / "thirdperson.hpp";
+  const std::string camera_header = strip_comments(read_file(camera));
+  expect(!camera_header.empty(), "the camera's header is there");
+  expect(camera_header.find("camera_guard_{}") != std::string::npos,
+         "the camera's guard is built with the default policy");
+  expect(camera_header.find("fail_closed") == std::string::npos,
+         "the camera's guard does not fail closed");
+}
+
+// The refusal has to be **counted**: a refused draw is a dropped primitive,
+// and a drop that is not counted is a silent hole in the model.
+void test_the_refusal_is_counted(const std::filesystem::path& base) {
+  const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
+  const std::string body = function_body(source, "draw_primitive_detour");
+  expect(!body.empty(), "the draw detour is there");
+  expect(body.find("count_refusal()") != std::string::npos,
+         "the detour counts the draw it refused");
+
+  // The counter is reported: the status line shows it. The format string is
+  // a **string literal**, so this check reads the source as it is (the
+  // stripped source has the literals removed).
+  const std::string raw = read_file(base / "src" / "chams.cpp");
+  const std::size_t at = raw.find("Chams::status_line");
+  expect(at != std::string::npos, "the status line is there");
+  if (at != std::string::npos) {
+    const std::string line = raw.substr(at, raw.size() - at);
+    expect(line.find("refused=") != std::string::npos, "the status line shows the refusals");
+    const std::string stripped = strip_comments(line);
+    expect(stripped.find("refused()") != std::string::npos, "the status line reads the counter");
+  }
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -511,6 +677,10 @@ auto main(int argc, char** argv) -> int {
   test_the_chams_hold_the_shared_guard(features);
   test_the_tree_holds_one_guard(features);
   test_the_status_line_does_not_allocate(features);
+  test_the_switch_off_clears_the_refusal_latch(features);
+  test_the_guard_is_held_across_the_trampoline_call(features);
+  test_the_chams_fail_closed_and_the_camera_does_not(features);
+  test_the_refusal_is_counted(features);
 
   if (failures != 0) {
     std::printf("features-chams-draw-hook: %d failed check(s)\n", failures);
