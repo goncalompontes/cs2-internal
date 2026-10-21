@@ -1340,3 +1340,111 @@ something the graph must not hold.
   been observed in a live round.
 * No live run: the numbers above come from the repository's own host test
   and its helper, not from the game.
+
+---
+
+## 11. The codec seam, measured (2026-10-21, the T32 implementer)
+
+> **Appended, not rewritten.** §10 and everything above it are left as they
+> are. This section records the measurement the T32 task required: **which**
+> codec the client runs, and what the animfix's capture seam has to be.
+
+### 11.1 The "twin" is not a codec: it is the class's schema registration
+
+§9.4.2 already said it ("`0x8daab0` is not a 'mirrored codec': it is the
+**schema registration** of `CCS2PawnGraphController` ... There is only
+**one** codec, `0x8d9740`"), and the T32 task's own premise (three
+byte-identical siblings that are "the same codec shape for three different
+classes") is **the same shape seen from the other side**. Measured on the
+live `client.dll` (sha256 `659940c1…`, 2026-10-21) with Ghidra 12.1.4
+through REA and with the dumper's own scanner:
+
+| function | what it is | how it was established |
+|---|---|---|
+| `0x8d9740` | the **netvar codec** of `CCS2PawnGraphController` (`void Codec(dst, chainer, schema)`) | it writes the slots (`m_flAimYawAngle` → `dst+0x4e8`, …); the destination is its **first** argument |
+| `0x8daab0` | the **schema registration** of the same class | it walks the class's field list, looks each name up in the chainer's member table (`FUN_1819b9740`) and *saves* it (`FUN_1819c4130`), reporting "Double-save to Member '%s'" — and the class-name getter right before it (`0x1808daa90`) returns `"CCS2PawnGraphController"` |
+| `0x90eb20` | the registration of `CCS2WeaponGraphController` | the class-name getter before it returns `"CCS2WeaponGraphController"`; the fields are the weapon ones (`m_weaponCategory`, `m_flWeaponAmmo`, …) |
+| `0xd29b30` | the registration of a third class | the fields are `m_nAnimationSeed`, `m_characterMode`, `m_nChickSnapshotVariant`, … |
+
+So the "three byte-identical siblings" are the **registrations of three
+classes** — the same generated shape, three different classes — and there
+is **no second codec** to hook. The payload hooks the one codec
+(`animfix_graph_codec` → `0x8d9740`), and the *dumper signature* for the
+"twin" was removed again.
+
+**The pattern** (for the record, because the shape is what made it look
+like a codec): the 14-byte prologue
+`48 89 5C 24 18 48 89 7C 24 20 55 48 8B EC` matches **ten** places in the
+module; with the frame setup it still matches **three**
+(`0x8daab0`, `0x90eb20`, `0xd29b30`); reaching the class's own first
+field hash (`m_bIsDefusing` = `0xfae2351e`) makes it **unique**
+(**1 match**, verified with the dumper's scanner) — but the function it
+names is a registration, so the signature has no use.
+
+### 11.2 The live measurement: the codec never runs
+
+The animfix now counts every call of the codec's detour and what it was
+(`animfix_codec_calls`, `animfix_codec_other_controller`,
+`animfix_codec_not_local`, `animfix_codec_local_calls`), and the
+scenario reports the **diagnosis** those counters settle. The live run
+(2026-10-21, the operator's bot match on `de_dust2`, the payload injected
+once) says:
+
+```
+codec calls 0, other controller 0, local controller unresolved 0,
+local calls 0        (anim ticks 1545, client ticks 1545, animfix on,
+                      animfix_ready true, animfix_status "ok",
+                      skips 392, all no_capture)
+```
+
+**That is H1**: the hooked codec **never runs** — not for the local player
+and not for anybody else. The anim-tick hook fires (1545 client ticks ✓),
+both hooks are installed (`animfix_status: "ok"` ✓), and the codec's
+detour is never entered.
+
+**What it rules out.** It is not the capture's filter (the "dst is not the
+local controller" case would show `other_controller > 0`), and it is not a
+stale local pawn (that would show `not_local > 0`). The engine simply
+does not call `0x8d9740` on the client.
+
+**What it means for the animfix.** The seam §2/§9 chose — "capture the
+server's replicated values in the codec, re-apply them in the anim tick" —
+is **not** a seam the client has: the client's snapshot decode does not go
+through this codec. Either the client decodes the graph inputs through a
+different path (and the payload must find it), or the local player's graph
+inputs are **not decoded at all** on the client — the local player is
+predicted, and the server's values for it may simply not be there. The
+next step is a measurement, not a guess: the payload would have to count
+the *other* candidates (the class's registration is not one of them), or
+the animfix has to take the server's values from where the client *does*
+receive them (the interpolated `m_angEyeAngles` at `pawn+0x3600`, which is
+what §5, target 1 names as the source of the server's aim yaw).
+
+### 11.3 The stack, and the detour's shape
+
+The inline hook's trampoline replays the function's prologue, and the
+codec's prologue begins with `mov qword ptr [rsp+0x08], rbx` — the
+caller's shadow slot. A detour that *calls* the trampoline has pushed a
+return address of its own, so the prologue runs with the stack **eight
+bytes lower** and the store lands **eight bytes below** the shadow slot —
+on the detour's own frame. (The compiler emits no sibling call for the
+trampoline: the call is a `call` in the built payload.)
+
+**What the code does now.** The detour's own work is **before** the call
+— the counters, and the comparison of the codec's destination against the
+local controller — so the detour's state lives in **registers** across the
+call, and the codec's prologue (which writes only to memory) cannot reach
+it. The **capture** moved to the **anim tick**: it picks the server's
+values up as soon as the codec's detour reports a decode (§9.2: the
+prediction never writes those slots, so they hold the server's values),
+and the capture is stamped with the **decode's** time, so its age is
+measured from the decode and not from the anim tick.
+
+### 11.4 What is still open
+
+* **Where the local player's graph inputs come from** — the open question
+  the counters posed (§11.2). The next measurement has to name the
+  function that decodes them, or the animfix has to be re-based on the
+  interpolated eye angles.
+* The **anim-state divergence** (§9.5) and the **ordering** (§10.6) are
+  untouched by this task.
