@@ -289,3 +289,35 @@ does the first, and the research says that is what works in practice.
 built in the injected configuration (`/MT`, importing exactly `KERNEL32`,
 `USER32`, `D3DCOMPILER_47`), and the injector is built. The game is up with a
 bot match in it.
+
+---
+
+## 12. The Monte-Carlo objective in the live path (2026-10-21)
+
+> Added with task T35 (`docs/orchestration/spec-t35-montecarlo-live.md`). The
+> core of §11.2's plan is in the live path: `AimObjective::monte_carlo` is
+> selectable from the control channel and from the per-weapon profile, so the
+> operator can live-test it against the damage-field solver. **The live run is
+> still the operator's** — nothing below has been exercised in the game yet.
+>
+> The four existing objectives (`damage`, `hitchance`, `expected`, `pellets`)
+> are unchanged, and the host test proves it against the field's own optima.
+
+| # | severity | finding | where | fix |
+|---|---|---|---|---|
+| **M1** | minor | **The live path's seed sequence is a fallback, not the game's.** The command's sequence number — the thing `MD5_PseudoRandom(sequence)` is derived from (`docs/re/aim.md` §"The seed") — is **not reachable from where the service sits**: the `Input` module owns the `CUserCmd` pointer and exposes no accessor for the command's number, and the one that exists (`bhop_cmd_number`) is refreshed by the **bunnyhop assist** alone, so it is zero when the assist is off and stale when it is on. The live path uses the **prediction tick** (the local controller's `m_nTickBase`) as the documented fallback, and the status says so (`mc_seed_fallback: true`, `mc_seed_note` names the reason). | `payload/control/src/service.cpp` (`prediction_tick`) | **not fixed — deferred** (it needs an accessor in the `Input` module, which this task does not own) |
+| **M2** | minor | **The `angle_grid` seed's hash is a stand-in.** The engine's `get_tick_view_angles` is not reverse-engineered, so the hash is *ours*: the numbers that policy produces are **indicative, not exact**. The status says so. | `payload/aim/src/montecarlo.cpp` (`angle_seed_hash`) | **not fixed — deferred** (it needs RE) |
+| **M3** | minor | **The Monte-Carlo objective scores the hitbox geometry only.** The repo is Tier-2: the world is projected into the chart, not traced, so whether the shot is *visible* (or penetrates a wall) is still the existing machinery's job — the `only_visible` gate and the `penetrated` flag. | `payload/aim/src/solver.cpp` | **by design** (`docs/ragebot.md` §13.7) |
+| **M4** | minor | **The `min_hitchance` and `min_damage` gates change meaning under the new objective, and not in the same direction.** The same `min_hitchance` passes **more** shots (the old Gaussian mass's σ is √6 too wide — it reports **0.221** where the truth is **0.777**), and the same `min_damage` blocks **more** shots (the Monte-Carlo's value is the **expected** damage: a 50 % hit chance on 100 damage reports **50**, not 100). A ragebot that fires under `hitchance` and does not fire under `monte_carlo` with the same thresholds is the semantics change, not a defect. | the gates (`payload/control/src/service.cpp`) | **by design** (`docs/ragebot.md` §14.2) |
+| **M5** | minor | **The Monte-Carlo objective and the backtracking pass do not fit the frame budget together.** One Monte-Carlo solve is ~4.3 ms at a live-sized hitbox set, and the backtracking pass is a **full solve per pose**, so the two together exceed the 12 ms guard. | the backtracking pass | **not fixed — deferred** (the operator turns the backtracking off while live-testing; the sample count of **64** was chosen for the single-solve budget) |
+| **M6** | nit | **The harness's `AimObjective` type does not know the new name.** `scripts/scenario/protocol.py`'s `Literal["damage", "hitchance", "expected", "pellets"]` becomes the MCP `cs2_rage` tool's JSON schema, so the tool refuses `"monte_carlo"` before the request is sent. The scenario library's `game.rage(objective="monte_carlo")` works (the annotation is not enforced at run time). | `scripts/scenario/protocol.py` | **not fixed — deferred** (one line: add the name to the literal) |
+| **M7** | nit | **The `√6` σ correction is still not applied.** It is blocked on the `sqrt(r)` RE question and on the inaccuracy's units. It does not affect the Monte-Carlo objective (the kernel is sampled, not blurred), but it is why the *old* objective's numbers are not comparable with the new one's. | the field's blur | **not fixed — deferred** (see §11.2) |
+
+**What is verified:** the host tests — `aim-solver` (the objective, its
+fallback, and the four other objectives' unchanged behaviour), `aim-montecarlo`
+(the core, including the two gaps T35 closed), `control-rage-objective` (the
+names, the values, the seed policy, the weapon's pattern) and
+`control-rage-config` (the profile's round trip and the garbage byte).
+
+**What is not:** the live run. The operator's steps are in
+`docs/operator-live-check.md` §6.

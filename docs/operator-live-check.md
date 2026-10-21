@@ -149,3 +149,139 @@ scenario's own `jointeam` — or `"auto"`, the server assigned the team).
 - **A stale address is worse than no feature.** Every hook target in this
   tree is either re-resolved per build (a dumper signature) or verified before
   it is patched (the prologue bytes are read and compared).
+
+## 6. The Monte-Carlo objective (the live check for T35)
+
+> Added 2026-10-21 — task T35 (`docs/orchestration/spec-t35-montecarlo-live.md`).
+> The Monte-Carlo hit-chance solver is in the live path as a **fifth
+> objective**. The four existing ones are unchanged, so the comparison below is
+> the point: the same scene, the same weapon, two solvers.
+>
+> **What the numbers mean is in `docs/ragebot.md` §14.2** — read that before
+> comparing a number from one objective with a number from the other.
+
+### 6.1 Switching the objective
+
+The objective is selected over the **control channel**:
+
+```json
+{"command": "rage", "args": {"objective": "monte_carlo"}}
+{"command": "rage", "args": {"objective": "hitchance"}}
+```
+
+The `rage` command's **answer** is the status. What to look at:
+
+| field | what a good run looks like |
+|---|---|
+| `objective` | `"monte_carlo"` — the objective **by name**, not a number |
+| `mc_samples` | `64` — the sample count in force |
+| `mc_seed` | `"sequence"` (the default) or `"angle_grid"` |
+| `mc_seed_fallback` | `true` under `sequence`: the tick stands in for the command's sequence number, which the service cannot reach |
+| `mc_hitchance` | the measured probability — a number between 0 and 1 that moves with the target |
+| `mc_expected_damage` | the **expected** damage (a miss contributes 0) |
+| `mc_refusal` | `""` when the solver produced a number |
+| `mc_fallback` | `false` while the solver is producing numbers |
+
+The one-line HUD status carries the objective's name too (`obj monte_carlo`).
+
+### 6.2 The comparison that matters
+
+1. Point at a target with the **old** objective and note the status.
+2. Switch to `monte_carlo` and note it again, **with the same target in the
+   same place**.
+3. The two `hitchance` numbers are **not** the same quantity: the old one is a
+   Gaussian mass (too narrow a target, too wide a σ → it reports **0.221** where
+   the truth is **0.777**), the new one is the measured probability. The new one
+   is the number you can trust; the old one is the number the gates have been
+   tuned against.
+4. `mc_expected_damage` is the **expected** damage, so it is lower than the old
+   objective's `value` (which is the damage of a shot that hits). A 50 % hit
+   chance on 100 damage reports **50**.
+
+### 6.3 The gates behave differently — and that is the point
+
+`min_hitchance` and `min_damage` are compared against **different quantities**
+under the new objective (`docs/ragebot.md` §14.2):
+
+* the same `min_hitchance` **passes more shots** under `monte_carlo` (the old
+  gate was stricter than its number suggested) — to keep the old strictness,
+  raise it to about the true probability (≈ **0.78** for a head-sized target);
+* the same `min_damage` **blocks more shots** under `monte_carlo` (the expected
+  damage is lower than the hit damage) — lower it, or read it as "the damage I
+  expect".
+
+So: **a ragebot that fires under `hitchance` and does not fire under
+`monte_carlo` with the same thresholds is not a bug — it is the semantics
+change.** Re-tune with the new numbers in front of you.
+
+### 6.4 The refusal is visible
+
+Switch to a weapon whose pellet pattern is **not modelled** (a shotgun, a
+machinegun) and switch the objective to `monte_carlo`:
+
+```json
+{"command": "rage", "args": {"objective": "monte_carlo"}}
+```
+
+What to look at: `mc_refusal` must name the reason
+(`"unsupported_pattern"`) and `mc_fallback` must be **true**. The aim then comes
+from the `damage` objective — **the fallback is not silent**, and the status
+says so. If `mc_refusal` is empty and the aim is wrong, that is a bug: report
+it.
+
+### 6.5 The seed policy
+
+```json
+{"command": "rage", "args": {"seed": "angle_grid"}}
+```
+
+What to look at: `mc_seed` becomes `"angle_grid"`, `mc_seed_fallback` becomes
+`false`, and `mc_seed_note` says the numbers are **indicative, not exact** (the
+hash is a stand-in for the engine's unreverse-engineered
+`get_tick_view_angles`). The two policies answer different questions —
+`sequence` is the expectation over the next N shots, `angle_grid` the
+probability over the shot that would be taken — so compare them, do not average
+them.
+
+### 6.6 The sample count and the cost
+
+```json
+{"command": "rage", "args": {"samples": 128}}
+```
+
+`mc_samples` must show the count in force. **Leave it at 64** unless you are
+measuring: 128 is over the 12 ms frame guard and 256 is over the tick.
+
+**Turn the backtracking off** while live-testing this objective
+(`{"command": "rage", "args": {"backtrack": false}}`): the backtracking pass is
+a full solve per pose, and the Monte-Carlo solve is ~4.3 ms at a live-sized
+hitbox set, so the two together do not fit the frame budget.
+
+### 6.7 The per-weapon profile
+
+The objective is part of the per-weapon profile too:
+
+```json
+{"command": "rage", "args": {"objective": "monte_carlo", "profile_save": true, "weapon": "weapon_ak47"}}
+{"command": "rage", "args": {"profile_load": true, "weapon": "weapon_ak47"}}
+```
+
+What to look at: after the load, `objective` is still `"monte_carlo"` — the
+byte round-trips through `cs2-rage.cfg`. A **garbage** byte in the file loads
+as the hitchance (the documented safe default), never as an arbitrary
+objective.
+
+### 6.8 Selecting it from the scenario harness
+
+The harness's `rage()` helper takes the objective's **name**:
+
+```python
+game.rage(on=True, force=True, objective="monte_carlo")
+```
+
+> **The MCP `cs2_rage` tool's schema does not know the name yet.** The
+> harness's `AimObjective` type is `Literal["damage", "hitchance", "expected",
+> "pellets"]` (`scripts/scenario/protocol.py`), so the tool's JSON schema
+> refuses `"monte_carlo"` before the request is sent. Until that literal is
+> widened, use the scenario library's `game.rage(...)` (which passes the name
+> through) or the raw control channel.
