@@ -31,12 +31,26 @@ namespace {
   // (`hitbox_valid`), and the reader does not validate the shape it reads
   // (`docs/ragebot.md` §13.3), so the core gets the **filtered** set. The field
   // keeps the unfiltered one: the four other objectives must not change.
-  std::vector<Hitbox> hitboxes;
-  hitboxes.reserve(input.hitboxes.size());
+  //
+  // **The common case copies nothing**: when every hitbox is well formed (the
+  // reader's capsules are), the core reads the caller's own list.
+  std::vector<Hitbox> filtered;
+  std::span<const Hitbox> hitboxes{input.hitboxes};
+  bool all_valid = true;
   for (const Hitbox& hitbox : input.hitboxes) {
-    if (hitbox_valid(hitbox)) {
-      hitboxes.push_back(hitbox);
+    if (!hitbox_valid(hitbox)) {
+      all_valid = false;
+      break;
     }
+  }
+  if (!all_valid) {
+    filtered.reserve(input.hitboxes.size());
+    for (const Hitbox& hitbox : input.hitboxes) {
+      if (hitbox_valid(hitbox)) {
+        filtered.push_back(hitbox);
+      }
+    }
+    hitboxes = std::span<const Hitbox>{filtered};
   }
   if (hitboxes.empty()) {
     result.monte_carlo_refusal = MonteCarloError::no_hitboxes;
@@ -54,7 +68,7 @@ namespace {
   MonteCarloInput mc;
   mc.eye = input.eye;
   mc.basis = input.basis;
-  mc.hitboxes = std::span<const Hitbox>{hitboxes};
+  mc.hitboxes = hitboxes;
   mc.targets = std::span<const TargetHealth>{input.monte_carlo_targets};
   mc.weapon = input.weapon;
   mc.kernel = *kernel;

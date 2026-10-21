@@ -389,6 +389,25 @@ auto main() -> int {
     expect(lethal_result.monte_carlo.has_value() && lethal_result.monte_carlo->can_kill,
            "a target with 10 hp left dies from the expected damage");
 
+    // A **malformed** hitbox must not refuse the whole scene. The reader does
+    // not validate the shape it reads — a capsule with a radius of zero reaches
+    // the solver today (`docs/ragebot.md` §13.3) — so the objective filters the
+    // set for the core instead of handing it a scene the core refuses.
+    SolveInput malformed = input;
+    Hitbox degenerate;
+    degenerate.is_capsule = true;
+    degenerate.capsule = cs2::aim::Capsule{.a = centre, .b = centre, .radius = 0.0F};
+    degenerate.multiplier = 1.0F;
+    degenerate.target = 1;
+    malformed.hitboxes.push_back(degenerate);
+    const auto filtered = cs2::aim::solve(malformed);
+    expect(filtered.valid, "the scene with a degenerate hitbox still solves");
+    expect(filtered.monte_carlo.has_value(),
+           "a degenerate hitbox is filtered for the core, not a refusal of the whole scene");
+    expect(!filtered.monte_carlo_refusal.has_value(), "the scene is not refused");
+    expect(filtered.monte_carlo.has_value() && filtered.monte_carlo->probability > 0.0F,
+           "the good target is still found");
+
     // --- the refusal: the weapon's pattern is not modelled ------------------
     // The shotgun's pellet pattern table is not modelled, so the core refuses —
     // and the refusal is **observable**: the aim falls back to the `damage`
