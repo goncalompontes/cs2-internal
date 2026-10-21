@@ -186,6 +186,11 @@ void test_the_delivered_direction_is_preserved() {
       {0.0F, 0.0F, 0.0F, 30.0F, 0.0F, -1.0F},
       {12.0F, 15.0F, 0.0F, 15.0F + 180.0F, 1.0F, 0.0F},
       {-20.0F, 200.0F, -20.0F, 200.0F + 90.0F, 1.0F, 1.0F},
+      // The camera pitched down and a 30-degree desync: the ideal axes are
+      // `(0.61, -0.35)`, and a **per-axis rounding** would deliver `(1, 0)` —
+      // 30 degrees off. The direction-optimal snap delivers `(1, -1)`: 15.
+      {45.0F, 0.0F, 0.0F, 30.0F, 1.0F, 0.0F},
+      {45.0F, 0.0F, 0.0F, 30.0F, 1.0F, 1.0F},
   };
   for (const Case& item : cases) {
     const Angles camera{item.camera_pitch, item.camera_yaw, 0.0F};
@@ -289,6 +294,36 @@ void test_the_axes_stay_within_the_engine_unit_range() {
       }
     }
   }
+}
+
+// The down-pitch inversion: with the camera past 89 degrees the operator is
+// looking straight down, the camera's forward axis points into the ground and
+// its sign flips at 90 degrees — the community's rule inverts the forward axis
+// there, so the player does not walk backwards.
+//
+// **The branch is defensive**: the engine clamps the *camera's* pitch to ±89
+// degrees (`cl_pitch`), so a live game never reaches it. The test pins it as
+// the contract it is, on the re-base's ideal axes (the delivery's
+// direction-optimal snap washes the inversion out — it delivers the direction
+// the camera's, which is the better answer).
+void test_the_down_pitch_inversion_flips_the_forward_axis() {
+  // Just past the threshold, and the anti-aim's frame is the camera's: the
+  // forward axis comes back as the intent's forward, **inverted**.
+  const Angles down{89.5F, 0.0F, 0.0F};
+  const Axes inverted = cs2::control::anti_aim::rebase_axes(down, down, Axes{1.0F, 0.0F});
+  assert(nearly(inverted.forward, -1.0F));
+  assert(nearly(inverted.left, 0.0F));
+
+  // Just below the threshold the inversion does not apply.
+  const Angles shallow{89.0F, 0.0F, 0.0F};
+  const Axes plain = cs2::control::anti_aim::rebase_axes(shallow, shallow, Axes{1.0F, 0.0F});
+  assert(nearly(plain.forward, 1.0F));
+  assert(nearly(plain.left, 0.0F));
+
+  // The lateral axis is not inverted: only the forward one flips.
+  const Axes lateral = cs2::control::anti_aim::rebase_axes(down, down, Axes{0.0F, 1.0F});
+  assert(nearly(lateral.forward, 0.0F));
+  assert(nearly(lateral.left, 1.0F));
 }
 
 // --- the fake angles -----------------------------------------------------------
@@ -495,6 +530,7 @@ auto main(int argc, char** argv) -> int {
   test_the_delivered_direction_is_exact_for_a_multiple_of_45();
   test_the_delivered_direction_is_not_a_per_axis_rounding();
   test_the_saturated_rebase_reports_what_it_gives_up();
+  test_the_down_pitch_inversion_flips_the_forward_axis();
   test_the_axes_stay_within_the_engine_unit_range();
   test_the_fake_yaw_is_the_camera_yaw_plus_the_offset();
   test_the_jitter_is_deterministic();
