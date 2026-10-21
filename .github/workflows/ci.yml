@@ -18,6 +18,10 @@
 #   * the Vulkan layer's runtime behaviour: the layer is only compiled here.
 #   * the injector against a real target: the injector's own test aids
 #     (a benign victim, a trivial DLL) are built, not run against a target.
+#   * the format check: the tree is deliberately not clang-format-clean
+#     (docs/style-guide.md §7 rule 3), so a format check would be red on
+#     its first run. The style gate -- the sweep's check mode over the
+#     groups the tree is clean under -- is the check that exists.
 #
 # The compiler is clang-cl -- the compiler the payload is built with -- and it
 # is the configuration this repository is verified with locally.

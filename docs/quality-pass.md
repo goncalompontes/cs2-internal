@@ -142,6 +142,21 @@ Three decisions worth knowing about:
   host-testable, which the Windows-only sources that use the wrapper are not.
   `payload/core/tests/test_handle.cpp` drives them with a counting policy.
 
+**The ownership rules themselves** (the review round tightened two of them,
+§9):
+
+- the wrapper tracks whether it **owns** what it holds, and the policy is
+  asked about a handle only when the wrapper *takes* one. The destructor
+  therefore never asks a policy about a handle it does not own — in
+  particular it never asks a **moved-from** policy, which for a policy that
+  carries a `std::function` closer would throw `std::bad_function_call` out
+  of a `noexcept` destructor;
+- the **empty value is reserved**: `Handle{}` is the wrapper's "holds
+  nothing", it is never owned and never released. A handle kind whose zero
+  value is live (a POSIX file descriptor, where 0 is stdin) must be wrapped
+  in a type whose empty value is distinct; the wrapper's own rule keeps such
+  a handle from being closed, at the price of leaking it.
+
 The Windows policy (`cs2/core/win_handle.hpp`) is separate and Windows-only:
 it includes `<windows.h>` and closes with the imported `CloseHandle`. The
 headers that *own* a handle but must stay free of `<windows.h>`
@@ -270,6 +285,22 @@ Python script (`scripts/preflight.py`) that both platforms run, rather than
 duplicated in a shell script. **Not started** — it needs a decision about
 whether the project supports a Linux host build as a first-class target.
 
+### 4.6 The format check (deliberately **not** in the CI) — *low*
+
+The specification's CI bullet asks for "the format check". There is none,
+and that is a decision, not an oversight: **the tree is deliberately not
+clang-format-clean** (docs/style-guide.md §7 rule 3 — a whole-file reformat
+of a 3000-line file produces a diff nobody can review), so a format check
+would be **red on its first run** and would stay red until the whole tree was
+reformatted, which is exactly the reformatting drive-by this pass's own rules
+forbid. The style gate is the sweep's *check mode* over the two groups the
+tree is clean under (§4.2), and that is what the CI runs.
+
+**The plan, if the tree is ever reformatted on purpose:** the reformat is
+its own commit (a separate, deliberate one), and the format check goes in
+with it — `clang-format --dry-run --Werror` over the tracked sources. Until
+then the gate that exists is the honest one.
+
 ---
 
 ## 5. The four contended files
@@ -321,6 +352,46 @@ If the concurrent work also edits `payload/control/meson.build` (e.g. to add
 a source file), that one file may conflict; the conflict would be a one-line
 include list on each side, and it is easy to resolve by hand.
 
+**The root `meson.build`, and what a new host test has to take.** The pass
+also changes the **root** `meson.build` — the file where a *new* host test is
+registered — and the reason is the shared handle. `cs2/control/channel.hpp`
+includes `cs2/core/handle.hpp`, and `cs2/control/service.hpp` includes the
+channel, so **every** consumer of the control headers needs the core include
+directory as well (`cs2/features/model_publisher.hpp` does the same for the
+features headers). A test that forgets fails with
+
+```
+cs2/core/handle.hpp: No such file or directory
+```
+
+which is a confusing way to learn that a header two directories away is
+included by the one you are compiling. The pass therefore *publishes* the
+pairs instead of re-listing the include directories in every test:
+
+```meson
+control_host_dep = declare_dependency(
+  include_directories : [include_directories('payload/control/include'), core_inc],
+)
+features_host_dep = declare_dependency(
+  include_directories : [include_directories('payload/features/include'), core_inc],
+)
+```
+
+**A new host test that includes a control header takes `control_host_dep`
+(and one that includes a features header takes `features_host_dep`)** — that
+is the whole of what it has to know. The root `meson.build` is otherwise
+untouched by the pass: the module's own host test is wired in the module
+(`payload/core/meson.build`, guarded by `if not meson.is_cross_build()`, like
+the loader's and the hooks'), so the root file carries only the
+`subdir('payload/core')` line and the two dependencies.
+
+**What the concurrent work has to watch for in the root file:** the two
+dependency definitions sit next to the `subdir('payload/core')` line, near the
+top of the file, and the host tests that use them are in the middle of it. If
+T19/T20 add a host test to the root `meson.build` *and* that test includes a
+control header, it must take `control_host_dep`; a conflict, if there is one,
+is a one-line `dependencies :` list on each side.
+
 ---
 
 ## 6. The measurements
@@ -334,13 +405,16 @@ branch's base commit (`e539bc6`) and at the tip.
 
 | what | before | after |
 |---|---|---|
-| `CloseHandle` call sites | 31 | 12 |
+| `CloseHandle` (occurrences of the token) | 31 | 12 |
 | raw `HANDLE` locals | 25 | 6 |
 
 Of the 12 remaining `CloseHandle` sites: 5 are the type aliases and the
 comments in `rage_config.cpp` plus the policy's own `close`; 2 are the shared
 policy in `cs2/core/win_handle.hpp`; 1 is the channel's closer; **3 are in
 the contended `service.cpp`** (F3, F4); 1 is the injector's trivial test aid.
+
+(The count is of *occurrences of the token*, not of call sites: five of the
+twelve are the type aliases and the comments the method also counts.)
 
 Of the 6 remaining raw `HANDLE` locals: 1 is the channel's local (handed
 straight to the wrapper), 1 is the contended `service.cpp`, 1 is the overlay's
@@ -404,7 +478,7 @@ under the gated groups, and the gated groups are clean.**
 | | before | after |
 |---|---|---|
 | the host suite (`meson test -C build`) | 42 tests | **44** (`core-handle`, `scenario-clang-tidy-fix`) |
-| the Python suite (`unittest discover`) | 387 tests | **397** (10 new: the sweep's check mode) |
+| the Python suite (`unittest discover`) | 387 tests | **400** (13 new: the sweep's check mode) |
 | mypy (`scripts/typecheck.py`) | 0 errors, 51 files | **0 errors, 52 files** |
 | the four builds | all compile | all compile |
 
@@ -435,11 +509,15 @@ the whole point of this pass:
 2. **The CI workflow on a GitHub runner.** The workflow's *steps* were all
    run locally, in the same order, with the same compiler (clang-cl) — the
    host build and tests, the three Windows builds, the Python suite, the
-   type gate and the style gate. What could not be verified is the *runner's*
-   environment: that `ilammy/msvc-dev-cmd` and the runner's LLVM are where
-   the workflow expects them, and that the runner's clang-tidy version
-   reports the same findings as the local one (22.1.8). If a future LLVM
-   changes a gated group's results, the gate needs a re-baseline.
+   type gate and the style gate. The two steps that *fetch* something were
+   run in the way the runner runs them: the Vulkan headers are cloned into a
+   scratch copy of the tree (and the copy **without** them is what proves
+   the step is needed — §9), and the payload is configured with the cross
+   file, which is the local configuration too. What could not be verified is
+   the *runner's* environment: that `ilammy/msvc-dev-cmd` and the runner's
+   LLVM are where the workflow expects them. The style gate's clang-tidy is
+   pinned (LLVM 22.1.8, the version the gated groups were measured with),
+   so that one no longer depends on the runner's image.
 3. **A Linux host build.** The CI runs on Windows because the payload is a
    Windows artifact and that is the configuration this repository is verified
    with. A Linux runner was not available here, so the host build's
@@ -459,7 +537,8 @@ it goes out of scope, and releases it on `reset()`. The two operations the
 old code performed by hand — `CloseHandle(file)` at the end of a function and
 the early `CloseHandle(file)` before an error return — are exactly what the
 destructor and `reset()` do. The *order* of the releases was preserved
-deliberately at every site:
+deliberately at every site (the review round found two places in the injector
+where it was not, and they were put back — §9):
 
 - the rage config's **load** closes the file *before* the buffer is parsed
   (the read is in an inner scope);
@@ -514,9 +593,67 @@ not releasing the source's handle, it fails at the move. The sweep's check
 mode was broken on purpose too: with `gated_findings` always returning an
 empty list, two of the ten new Python tests fail.
 
+**The review round's tests** were broken on purpose in the same way (§9):
+with the wrapper's old "ask the policy whether the empty value is live" rule
+put back, the host test ends the process with `std::bad_function_call` (the
+moved-from policy is called) and fails `!descriptor.valid()` (the zero value
+was owned); with the sweep's compile-error rule removed, two of the three new
+Python tests fail.
+
 ---
 
-## 9. Where to look next
+## 9. The review round
+
+The pass was reviewed adversarially (the reviewer re-derived every release
+point of every converted handle and mutation-proved the new tests). The
+verdict was **ship with fixes**: the refactor itself is sound — no behaviour
+change, no use-after-close, every number in §6 confirmed — but the **new CI
+workflow was red on its first run**, which is the one failure the
+specification forbade.
+
+### 9.1 What the review found, and what was done
+
+| finding | what it was | what changed | how it was proven |
+|---|---|---|---|
+| **B1** (blocker) | the workflow built the overlay without `external/Vulkan-Headers`, which is git-ignored and never fetched: the job died at configure time | the runner clones the headers (a pinned tag) before the overlay is configured | a scratch copy of the tree **without** the headers fails with `Include dir ../external/Vulkan-Headers/include does not exist` (exit 1); with the clone step it configures and links `cs2_overlay_layer.dll` |
+| **M1** | the workflow built the payload *without* the cross file, so meson picked `/MD`: the DLL imported `MSVCP140.dll`, `VCRUNTIME140.dll` and the `ucrtbase` api-set — an artifact the injector's manual loader would have to resolve inside `cs2.exe` | the workflow configures the payload with `toolchain/windows-msvc.ini` (`b_vscrt = mt`); the local build was reconfigured the same way | `dumpbin /dependents` on the two builds: the native one imports the CRT DLLs, the cross one imports only `KERNEL32`, `USER32` and `D3DCOMPILER_47` |
+| **M2** | the move constructor moved the policy, so the moved-from wrapper's destructor called a **moved-from** policy (a `std::function` closer is empty after the move → `std::bad_function_call` out of a `noexcept` destructor) | the wrapper tracks the ownership itself (`owns_`); the policy is asked about a handle only when one is *taken* | the host test drives a `std::function` policy: with the old wrapper the test ends the process with `std::bad_function_call`; with the new one it passes |
+| **M3** | the wrapper's empty state was `Handle{}` and the destructor asked the policy whether that value was live — an undocumented, unenforced requirement | the **empty value is reserved**: the wrapper never owns it and never releases it, and `reset()` with the handle the wrapper already holds keeps it instead of releasing it twice | the host test drives a policy whose zero value is live: with the old wrapper it fails `!descriptor.valid()` (and would close stdin); with the new one the zero value is left alone and a handle is released exactly once |
+| **m1** | two releases in the injector happened later than they used to (the toolhelp snapshot, the entry thread) | both handles are in an inner block again | the diff against the pre-pass code: the release points are the same lines as the hand-written `CloseHandle` calls |
+| **m2** | the pass changed the root `meson.build`, and a new host test that includes a control header would fail with `cs2/core/handle.hpp: No such file or directory` | the control and the features include paths are published as `control_host_dep` / `features_host_dep`; the module's test is wired in the module | a scratch translation unit that includes `cs2/control/channel.hpp`: without the core include directory it fails with exactly that error, with `control_host_dep`'s include set it compiles |
+| **m3** | `docs/style-guide.md` §7 documented only the fix modes | §7 documents `--check`, `--list-gate` and `--gate`, and the rule that a compile error is a failed translation unit | — |
+| **m4** | the spec's CI bullet asks for a format check; there is none, and nobody said why | §4.6 says why (the tree is deliberately not clang-format-clean, so the check would be red on its first run), and the workflow's header says the same | — |
+| **m5** | a compile error was counted as a finding of the group that was running, so the gate said "performance reported a finding" | `clang-diagnostic-error` is not a finding; the sweep's "failed on N translation unit(s)" path carries it | a broken `payload/game/src/log.cpp`: the gate now says "failed on 1 translation unit(s)" and exits 1, where it used to say "performance reported a finding" |
+| **m6** | the workflow installed the **latest** mypy and ran the runner's clang-tidy, while `requirements-dev.txt` pins mypy and says that a gate which changes its mind is not a gate | the workflow installs `requirements-dev.txt` and puts the **pinned** clang-tidy (LLVM 22.1.8) first on `PATH` | the gate was run with the pinned binary: "LLVM version 22.1.8", 0 findings |
+| the nits | the new test's closing brace was glued to the method's; the report's `CloseHandle` row counted tokens and said "call sites"; four workflow steps shared two names; the module's test was wired in the root file; the single-argument constructor's default policy could not release | all five are fixed | the host suite is 44 and the workflow's step names are unique |
+
+### 9.2 The commits
+
+| commit | what it changed |
+|---|---|
+| `71fc87a` | **ci:** the runner fetches the Vulkan headers the overlay needs (B1) |
+| `8fb7c2d` | **ci:** the payload is built the way it is shipped (static CRT) (M1) |
+| `c0824ef` | **ci:** the gates run the tools they were baselined with (m6) |
+| `58ea7dd` | **ci:** every step has its own name (a nit) |
+| `98c1ca6` | **fix(core):** the wrapper owns what it holds, and never calls a moved-from policy (M2, M3) |
+| `69686e5` | **refactor(injector):** the two releases happen where they happened (m1) |
+| `87f9aed` | **build:** the control and the features headers come with the core include path (m2, and the module's test) |
+| `e4eaf09` | **tool(scripts):** a compile error is not a finding of a check group (m5) |
+| `5690e37` | **docs(style):** the sweep's check mode and the gate are documented (m3) |
+| `2f7e775` | **fix(control):** a null closer is loud, not a silent leak (a nit) |
+
+### 9.3 What the review round did **not** change
+
+The refactor is untouched: no call site changed its behaviour, the four
+contended files are still untouched, and `payload/aim/` is still untouched.
+The two changes that reach into the C++ are the wrapper's own ownership
+rules (in the module this pass added) and two inner blocks in the injector
+that put the releases back where they were. The rest is the CI and the
+tooling — which is the deliverable the specification asked for.
+
+---
+
+## 10. Where to look next
 
 - `docs/style-guide.md` §7 — how the sweep is driven, and the exclusions
   that are deliberate.
