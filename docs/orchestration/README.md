@@ -1,60 +1,166 @@
 # The orchestration plugin
 
-`C:\Users\gpmpo\.config\opencode\plugins\orchestration.ts` — the plugin that
-runs the **implement → adversarial review → fix → merge** loop with a git
-worktree per agent. It is plain user configuration (not a core patch), so
-OpenCode updates do not break it, and it discovers automatically from the
+The plugin that runs a task through **implement → adversarial review → fix →
+merge**, with a git worktree per agent. This file is the **index**: what the
+plugin is, where it lives, what its eight tools do, and where the details
+are. The details live in the plugin's own repository - see
+[The plugin's own documentation](#the-plugins-own-documentation) at the end.
+
+## Where it lives
+
+| what | where |
+|---|---|
+| the source repository | `C:\Users\gpmpo\orchestration-plugin` |
+| the installed plugin | `C:\Users\gpmpo\.config\opencode\plugins\orchestration.ts` |
+| the installed implementation | `C:\Users\gpmpo\.config\opencode\orchestration\` |
+| the configuration | `C:\Users\gpmpo\.config\opencode\orchestration.json` |
+| the two configured projects | `C:\Users\gpmpo\orchestration-plugin\config\orchestration.json` |
+
+The installed copy is a **build of the source repository**, not the source
+itself: `node scripts/install.mjs` copies `src\` to `<config>\orchestration\`
+(where the loader does not find it) and `plugin\orchestration.ts` to
+`<config>\plugins\orchestration.ts`; `--config` installs the project
+configuration as well. **Edit the source repository, install, and the change is
+live.**
+
+It is plain user configuration - no core patch and no SDK import - so an
+OpenCode update does not break it, and it is discovered automatically from the
 global plugins directory.
 
-Its three tools are callable from the Code Mode `execute` runtime as
-`tools.orchestrate.*`:
+## The loop
+
+```
+plan → verify → review → fix → merge
+```
+
+Each step is one of the eight tools the orchestrator calls; the agent between
+them is a sub-agent. The tools are callable from the Code Mode `execute`
+runtime as `tools.orchestrate.*`.
 
 | tool | what it does |
 |---|---|
-| `plan({name, spec \| spec_file, base?})` | creates the task's worktree (`C:\Users\gpmpo\cs2-wt\<name>`) on `feat/<name>` off the integration tip, seeds it (copies the vendored Vulkan headers in), writes the spec into the worktree's `docs/orchestration/`, and returns the **implementer's prompt** |
-| `review({commit, base?, spec_file?, focus?})` | points the shared review worktree (`cs2-wt\rev`) at the commit and returns the **reviewer's prompt** (with the hostile-reviewer role) |
-| `merge({branch, message?, skip_tests?})` | merges the task branch into the integration branch (`feat/occlusion-penetration`) and runs the **whole verify loop**; it refuses to commit a tree that does not build, and on a conflict it reports and stops rather than committing something broken |
+| `plan({name, spec \| spec_file, base?, project?, sparse?, no_seed?})` | creates the task's worktree on `<prefix><name>` off the integration tip, seeds it (shared assets, shared dependencies, build directories **outside** the worktree), writes the spec into it, and returns the **implementer's prompt** |
+| `verify({task?, groups?, skip?, project?})` | runs the project's verify loop in a worktree - what the implementer and the fixer use to check their own work before anyone reviews it |
+| `review({commit, task?, base?, spec_file?, focus?, shared?, project?})` | points a review worktree at the commit and returns the **reviewer's prompt** (hostile by construction); the report is written to a fixed path, so the verdict can be read back before the merge |
+| `fix({task? \| branch?, findings?, report?, project?})` | takes the review's findings back to the implementer's worktree and returns the **fixer's prompt** |
+| `merge({branch, message?, task?, skip?, allow_unreviewed?, project?})` | merges the task branch into the integration branch - but only after the verify loop passes on the **merged tree** |
+| `status({project?})` | the task board: ahead, behind, dirty, merged, reviewed, disk usage |
+| `size({project?})` | what makes the worktrees big, and what to do about it |
+| `cleanup({task?, merged_only?, apply?, prune_branches?, remove_builds?, project?})` | removes the worktrees that are done with - safely (see [the junction guard](#the-junction-hazard-and-the-guard)) |
 
-`repo: 'cs2'` (default) is this project; `repo: 'rea'` is the TypeScript REA
-tool with its own npm/turbo verify loop.
+## The project configuration
 
-## The verify loop it runs
+A project is described by a configuration file:
 
-`meson compile -C build` → `meson test -C build` → the payload → the overlay →
-the injector → the Python suite → the mypy gate. **The Windows targets need
-`vcvars64`**, and the plugin runs them through `cmd.exe /c call vcvars64.bat
-...`.
+1. `~/.config/opencode/orchestration.json` - the global configuration,
+2. `<repository>/.orchestration.json` (or `.orchestration.jsonc`, or
+   `.opencode/orchestration.json`) - the repository's own, which **wins**.
 
-## The `vcvars64` quoting bug (fixed 2026-10-21)
+A repository with **no configuration at all is inferred** from what it
+contains: its stack, its build system, its test command, its integration
+branch, its house rules (`AGENTS.md`, `docs/style-guide.md`) and its reviewer
+role (`docs/orchestration/reviewer-role.md`). The generic hostile-reviewer role
+is used when there is none. The tools therefore work in an unknown repository
+without being set up first - which is what the plugin's own test suite proves,
+in a scratch repository it has never seen.
 
-The plugin's Windows-target steps **reported exit 1 for every build** even
-though the builds were fine. The cause was in `runInVcvars`: it passed the
-whole command line as a **single** `/c` argument:
+Every field is documented in the plugin's `docs\configuration.md`.
 
-```ts
-["/c", `call "${MSVC}" >nul 2>&1 && set CC=clang-cl && ... && ${args.join(" ")}`]
-```
+## The verify loop
 
-`execFile` with `shell: false` builds the Win32 command line by quoting each
-argument, and a single argument that already contains `"` loses its inner
-quotes to that quoting. `cmd.exe` therefore saw a **truncated path**, the
-`call` failed, and the step exited 1 with **no output at all** — which is why
-the failure looked like a build error and was not one.
+For this project the loop is:
 
-The fix is to pass the tokens as **separate argv entries** (each a plain word
-with no embedded quotes, so the quoting round-trips):
+| group | steps |
+|---|---|
+| `fast` | the host build (`meson compile`), the payload, the overlay, the injector |
+| `tests` | the host tests (`meson test`), the Python suite |
+| `slow` | the type gate |
 
-```ts
-["/c", "call", MSVC, ">", "nul", "2>&1", "&&", "set", "CC=clang-cl", "&&", ...args]
-```
+The three Windows targets need the MSVC environment, so they run inside
+`vcvars64`. The quoting rule that keeps them working - and the symptom of
+getting it wrong - is in the plugin's `docs\configuration.md` §"The Windows
+quoting rule".
 
-**Symptom to recognise:** a Windows-target step fails with **no output** and
-exit 1, while the same command run by hand succeeds. Always re-run the step
-by hand before believing it.
+**The merge verifies before it commits.** It does not commit first and verify
+afterwards: the merge is staged with `--no-ff --no-commit`, the verify loop
+runs against the **merged tree**, and only a tree that passes is committed. A
+conflict or a red verify loop aborts the merge and leaves the integration tree
+exactly as it was.
 
-## The rule about the vendored Vulkan headers
+The merge also **refuses** a branch that was never reviewed, or one whose
+review said **DO NOT SHIP**, unless `allow_unreviewed: true` is passed.
 
-`external/Vulkan-Headers` is gitignored, so a fresh worktree has none and the
-overlay build fails. **Copy them into each worktree; never junction or
-symlink them** — `git worktree remove --force` follows a directory junction
-and **deletes the contents of the target**. The plugin's `seed` does the copy.
+## The worktrees stay small
+
+A worktree of a big project does not have to be big. Five levers, all in the
+project configuration:
+
+| lever | what it does |
+|---|---|
+| `build_root` | the build directories live **outside** the worktree, in `<build_root>/<task>/<name>` |
+| `deps` | the dependency tree is installed **once**, keyed by the hash of the lockfile, and linked |
+| `assets` | a vendored or generated tree is shared through a **junction** instead of being copied |
+| `env` | a tool cache (`.mypy_cache`, the cargo target directory) is pointed at a shared directory |
+| `sparse` | a large tracked checkout becomes a cone-mode sparse checkout |
+
+The measured numbers for this project:
+
+| what a cs2 worktree held, before the levers | size |
+|---|---|
+| `external/dumper/target` - the Rust build output | 117 MB |
+| `build/` - the meson host build | 100 MB |
+| `build-payload/` - the meson payload build | 70 MB |
+| `external/Vulkan-Headers` - the vendored headers, copied per worktree | 45 MB |
+| `.mypy_cache` - the same cache in every worktree | 43 MB |
+| **the worktree, in total** | **374 MB** |
+| **the tracked sources** | **8 MB** |
+
+So the worktree was **374 MB and is now 8 MB**: the build output and the cargo
+target directory live in the build root, the mypy cache is shared, and **the
+vendored Vulkan headers are shared through a junction instead of being
+copied** - zero bytes in the worktree. The whole story is in the plugin's
+`docs\worktree-size.md`.
+
+## The junction hazard, and the guard
+
+This is the rule that must not be lost.
+
+**`git worktree remove --force` follows a directory junction and deletes the
+contents of the target.** A junction inside a worktree points at a shared
+tree, and removing the worktree takes the shared tree with it. That is how
+the vendored Vulkan headers were destroyed on this machine once.
+
+So the plugin:
+
+1. **records** every link it makes, in
+   `<worktrees>\.orchestration\links\<task>.json`,
+2. **unlinks** them - the link, never what it points at - before it removes a
+   worktree,
+3. **scans** the worktree for any junction it did *not* make, and unlinks that
+   too, and
+4. never removes a worktree with `--force` before that scan.
+
+`orchestrate.cleanup` is the tool that removes worktrees, and it unlinks
+before it removes. `test/links.test.ts` in the plugin's repository is the test
+that holds the line: it creates a junction, unlinks it, and asserts that the
+target's content is still there.
+
+## The plugin's own documentation
+
+The details live in the plugin's repository, not here:
+
+| document | what it holds |
+|---|---|
+| `C:\Users\gpmpo\orchestration-plugin\README.md` | the loop, the eight tools, the install |
+| `C:\Users\gpmpo\orchestration-plugin\docs\configuration.md` | every configuration field, the verify step, the Windows quoting rule |
+| `C:\Users\gpmpo\orchestration-plugin\docs\worktree-size.md` | the five levers, the measurements, the junction guard |
+
+## This repository's own orchestration files
+
+| file | what it is |
+|---|---|
+| `docs/orchestration/feature-brief.md` | the shared brief, given to the reviewer |
+| `docs/orchestration/reviewer-role.md` | the reviewer's role - the hostile reviewer, by construction |
+| `docs/orchestration/review-prompt-template.md` | the prompt the reviewer is given |
+| `docs/orchestration/spec-*.md` | the written specification of a task - the same text goes to the implementer and the reviewer |
+
