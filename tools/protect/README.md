@@ -569,6 +569,18 @@ The `direct` lines name the **distinct** cross-TU callees that a protected
 function still calls directly: the payload check compares them with the
 symbols the payload's own libraries define (§11).
 
+The `direct` lines are **not** only about the payload's own code: they
+name every declaration a protected function calls directly, and that
+includes the CRT's (`atan2f`, `operator delete`, `_Query_perf_counter`).
+Those are imports, the payload does not own them, and the check counts them
+as "left alone" (§11).
+
+The two extra fields — the symbol of a `cross` line and the reason of a
+`direct` line — are **not** in the parent specification's example of the
+format (`cross <state> <pattern>` and `direct <symbol>`). The readers
+accept both: the two fields are optional, so a coverage file written in
+either spelling is read.
+
 The `fn` line carries one more key, `cross=`: the number of the cross-TU
 rewrites of that function.
 
@@ -1053,6 +1065,12 @@ When the libraries or the `llvm-nm` cannot be found, the check **says so**
 and **fails**: a rule that cannot be evaluated must not be reported as
 passed. The "no coverage, no image comparison" mode of the check (the
 manual run without `--coverage`) skips the rules that need the evidence.
+
+The libraries and the objects are looked for in the **current working
+directory**, so the check has to be run from the build directory (the
+build does that, and a manual run has to `cd` there). Run from anywhere
+else, the check finds no library and **fails** with the message above: it
+does not guess where the payload's own code is.
 
 ### The check is part of the build
 

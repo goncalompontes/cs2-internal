@@ -25,6 +25,7 @@ import contextlib
 import hashlib
 import io
 import shutil
+import struct
 import sys
 import tempfile
 from collections.abc import Callable
@@ -37,7 +38,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import check_policy  # noqa: E402
 import check_payload  # noqa: E402
 from check_payload import check_cross_module_entries, check_direct_callees  # noqa: E402
-from protect_checks import Coverage, Failure, PeImage, read_coverage  # noqa: E402
+from protect_checks import (  # noqa: E402
+    Coverage,
+    DispatchSite,
+    Failure,
+    PeImage,
+    mix64,
+    read_coverage,
+)
 
 
 class TestFailure(Exception):
@@ -315,6 +323,137 @@ def check_the_image_reader() -> None:
         raise TestFailure(f"the reader accepted {data!r} as a PE image")
 
 
+#: The image base of the synthetic image the table test builds.
+IMAGE_BASE = 0x180000000
+
+#: The RVA of the `.text` section of the synthetic image.
+TEXT_RVA = 0x1000
+
+#: The RVA of the `.rdata` section of the synthetic image.
+RDATA_RVA = 0x2000
+
+
+def synthetic_image(rdata: bytes) -> bytes:
+    """A PE image with a `.text` section and a `.rdata` section.
+
+    The image is the smallest one the reader of the check accepts: the
+    tests of the table lookup need a `.text` (the code addresses of the
+    table have to be in it) and a `.rdata` (the table and its descriptor).
+    """
+    text = bytes(0x100)
+    headers = bytearray(0x200)
+    headers[0:2] = b"MZ"
+    struct.pack_into("<I", headers, 0x3C, 0x80)
+    headers[0x80:0x84] = b"PE\0\0"
+    coff = 0x84
+    struct.pack_into("<H", headers, coff, 0x8664)        # the machine
+    struct.pack_into("<H", headers, coff + 2, 2)         # the number of sections
+    struct.pack_into("<H", headers, coff + 16, 0xF0)     # the size of the optional header
+    optional = coff + 20
+    struct.pack_into("<H", headers, optional, 0x20B)     # PE32+
+    struct.pack_into("<Q", headers, optional + 24, IMAGE_BASE)
+    struct.pack_into("<I", headers, optional + 108, 16)  # the number of the directories
+    table = optional + 0xF0
+    sections = ((".text", TEXT_RVA, len(text), len(headers)),
+                (".rdata", RDATA_RVA, len(rdata), len(headers) + len(text)))
+    for index, (name, rva, size, offset) in enumerate(sections):
+        header = table + index * 40
+        headers[header:header + len(name)] = name.encode("ascii")
+        struct.pack_into("<IIII", headers, header + 8, size, rva, size, offset)
+    body = bytearray(headers)
+    body += text
+    body += rdata
+    return bytes(body)
+
+
+def check_the_table_lookup(root: Path) -> None:
+    """The table of a module is found, and it is the module's **own** table.
+
+    The check decodes the descriptor of a dispatch in the table of the
+    module, and it finds the table by its **content**: a run of code
+    addresses in the read-only data whose descriptor follows it.
+
+    Two things have to hold:
+
+    * the run may be **longer** than the table. The linker may put two
+      tables of the same size next to each other, or a global that holds a
+      code address right after the table. A scan that only accepts a run of
+      exactly `table_size` addresses does not find the table then, and the
+      check fails with "the dispatch does not decode to a callee of the
+      image" -- a baffling message for a pure layout change;
+    * the table the check reads is the **module's own** table. The content
+      of a run of code addresses does not say which module it belongs to,
+      so the link between a dispatch and its table comes from the register
+      the dispatch calls through (the `leaq` that loaded it). The content
+      scan is the **fallback**, for the sites where that tracking failed.
+    """
+    # The coverage entry of the module: the table size, the descriptor size
+    # and the key the call site uses.
+    tree = root / "table-tree"
+    (tree / "payload").mkdir(parents=True)
+    source = tree / "payload" / "solver.cpp"
+    source.write_text("int main() { return 0; }\n", encoding="utf-8")
+    policy = root / "table-policy.json"
+    policy.write_text('{"protect": ["cs2::aim::solve"]}\n', encoding="utf-8")
+    policy_digest = digest_of(policy.read_bytes())
+    coverage = root / "table-coverage"
+    coverage.mkdir()
+    write_coverage(coverage / "0x1.cov", policy_digest, source, 7)
+    entry = Coverage(coverage / "0x1.cov")
+    check(entry.intact, "the coverage of the table test is not intact")
+
+    # The key the call site mixes: the xor of the three parts of the key.
+    mixed = mix64(0x1 ^ 0x2 ^ 0x3)
+
+    def code(offset: int) -> int:
+        """A code address of the `.text` section."""
+        return IMAGE_BASE + TEXT_RVA + offset
+
+    #: The table of the module, and the table of another module.
+    table = [code(0x10), code(0x20)]
+    other = [code(0x30), code(0x40)]
+    #: The descriptor of the module: the encrypted indices of its call sites.
+    descriptor = [mixed ^ 0, mixed ^ 1, mixed ^ 0]
+
+    def rdata_bytes(runs: list[list[int]]) -> bytes:
+        """The read-only data of the given runs of 64-bit values."""
+        out = bytearray()
+        for run in runs:
+            for value in run:
+                out += struct.pack("<Q", value)
+        return bytes(out)
+
+    # The plain layout: the run is exactly the table, and the descriptor
+    # follows it.
+    plain = PeImage(synthetic_image(rdata_bytes([table, descriptor])))
+    found = check_payload.tables_of(plain, entry, RDATA_RVA + 8 * len(table))
+    check(found == [RDATA_RVA],
+          f"the table of the plain layout was not found: {found}")
+
+    # Two tables of the same size next to each other: the run is twice as
+    # long as the table. The scan has to find the module's own table -- the
+    # second one -- and not give up.
+    adjacent = PeImage(synthetic_image(rdata_bytes([other, table, descriptor])))
+    slot = RDATA_RVA + 8 * (len(other) + len(table))
+    found = check_payload.tables_of(adjacent, entry, slot)
+    check(RDATA_RVA + 8 * len(other) in found,
+          f"the table of the adjacent layout was not found: {found}")
+
+    # And the dispatch reads **its own** table, not the one that happens to
+    # be next to it: the tracked table is the module's.
+    site = DispatchSite(0, RDATA_RVA + 8 * len(other), [slot])
+    resolved = check_payload.resolve_site(adjacent, site, entry)
+    check(resolved == table[0],
+          f"the dispatch resolved to {resolved}, not the table of the module ({table[0]})")
+
+    # A global that holds a code address right after the table: the run is
+    # one address longer than the table.
+    trailing = PeImage(synthetic_image(rdata_bytes([table + [code(0x50)], descriptor])))
+    found = check_payload.tables_of(trailing, entry, RDATA_RVA + 8 * (len(table) + 1))
+    check(RDATA_RVA in found,
+          f"the table before the code-address global was not found: {found}")
+
+
 def run_check_policy(policy: Path, coverage: Path) -> int:
     """Runs the policy checker and returns its exit code."""
     with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
@@ -490,6 +629,7 @@ def main() -> int:
             check_the_readers(root)
             check_the_cross_module_rule(root)
             check_the_payload_rules(root)
+            check_the_table_lookup(root)
         finally:
             shutil.rmtree(root, ignore_errors=True)
     except TestFailure as error:
