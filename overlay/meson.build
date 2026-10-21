@@ -76,7 +76,8 @@ overlay_layer = shared_library('cs2_overlay_layer',
   'src/menu.cpp',
   'src/transport.cpp',
   imgui_sources,
-  include_directories : [vulkan_headers, overlay_inc, imgui_inc],
+  include_directories : [vulkan_headers, overlay_inc, imgui_inc,
+                         include_directories('../payload/core/include')],
   dependencies : overlay_deps,
   # ImGui must resolve Vulkan entry points via the layer chain, not the loader's
   # global exports (see renderer.cpp).
