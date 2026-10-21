@@ -49,7 +49,10 @@ jobs:
       - name: the build tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install meson ninja mypy
+          python -m pip install meson ninja
+          # The pinned gate tools (mypy, clang-tidy). The file's own rule:
+          # "a gate that changes its mind between runs is not a gate".
+          python -m pip install -r requirements-dev.txt
 
       - name: the compiler (clang-cl) and the LLVM tools
         run: |
@@ -110,5 +113,13 @@ jobs:
       - name: the type gate
         run: python scripts/typecheck.py
 
+      # The style gate runs the **pinned** clang-tidy (the LLVM release the
+      # gated groups were baselined with). The runner ships its own LLVM, so
+      # the pinned binary is put first on PATH: otherwise the gate would
+      # silently run a different version and its verdict would mean nothing.
       - name: the style gate
-        run: python scripts/clang-tidy-fix.py --check
+        run: |
+          $pinned = python -c "import clang_tidy, os; print(os.path.join(os.path.dirname(clang_tidy.__file__), 'data', 'bin'))"
+          $env:PATH = "$pinned;$env:PATH"
+          clang-tidy --version
+          python scripts/clang-tidy-fix.py --check

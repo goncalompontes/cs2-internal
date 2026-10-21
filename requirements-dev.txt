@@ -13,6 +13,13 @@
 # (`[tool.mypy]`).
 mypy==1.14.1
 
+# The style gate's clang-tidy (`scripts/clang-tidy-fix.py --check`). Pinned to
+# the LLVM release the gated groups were baselined with: a gate that changes
+# its mind between runs is not a gate. The package ships the LLVM binary; the
+# CI puts it first on PATH so the gate cannot silently run the runner's own
+# (unpinned) LLVM.
+clang-tidy==22.1.8
+
 # The MCP SDK. Only the *reference client* test needs it (it drives the MCP
 # server with the real client); that test is skipped when the package is
 # absent, because the server itself is standard library only.
