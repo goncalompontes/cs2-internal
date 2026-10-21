@@ -605,6 +605,7 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16
 @.str.compare = private unnamed_addr constant [9 x i8] c"compared\00"
 @.str.address = private unnamed_addr constant [8 x i8] c"address\00"
 @.str.twoblock = private unnamed_addr constant [9 x i8] c"twoblock\00"
+@.str.tworeasons = private unnamed_addr constant [10 x i8] c"tworeason\00"
 @.str.aspace = internal addrspace(1) constant [8 x i8] c"aspace1\00"
 
 @global.init = private constant { ptr, i64 } { ptr @.str.escapes, i64 7 }
@@ -646,6 +647,19 @@ entry:
   %c = load i8, ptr @.str.optnone
   store i8 %c, ptr %out
   ret void
+}
+
+define void @uses_two_reasons_optnone(ptr %out) noinline optnone {
+entry:
+  %c = load i8, ptr @.str.tworeasons
+  store i8 %c, ptr %out
+  ret void
+}
+
+define i1 @compares_two_reasons() {
+entry:
+  %c = icmp eq ptr @.str.tworeasons, null
+  ret i1 %c
 }
 
 define void @uses_virtual(ptr %out) {
@@ -818,6 +832,12 @@ void test_string_gate() {
                "a literal whose address is taken as an integer is refused");
   check_reason(".str.aspace", cs2::protect::StringSkipReason::unsupported_address_space,
                "a literal in another address space is refused");
+  // A literal with **two** reasons has one verdict: the first *rule* of the
+  // table that holds. The use list of the literal is the module's, and the
+  // last use comes first, so the use the old gate answered with (the
+  // unrewritable one) is the first of the list.
+  check_reason(".str.tworeasons", cs2::protect::StringSkipReason::optnone_function,
+               "a literal with two reasons is refused with the first rule that holds");
 }
 
 /// The transform: the literal leaves the image, the blob and the decode are
