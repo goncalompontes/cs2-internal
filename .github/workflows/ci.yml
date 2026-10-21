@@ -40,9 +40,10 @@
 # install a specific LLVM from a package the runner already has, and no pip
 # package that ships the compiler. The tree was verified locally with
 # clang-cl 22.1.8; the image (windows-2025) ships 20.1.8, which maps
-# /std:c++latest to the same -std=c++26 and the same __cplusplus (202400),
-# and the tree has no __cplusplus conditionals and no clang-21+ language
-# features -- so the exposure is low, but it is **not** verified. If the
+# /std:c++latest to the same -std=c++26. No __cplusplus *value* is assumed:
+# the tree has no __cplusplus conditionals of its own, so the two compilers
+# do not have to agree on one. The tree uses no clang-21+ language features
+# either -- so the exposure is low, but it is **not** verified. If the
 # image's LLVM ever changes in a way that matters, the fix is to pin it (the
 # way clang-tidy is pinned) or to move the payload build into a container.
 #
