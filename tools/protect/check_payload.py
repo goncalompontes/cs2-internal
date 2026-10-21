@@ -641,11 +641,12 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
         # protection.
         plain_whole, plain_part = scan_literals(plain_runs, by_length, seed, forms)
         missing = everywhere - (plain_whole | plain_part)
-        check(
-            not missing,
-            f"the unprotected image does not hold the plaintext of {len(missing)} protected "
-            f"strings (sha256 {sorted(missing)[0][:12]}): the check would be vacuous",
-        )
+        if missing:
+            check(
+                False,
+                f"the unprotected image does not hold the plaintext of {len(missing)} protected "
+                f"strings (sha256 {sorted(missing)[0][:12]}): the check would be vacuous",
+            )
         print(f"check_payload: the unprotected image holds the plaintext of all the "
               f"{len(everywhere)} protected strings")
 
