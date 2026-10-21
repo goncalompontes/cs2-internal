@@ -149,9 +149,10 @@ inline constexpr std::uintptr_t k_render_component_view_models = 0x50;
 // guard only has to be *seen* by the thread that re-enters.
 std::atomic<int> g_draw_depth{0};
 
-// Is the draw hook's **target** verified?
+// The draw hook's **target** — and why it is verified at run time.
 //
-// The address the hook patches was derived from an MSVC RTTI *lambda* type:
+// The address the hook used to patch was derived from an MSVC RTTI *lambda*
+// type:
 // `DrawPrimitive@CAnimatableSceneObjectDesc@@QEAAXPEAVIRenderContext@@PEAUCMeshDrawPrimitive_t@@PEBVIMaterial2@@PEAVIMaterialMode@@AEAUDrawValues_t@@_NAEAUScSceneSystemPerFrameStats_t@@PEAVIScSceneLayer@@`.
 //
 // Decoded, that is a **member** function: `Q` public, `E` 64-bit, `A` __cdecl,
