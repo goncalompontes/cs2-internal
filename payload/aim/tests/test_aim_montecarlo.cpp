@@ -473,6 +473,65 @@ auto main() -> int {
            "the modelled weapon still draws its samples");
   }
 
+  // --- 10. the can-kill key is judged per target ----------------------------
+  {
+    // Two targets: A is a chest at 100 units (35 damage, 40 hp left) and B is a
+    // head at 100.4 units (140 damage, 100 hp). The cone covers both, so the
+    // scene's mean damage (45.25) is the mixture of A's 35 and B's 140 — but **A
+    // can never die** from a 35-damage chest hit. The rule's first key must be
+    // judged against A's **own** damage (the review's M2: the aggregate was
+    // attributed to one target, and the key beat every honest candidate).
+    Hitbox a;
+    a.is_capsule = true;
+    a.capsule = sphere(Vec3{.x = 100.0F, .y = 0.0F, .z = 0.0F}, 3.0F);
+    a.multiplier = 1.0F;
+    a.target = 1;
+    a.group = cs2::aim::HITGROUP_CHEST;
+    Hitbox b;
+    b.is_capsule = true;
+    b.capsule = sphere(Vec3{.x = 100.4F, .y = 2.4F, .z = 0.0F}, 3.0F);
+    b.multiplier = 4.0F;
+    b.target = 2;
+    b.group = cs2::aim::HITGROUP_HEAD;
+    const std::vector<Hitbox> hitboxes{a, b};
+    const std::vector<TargetHealth> health{TargetHealth{.index = 1, .health = 40.0F},
+                                           TargetHealth{.index = 2, .health = 100.0F}};
+    MonteCarloInput input;
+    input.hitboxes = hitboxes;
+    input.targets = health;
+    input.weapon.damage = 35.0F;
+    input.weapon.range_modifier = 1.0F;
+    input.kernel = SpreadKernel{.spread = 0.03F, .inaccuracy = 0.0F, .pellets = 1};
+    input.samples = 256;
+
+    const auto chance = cs2::aim::evaluate_hit_chance(input, Vec2{});
+    expect(chance.has_value(), "the two-target case evaluates");
+    expect(chance->target == 1, "the nearest hit names the chest target");
+    expect(near(chance->expected_damage, 45.25F, 0.05F),
+           "the scene's mean damage is the mixture of the two targets");
+    expect(chance->target_damage <= 35.0F,
+           "the damage attributed to the chest target is at most one chest hit");
+    expect(chance->target_damage < chance->expected_damage,
+           "the attributed damage is not the scene's aggregate");
+    expect(chance->target_damage < 40.0F, "the chest target cannot die from that damage");
+
+    const std::vector<cs2::aim::Cell> cells{cell_at(Vec2{}, 1.0F)};
+    const auto choice = cs2::aim::solve_montecarlo(input, cells);
+    expect(choice.has_value(), "the two-target search solves");
+    expect(!choice->can_kill, "a target that cannot die is not a kill");
+
+    // The single-target case is unchanged: every sample's damage belongs to the
+    // one target, so the attributed damage is the scene's mean.
+    const std::vector<Hitbox> one_target{a};
+    input.hitboxes = one_target;
+    const TargetHealth only{.index = 1, .health = 40.0F};
+    input.targets = std::span<const TargetHealth>{&only, 1};
+    const auto single = cs2::aim::evaluate_hit_chance(input, Vec2{});
+    expect(single.has_value(), "the single-target case evaluates");
+    expect(near(single->target_damage, single->expected_damage, 1e-3F),
+           "one target: the attributed damage is the scene's mean");
+  }
+
   if (failures == 0) {
     std::printf("aim-montecarlo: ok\n");
     return 0;

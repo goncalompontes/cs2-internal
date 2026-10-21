@@ -51,6 +51,7 @@ enum class MonteCarloError : std::uint8_t {
   too_many_pellets,     ///< more pellets than `MAX_PELLETS`
   unsupported_pattern,  ///< the weapon's pellet pattern is not modelled
   no_candidates,        ///< the candidate set is empty
+  too_many_targets,     ///< more candidate targets than `MAX_TRACKED_TARGETS`
 };
 
 [[nodiscard]] auto to_string(MonteCarloError error) noexcept -> const char*;
@@ -202,6 +203,14 @@ struct HitChance {
   int hits = 0;                  ///< how many of them hit
   int target = -1;               ///< the target of the nearest hit, -1 when nothing hit
   int hitgroup = 0;              ///< the hitgroup of the nearest hit
+  // The mean damage the samples did **to `target`** — the per-target attribution.
+  //
+  // `expected_damage` is the **scene's** mean: in a multi-target scene it sums the
+  // damage of every target a sample hit, so it says nothing about whether the
+  // named target dies. The can-kill key is judged against **this** number and
+  // `target`'s own health (the review's M2: the aggregate was attributed to one
+  // target, and the rule's first key beat every honest candidate with it).
+  float target_damage = 0.0F;
   // Which seed policy produced the number. The two policies answer the ledger's
   // question differently (§ the header's `SeedSource`), so a number that does not
   // say which one it came from cannot be read.
@@ -287,14 +296,15 @@ struct MonteCarloChoice {
   HitChance chance{};     ///< its verdict
   int target = -1;        ///< the target of the nearest hit
   int hitgroup = 0;       ///< the hitgroup of the nearest hit
-  bool can_kill = false;  ///< does its expected damage reach the target's health?
+  bool can_kill = false;  ///< does the damage attributed to the target reach the
+                          ///< target's remaining health?
 };
 
 // The search: the bounded evaluation over the candidate set and the **lexicographic**
 // selection rule (the community's, `docs/research/aim-objective-math.md` §2):
 //
-//   1. a candidate that **can kill** (its expected damage reaches the target's
-//      remaining health) beats one that cannot;
+//   1. a candidate that **can kill** (the damage **attributed to its target**
+//      reaches that target's remaining health) beats one that cannot;
 //   2. then the **highest probability of any hit**;
 //   3. then the **hitgroup preference** (head before body);
 //   4. then the highest expected damage (the final tie-break).

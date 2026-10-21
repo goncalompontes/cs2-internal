@@ -730,14 +730,24 @@ function of the field's size.
 The selection is the community's **lexicographic** rule
 (`docs/research/aim-objective-math.md` §2):
 
-1. a candidate that **can kill** (its expected damage reaches the target's
-   remaining health) beats one that cannot;
+1. a candidate that **can kill** beats one that cannot;
 2. then the **highest probability of any hit**;
 3. then the **hitgroup preference** — the repo has no ordered hitgroup list of its
    own (the "head beats body" test works through the damage multiplier, not through
    an order), so the module states the order it uses: **head, chest, stomach,
    generic (neck/pelvis), arms, legs** (`hitgroup_preference`);
 4. then the highest expected damage (the final tie-break).
+
+> **"Can kill" is judged per target.** The damage a sample does belongs to the
+> target it hit, so the key is `the damage attributed to the candidate's target ≥
+> that target's remaining health` (`HitChance::target_damage`). The scene's mean
+> damage (`expected_damage`) is a different number — in a multi-target scene it is
+> the mixture of every target a sample hit — and it says **nothing** about whether
+> the named target dies. The first version compared the aggregate with one target's
+> health (the review's M2): a chest target with 40 hp left and 35 damage per hit
+> was reported as `can kill` because a *second* target's head hits were in the
+> average, and since "can kill" is the rule's **first** key, that candidate beat
+> every honest one.
 
 ### 13.6 The measured cost
 

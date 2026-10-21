@@ -22,6 +22,12 @@ constexpr float ANGLE_HASH_QUANTUM = 1.0e-4F;
 // `1 / samples` and never land this close by accident).
 constexpr float TIE_EPSILON = 1.0e-6F;
 
+// The number of candidate targets whose damage the estimator can attribute at once.
+// The accumulator is a fixed-size local scratch (the payload is manually mapped —
+// no heap on the hot path), so the health list is bounded: more targets than this
+// is an error, never a silently wrong attribution.
+constexpr int MAX_TRACKED_TARGETS = 32;
+
 // The engine's per-pellet draw, in the engine's order (`docs/re/aim.md` §"The spread
 // cone"):
 //
@@ -96,6 +102,8 @@ auto to_string(MonteCarloError error) noexcept -> const char* {
       return "unsupported_pattern";
     case MonteCarloError::no_candidates:
       return "no_candidates";
+    case MonteCarloError::too_many_targets:
+      return "too_many_targets";
   }
   return "unknown";
 }
@@ -254,10 +262,19 @@ auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
   if (input.kernel.pellets > MAX_PELLETS) {
     return std::unexpected(MonteCarloError::too_many_pellets);
   }
+  if (input.targets.size() > static_cast<std::size_t>(MAX_TRACKED_TARGETS)) {
+    return std::unexpected(MonteCarloError::too_many_targets);
+  }
 
   HitChance chance{};
   chance.samples = input.samples;
   chance.source = input.seed.source;
+  // The per-target damage accumulator: a sample's damage belongs to the target it
+  // hit, so the can-kill key can be judged against **that** target's health. The
+  // accumulator is indexed by the position of the target in `input.targets` (the
+  // health list) and is a fixed-size local scratch — the payload must not allocate
+  // on the hot path.
+  std::array<float, MAX_TRACKED_TARGETS> damage_by_target{};
   float damage_total = 0.0F;
   float nearest = 0.0F;
   bool have_nearest = false;
@@ -272,6 +289,12 @@ auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
     }
     ++chance.hits;
     damage_total += sample->damage;
+    for (std::size_t slot = 0; slot < input.targets.size(); ++slot) {
+      if (input.targets[slot].index == sample->target) {
+        damage_by_target[slot] += sample->damage;
+        break;
+      }
+    }
     if (!have_nearest || sample->distance < nearest) {
       have_nearest = true;
       nearest = sample->distance;
@@ -281,6 +304,15 @@ auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
   }
   chance.probability = static_cast<float>(chance.hits) / static_cast<float>(input.samples);
   chance.expected_damage = damage_total / static_cast<float>(input.samples);
+  // The damage **attributed to the target of the nearest hit**: the can-kill key is
+  // judged against this number and that target's own health, never against the
+  // scene's aggregate.
+  for (std::size_t slot = 0; slot < input.targets.size(); ++slot) {
+    if (input.targets[slot].index == chance.target) {
+      chance.target_damage = damage_by_target[slot] / static_cast<float>(input.samples);
+      break;
+    }
+  }
   return chance;
 }
 
@@ -331,11 +363,15 @@ auto solve_montecarlo(const MonteCarloInput& input, std::span<const Cell> cells,
     if (!chance.has_value()) {
       return std::unexpected(chance.error());
     }
-    // Can kill: the candidate's expected damage reaches the target's remaining
-    // health. An unknown target's health is not a proof, so it does not kill.
+    // Can kill: the damage **attributed to the candidate's target** reaches that
+    // target's remaining health. The scene's mean damage would say nothing about
+    // whether the named target dies — in a multi-target scene it sums the damage of
+    // every target a sample hit, so an aggregate could declare a kill that cannot
+    // happen (the review's M2). An unknown target's health is not a proof, so it
+    // does not kill.
     bool kills = false;
     if (const auto health = remaining_health(input, chance->target); health.has_value()) {
-      kills = chance->expected_damage >= *health;
+      kills = chance->target_damage >= *health;
     }
     if (!best.valid || better(*chance, kills, best.chance, best.can_kill)) {
       best.valid = true;
