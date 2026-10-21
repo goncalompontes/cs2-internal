@@ -152,19 +152,17 @@ void test_the_bound_is_the_observed_snapshot_interval() {
   assert(animfix::snapshot_bound_ms(clock) == animfix::k_min_snapshot_interval_ms);
   // A 64 Hz server: the interval is ~16 ms.
   animfix::observe_decode(clock, 1000);
-  assert(animfix::snapshot_bound_ms(clock) == animfix::k_min_snapshot_interval_ms);
   animfix::observe_decode(clock, 1016);
   assert(animfix::snapshot_bound_ms(clock) == 16);
   // A 30 Hz server: the interval is ~33 ms, and the bound follows it.
   animfix::SnapshotClock slow{};
   animfix::observe_decode(slow, 1000);
   animfix::observe_decode(slow, 1033);
+  animfix::observe_decode(slow, 1066);
   assert(animfix::snapshot_bound_ms(slow) == 33);
   // A **stall** must not loosen the bound: a stalled connection produces no
-  // new decodes at all, so the average stays at the server's normal rate and
-  // the capture ages out against it. (A single late snapshot does move the
-  // average - the server really did take that long - but a stall is the
-  // absence of snapshots, and that is what must not widen the window.)
+  // new decodes at all, so the estimate stays at the server's normal rate
+  // and the capture ages out against it.
   const std::uint64_t bound_before = animfix::snapshot_bound_ms(clock);
   // ... time passes, no decode ...
   assert(animfix::snapshot_bound_ms(clock) == bound_before);
@@ -173,6 +171,40 @@ void test_the_bound_is_the_observed_snapshot_interval() {
   assert(!animfix::decide(stalled, animfix::Slot::aim_yaw, 1000 + bound_before + 1, bound_before,
                           k_controller)
               .reapply);
+}
+
+// **A late decode must not widen the bound.** One snapshot that arrives
+// 500 ms late (a packet-reordering burst, a Wi-Fi stall, a server-side
+// hitch) must not turn the window into a half-second one: with such a
+// window a capture that is a hundred milliseconds old would be written over
+// the client's fresh prediction, which is the one thing the bound exists to
+// prevent.
+//
+// The estimate is the **median** of the observed intervals, so an outlier
+// cannot move it - in either direction.
+void test_a_late_decode_does_not_widen_the_bound() {
+  animfix::SnapshotClock clock{};
+  // A healthy 64 Hz stream.
+  for (int i = 0; i < 8; ++i) {
+    animfix::observe_decode(clock, 1000 + static_cast<std::uint64_t>(i) * 16);
+  }
+  const std::uint64_t healthy = animfix::snapshot_bound_ms(clock);
+  assert(healthy == 16);
+  // One late decode.
+  animfix::observe_decode(clock, 1000 + 7 * 16 + 500);
+  assert(animfix::snapshot_bound_ms(clock) == healthy);
+  // And a capture that is older than the healthy bound is still refused.
+  const animfix::Capture capture = captured_at(1000);
+  assert(
+      !animfix::decide(capture, animfix::Slot::aim_yaw, 1000 + healthy + 1, healthy, k_controller)
+           .reapply);
+  // A single **fast** decode does not move it either.
+  animfix::SnapshotClock fast{};
+  for (int i = 0; i < 8; ++i) {
+    animfix::observe_decode(fast, 1000 + static_cast<std::uint64_t>(i) * 16);
+  }
+  animfix::observe_decode(fast, 1000 + 7 * 16 + 2);
+  assert(animfix::snapshot_bound_ms(fast) == 16);
 }
 
 // --- the validity rule --------------------------------------------------------
@@ -512,6 +544,7 @@ auto main(int argc, char** argv) -> int {
   test_the_parameter_layout_is_the_engines();
   test_the_engines_own_guard_is_reproduced();
   test_the_bound_is_the_observed_snapshot_interval();
+  test_a_late_decode_does_not_widen_the_bound();
   test_nothing_is_reapplied_before_the_first_capture();
   test_a_fresh_capture_is_reapplied();
   test_an_aged_out_capture_is_refused();

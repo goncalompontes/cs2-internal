@@ -45,6 +45,7 @@
 // The maths here is pure and platform-independent: the host test
 // (`payload/control/tests/test_control_animfix.cpp`) pins it.
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -194,46 +195,73 @@ inline constexpr double k_engine_value_limit = 2.1474836e9;
 // --- the staleness bound ----------------------------------------------------
 
 // The shortest snapshot interval the animfix assumes.
-//
-// The bound is **not** the client's frame rate: what goes stale is the
-// *server's* value, and how old it can be is the server's **snapshot
-// interval** — the time between two decodes. A server that sends its
-// snapshots at 30 Hz delivers values that are up to 33 ms old, and refusing
-// them because the client draws at 60 Hz would make the animfix inert on
-// every server but the default one.
-//
-// The floor covers the interval between a decode and the anim tick that
-// consumes it (the correction lands a few milliseconds after the decode).
 inline constexpr std::uint64_t k_min_snapshot_interval_ms = 8;
 
-// The animfix's estimate of the server's snapshot interval: an exponential
-// moving average of the time between two decodes.
+// The longest: beyond a quarter of a second the server's value is not the
+// server's current animation under any reading, so it is refused however the
+// measured interval looks.
+inline constexpr std::uint64_t k_max_snapshot_interval_ms = 250;
+
+// How many intervals the estimate is taken over.
 //
-// The average (rather than the last interval) is what keeps a **stall** from
-// loosening the bound: a stalled connection produces no new decodes at all, so
-// the average stays at the server's normal rate and the capture ages out
-// against it.
+// The estimate is the **median** of the window, and that is what makes it
+// robust in both directions: a single **late** decode (a packet-reordering
+// burst, a Wi-Fi stall, a server-side hitch) cannot move the median, and
+// neither can a single fast one. A plain average would be inflated by the
+// late decode - and an inflated bound is exactly the failure the bound
+// exists to prevent: a capture that is minutes old would be written over
+// the client's fresh prediction.
+inline constexpr std::size_t k_snapshot_window = 8;
+
+// The animfix's estimate of the server's snapshot interval: the observed
+// intervals, and the time of the last decode.
+//
+// The window is filled from the *accepted* intervals - every interval is
+// kept, and the median is what discards the outliers - so a stall (which
+// produces no decodes at all) cannot widen the window either: the estimate
+// only changes when a decode happens.
 struct SnapshotClock {
+  std::array<std::uint64_t, k_snapshot_window> samples{};
+  std::size_t count{0};
   std::uint64_t last_ms{0};
-  std::uint64_t average_ms{0};
   bool seen{false};
 };
 
-// A decode happened at `now_ms`: fold the interval since the previous one
-// into the average.
+// A decode happened at `now_ms`: record the interval since the previous one.
 inline void observe_decode(SnapshotClock& clock, std::uint64_t now_ms) noexcept {
   if (clock.seen && now_ms > clock.last_ms) {
-    const std::uint64_t interval = now_ms - clock.last_ms;
-    clock.average_ms = clock.average_ms == 0 ? interval : (clock.average_ms * 3 + interval) / 4;
+    clock.samples[clock.count % k_snapshot_window] = now_ms - clock.last_ms;
+    if (clock.count < k_snapshot_window) {
+      ++clock.count;
+    }
   }
   clock.last_ms = now_ms;
   clock.seen = true;
 }
 
-// The staleness bound: the observed snapshot interval, with the floor.
+// The server's snapshot interval, in milliseconds: the **median** of the
+// observed intervals. Zero until the first interval has been seen.
+[[nodiscard]] inline auto snapshot_interval_ms(const SnapshotClock& clock) noexcept
+    -> std::uint64_t {
+  if (clock.count == 0) {
+    return 0;
+  }
+  std::array<std::uint64_t, k_snapshot_window> sorted = clock.samples;
+  std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(clock.count));
+  return sorted[(clock.count - 1) / 2];
+}
+
+// The staleness bound: the observed snapshot interval, clamped to the floor
+// and to the hard maximum.
 [[nodiscard]] inline auto snapshot_bound_ms(const SnapshotClock& clock) noexcept -> std::uint64_t {
-  return clock.average_ms > k_min_snapshot_interval_ms ? clock.average_ms
-                                                       : k_min_snapshot_interval_ms;
+  const std::uint64_t interval = snapshot_interval_ms(clock);
+  if (interval == 0) {
+    return k_min_snapshot_interval_ms;
+  }
+  if (interval > k_max_snapshot_interval_ms) {
+    return k_max_snapshot_interval_ms;
+  }
+  return interval > k_min_snapshot_interval_ms ? interval : k_min_snapshot_interval_ms;
 }
 
 // --- the validity rule ----------------------------------------------------
