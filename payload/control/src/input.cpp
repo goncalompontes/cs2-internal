@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -30,6 +31,14 @@ constexpr std::size_t k_max_vtable_slots = 96;
 
 // The one Input the payload owns, for the static hook detour.
 Input* g_active = nullptr;
+
+// The animfix's clock: a monotonic millisecond counter. The capture's age
+// is measured with it (`cs2/control/animfix.hpp`'s validity rule).
+[[nodiscard]] auto animfix_now_ms() noexcept -> std::uint64_t {
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+}
 
 auto flags_offset() noexcept -> std::uint32_t {
 #if defined(CS2_CONTROL_HAVE_CLIENT_SCHEMA)
@@ -129,10 +138,10 @@ constexpr std::size_t k_services_button_offset = 0x58;  // CInButtonState word 0
 // `C_CSPlayerPawn::m_pAimPunchServices` -> `m_predictableBaseAngle` (QAngle, degrees):
 // the recoil punch the shot inherits, subtracted for recoil compensation.
 constexpr std::size_t k_pawn_aim_punch_offset = 0x1598;
-constexpr std::size_t k_aim_punch_angle_offset = 0x50;               // m_predictableBaseAngle
+constexpr std::size_t k_aim_punch_angle_offset = 0x50;                // m_predictableBaseAngle
 constexpr std::size_t k_aim_punch_angle_offset_unpredictable = 0xa4;  // m_unpredictableBaseAngle
-constexpr std::size_t k_cmd_number_offset = 0x8;        // CUserCmd::nSequenceNumber
-constexpr std::size_t k_base_client_tick_offset = 0x54;  // CBaseUserCmdPB::client_tick
+constexpr std::size_t k_cmd_number_offset = 0x8;                      // CUserCmd::nSequenceNumber
+constexpr std::size_t k_base_client_tick_offset = 0x54;               // CBaseUserCmdPB::client_tick
 // Sub-tick placement: the press pair sits a few grid steps past the recorded
 // contact, inside the engine's half-tick window; the grid is 1/64.
 constexpr float k_subtick_grid = 1.0F / 64.0F;
@@ -173,7 +182,8 @@ using reset_prediction_command_fn = void(__fastcall*)(void* self);
 }
 
 // Read-only probe of a 3-float move vector at `address` (engine units).
-[[nodiscard]] auto read_move_sample(std::uintptr_t address) noexcept -> MoveSample {  MoveSample sample;
+[[nodiscard]] auto read_move_sample(std::uintptr_t address) noexcept -> MoveSample {
+  MoveSample sample;
   float values[3] = {0.0F, 0.0F, 0.0F};
   if (address == 0 || !cs2::game::read(address, values)) {
     return sample;
@@ -308,13 +318,12 @@ void Input::write_silent_angles(void* cmd, float pitch, float yaw, float roll) n
 //
 // This is the **one** place that field is written: the `look` control command
 // and the anti-aim share it.
-auto Input::write_command_angles(std::uint8_t* base, float pitch, float yaw,
-                                  float roll) noexcept -> bool {
+auto Input::write_command_angles(std::uint8_t* base, float pitch, float yaw, float roll) noexcept
+    -> bool {
   if (base == nullptr) {
     return false;
   }
-  if (!writable(reinterpret_cast<std::uintptr_t>(base),
-                k_base_viewangles_offset + sizeof(void*))) {
+  if (!writable(reinterpret_cast<std::uintptr_t>(base), k_base_viewangles_offset + sizeof(void*))) {
     return false;
   }
   const auto angles = *reinterpret_cast<std::uintptr_t*>(base + k_base_viewangles_offset);
@@ -348,15 +357,14 @@ auto Input::write_command_angles(std::uint8_t* base, float pitch, float yaw,
 //
 // Returns false when the wish carries no move button at all — there is
 // nothing to write.
-auto Input::write_move_axes(std::uint8_t* base, void* cmd, float forward,
-                             float left) noexcept -> bool {
+auto Input::write_move_axes(std::uint8_t* base, void* cmd, float forward, float left) noexcept
+    -> bool {
   if (base == nullptr) {
     return false;
   }
   constexpr std::uint64_t move_bits =
       button::k_forward | button::k_back | button::k_moveleft | button::k_moveright;
-  const std::uint64_t held =
-      cs2::control::engine_move_buttons(forward, left, k_move_epsilon);
+  const std::uint64_t held = cs2::control::engine_move_buttons(forward, left, k_move_epsilon);
   if ((held & move_bits) == 0) {
     return false;  // nothing to write
   }
@@ -375,21 +383,18 @@ auto Input::write_move_axes(std::uint8_t* base, void* cmd, float forward,
       raw[2] = 0.0F;
     }
   }
-  if (cmd != nullptr &&
-      writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_buttons_offset,
-               sizeof(std::uint64_t))) {
-    auto* legacy = reinterpret_cast<std::uint64_t*>(static_cast<std::uint8_t*>(cmd) +
-                                                   k_cmd_buttons_offset);
+  if (cmd != nullptr && writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_buttons_offset,
+                                 sizeof(std::uint64_t))) {
+    auto* legacy =
+        reinterpret_cast<std::uint64_t*>(static_cast<std::uint8_t*>(cmd) + k_cmd_buttons_offset);
     *legacy = (*legacy & ~move_bits) | held;
   }
   // The `buttons_pb` pointer lives in the command's base — read it **inside**
   // the guard, so an unmapped base cannot fault the game thread.
   if (writable(reinterpret_cast<std::uintptr_t>(base), k_base_buttons_pb_offset + 8)) {
-    const auto buttons_pb =
-        *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
+    const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
     if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
-      auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb +
-                                                     k_buttonstate_values_offset);
+      auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
       state[0] = (state[0] & ~move_bits) | held;
       state[1] = (state[1] & ~move_bits) | held;
       *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
@@ -406,11 +411,9 @@ auto Input::write_move_axes(std::uint8_t* base, void* cmd, float forward,
 // runs more than once"). This is the content-based guard that keeps the write
 // to **once per command** without any state of its own: a write that failed
 // left the old angles in place, and the next call writes again.
-auto Input::command_angles_are(std::uint8_t* base, float pitch, float yaw) const noexcept
-    -> bool {
+auto Input::command_angles_are(std::uint8_t* base, float pitch, float yaw) const noexcept -> bool {
   if (base == nullptr ||
-      !writable(reinterpret_cast<std::uintptr_t>(base),
-                k_base_viewangles_offset + sizeof(void*))) {
+      !writable(reinterpret_cast<std::uintptr_t>(base), k_base_viewangles_offset + sizeof(void*))) {
     return false;
   }
   const auto angles = *reinterpret_cast<std::uintptr_t*>(base + k_base_viewangles_offset);
@@ -464,8 +467,7 @@ void Input::anti_aim_tick(void* cmd, std::uint8_t* base) noexcept {
   // and never writes them — the camera reads the same field, so a write here
   // would drag the operator's view onto the fake angles.
   float camera[3] = {0.0F, 0.0F, 0.0F};
-  if (ccsgo_input_ == 0 ||
-      !cs2::game::read(ccsgo_input_ + k_input_view_angles_offset, camera)) {
+  if (ccsgo_input_ == 0 || !cs2::game::read(ccsgo_input_ + k_input_view_angles_offset, camera)) {
     anti_aim_reason_.store(k_anti_aim_reason_no_camera);
     return;
   }
@@ -479,16 +481,14 @@ void Input::anti_aim_tick(void* cmd, std::uint8_t* base) noexcept {
   // offset, so the two writes of a tick (the slot-5 builder and the slot-25
   // finaliser) agree and the write stays idempotent.
   std::uint32_t number = 0;
-  if (cmd != nullptr &&
-      writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_number_offset,
-               sizeof(std::uint32_t))) {
+  if (cmd != nullptr && writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_number_offset,
+                                 sizeof(std::uint32_t))) {
     number = *reinterpret_cast<const std::uint32_t*>(static_cast<std::uint8_t*>(cmd) +
-                                                      k_cmd_number_offset);
+                                                     k_cmd_number_offset);
   }
   const auto side = static_cast<anti_aim::Side>(anti_aim_side_.load());
-  const float fake =
-      anti_aim::fake_yaw(camera_angles.yaw, anti_aim_yaw_offset_.load(), side,
-                         anti_aim_seed_, number, anti_aim_jitter_.load());
+  const float fake = anti_aim::fake_yaw(camera_angles.yaw, anti_aim_yaw_offset_.load(), side,
+                                        anti_aim_seed_, number, anti_aim_jitter_.load());
   const float pitch = anti_aim::clamp_pitch(anti_aim_pitch_.load());
   anti_aim_fake_yaw_.store(fake);
   anti_aim_fake_pitch_.store(pitch);
@@ -519,8 +519,8 @@ void Input::anti_aim_tick(void* cmd, std::uint8_t* base) noexcept {
   // The **delivered** axes: a member of the engine's discrete set, chosen so
   // the walk direction stays as close to the camera's as the set allows. The
   // cost is reported: the direction error and the walk-speed factor.
-  const auto delivery = anti_aim::deliver_axes(
-      camera_angles, anti_aim::Angles{pitch, fake, 0.0F}, current);
+  const auto delivery =
+      anti_aim::deliver_axes(camera_angles, anti_aim::Angles{pitch, fake, 0.0F}, current);
   anti_aim_forward_.store(delivery.axes.forward);
   anti_aim_left_.store(delivery.axes.left);
   anti_aim_direction_error_.store(delivery.direction_error_deg);
@@ -653,8 +653,7 @@ void Input::rage_tick(std::uint8_t* cmd, const std::uint64_t* buttons) noexcept 
   // `CInButtonStatePB` so the sub-tick records agree with the legacy mask. A changed
   // word is needed for the engine to see a fresh press edge (zoom/reload act on the
   // edge), exactly as the attack does.
-  const auto base =
-      *reinterpret_cast<std::uintptr_t*>(cmd + k_cmd_pb_offset + k_pb_base_offset);
+  const auto base = *reinterpret_cast<std::uintptr_t*>(cmd + k_cmd_pb_offset + k_pb_base_offset);
   const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
   std::uint64_t extra = *buttons & button::k_attack;
   if (rage_scope_.load()) {
@@ -850,8 +849,8 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   const StrafeIntent intent = intent_from_buttons(buttons);
   strafe_intent_f_.store(intent.forward);
   strafe_intent_l_.store(intent.right);
-  const bool legacy = mode == static_cast<int>(StrafeMode::camera_relative) ||
-                      strafe_ignore_keys_.load();
+  const bool legacy =
+      mode == static_cast<int>(StrafeMode::camera_relative) || strafe_ignore_keys_.load();
   constexpr std::uint64_t side_bits = button::k_moveleft | button::k_moveright;
   if (legacy && (buttons & side_bits) != 0) {
     strafe_reason_.store(7);
@@ -1028,8 +1027,7 @@ void Input::strafe_judge_steer(float vel_yaw, int side, float written_rotation) 
     // whose effect this turn measures) and the side it pushed the wish on: the
     // current tick's request has not been written yet, and the rotation that
     // was written may have been clamped by the gate's limit.
-    switch (classify_steer(strafe_vel_yaw_last_.load(), vel_yaw,
-                           strafe_side_sample_.load(),
+    switch (classify_steer(strafe_vel_yaw_last_.load(), vel_yaw, strafe_side_sample_.load(),
                            strafe_rot_sample_.load())) {
       case SteerVerdict::followed:
         strafe_steered_ticks_.fetch_add(1);
@@ -1229,9 +1227,8 @@ auto Input::simulate_landing(void* cmd, int ticks, int& landed_tick, float& land
     if (!cs2::game::read(reinterpret_cast<std::uintptr_t>(&vtable[k_run_command_slot]), run) ||
         !cs2::game::read(reinterpret_cast<std::uintptr_t>(&vtable[k_set_prediction_command_slot]),
                          set_pred) ||
-        !cs2::game::read(
-            reinterpret_cast<std::uintptr_t>(&vtable[k_reset_prediction_command_slot]),
-            reset_pred) ||
+        !cs2::game::read(reinterpret_cast<std::uintptr_t>(&vtable[k_reset_prediction_command_slot]),
+                         reset_pred) ||
         run == nullptr || set_pred == nullptr || reset_pred == nullptr) {
       return false;
     }
@@ -1285,8 +1282,7 @@ auto Input::simulate_landing(void* cmd, int ticks, int& landed_tick, float& land
   // The landing recorded before the simulation (so a stale landing is not read
   // as a fresh one), and the controller tick base `RunCommand` advances.
   int before_tick = 0;
-  (void)cs2::game::read(svc + k_modern_jump_offset + k_modern_jump_landed_tick_offset,
-                        before_tick);
+  (void)cs2::game::read(svc + k_modern_jump_offset + k_modern_jump_landed_tick_offset, before_tick);
   std::uintptr_t controller = 0;
   int base_tick = 0;
   if (client_base_ != 0 && controllers_rva_ != 0) {
@@ -1404,6 +1400,11 @@ void __fastcall Input::create_move_detour(void* self, int slot, void* cmd) noexc
   }
   // Let the game build/process the command, then override what it produced.
   if (input->original_ != nullptr) {
+    // The local animfix's two hooks (the graph codec and the anim tick) are
+    // installed **here**, on the game's thread: the inline hook's patch is not
+    // atomic, and patching a function the game may be executing right now can
+    // tear (see `Input::animfix_install`).
+    input->animfix_install();
     // The raw per-sub-tick angle history is the *source* the PB history is built
     // from, so a write for movement steering must land before the original.
     input->write_raw_angles();
@@ -1453,6 +1454,438 @@ void __fastcall Input::create_move_input_detour(void* self, int slot, char activ
   input->write_raw_angles();
 }
 
+// --- the local animfix (`docs/re/animfix.md`) -----------------------------
+//
+// The engine's ground truth (measured on the live `client.dll`, 2026-10-21;
+// the measurement is appended to `docs/re/animfix.md` as "§9 The ordering
+// measurement"):
+//
+//   * the per-class netvar **codec** decodes the **server's** replicated AG2
+//     graph inputs into the local controller's slots. Its first argument is
+//     the destination controller; the decoded value lands at the **slot
+//     base** (`+0x470` air height, `+0x4b8` flashed, `+0x4d0` aim pitch,
+//     `+0x4e8` aim yaw — the four **float** slots it decodes);
+//   * the **client's prediction** (`ReflectPawnState` → `ReflectAim` /
+//     `ReflectMove`) pushes the *client's* values into the AG2 graph through
+//     the parameter **setter**, for exactly those four float slots. It never
+//     writes the replicated value in the slot, so **the server's value never
+//     reaches the graph** — the prediction is the only writer through the
+//     setter.
+//
+// The animfix therefore **captures** the server's values at the codec and
+// **re-applies** them into the graph's parameters in the **anim tick**
+// (`CAnimGraphGameSystem::AnimTickUpdate`, `0x35aeb0`), which runs *after*
+// the prediction in the same tick (§9.3) and *contains* the AG2 evaluation:
+// the values written there are the ones the pose is computed from. (That the
+// anim tick runs after the client's prediction in the same tick is
+// **inferred**, `docs/re/animfix.md` §9.3 — and the fix does not depend
+// on it: the correction is written at the start of the anim tick and the
+// evaluation happens inside it.)
+//
+// **Why not the setter** (`0x8492a0`), which is where the prediction writes
+// and would be the natural seam? Its third prologue instruction is a
+// RIP-relative load (`movss xmm0, [rip+0x13c0fa0]`), and the repo's inline
+// relocator rewrites such a displacement as `disp + (target - trampoline)`.
+// The module is mapped high under ASLR and the trampoline comes from
+// `VirtualAlloc` low, so the rewrite is ~141 TB and can never fit in an
+// `int32`: the hook engine bails with `unsupported_instruction` and the
+// animfix would never hook anything. The anim tick's prologue is
+// RIP-free, so the correction is written there instead — with the setter's
+// own write replicated by hand
+// (`*(float *)(*(node + 0x10)[index] + 0x18) = value`).
+//
+// The enum/bool slots the codec also decodes (`m_moveType`, `m_flinchHead`,
+// …) are **not** covered: the prediction pushes those into the graph with
+// direct stores, which no available seam intercepts. The **anim state**
+// divergence (the client's own move state and turn angle) stays open too —
+// see the report.
+
+void __fastcall Input::animfix_codec_detour(void* dst, void* src, void* schema) noexcept {
+  // A game thread has no TLS block for our mapped image until we install one.
+  // (The codec runs on the network thread, so this is not a formality: see
+  // `docs/re/camera-split.md`.)
+  cs2::tls::ensure_thread_tls();
+  // The original runs **first**: the codec writes the server's values into
+  // the slots, and the capture copies them out afterwards.
+  Input* input = g_active;
+  if (input == nullptr) {
+    return;
+  }
+  reinterpret_cast<animfix_codec_fn>(input->animfix_codec_hook_.original())(dst, src, schema);
+  if (!input->animfix_enabled_.load()) {
+    return;
+  }
+  input->animfix_capture(dst);
+}
+
+void __fastcall Input::animfix_anim_tick_detour(void* self, int client_tick_flag) noexcept {
+  // A game thread has no TLS block for our mapped image until we install one.
+  cs2::tls::ensure_thread_tls();
+  Input* input = g_active;
+  if (input == nullptr) {
+    return;
+  }
+  // The driver runs **two** variants - the client tick and (in a listen
+  // server) the server tick - and the flag says which: the engine picks its
+  // VProf scope by it ("AnimGraph Server Tick" when the flag is 0, "AnimGraph
+  // Client Tick" otherwise).
+  //
+  // The correction is for the **local player's client-side graph**, so it
+  // is written on the client tick only: the server tick evaluates the
+  // server's own copies of the entities, which the animfix never writes to.
+  // (And the correction is re-applied on *every* client anim tick while the
+  // capture is fresh, so the server's value stays in the graph between the
+  // decodes - a consume-once rule would leave the client's prediction in
+  // the graph for the later anim ticks of the same tick, and the pose would
+  // oscillate at the server's tick rate.)
+  if (client_tick_flag != 0 && input->animfix_enabled_.load()) {
+    input->animfix_apply();
+    // The **duty cycle**'s denominator: the client anim ticks that ran
+    // while the animfix was **on**. The correction counter only moves while
+    // it is on, so this closes the windows - dividing the two absolute
+    // counters would dilute the duty cycle by the payload's uptime.
+    input->animfix_enabled_client_ticks_.fetch_add(1);
+  }
+  input->animfix_anim_ticks_.fetch_add(1);
+  if (client_tick_flag != 0) {
+    input->animfix_client_ticks_.fetch_add(1);
+  }
+  reinterpret_cast<animfix_anim_tick_fn>(input->animfix_anim_tick_hook_.original())(
+      self, client_tick_flag);
+}
+
+auto Input::animfix_controller() const noexcept -> std::uintptr_t {
+  // `C_CSPlayerPawn::m_AnimationState` (the `CCS2PawnGraphController*`) is
+  // at `+0x34f8` (`docs/re/animfix.md` §7 step 1: `ReflectPawnState` is
+  // called with `*(pawn + 0x34f8)`).
+  constexpr std::size_t k_controller_offset = 0x34f8;
+  const std::uintptr_t pawn = local_pawn_.load();
+  if (pawn == 0) {
+    return 0;
+  }
+  std::uintptr_t controller = 0;
+  if (!cs2::game::read(pawn + k_controller_offset, controller)) {
+    return 0;
+  }
+  return controller;
+}
+
+void Input::animfix_capture(void* controller) noexcept {
+  const std::uintptr_t local = animfix_controller();
+  if (local == 0 || controller != reinterpret_cast<void*>(local)) {
+    return;  // another entity's controller
+  }
+  std::array<float, animfix::k_tracked_slot_count> values{};
+  for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
+    const animfix::Slot slot = animfix::k_tracked_slots[i];
+    if (!cs2::game::read(local + animfix::slot_offset(slot), values[i])) {
+      return;
+    }
+  }
+  const std::uint64_t now = animfix_now_ms();
+  std::uint64_t interval = 0;
+  {
+    const std::lock_guard<std::mutex> lock(animfix_mutex_);
+    animfix::store(animfix_capture_, local, values, now);
+    // The server's snapshot rate: the animfix's staleness bound is measured
+    // against it (see `animfix::snapshot_bound_ms`).
+    animfix::observe_decode(animfix_clock_, now);
+    // The estimate reads the clock, so it is taken **under the lock** like
+    // every other access to it.
+    interval = animfix::snapshot_interval_ms(animfix_clock_);
+  }
+  animfix_captures_.fetch_add(1);
+  animfix_snapshot_interval_.store(interval);
+  animfix_server_yaw_.store(values[animfix::slot_position(animfix::Slot::aim_yaw)]);
+}
+
+// The re-apply: the server's values into the graph's parameters.
+//
+// The write is the setter's own (`*(float *)(*(node + 0x10)[index] + 0x18) =
+// value`), replicated here because the setter is not hookable (see the
+// comment above). The parameter's **current** value is read first: that is
+// the client's own prediction, and the difference between it and the
+// server's value is the divergence the animfix removes — the operator's
+// evidence that the feature does something.
+void Input::animfix_apply() noexcept {
+  animfix_acted_.store(false);
+  // The write goes to the graph parameters of the **live** controller, so the
+  // capture must belong to it: a local pawn that died and respawned has a new
+  // controller, and the old one (with its AG2 instance) is freed. Writing
+  // through the captured `(node, index)` pairs would then be a write into
+  // freed memory — a corruption, which is worse than a fault.
+  const std::uintptr_t controller = animfix_controller();
+  if (controller == 0) {
+    // No local pawn (dead, or the map is changing): nothing to correct, and
+    // the operator can see it.
+    count_animfix_refusal(animfix::Refusal::controller);
+    animfix_skips_.fetch_add(1);
+    return;
+  }
+  const std::uint64_t now = animfix_now_ms();
+  // The write targets are read from the **live** controller, not from the
+  // capture: the AG2 instance inside it is a separate object, and it can be
+  // re-created (an anim-graph restart, a model change) while the controller
+  // survives - the captured `(node, index)` pairs would then dangle and the
+  // write would land in freed memory. Reading them here also means the write
+  // can only happen into a controller that answers a read right now.
+  std::array<animfix::Target, animfix::k_tracked_slot_count> targets{};
+  for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
+    const animfix::Slot slot = animfix::k_tracked_slots[i];
+    const std::size_t offset = animfix::slot_offset(slot);
+    std::uintptr_t node = 0;
+    if (!cs2::game::read(controller + offset + animfix::slot_node_offset(slot), node)) {
+      // The controller does not answer: the local pawn is gone, or the
+      // controller is being re-created. Counted, so the operator can tell
+      // "idle because I am dead" from "broken".
+      count_animfix_refusal(animfix::Refusal::controller);
+      animfix_skips_.fetch_add(1);
+      return;
+    }
+    std::int16_t index = 0;
+    if (!cs2::game::read(controller + offset + animfix::slot_index_offset(slot), index)) {
+      count_animfix_refusal(animfix::Refusal::controller);
+      animfix_skips_.fetch_add(1);
+      return;
+    }
+    targets[i] = animfix::Target{node, index};
+  }
+  if (!animfix::targets_are_distinct(targets)) {
+    // Two slots that share a graph parameter would collide: one of them would
+    // silently never be corrected. Refuse the controller instead.
+    count_animfix_refusal(animfix::Refusal::controller);
+    animfix_skips_.fetch_add(1);
+    return;
+  }
+  std::uint64_t bound = 0;
+  {
+    const std::lock_guard<std::mutex> lock(animfix_mutex_);
+    bound = animfix::snapshot_bound_ms(animfix_clock_);
+  }
+  bool corrected = false;
+  for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
+    const animfix::Slot slot = animfix::k_tracked_slots[i];
+    float server = 0.0F;
+    std::uint64_t generation = 0;
+    {
+      const std::lock_guard<std::mutex> lock(animfix_mutex_);
+      const animfix::Decision decision =
+          animfix::decide(animfix_capture_, slot, now, bound, controller);
+      if (!decision.reapply) {
+        // One refusal per anim tick: the capture-level reasons (no capture,
+        // aged out, the controller changed) hold for every slot, so counting
+        // them per slot would multiply them by the number of slots.
+        count_animfix_refusal(decision.refusal);
+        break;
+      }
+      server = animfix_capture_.values[animfix::slot_position(slot)];
+      generation = animfix_capture_.generation;
+    }
+    // The graph parameter's address: node -> the parameter array -> the
+    // parameter object -> the value.
+    std::uintptr_t array = 0;
+    if (!cs2::game::read(targets[i].node + animfix::k_node_array_offset, array) || array == 0) {
+      count_animfix_refusal(animfix::Refusal::controller);
+      continue;
+    }
+    std::uintptr_t object = 0;
+    const std::uint64_t element =
+        array + static_cast<std::uint64_t>(targets[i].index) * animfix::k_parameter_stride;
+    if (!cs2::game::read(element, object) || object == 0) {
+      count_animfix_refusal(animfix::Refusal::controller);
+      continue;
+    }
+    const std::uintptr_t value_address = object + animfix::k_parameter_value_offset;
+    // The client's own prediction — the value that is in the graph now.
+    float current = 0.0F;
+    if (!cs2::game::read(value_address, current)) {
+      // The parameter does not answer: the controller is gone, or the object
+      // was freed under us. Counted, so the operator can tell "idle because
+      // I am dead" from "broken".
+      count_animfix_refusal(animfix::Refusal::controller);
+      continue;
+    }
+    if (slot == animfix::Slot::aim_yaw && current != server) {
+      // The value in the graph is the **client's own prediction** - it
+      // differs from the server's. (When it does not differ, the graph
+      // holds the animfix's own correction, or the two agree; either way
+      // there is no divergence to report, and the last observed one is
+      // kept.)
+      animfix_predicted_yaw_.store(current);
+      // Both numbers are known now: the server's aim yaw (from the capture)
+      // and the client's predicted one (the value the graph held). Until
+      // then the status says "no data" rather than "no divergence".
+      animfix_data_valid_.store(true);
+    }
+    // The engine's own guard: a graph parameter must never hold a NaN, an
+    // infinity or a value outside the engine's range. The captured value is
+    // network-controlled, so the animfix has to refuse exactly what the
+    // engine's setter would refuse (and count the refusals).
+    if (!animfix::value_is_writable(server)) {
+      // Counted **once per capture**: the capture is re-applied on every
+      // anim tick, so a per-apply count would climb at the tick rate and
+      // hide how many *snapshots* the server sent something the graph must
+      // not hold.
+      bool first = false;
+      {
+        const std::lock_guard<std::mutex> lock(animfix_mutex_);
+        first = animfix::mark_guard_refused(animfix_capture_, generation);
+      }
+      if (first) {
+        animfix_rejected_.fetch_add(1);
+      }
+      continue;
+    }
+    if (!cs2::game::write_bytes(value_address, &server, sizeof(server))) {
+      // The write itself failed: the page is not writable, or the object was
+      // freed between the read and the write. Its own reason, so the
+      // operator can tell it from "the controller does not answer".
+      count_animfix_refusal(animfix::Refusal::write_failed);
+      continue;
+    }
+    {
+      const std::lock_guard<std::mutex> lock(animfix_mutex_);
+      // Diagnostic only: the next anim tick must still be allowed to
+      // re-apply this fresh capture.
+      animfix::mark_applied(animfix_capture_);
+    }
+    animfix_applies_.fetch_add(1);
+    corrected = true;
+  }
+  if (corrected) {
+    // The **duty cycle**: the anim ticks on which the correction won. The
+    // operator divides it by the client anim ticks to see the fraction of
+    // frames that carry the server's value - a duty cycle below 100 % is the
+    // oscillation at the server's tick rate.
+    animfix_corrected_ticks_.fetch_add(1);
+  } else {
+    // Nothing was corrected in this anim tick: count it, with the reason of
+    // the first refusal, so the operator can tell "the codec has not run
+    // yet" from "every capture aged out".
+    animfix_skips_.fetch_add(1);
+  }
+  animfix_acted_.store(corrected);
+}
+
+void Input::count_animfix_refusal(animfix::Refusal refusal) noexcept {
+  switch (refusal) {
+    case animfix::Refusal::no_capture:
+      animfix_skip_no_capture_.fetch_add(1);
+      break;
+    case animfix::Refusal::stale:
+      animfix_skip_stale_.fetch_add(1);
+      break;
+    case animfix::Refusal::controller:
+      animfix_skip_controller_.fetch_add(1);
+      break;
+    case animfix::Refusal::write_failed:
+      animfix_skip_write_failed_.fetch_add(1);
+      break;
+    case animfix::Refusal::not_tracked:
+    case animfix::Refusal::none:
+      break;
+  }
+}
+
+auto Input::animfix_aim_yaw_delta() const noexcept -> float {
+  return animfix::aim_yaw_difference(animfix_server_yaw_.load(), animfix_predicted_yaw_.load());
+}
+
+auto Input::animfix_status() const noexcept -> std::string {
+  const std::lock_guard<std::mutex> lock(animfix_status_mutex_);
+  return animfix_status_;
+}
+
+void Input::report_animfix_status(std::string status, std::string log_line) noexcept {
+  {
+    const std::lock_guard<std::mutex> lock(animfix_status_mutex_);
+    // The latch: the status is written to the log only when it **changes**.
+    // `animfix_install` runs on every tick, and the log helper opens,
+    // writes and closes the log file on every call — a line per tick would
+    // be ~64 file round trips a second on the game's main thread, and the
+    // log would be useless for anything else.
+    if (!animfix_status_latch_.should_log(status)) {
+      return;
+    }
+    animfix_status_ = std::move(status);
+  }
+  cs2::game::append_log("[cs2-payload] animfix: " + std::move(log_line));
+}
+
+// The animfix's hooks are installed **on the game's thread** (from the
+// CreateMove detour), not from the control thread's `refresh()`.
+//
+// The inline hook patches the target with a 14-byte write that is not atomic
+// (`InlineHook::install` copies the jump in with a `memcpy`). A patch that
+// lands while another thread is *executing* the target can tear: the thread
+// would fetch a mixture of the old prologue and the new jump. The anim tick
+// is the client's tick - it runs on the main thread - so patching it from
+// the control thread would race with the main thread's own execution of it.
+//
+// The CreateMove detour also runs on the main thread, and it is *not* inside
+// the anim tick, so patching from there means no thread can be executing the
+// patched function: the window is a single write on the thread that owns
+// the function.
+//
+// (The residual: `InlineHook::original()` is read by the detour while the
+// installing thread wrote it. The hook engine publishes the trampoline
+// *before* it patches the target, precisely so the detour always finds it;
+// the write is a plain pointer store, which is atomic on x86.)
+void Input::animfix_install() noexcept {
+  if (animfix_codec_hook_.installed() && animfix_anim_tick_hook_.installed()) {
+    return;
+  }
+  const cs2::game::ModuleInfo module = cs2::game::find_module("client.dll");
+  if (!module.valid()) {
+    report_animfix_status("the client module is not resolved yet",
+                          "the client module is not resolved yet");
+    return;
+  }
+  const OffsetInfo* codec = find_offset("animfix_graph_codec");
+  const OffsetInfo* anim_tick = find_offset("animfix_anim_tick");
+  if (codec == nullptr || anim_tick == nullptr) {
+    // The offsets come from the generated SDK, which is rendered from the
+    // **calibration dump** — a build-specific, gitignored artifact. A dump
+    // that predates this feature has no entry for it, and the animfix would
+    // then be silently inert. Say so, loudly, in the log and in the status.
+    const std::string missing = codec == nullptr ? "animfix_graph_codec" : "animfix_anim_tick";
+    const std::string status = "the calibration dump has no '" + missing +
+                               "' signature (re-run scripts/calibrate-live.py to refresh it)";
+    report_animfix_status(status, status);
+    return;
+  }
+  if (codec->module != "client.dll" || anim_tick->module != "client.dll") {
+    report_animfix_status("the animfix's signatures are not from client.dll",
+                          "the animfix's signatures are not from client.dll");
+    return;
+  }
+  if (!animfix_anim_tick_hook_.installed()) {
+    const auto error =
+        animfix_anim_tick_hook_.install(reinterpret_cast<void*>(module.base + anim_tick->rva),
+                                        reinterpret_cast<void*>(&Input::animfix_anim_tick_detour));
+    if (error.has_value()) {
+      const std::string status =
+          std::string("the anim tick is not hookable: ") + cs2::hooks::to_string(*error);
+      report_animfix_status(status, status);
+      return;
+    }
+  }
+  if (!animfix_codec_hook_.installed()) {
+    const auto error =
+        animfix_codec_hook_.install(reinterpret_cast<void*>(module.base + codec->rva),
+                                    reinterpret_cast<void*>(&Input::animfix_codec_detour));
+    if (error.has_value()) {
+      const std::string status =
+          std::string("the graph codec is not hookable: ") + cs2::hooks::to_string(*error);
+      report_animfix_status(status, status);
+      return;
+    }
+  }
+  // The success is logged **once**: the latch keeps the line to one, no
+  // matter how many ticks go by.
+  report_animfix_status("ok", "the graph codec and the anim tick are hooked");
+}
+
 auto Input::current_cmd() noexcept -> void* {
   if (client_base_ == 0 || tick_ == nullptr || array_ == nullptr || sequence_ == nullptr) {
     return nullptr;
@@ -1476,7 +1909,8 @@ auto Input::current_cmd() noexcept -> void* {
   }
   const auto sequence = *reinterpret_cast<std::uint32_t*>(array + k_user_cmd_array_sequence_offset);
   auto* cmd = static_cast<std::uint8_t*>(sequence_(reinterpret_cast<void*>(controller), sequence));
-  if (cmd == nullptr || !writable(reinterpret_cast<std::uintptr_t>(cmd), k_cmd_buttons_offset + 8)) {
+  if (cmd == nullptr ||
+      !writable(reinterpret_cast<std::uintptr_t>(cmd), k_cmd_buttons_offset + 8)) {
     return nullptr;
   }
   return cmd;
@@ -1491,8 +1925,8 @@ void Input::capture(void* cmd) noexcept {
   for (std::size_t i = 0; i < k_probe_words; ++i) {
     probe_[i].store(words[i], std::memory_order_relaxed);
   }
-  const auto base = *reinterpret_cast<std::uintptr_t*>(
-      static_cast<std::uint8_t*>(cmd) + k_cmd_pb_offset + k_pb_base_offset);
+  const auto base = *reinterpret_cast<std::uintptr_t*>(static_cast<std::uint8_t*>(cmd) +
+                                                       k_cmd_pb_offset + k_pb_base_offset);
   last_base_.store(base, std::memory_order_relaxed);
   if (writable(base, k_probe_base_words * sizeof(std::uint64_t))) {
     const auto* base_words = reinterpret_cast<const std::uint64_t*>(base);
@@ -1627,8 +2061,8 @@ auto Input::add_yaw_step(void* base, float yaw_delta, float when) noexcept -> vo
   return step;
 }
 
-auto Input::add_button_step(void* base, std::uint64_t button, bool pressed,
-                            float when) noexcept -> void* {
+auto Input::add_button_step(void* base, std::uint64_t button, bool pressed, float when) noexcept
+    -> void* {
   auto* step = static_cast<std::uint8_t*>(alloc_step(base));
   if (step == nullptr) {
     return nullptr;
@@ -1746,15 +2180,14 @@ void Input::bhop_tick(void* cmd, std::uint8_t* base, std::uint64_t buttons) noex
       // command early — its press stands at `offset/64` from the tick start.
       when = landed_frac == 0.0F
                  ? k_bhop_offset
-                 : std::clamp(contact + k_bhop_offset, contact + k_subtick_grid,
-                              k_bhop_last_when);
+                 : std::clamp(contact + k_bhop_offset, contact + k_subtick_grid, k_bhop_last_when);
       mode = 1;
     } else if (build > landed_tick + 1 && build <= landed_tick + 1 + k_bhop_catchup_ticks) {
       // B: the command is one or more ticks past the contact. A whole tick late
       // takes `DoJump`'s beta path (a hop, but the ground-slice clamp keeps the
       // speed loss); the catch-up window keeps the array from ever starving.
-      when = std::clamp(contact + k_bhop_offset + k_subtick_grid, k_bhop_first_when,
-                        k_bhop_last_when);
+      when =
+          std::clamp(contact + k_bhop_offset + k_subtick_grid, k_bhop_first_when, k_bhop_last_when);
       mode = 2;
     }
     if (when < k_bhop_first_when || when > k_bhop_last_when) {
@@ -2111,18 +2544,16 @@ void Input::apply(void* cmd) noexcept {
       move[2] = axes[2];
       *reinterpret_cast<std::uint32_t*>(base + k_base_has_bits_offset) |= k_base_move_bits;
 
-      constexpr std::uint64_t move_bits = button::k_forward | button::k_back |
-                                          button::k_moveleft | button::k_moveright;
+      constexpr std::uint64_t move_bits =
+          button::k_forward | button::k_back | button::k_moveleft | button::k_moveright;
       // The button bits follow the engine's convention — a positive side axis
       // is the player's LEFT (`cs2::control::engine_move_buttons`).
       const std::uint64_t held = *buttons & ~move_bits;
       *buttons = held | cs2::control::engine_move_buttons(move[0], move[1], k_move_epsilon);
 
-      const auto buttons_pb =
-          *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
+      const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
       if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
-        auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb +
-                                                       k_buttonstate_values_offset);
+        auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
         state[0] = (state[0] & ~move_bits) | (held & move_bits);  // buttonstate1: held
         state[1] = (state[1] & ~move_bits) | (held & move_bits);  // buttonstate2: changed
         *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
@@ -2227,9 +2658,8 @@ void Input::apply(void* cmd) noexcept {
   if (control && command_angles_enabled_.load()) {
     const auto base =
         *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset + k_pb_base_offset);
-    if (write_command_angles(reinterpret_cast<std::uint8_t*>(base),
-                             command_angle_pitch_.load(), command_angle_yaw_.load(),
-                             command_angle_roll_.load())) {
+    if (write_command_angles(reinterpret_cast<std::uint8_t*>(base), command_angle_pitch_.load(),
+                             command_angle_yaw_.load(), command_angle_roll_.load())) {
       command_angle_writes_.fetch_add(1);
     }
   }
@@ -2246,9 +2676,8 @@ void Input::apply(void* cmd) noexcept {
   //     frame, so those features keep working. It refuses to act where a
   //     composition is impossible (the strafe's sub-tick basis rotation, the
   //     `look` command's own angles) and says so in `anti_aim_reason`.
-  anti_aim_tick(cmd, reinterpret_cast<std::uint8_t*>(
-                          *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset +
-                                                            k_pb_base_offset)));
+  anti_aim_tick(cmd, reinterpret_cast<std::uint8_t*>(*reinterpret_cast<std::uintptr_t*>(
+                         bytes + k_cmd_pb_offset + k_pb_base_offset)));
 
   // 5. Sub-tick view angles: every `input_history` entry's `view_angles` (the
   //    silent-aim seam). The shot reads the entry at
@@ -2292,7 +2721,9 @@ void Input::refresh() noexcept {
   }
   struct ClaimReset {
     std::atomic<bool>& flag;
-    ~ClaimReset() { flag.store(false); }
+    ~ClaimReset() {
+      flag.store(false);
+    }
   } claim_reset{refresh_claimed_};
   const cs2::game::ModuleInfo module = cs2::game::find_module("client.dll");
   if (!module.valid()) {
@@ -2300,8 +2731,8 @@ void Input::refresh() noexcept {
   }
   const OffsetInfo* object_offset = find_offset("ccsgo_input");
   const OffsetInfo* move_offset = find_offset("create_move");
-  if (object_offset == nullptr || move_offset == nullptr ||
-      object_offset->module != "client.dll" || move_offset->module != "client.dll") {
+  if (object_offset == nullptr || move_offset == nullptr || object_offset->module != "client.dll" ||
+      move_offset->module != "client.dll") {
     return;
   }
   void* object = reinterpret_cast<void*>(module.base + object_offset->rva);

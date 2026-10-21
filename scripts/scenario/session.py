@@ -233,6 +233,10 @@ class Game:
         """Enable the payload's auto-jump."""
         return self.control.bhop(on)
 
+    def animfix(self, on: bool = True) -> InputStatus:
+        """Toggle the payload's **local animfix** (``docs/re/animfix.md``)."""
+        return self.control.animfix(on)
+
     def strafe(self, on: bool = True, *, wishspeed: float | None = None,
                subtick: int | None = None) -> InputStatus:
         """Toggle the payload's auto-strafe (airborne only, silent)."""

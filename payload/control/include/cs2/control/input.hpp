@@ -22,13 +22,18 @@
 // The write is inert unless the `usercmd` backend is selected, so the
 // live-validated `console` path is unaffected.
 
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
+#include <string>
 
+#include "cs2/control/animfix.hpp"
 #include "cs2/control/anti_aim.hpp"
 #include "cs2/control/strafe_geometry.hpp"
+#include "cs2/hooks/inline.hpp"
 
 namespace cs2::control {
 
@@ -46,7 +51,7 @@ inline constexpr std::size_t k_cmd_pb_offset = 0x10;   // CSGOUserCmdPB begins
 inline constexpr std::size_t k_pb_base_offset = 0x30;  // CBaseUserCmdPB* (within the PB)
 inline constexpr std::size_t k_base_has_bits_offset = 0x10;
 inline constexpr std::uint32_t k_base_move_bits = 0x40u | 0x80u | 0x100u;  // fields 5/6/7
-inline constexpr std::size_t k_base_move_offset = 0x58;  // forwardmove/sidemove/upmove
+inline constexpr std::size_t k_base_move_offset = 0x58;        // forwardmove/sidemove/upmove
 inline constexpr std::size_t k_base_buttons_pb_offset = 0x38;  // CInButtonStatePB* (field 3)
 inline constexpr std::size_t k_base_viewangles_offset = 0x40;  // CMsgQAngle* (field 4)
 inline constexpr std::uint32_t k_base_viewangles_bit = 0x4u;   // `viewangles` has-bit
@@ -58,13 +63,13 @@ inline constexpr std::size_t k_step_has_bits_offset = 0x10;
 inline constexpr std::size_t k_step_button_offset = 0x18;
 inline constexpr std::size_t k_step_pressed_offset = 0x20;
 inline constexpr std::size_t k_step_when_offset = 0x24;
-inline constexpr std::size_t k_step_forward_offset = 0x28;  // analog_forward_delta
-inline constexpr std::size_t k_step_left_offset = 0x2c;     // analog_left_delta
-inline constexpr std::size_t k_step_pitch_offset = 0x30;  // pitch_delta
-inline constexpr std::size_t k_step_yaw_offset = 0x34;    // yaw_delta
-inline constexpr std::uint32_t k_step_bits = 0x4u | 0x8u | 0x10u;  // when/forward/left
+inline constexpr std::size_t k_step_forward_offset = 0x28;                // analog_forward_delta
+inline constexpr std::size_t k_step_left_offset = 0x2c;                   // analog_left_delta
+inline constexpr std::size_t k_step_pitch_offset = 0x30;                  // pitch_delta
+inline constexpr std::size_t k_step_yaw_offset = 0x34;                    // yaw_delta
+inline constexpr std::uint32_t k_step_bits = 0x4u | 0x8u | 0x10u;         // when/forward/left
 inline constexpr std::uint32_t k_step_angle_bits = 0x4u | 0x20u | 0x40u;  // when/pitch/yaw
-inline constexpr std::uint32_t k_step_button_bits = 0x1u | 0x2u | 0x4u;  // button/pressed/when
+inline constexpr std::uint32_t k_step_button_bits = 0x1u | 0x2u | 0x4u;   // button/pressed/when
 
 // The **raw** per-sub-tick angle history on `CCSGOInput`: the array the command's
 // `input_history` is built from (`FUN_180cf9c30` copies entry → PB), stride `0x60`,
@@ -84,7 +89,8 @@ inline constexpr std::size_t k_rep_allocated_offset = 0x00;
 inline constexpr std::size_t k_rep_elements_offset = 0x08;
 inline constexpr std::size_t k_pb_history_size_offset = 0x20;  // input_history current_size
 inline constexpr std::size_t k_pb_history_rep_offset = 0x28;   // input_history rep (void**)
-inline constexpr std::size_t k_history_entry_angles_offset = 0x18;  // CSGOInputHistoryEntryPB::view_angles
+inline constexpr std::size_t k_history_entry_angles_offset =
+    0x18;  // CSGOInputHistoryEntryPB::view_angles
 inline constexpr std::size_t k_angles_has_bits_offset = 0x10;
 inline constexpr std::size_t k_angles_values_offset = 0x18;  // x/y/z floats
 inline constexpr std::uint32_t k_angles_bits = 0x7u;
@@ -197,13 +203,25 @@ class Input {
   // Resolve `CCSGOInput` and install the hook (idempotent; safe on every call).
   void refresh() noexcept;
 
-  [[nodiscard]] bool ready() const noexcept { return installed_; }
-  [[nodiscard]] bool hooked() const noexcept { return original_ != nullptr; }
-  [[nodiscard]] std::size_t slot_index() const noexcept { return slot_index_; }
-  [[nodiscard]] std::size_t slot5_index() const noexcept { return slot5_index_; }
+  [[nodiscard]] bool ready() const noexcept {
+    return installed_;
+  }
+  [[nodiscard]] bool hooked() const noexcept {
+    return original_ != nullptr;
+  }
+  [[nodiscard]] std::size_t slot_index() const noexcept {
+    return slot_index_;
+  }
+  [[nodiscard]] std::size_t slot5_index() const noexcept {
+    return slot5_index_;
+  }
 
-  [[nodiscard]] Backend backend() const noexcept { return backend_; }
-  void set_backend(Backend backend) noexcept { backend_ = backend; }
+  [[nodiscard]] Backend backend() const noexcept {
+    return backend_;
+  }
+  void set_backend(Backend backend) noexcept {
+    backend_ = backend;
+  }
   [[nodiscard]] static const char* backend_name(Backend backend) noexcept;
 
   // A per-tick sink that runs on the **game's** main thread (inside the CreateMove
@@ -225,8 +243,12 @@ class Input {
   void press(std::uint64_t bits) noexcept;
   void release(std::uint64_t bits) noexcept;
   void reset_buttons() noexcept;
-  [[nodiscard]] std::uint64_t buttons_set() const noexcept { return set_mask_.load(); }
-  [[nodiscard]] std::uint64_t buttons_clear() const noexcept { return clear_mask_.load(); }
+  [[nodiscard]] std::uint64_t buttons_set() const noexcept {
+    return set_mask_.load();
+  }
+  [[nodiscard]] std::uint64_t buttons_clear() const noexcept {
+    return clear_mask_.load();
+  }
 
   // Hold / release a button on behalf of a **payload feature** (the triggerbot).
   //
@@ -260,25 +282,41 @@ class Input {
   // every frame (the command's sub-tick table is rebuilt each frame), never
   // *cleared*, and the whole array dies on the admission gate if it stops being
   // monotonic or exceeds 32 entries.
-  void set_bhop(bool on) noexcept { bhop_.store(on); }
-  [[nodiscard]] bool bhop() const noexcept { return bhop_.load(); }
+  void set_bhop(bool on) noexcept {
+    bhop_.store(on);
+  }
+  [[nodiscard]] bool bhop() const noexcept {
+    return bhop_.load();
+  }
 
   // The manual engine-simulation path (`RunCommand`) for the bhop — **off by
   // default**: without the full `CPrediction` setup it faults inside client.dll
   // and moves the pawn. Kept behind `predict(on)` until the record-based design
   // (UC 771389) lands. See `docs/re/prediction.md`.
-  void set_predict(bool on) noexcept { predict_.store(on); }
-  [[nodiscard]] bool predict() const noexcept { return predict_.load(); }
+  void set_predict(bool on) noexcept {
+    predict_.store(on);
+  }
+  [[nodiscard]] bool predict() const noexcept {
+    return predict_.load();
+  }
 
   // Sub-tick view angles (usercmd-only): every `input_history` entry's
   // `view_angles` sub-message (3 floats). This is the silent-aim seam — the
   // camera does not follow.
   void set_view_angles(float pitch, float yaw, float roll) noexcept;
   void clear_view_angles() noexcept;
-  [[nodiscard]] bool angles_enabled() const noexcept { return angles_enabled_.load(); }
-  [[nodiscard]] float angle_pitch() const noexcept { return angle_pitch_.load(); }
-  [[nodiscard]] float angle_yaw() const noexcept { return angle_yaw_.load(); }
-  [[nodiscard]] float angle_roll() const noexcept { return angle_roll_.load(); }
+  [[nodiscard]] bool angles_enabled() const noexcept {
+    return angles_enabled_.load();
+  }
+  [[nodiscard]] float angle_pitch() const noexcept {
+    return angle_pitch_.load();
+  }
+  [[nodiscard]] float angle_yaw() const noexcept {
+    return angle_yaw_.load();
+  }
+  [[nodiscard]] float angle_roll() const noexcept {
+    return angle_roll_.load();
+  }
 
   // The **command's own** `viewangles` (`base + 0x40`, field 4) — the angles the
   // movement/wishdir is computed from. Measured live 2026-10-15: writing the
@@ -291,7 +329,9 @@ class Input {
   [[nodiscard]] bool command_angles_enabled() const noexcept {
     return command_angles_enabled_.load();
   }
-  [[nodiscard]] float command_angle_yaw() const noexcept { return command_angle_yaw_.load(); }
+  [[nodiscard]] float command_angle_yaw() const noexcept {
+    return command_angle_yaw_.load();
+  }
 
   // --- the anti-aim -------------------------------------------------------------
   //
@@ -327,7 +367,9 @@ class Input {
   // gate: the server cannot reject a command whose CRC the client never
   // writes, and this repo's own measurement shows the server honours a
   // modified analog (`docs/re/strafing.md` §"the gate").
-  void set_anti_aim(bool on) noexcept { anti_aim_enabled_.store(on); }
+  void set_anti_aim(bool on) noexcept {
+    anti_aim_enabled_.store(on);
+  }
   /// Configure the anti-aim: the desync offset (degrees, applied to the
   /// camera's yaw), the fake pitch (degrees, clamped to the engine's range),
   /// the per-command jitter (degrees) and the side (`0` automatic, `+1` left,
@@ -337,31 +379,55 @@ class Input {
   /// is **on by default**; turning it off leaves the fake angles in place, and
   /// the walk basis then follows the fake yaw (a diagnostic, not a mode to
   /// play in).
-  void set_anti_aim_move_rebase(bool on) noexcept { anti_aim_move_rebase_.store(on); }
-  [[nodiscard]] bool anti_aim() const noexcept { return anti_aim_enabled_.load(); }
+  void set_anti_aim_move_rebase(bool on) noexcept {
+    anti_aim_move_rebase_.store(on);
+  }
+  [[nodiscard]] bool anti_aim() const noexcept {
+    return anti_aim_enabled_.load();
+  }
   [[nodiscard]] bool anti_aim_move_rebase() const noexcept {
     return anti_aim_move_rebase_.load();
   }
-  [[nodiscard]] float anti_aim_yaw_offset() const noexcept { return anti_aim_yaw_offset_.load(); }
-  [[nodiscard]] float anti_aim_pitch() const noexcept { return anti_aim_pitch_.load(); }
-  [[nodiscard]] float anti_aim_jitter() const noexcept { return anti_aim_jitter_.load(); }
-  [[nodiscard]] int anti_aim_side() const noexcept { return anti_aim_side_.load(); }
+  [[nodiscard]] float anti_aim_yaw_offset() const noexcept {
+    return anti_aim_yaw_offset_.load();
+  }
+  [[nodiscard]] float anti_aim_pitch() const noexcept {
+    return anti_aim_pitch_.load();
+  }
+  [[nodiscard]] float anti_aim_jitter() const noexcept {
+    return anti_aim_jitter_.load();
+  }
+  [[nodiscard]] int anti_aim_side() const noexcept {
+    return anti_aim_side_.load();
+  }
   /// The fake yaw and pitch the anti-aim wrote (or would write) — the angles
   /// the server sees as the player's body.
-  [[nodiscard]] float anti_aim_fake_yaw() const noexcept { return anti_aim_fake_yaw_.load(); }
-  [[nodiscard]] float anti_aim_fake_pitch() const noexcept { return anti_aim_fake_pitch_.load(); }
+  [[nodiscard]] float anti_aim_fake_yaw() const noexcept {
+    return anti_aim_fake_yaw_.load();
+  }
+  [[nodiscard]] float anti_aim_fake_pitch() const noexcept {
+    return anti_aim_fake_pitch_.load();
+  }
   /// The camera's own yaw and pitch (the live view angles). The anti-aim only
   /// reads them — the operator's view must not move, and these two numbers are
   /// the proof that it did not. They are sampled while the anti-aim runs (the
   /// feature is off: they stay at their last value).
-  [[nodiscard]] float anti_aim_camera_yaw() const noexcept { return anti_aim_camera_yaw_.load(); }
-  [[nodiscard]] float anti_aim_camera_pitch() const noexcept { return anti_aim_camera_pitch_.load(); }
+  [[nodiscard]] float anti_aim_camera_yaw() const noexcept {
+    return anti_aim_camera_yaw_.load();
+  }
+  [[nodiscard]] float anti_aim_camera_pitch() const noexcept {
+    return anti_aim_camera_pitch_.load();
+  }
   /// The **delivered** analog axes — the members of the engine's discrete set
   /// (`{-1, 0, +1}`) the payload writes. These are the values the server acts
   /// on: `sv_quantize_movement_input` rounds the analog it receives, so the
   /// payload snaps first and the client predicts what the server does.
-  [[nodiscard]] float anti_aim_forward() const noexcept { return anti_aim_forward_.load(); }
-  [[nodiscard]] float anti_aim_left() const noexcept { return anti_aim_left_.load(); }
+  [[nodiscard]] float anti_aim_forward() const noexcept {
+    return anti_aim_forward_.load();
+  }
+  [[nodiscard]] float anti_aim_left() const noexcept {
+    return anti_aim_left_.load();
+  }
   /// How far the delivered walk direction is off the camera's (degrees). Zero
   /// for an offset that is a multiple of 45 degrees, at most 22.5 degrees for
   /// a well-conditioned re-base — and **not** bounded when the re-base
@@ -378,17 +444,25 @@ class Input {
   /// The re-base saturated: the ideal axes did not fit in ±1, so the delivery
   /// is a compromise — the direction may be off (see nti_aim_direction_error)
   /// and the walk speed is what nti_aim_wish_factor says.
-  [[nodiscard]] bool anti_aim_saturated() const noexcept { return anti_aim_saturated_.load(); }
+  [[nodiscard]] bool anti_aim_saturated() const noexcept {
+    return anti_aim_saturated_.load();
+  }
   /// `cos` of the fake pitch: the factor the engine puts on the forward axis,
   /// so the operator can see how far the walk's basis is tilted.
-  [[nodiscard]] float anti_aim_basis_cos() const noexcept { return anti_aim_basis_cos_.load(); }
+  [[nodiscard]] float anti_aim_basis_cos() const noexcept {
+    return anti_aim_basis_cos_.load();
+  }
   /// Did the anti-aim write this tick?
-  [[nodiscard]] bool anti_aim_acted() const noexcept { return anti_aim_acted_.load(); }
+  [[nodiscard]] bool anti_aim_acted() const noexcept {
+    return anti_aim_acted_.load();
+  }
   /// Why it did or did not: 0 off, 1 acted, 2 the camera's angles could not be
   /// read, 3 the command's angles could not be written, 4 the movement re-base
   /// is off, 5 the auto-strafe's sub-tick basis rotation owns the movement,
   /// 6 the `look` command owns the command's angles.
-  [[nodiscard]] int anti_aim_reason() const noexcept { return anti_aim_reason_.load(); }
+  [[nodiscard]] int anti_aim_reason() const noexcept {
+    return anti_aim_reason_.load();
+  }
   /// The counters: the writes, the re-base's applications and the ticks the
   /// re-base was skipped on.
   [[nodiscard]] std::uint64_t anti_aim_writes() const noexcept {
@@ -405,7 +479,9 @@ class Input {
   // candidate for a movement yaw that does *not* turn the pawn's eye angles.
   void set_raw_angles(float pitch, float yaw, float roll) noexcept;
   void clear_raw_angles() noexcept;
-  [[nodiscard]] bool raw_angles_enabled() const noexcept { return raw_angles_enabled_.load(); }
+  [[nodiscard]] bool raw_angles_enabled() const noexcept {
+    return raw_angles_enabled_.load();
+  }
   [[nodiscard]] std::uint64_t raw_angle_writes() const noexcept {
     return raw_angle_writes_.load();
   }
@@ -415,8 +491,12 @@ class Input {
   // `set_when(1.f)` with a yaw delta). Appended once per tick.
   void set_step_yaw(float yaw_delta_degrees) noexcept;
   void clear_step_yaw() noexcept;
-  [[nodiscard]] bool step_yaw_enabled() const noexcept { return step_yaw_enabled_.load(); }
-  [[nodiscard]] float step_yaw() const noexcept { return step_yaw_.load(); }
+  [[nodiscard]] bool step_yaw_enabled() const noexcept {
+    return step_yaw_enabled_.load();
+  }
+  [[nodiscard]] float step_yaw() const noexcept {
+    return step_yaw_.load();
+  }
 
   // Analog move (usercmd-only): the raw axes on `CCSGOInput` (`+0x270`) that
   // `create_move_input` copies into `CBaseUserCmdPB` each tick, plus the command's
@@ -431,17 +511,31 @@ class Input {
   // (`CCSGOInput + 0xb58`) — **it crashed the game (input-path AV) on 2026-10-15,
   // so it must not be enabled** until the layout is re-derived
   // (`docs/re/subtick.md` §"Actionable seams").
-  void set_move(float forward, float side, float up, bool quantize = false,
-                bool step = false, bool raw_entry = false) noexcept;
+  void set_move(float forward, float side, float up, bool quantize = false, bool step = false,
+                bool raw_entry = false) noexcept;
   void clear_move() noexcept;
 
-  [[nodiscard]] bool move_enabled() const noexcept { return move_enabled_.load(); }
-  [[nodiscard]] bool move_quantize() const noexcept { return move_quantize_.load(); }
-  [[nodiscard]] bool move_step() const noexcept { return move_step_.load(); }
-  [[nodiscard]] bool move_raw_entry() const noexcept { return move_raw_entry_.load(); }
-  [[nodiscard]] float move_forward() const noexcept { return move_forward_.load(); }
-  [[nodiscard]] float move_side() const noexcept { return move_side_.load(); }
-  [[nodiscard]] float move_up() const noexcept { return move_up_.load(); }
+  [[nodiscard]] bool move_enabled() const noexcept {
+    return move_enabled_.load();
+  }
+  [[nodiscard]] bool move_quantize() const noexcept {
+    return move_quantize_.load();
+  }
+  [[nodiscard]] bool move_step() const noexcept {
+    return move_step_.load();
+  }
+  [[nodiscard]] bool move_raw_entry() const noexcept {
+    return move_raw_entry_.load();
+  }
+  [[nodiscard]] float move_forward() const noexcept {
+    return move_forward_.load();
+  }
+  [[nodiscard]] float move_side() const noexcept {
+    return move_side_.load();
+  }
+  [[nodiscard]] float move_up() const noexcept {
+    return move_up_.load();
+  }
 
   // --- auto-strafe -------------------------------------------------------
   // A **normal, silent** auto-strafe: while **airborne** (and above a minimum
@@ -468,9 +562,9 @@ class Input {
   // camera nor the pawn's eye angles move. Two encodings, chosen by `subticks`:
   //
   //   * `subticks >= 1` (**default 8**, the precise channel — validated live at
-  //     **+85.1 median / +104.9 max u/s per hop**, scaling with the slice count): the analog stays on the
-  //     valid set (`forwardmove = 1`, `leftmove = 0`) and the *movement basis* is
-  //     rotated onto the wish with `subticks` `CSubtickMoveStep` `yaw_delta`s
+  //     **+85.1 median / +104.9 max u/s per hop**, scaling with the slice count): the analog stays
+  //     on the valid set (`forwardmove = 1`, `leftmove = 0`) and the *movement basis* is rotated
+  //     onto the wish with `subticks` `CSubtickMoveStep` `yaw_delta`s
   //     (`when = i/N`). The engine accumulates them onto the command's `viewangles`
   //     and `AirMove` builds `wishdir` from that rotated basis, so the wish is exact
   //     and `sv_quantize_movement_input` is a no-op (`docs/re/strafing.md` §"The
@@ -485,7 +579,9 @@ class Input {
   // with `bhop` for the classic auto-bhop-strafe, sharing the sub-tick array and
   // its admission gate.
   void set_strafe(bool on) noexcept;
-  [[nodiscard]] bool strafe() const noexcept { return strafe_enabled_.load(); }
+  [[nodiscard]] bool strafe() const noexcept {
+    return strafe_enabled_.load();
+  }
   void set_strafe_config(float wishspeed, int subticks) noexcept;
   /// How the goal heading is derived (`StrafeMode`): `off` disables the
   /// feature, `camera_relative` is the legacy camera-forward goal and
@@ -495,48 +591,88 @@ class Input {
   /// the camera's forward/back. Off (the default) the lateral keys **bias**
   /// the heading instead.
   void set_strafe_ignore_keys(bool ignore) noexcept;
-  [[nodiscard]] float strafe_wishspeed() const noexcept { return strafe_wishspeed_.load(); }
-  [[nodiscard]] int strafe_subticks() const noexcept { return strafe_subticks_.load(); }
-  [[nodiscard]] int strafe_mode() const noexcept { return strafe_mode_.load(); }
-  [[nodiscard]] bool strafe_ignore_keys() const noexcept { return strafe_ignore_keys_.load(); }
-  [[nodiscard]] std::uint64_t strafe_writes() const noexcept { return strafe_writes_.load(); }
+  [[nodiscard]] float strafe_wishspeed() const noexcept {
+    return strafe_wishspeed_.load();
+  }
+  [[nodiscard]] int strafe_subticks() const noexcept {
+    return strafe_subticks_.load();
+  }
+  [[nodiscard]] int strafe_mode() const noexcept {
+    return strafe_mode_.load();
+  }
+  [[nodiscard]] bool strafe_ignore_keys() const noexcept {
+    return strafe_ignore_keys_.load();
+  }
+  [[nodiscard]] std::uint64_t strafe_writes() const noexcept {
+    return strafe_writes_.load();
+  }
   [[nodiscard]] std::uint64_t strafe_raw_writes() const noexcept {
     return strafe_raw_writes_.load();
   }
-  [[nodiscard]] bool strafe_airborne() const noexcept { return strafe_airborne_.load(); }
-  [[nodiscard]] float strafe_speed() const noexcept { return strafe_speed_.load(); }
-  [[nodiscard]] float strafe_delta() const noexcept { return strafe_delta_.load(); }
+  [[nodiscard]] bool strafe_airborne() const noexcept {
+    return strafe_airborne_.load();
+  }
+  [[nodiscard]] float strafe_speed() const noexcept {
+    return strafe_speed_.load();
+  }
+  [[nodiscard]] float strafe_delta() const noexcept {
+    return strafe_delta_.load();
+  }
   // The goal heading (the W/A/S/D intent's travel heading, world yaw), the
   // chosen wish yaw, the basis rotation written (`wish - view`, degrees, after
   // the gate clamp), the side (+1 CCW / −1 CW of the velocity) and how many
   // `yaw_delta` steps were queued.
-  [[nodiscard]] float strafe_goal() const noexcept { return strafe_goal_.load(); }
-  [[nodiscard]] float strafe_wish() const noexcept { return strafe_wish_.load(); }
-  [[nodiscard]] float strafe_rot() const noexcept { return strafe_rot_.load(); }
-  [[nodiscard]] int strafe_side() const noexcept { return strafe_side_.load(); }
-  [[nodiscard]] int strafe_steps() const noexcept { return strafe_steps_.load(); }
+  [[nodiscard]] float strafe_goal() const noexcept {
+    return strafe_goal_.load();
+  }
+  [[nodiscard]] float strafe_wish() const noexcept {
+    return strafe_wish_.load();
+  }
+  [[nodiscard]] float strafe_rot() const noexcept {
+    return strafe_rot_.load();
+  }
+  [[nodiscard]] int strafe_side() const noexcept {
+    return strafe_side_.load();
+  }
+  [[nodiscard]] int strafe_steps() const noexcept {
+    return strafe_steps_.load();
+  }
   // The decoded **view-frame intent** the feature read this tick (the forward
   // axis: +1 = `W`, -1 = `S`; the lateral axis: +1 = `D`, -1 = `A`). Both 0
   // when no movement key is held — the goal then falls back to the camera's
   // forward.
-  [[nodiscard]] float strafe_intent_f() const noexcept { return strafe_intent_f_.load(); }
-  [[nodiscard]] float strafe_intent_l() const noexcept { return strafe_intent_l_.load(); }
+  [[nodiscard]] float strafe_intent_f() const noexcept {
+    return strafe_intent_f_.load();
+  }
+  [[nodiscard]] float strafe_intent_l() const noexcept {
+    return strafe_intent_l_.load();
+  }
   // True when the dead zone kept the previous side instead of re-deciding it.
-  [[nodiscard]] bool strafe_side_locked() const noexcept { return strafe_side_locked_.load() != 0; }
+  [[nodiscard]] bool strafe_side_locked() const noexcept {
+    return strafe_side_locked_.load() != 0;
+  }
   // The side of the last **decisive** tick (the hysteresis state; 0 when there
   // is none yet, which is also the state a fresh jump starts from).
-  [[nodiscard]] int strafe_side_last() const noexcept { return strafe_side_last_.load(); }
+  [[nodiscard]] int strafe_side_last() const noexcept {
+    return strafe_side_last_.load();
+  }
   // The configured dead zone, in degrees (a constant — exposed so the operator
   // can confirm the build).
-  [[nodiscard]] float strafe_deadzone_deg() const noexcept { return k_strafe_side_deadzone_deg; }
+  [[nodiscard]] float strafe_deadzone_deg() const noexcept {
+    return k_strafe_side_deadzone_deg;
+  }
   // Why the last tick did or did not act: 0 off/no command, 1 on the ground,
   // 2 too slow, 3 no readable basis, 4 acted, 5 no room in the sub-tick array,
   // 6 nothing to write, 7 the player is holding A/D (their input wins),
   // 8 the strafe mode is off (the settings disabled the feature).
-  [[nodiscard]] int strafe_reason() const noexcept { return strafe_reason_.load(); }
+  [[nodiscard]] int strafe_reason() const noexcept {
+    return strafe_reason_.load();
+  }
   // True when the basis rotation had to be clamped so the admission gate's
   // view-delta limit could not discard the whole array (the bhop pair included).
-  [[nodiscard]] bool strafe_clamped() const noexcept { return strafe_clamped_.load(); }
+  [[nodiscard]] bool strafe_clamped() const noexcept {
+    return strafe_clamped_.load();
+  }
   // --- The outcome: did the feature actually accelerate the player? ---------
   //
   // The **speed gained over the last completed airtime** (the horizontal speed
@@ -546,7 +682,9 @@ class Input {
   // The earlier session's live figure for the working encoding was **+85
   // median / +105 max u/s per hop** (`docs/handoff.md`); a gated server gives
   // ~0.
-  [[nodiscard]] float strafe_gain() const noexcept { return strafe_gain_.load(); }
+  [[nodiscard]] float strafe_gain() const noexcept {
+    return strafe_gain_.load();
+  }
   // Did the engine apply the requested basis rotation? The server ignores the
   // sub-tick view angles when `sv_subtick_movement_view_angles` is 0, and then
   // the wish is never applied: the velocity heading does not move and the
@@ -554,24 +692,34 @@ class Input {
   // is the verdict of the last judged tick; the two counters say how many
   // ticks the rotation was followed and how many were ignored — **the counters
   // are the robust signal** (one noisy tick flips the last verdict).
-  [[nodiscard]] bool strafe_steered() const noexcept { return strafe_steered_.load(); }
+  [[nodiscard]] bool strafe_steered() const noexcept {
+    return strafe_steered_.load();
+  }
   [[nodiscard]] std::uint64_t strafe_steered_ticks() const noexcept {
     return strafe_steered_ticks_.load();
   }
-  [[nodiscard]] std::uint64_t strafe_ignored() const noexcept { return strafe_ignored_.load(); }
+  [[nodiscard]] std::uint64_t strafe_ignored() const noexcept {
+    return strafe_ignored_.load();
+  }
   // The **turn of the velocity heading** the last judgement was made on
   // (degrees, counter-clockwise positive). The evidence behind the verdict: a
   // gated rotation leaves it at zero, an applied one turns the velocity by a
   // few degrees per command.
-  [[nodiscard]] float strafe_turn() const noexcept { return strafe_turn_.load(); }
+  [[nodiscard]] float strafe_turn() const noexcept {
+    return strafe_turn_.load();
+  }
   // How many times the bhop assist queued a (sub-tick) jump press.
-  [[nodiscard]] std::uint64_t bhop_presses() const noexcept { return bhop_presses_.load(); }
+  [[nodiscard]] std::uint64_t bhop_presses() const noexcept {
+    return bhop_presses_.load();
+  }
   // Bhop gate diagnostics: ticks the engine's button state showed the player
   // holding jump, and of those how many were airborne.
   [[nodiscard]] std::uint64_t bhop_holding_ticks() const noexcept {
     return bhop_holding_ticks_.load();
   }
-  [[nodiscard]] std::uint64_t bhop_air_ticks() const noexcept { return bhop_air_ticks_.load(); }
+  [[nodiscard]] std::uint64_t bhop_air_ticks() const noexcept {
+    return bhop_air_ticks_.load();
+  }
 
   // --- ragebot (`docs/ragebot.md`) ----------------------------------------
   // The aim solve runs on the render thread (the overlay's per-frame state
@@ -584,8 +732,12 @@ class Input {
   void clear_rage_aim() noexcept;
   // Drop the aim but keep the assists (auto-stop/scope) — the predictive assists run
   // even when the trigger is not engaged.
-  void clear_rage_aim_keep_aux() noexcept { rage_active_.store(false); }
-  void set_rage_fire(bool on) noexcept { rage_fire_.store(on); }
+  void clear_rage_aim_keep_aux() noexcept {
+    rage_active_.store(false);
+  }
+  void set_rage_fire(bool on) noexcept {
+    rage_fire_.store(on);
+  }
   // The common ragebot assists, applied while a solve is active (`docs/ragebot.md`):
   // auto-stop (hold still for accuracy), auto-scope (press zoom), auto-reload. Owned by
   // the menu / `rage` command like the rest; all default off.
@@ -598,19 +750,180 @@ class Input {
   // auto-stop speed threshold in units/s: 0 = a full stop, > 0 = decelerate
   // (counter-strafe) only until the horizontal speed is at/below this many units per
   // second. The service defaults this to 34% of the weapon's max speed.
-  void set_rage_recoil(bool on) noexcept { rage_recoil_.store(on); }
+  void set_rage_recoil(bool on) noexcept {
+    rage_recoil_.store(on);
+  }
   void set_rage_stop_speed(float units_per_second) noexcept {
     rage_stop_speed_.store(units_per_second);
   }
-  [[nodiscard]] bool rage_fire() const noexcept { return rage_fire_.load(); }
-  [[nodiscard]] bool rage_active() const noexcept { return rage_active_.load(); }
-  [[nodiscard]] bool rage_stop() const noexcept { return rage_stop_.load(); }
-  [[nodiscard]] int rage_target() const noexcept { return rage_target_.load(); }
-  [[nodiscard]] int rage_hitbox() const noexcept { return rage_hitbox_.load(); }
+  [[nodiscard]] bool rage_fire() const noexcept {
+    return rage_fire_.load();
+  }
+  [[nodiscard]] bool rage_active() const noexcept {
+    return rage_active_.load();
+  }
+  [[nodiscard]] bool rage_stop() const noexcept {
+    return rage_stop_.load();
+  }
+  [[nodiscard]] int rage_target() const noexcept {
+    return rage_target_.load();
+  }
+  [[nodiscard]] int rage_hitbox() const noexcept {
+    return rage_hitbox_.load();
+  }
   // Ticks a rage aim was written, and attack presses issued.
-  [[nodiscard]] std::uint64_t rage_writes() const noexcept { return rage_writes_.load(); }
-  [[nodiscard]] std::uint64_t rage_shots() const noexcept { return rage_shots_.load(); }
-  [[nodiscard]] std::uint64_t rage_stops() const noexcept { return rage_stops_.load(); }
+  [[nodiscard]] std::uint64_t rage_writes() const noexcept {
+    return rage_writes_.load();
+  }
+  [[nodiscard]] std::uint64_t rage_shots() const noexcept {
+    return rage_shots_.load();
+  }
+  [[nodiscard]] std::uint64_t rage_stops() const noexcept {
+    return rage_stops_.load();
+  }
+
+  // --- the local animfix (`docs/re/animfix.md`) ---------------------------
+  //
+  // The **local animfix** makes the **server's** animation win for the local
+  // player: the server replicates a part of the AG2 graph inputs of
+  // `CCS2PawnGraphController`, and the client's own prediction is the only
+  // writer of them (the engine's facts are in `docs/re/animfix.md` §9). The
+  // animfix captures the server's values at the netvar codec and puts them
+  // into the graph's parameters in the anim tick — where the graph is
+  // evaluated — for the **four float slots** the server replicates
+  // (`m_flAirHeightAboveGround`, `m_flFlashedAmount`, `m_flAimPitchAngle`,
+  // `m_flAimYawAngle`).
+  //
+  // **Off by default** and driven by the control channel's `animfix`
+  // command. The counters are the operator's evidence: how many captures
+  // (the server's values received), how many re-applies (the graph writes
+  // corrected), how many skips (a re-apply that was refused because the
+  // capture was not fresh), and the **aim yaw** — the server's value against
+  // the client's predicted one — which is the divergence the animfix removes.
+  void set_animfix(bool on) noexcept {
+    animfix_enabled_.store(on);
+    if (!on) {
+      // "Acted" is the last anim tick's verdict, and the apply only runs
+      // while the feature is on — without this the status would keep
+      // reporting "acted" from the last enabled frame.
+      animfix_acted_.store(false);
+    }
+  }
+  [[nodiscard]] bool animfix() const noexcept {
+    return animfix_enabled_.load();
+  }
+  // True when both hooks (the codec and the anim tick) are installed.
+  [[nodiscard]] bool animfix_ready() const noexcept {
+    return animfix_codec_hook_.installed() && animfix_anim_tick_hook_.installed();
+  }
+  // **Why** the animfix is not ready ("" when it is). The offsets come from
+  // the generated SDK, which is rendered from the gitignored calibration
+  // dump — a dump that predates this feature has no entry for it, and the
+  // animfix would then be silently inert. The status says so out loud.
+  [[nodiscard]] std::string animfix_status() const noexcept;
+  [[nodiscard]] std::uint64_t animfix_captures() const noexcept {
+    return animfix_captures_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_applies() const noexcept {
+    return animfix_applies_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_skips() const noexcept {
+    return animfix_skips_.load();
+  }
+  // The refusals, broken down by reason — so the operator can tell "the
+  // codec has not run yet" from "every capture aged out" (a stalled
+  // connection) and from "the controller changed" (the pawn respawned) and
+  // from "the graph parameter could not be written" (the write path failed).
+  [[nodiscard]] std::uint64_t animfix_skip_no_capture() const noexcept {
+    return animfix_skip_no_capture_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_skip_stale() const noexcept {
+    return animfix_skip_stale_.load();
+  }
+  // The anim ticks the driver ran — **every** tick, whether or not the
+  // animfix is on. This is the driver's own counter, not the animfix's: do
+  // **not** divide the correction counter by it (see
+  // `animfix_enabled_client_ticks`).
+  [[nodiscard]] std::uint64_t animfix_anim_ticks() const noexcept {
+    return animfix_anim_ticks_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_client_ticks() const noexcept {
+    return animfix_client_ticks_.load();
+  }
+  // The **client** anim ticks that ran while the animfix was **on**: the
+  // denominator the duty cycle is measured against.
+  //
+  // The animfix is off by default, and the driver's own counters climb
+  // whether or not it is on — so `animfix_corrected_ticks` (which only moves
+  // while it is on) over `animfix_client_ticks` (which moves since the
+  // payload started) divides two counters with **different windows**, and
+  // the quotient is diluted by the payload's uptime: a feature that works
+  // perfectly reads as 0 % after an hour. This counter closes the windows:
+  // both it and the correction counter only move while the animfix is on.
+  [[nodiscard]] std::uint64_t animfix_enabled_client_ticks() const noexcept {
+    return animfix_enabled_client_ticks_.load();
+  }
+  // The anim ticks on which the correction won: the **duty cycle** is this
+  // over `animfix_enabled_client_ticks` (the client anim ticks that ran
+  // while the animfix was on) — not over `animfix_client_ticks`.
+  [[nodiscard]] std::uint64_t animfix_corrected_ticks() const noexcept {
+    return animfix_corrected_ticks_.load();
+  }
+  // True when the driver has run a **client** tick at all. The correction is
+  // written on the client tick only, so a payload that never saw one cannot
+  // work - this says so instead of leaving the operator to infer it from the
+  // counters.
+  [[nodiscard]] bool animfix_client_tick_seen() const noexcept {
+    return animfix_client_ticks_.load() != 0;
+  }
+  [[nodiscard]] std::uint64_t animfix_skip_controller() const noexcept {
+    return animfix_skip_controller_.load();
+  }
+  // The graph parameters the animfix could **not** write (the page is not
+  // writable, or the object was freed between the read and the write). It is
+  // a failure of its own: the controller answered, but the write did not
+  // land.
+  [[nodiscard]] std::uint64_t animfix_skip_write_failed() const noexcept {
+    return animfix_skip_write_failed_.load();
+  }
+  // The observed **snapshot interval** (the server's rate), in milliseconds:
+  // the staleness bound is measured against it, so this is what tells the
+  // operator how old the server's values are allowed to be.
+  [[nodiscard]] std::uint64_t animfix_snapshot_interval_ms() const noexcept {
+    return animfix_snapshot_interval_.load();
+  }
+  // How many **captures** the **engine's own guard** refused (a NaN, an
+  // infinity, or a value outside the engine's range). The captured values are
+  // network-controlled, so this is the count of "the server sent something
+  // the graph must not hold" — it should be zero. It counts **one refusal
+  // per capture**, not per apply: the capture is re-applied on every anim
+  // tick, so a per-apply count would climb at the tick rate and hide how
+  // many *snapshots* were bad.
+  [[nodiscard]] std::uint64_t animfix_rejected() const noexcept {
+    return animfix_rejected_.load();
+  }
+  // True when the last anim tick corrected the graph (the specification's
+  // "acted this frame").
+  [[nodiscard]] bool animfix_acted() const noexcept {
+    return animfix_acted_.load();
+  }
+  // The server's aim yaw (the last value the codec delivered) and the
+  // client's predicted one (the value the graph held before the correction).
+  // Both are only meaningful once `animfix_data_valid()` is true.
+  [[nodiscard]] float animfix_server_aim_yaw() const noexcept {
+    return animfix_server_yaw_.load();
+  }
+  [[nodiscard]] float animfix_predicted_aim_yaw() const noexcept {
+    return animfix_predicted_yaw_.load();
+  }
+  // True once the animfix has seen both the server's aim yaw and the
+  // client's predicted one — so "no data" is distinguishable from "no
+  // divergence".
+  [[nodiscard]] bool animfix_data_valid() const noexcept {
+    return animfix_data_valid_.load();
+  }
+  // The signed difference between the two, in degrees: the divergence.
+  [[nodiscard]] float animfix_aim_yaw_delta() const noexcept;
 
   // --- record-based bunnyhop (UC 771389) ---------------------------------
   // Read-only post-hook state (`docs/re/research-bhop.md`). `bhop_landed_tick` /
@@ -620,22 +933,48 @@ class Input {
   // `bhop_build` the derived command tick, `bhop_age` = `build - landed_tick`
   // (the write wants 1), `bhop_mode` 1 = A (contact placed past), 2 = B (beta
   // catch-up), 0 = nothing, `bhop_when` the sub-tick fraction written.
-  [[nodiscard]] std::uint64_t bhop_writes() const noexcept { return bhop_writes_.load(); }
-  [[nodiscard]] int bhop_landed_tick() const noexcept { return bhop_landed_tick_.load(); }
-  [[nodiscard]] float bhop_landed_frac() const noexcept { return bhop_landed_frac_.load(); }
-  [[nodiscard]] int bhop_build() const noexcept { return bhop_build_.load(); }
-  [[nodiscard]] int bhop_age() const noexcept { return bhop_age_.load(); }
-  [[nodiscard]] int bhop_tick_base() const noexcept { return bhop_tick_base_.load(); }
-  [[nodiscard]] int bhop_client_tick() const noexcept { return bhop_client_tick_.load(); }
-  [[nodiscard]] int bhop_cmd_number() const noexcept { return bhop_cmd_number_.load(); }
-  [[nodiscard]] int bhop_mode() const noexcept { return bhop_mode_.load(); }
-  [[nodiscard]] float bhop_when() const noexcept { return bhop_when_.load(); }
+  [[nodiscard]] std::uint64_t bhop_writes() const noexcept {
+    return bhop_writes_.load();
+  }
+  [[nodiscard]] int bhop_landed_tick() const noexcept {
+    return bhop_landed_tick_.load();
+  }
+  [[nodiscard]] float bhop_landed_frac() const noexcept {
+    return bhop_landed_frac_.load();
+  }
+  [[nodiscard]] int bhop_build() const noexcept {
+    return bhop_build_.load();
+  }
+  [[nodiscard]] int bhop_age() const noexcept {
+    return bhop_age_.load();
+  }
+  [[nodiscard]] int bhop_tick_base() const noexcept {
+    return bhop_tick_base_.load();
+  }
+  [[nodiscard]] int bhop_client_tick() const noexcept {
+    return bhop_client_tick_.load();
+  }
+  [[nodiscard]] int bhop_cmd_number() const noexcept {
+    return bhop_cmd_number_.load();
+  }
+  [[nodiscard]] int bhop_mode() const noexcept {
+    return bhop_mode_.load();
+  }
+  [[nodiscard]] float bhop_when() const noexcept {
+    return bhop_when_.load();
+  }
   // How many landings were answered with placement A (the tick-perfect one) and
   // with placement B (the beta catch-up). Sampled counters, not a sampled read:
   // A firing at all proves the phase, and A >> B means speed is preserved.
-  [[nodiscard]] std::uint64_t bhop_a() const noexcept { return bhop_a_.load(); }
-  [[nodiscard]] std::uint64_t bhop_b() const noexcept { return bhop_b_.load(); }
-  [[nodiscard]] std::uint64_t bhop_skipped() const noexcept { return bhop_skipped_.load(); }
+  [[nodiscard]] std::uint64_t bhop_a() const noexcept {
+    return bhop_a_.load();
+  }
+  [[nodiscard]] std::uint64_t bhop_b() const noexcept {
+    return bhop_b_.load();
+  }
+  [[nodiscard]] std::uint64_t bhop_skipped() const noexcept {
+    return bhop_skipped_.load();
+  }
 
   // --- engine prediction (sub-tick bhop) ---------------------------------
   // Runs the game's own per-command movement (`CPlayer_MovementServices::
@@ -643,11 +982,21 @@ class Input {
   // modern-jump system records (`CCSPlayerModernJump`), then restores every field
   // the simulation touched (`docs/re/prediction.md`). That is what lets the bhop
   // place a sub-tick `IN_JUMP` press at the exact landing fraction.
-  [[nodiscard]] bool predict_ready() const noexcept { return run_command_ != nullptr; }
-  [[nodiscard]] std::uint64_t predict_runs() const noexcept { return predict_runs_.load(); }
-  [[nodiscard]] int predicted_landing_tick() const noexcept { return predicted_tick_.load(); }
-  [[nodiscard]] float predicted_landing_frac() const noexcept { return predicted_frac_.load(); }
-  [[nodiscard]] int predicted_landing_delta() const noexcept { return predicted_delta_.load(); }
+  [[nodiscard]] bool predict_ready() const noexcept {
+    return run_command_ != nullptr;
+  }
+  [[nodiscard]] std::uint64_t predict_runs() const noexcept {
+    return predict_runs_.load();
+  }
+  [[nodiscard]] int predicted_landing_tick() const noexcept {
+    return predicted_tick_.load();
+  }
+  [[nodiscard]] float predicted_landing_frac() const noexcept {
+    return predicted_frac_.load();
+  }
+  [[nodiscard]] int predicted_landing_delta() const noexcept {
+    return predicted_delta_.load();
+  }
   // The position the prediction simulation ended at (the box the overlay draws to
   // show the prediction is live). False until the first simulation.
   [[nodiscard]] bool predicted_origin_valid() const noexcept {
@@ -661,18 +1010,38 @@ class Input {
                         int& landed_delta) noexcept -> bool;
 
   // The local pawn, noted from a snapshot — used for the auto-jump on-ground test.
-  void note_local_pawn(std::uintptr_t pawn) noexcept { local_pawn_.store(pawn); }
-  [[nodiscard]] std::uintptr_t local_pawn() const noexcept { return local_pawn_.load(); }
+  void note_local_pawn(std::uintptr_t pawn) noexcept {
+    local_pawn_.store(pawn);
+  }
+  [[nodiscard]] std::uintptr_t local_pawn() const noexcept {
+    return local_pawn_.load();
+  }
 
   // Diagnostics.
-  [[nodiscard]] std::uint64_t calls() const noexcept { return calls_.load(); }
-  [[nodiscard]] std::uint64_t calls5() const noexcept { return calls5_.load(); }
-  [[nodiscard]] std::uint64_t writes() const noexcept { return writes_.load(); }
-  [[nodiscard]] std::uint64_t angle_writes() const noexcept { return angle_writes_.load(); }
-  [[nodiscard]] std::uint64_t move_writes() const noexcept { return move_writes_.load(); }
-  [[nodiscard]] std::uint64_t raw_writes() const noexcept { return raw_writes_.load(); }
-  [[nodiscard]] std::uint64_t entry_writes() const noexcept { return entry_writes_.load(); }
-  [[nodiscard]] std::uint64_t step_writes() const noexcept { return step_writes_.load(); }
+  [[nodiscard]] std::uint64_t calls() const noexcept {
+    return calls_.load();
+  }
+  [[nodiscard]] std::uint64_t calls5() const noexcept {
+    return calls5_.load();
+  }
+  [[nodiscard]] std::uint64_t writes() const noexcept {
+    return writes_.load();
+  }
+  [[nodiscard]] std::uint64_t angle_writes() const noexcept {
+    return angle_writes_.load();
+  }
+  [[nodiscard]] std::uint64_t move_writes() const noexcept {
+    return move_writes_.load();
+  }
+  [[nodiscard]] std::uint64_t raw_writes() const noexcept {
+    return raw_writes_.load();
+  }
+  [[nodiscard]] std::uint64_t entry_writes() const noexcept {
+    return entry_writes_.load();
+  }
+  [[nodiscard]] std::uint64_t step_writes() const noexcept {
+    return step_writes_.load();
+  }
   [[nodiscard]] std::uint64_t command_angle_writes() const noexcept {
     return command_angle_writes_.load();
   }
@@ -683,9 +1052,13 @@ class Input {
   // Read-only.
   static constexpr std::size_t k_probe_words = 16;
   static constexpr std::size_t k_probe_base_words = 16;
-  [[nodiscard]] std::uintptr_t last_cmd() const noexcept { return last_cmd_.load(); }
+  [[nodiscard]] std::uintptr_t last_cmd() const noexcept {
+    return last_cmd_.load();
+  }
   [[nodiscard]] std::uint64_t last_word(std::size_t index) const noexcept;
-  [[nodiscard]] std::uintptr_t last_base() const noexcept { return last_base_.load(); }
+  [[nodiscard]] std::uintptr_t last_base() const noexcept {
+    return last_base_.load();
+  }
   [[nodiscard]] std::uint64_t last_base_word(std::size_t index) const noexcept;
 
   // Read-only probes of the last command's `base` (`CBaseUserCmdPB`) and of the
@@ -693,7 +1066,9 @@ class Input {
   // movement probe (`docs/re/subtick.md` §"Actionable seams").
   [[nodiscard]] std::uint32_t base_has_bits() const noexcept;
   [[nodiscard]] MoveSample base_move() const noexcept;
-  [[nodiscard]] int step_count() const noexcept { return step_count_.load(); }
+  [[nodiscard]] int step_count() const noexcept {
+    return step_count_.load();
+  }
   [[nodiscard]] StepProbe step_probe(std::size_t index) const noexcept;
   // The raw axes the engine currently has on `CCSGOInput + 0x270` and, for
   // comparison, the per-controller input entry (`+0xb58`) it derives them from.
@@ -761,21 +1136,20 @@ class Input {
   // server reads the player's angles from and the movement's wish basis is
   // built from. The one place that field is written — the `look` command and
   // the anti-aim share it.
-  auto write_command_angles(std::uint8_t* base, float pitch, float yaw,
-                            float roll) noexcept -> bool;
+  auto write_command_angles(std::uint8_t* base, float pitch, float yaw, float roll) noexcept
+      -> bool;
   // True when the command's own `viewangles` already carry the given angles —
   // the content-based guard that keeps the anti-aim's write to once per
   // command (the hook can run more than once for the same command) without
   // any state of its own.
-  [[nodiscard]] auto command_angles_are(std::uint8_t* base, float pitch,
-                                        float yaw) const noexcept -> bool;
+  [[nodiscard]] auto command_angles_are(std::uint8_t* base, float pitch, float yaw) const noexcept
+      -> bool;
   // Write the command's analog axes: the command's own floats, the **raw**
   // axes (`CCSGOInput + 0x270/0x274` — the slot-5 builder re-derives the
   // command's floats from them, so a command-only write is overwritten) and
   // the button bits (`SetupMove`'s sanitizer turns the held buttons into the
   // same axes). Shared with the auto-strafe.
-  auto write_move_axes(std::uint8_t* base, void* cmd, float forward,
-                       float left) noexcept -> bool;
+  auto write_move_axes(std::uint8_t* base, void* cmd, float forward, float left) noexcept -> bool;
   // One tick of the anti-aim: read the camera's angles, compute the fake
   // angles and the re-based axes, and write them into the command.
   void anti_aim_tick(void* cmd, std::uint8_t* base) noexcept;
@@ -821,11 +1195,11 @@ class Input {
   // The local pawn's horizontal velocity (``false`` when unavailable).
   [[nodiscard]] bool velocity(float& x, float& y) const noexcept;
 
-  void** slot_ = nullptr;         // patched vtable slot 25 (`create_move`)
-  void* original_ = nullptr;      // its previous value
+  void** slot_ = nullptr;     // patched vtable slot 25 (`create_move`)
+  void* original_ = nullptr;  // its previous value
   std::size_t slot_index_ = 0;
-  void** slot5_ = nullptr;        // patched vtable slot 5 (`create_move_input`)
-  void* original5_ = nullptr;     // its previous value
+  void** slot5_ = nullptr;     // patched vtable slot 5 (`create_move_input`)
+  void* original5_ = nullptr;  // its previous value
   std::size_t slot5_index_ = 0;
   bool installed_ = false;
   // One-shot guard so `refresh()` (called from the control thread *and* the
@@ -834,7 +1208,7 @@ class Input {
   Backend backend_ = Backend::console;
   GameThreadSink game_thread_sink_ = nullptr;
   void* game_thread_context_ = nullptr;
-  std::uint32_t flags_offset_ = 0x3f4;  // C_BaseEntity::m_fFlags
+  std::uint32_t flags_offset_ = 0x3f4;     // C_BaseEntity::m_fFlags
   std::uint32_t velocity_offset_ = 0x3f8;  // C_BaseEntity::m_vecAbsVelocity
   alloc_step_fn alloc_step_ = nullptr;
   add_step_fn add_step_ = nullptr;
@@ -900,11 +1274,11 @@ class Input {
   std::atomic<int> bhop_cmd_number_{0};
   std::atomic<int> bhop_mode_{0};
   std::atomic<float> bhop_when_{0.0F};
-  std::uint32_t bhop_prev_number_ = 0;    // command number seen on the previous call
-  std::uint32_t bhop_active_number_ = 0;  // the command the cached decision is for
-  int bhop_active_landed_ = 0;            // the landing it answers
-  float bhop_active_when_ = 0.0F;         // its sub-tick fraction
-  int bhop_active_mode_ = 0;              // 1 = A, 2 = B
+  std::uint32_t bhop_prev_number_ = 0;          // command number seen on the previous call
+  std::uint32_t bhop_active_number_ = 0;        // the command the cached decision is for
+  int bhop_active_landed_ = 0;                  // the landing it answers
+  float bhop_active_when_ = 0.0F;               // its sub-tick fraction
+  int bhop_active_mode_ = 0;                    // 1 = A, 2 = B
   std::atomic<std::uint64_t> bhop_a_{0};        // landings answered with A
   std::atomic<std::uint64_t> bhop_b_{0};        // landings answered with B
   std::atomic<std::uint64_t> bhop_skipped_{0};  // landings with no pair placed
@@ -918,8 +1292,8 @@ class Input {
   std::atomic<std::uint64_t> strafe_raw_writes_{0};
   // Engine prediction (sub-tick bhop): the movement-services vtable entries the
   // simulation calls, and its last result (`docs/re/prediction.md`).
-  void* run_command_ = nullptr;             // vtable slot 29
-  void* set_prediction_command_ = nullptr;  // vtable slot 43
+  void* run_command_ = nullptr;               // vtable slot 29
+  void* set_prediction_command_ = nullptr;    // vtable slot 43
   void* reset_prediction_command_ = nullptr;  // vtable slot 44
   std::atomic<std::uint64_t> predict_runs_{0};
   std::atomic<int> predicted_tick_{0};
@@ -1025,6 +1399,83 @@ class Input {
   std::atomic<float> step_left_[k_probe_steps]{};
   std::atomic<std::uint64_t> step_button_[k_probe_steps]{};
   std::atomic<bool> step_pressed_[k_probe_steps]{};
+
+  // --- the local animfix --------------------------------------------------
+  //
+  // The decision logic lives in the pure header (`cs2/control/animfix.hpp`);
+  // this is only the engine access. The **capture** (the codec detour) and
+  // the **re-apply** (the anim tick detour) both run on the **game's main
+  // thread** — the snapshot decode and the game system's update are both
+  // main-thread work — so the state below is only touched there; the mutex
+  // is the belt to that braces (and the counters the control thread reads
+  // are atomic).
+  using animfix_codec_fn = void (*)(void* dst, void* src, void* schema);
+  /// The anim tick's second argument is a **flag** (0 = the server tick,
+  /// otherwise the client tick), not a tick count.
+  using animfix_anim_tick_fn = void (*)(void* self, int client_tick_flag);
+  static void __fastcall animfix_codec_detour(void* dst, void* src, void* schema) noexcept;
+  static void __fastcall animfix_anim_tick_detour(void* self, int client_tick_flag) noexcept;
+  // Install the two hooks (idempotent).
+  void animfix_install() noexcept;
+  // Copy the server's values out of the local controller (the codec detour).
+  void animfix_capture(void* controller) noexcept;
+  // Put the server's values into the graph's parameters (the anim tick
+  // detour, before the graph is evaluated).
+  void animfix_apply() noexcept;
+  // Count one refusal, by its reason.
+  void count_animfix_refusal(animfix::Refusal refusal) noexcept;
+  // The local player's `CCS2PawnGraphController*` (0 when it is not known).
+  [[nodiscard]] auto animfix_controller() const noexcept -> std::uintptr_t;
+  // Set the status the operator reads **and** write it to the log — but
+  // only when the status **changed**.
+  //
+  // The hooks are installed from the CreateMove detour, which runs on every
+  // tick, and the log helper opens, writes and closes the log file on every
+  // call: a line per tick would be ~64 file round trips a second on the
+  // game's main thread and ~500 MB of log a day. The latch is what keeps
+  // the log to one line per distinct status.
+  void report_animfix_status(std::string status, std::string log_line) noexcept;
+  cs2::hooks::InlineHook animfix_codec_hook_{};
+  cs2::hooks::InlineHook animfix_anim_tick_hook_{};
+  // The capture's state is touched on the **game's main thread** only (the
+  // codec decode and the anim tick); the status string is written and read on
+  // the **control thread**. Two mutexes, so a status read can never block the
+  // anim tick.
+  mutable std::mutex animfix_mutex_{};
+  mutable std::mutex animfix_status_mutex_{};
+  animfix::Capture animfix_capture_{};
+  animfix::SnapshotClock animfix_clock_{};
+  std::string animfix_status_{
+      "the animfix's hooks are not installed yet (they are installed on the game's "
+      "first command)"};
+  // The latch that keeps the log quiet: it holds the last status that was
+  // written to the log, so the log gets a line only when the status changes.
+  animfix::StatusLatch animfix_status_latch_{};
+  std::atomic<bool> animfix_enabled_{false};
+  std::atomic<bool> animfix_data_valid_{false};
+  std::atomic<std::uint64_t> animfix_captures_{0};
+  std::atomic<std::uint64_t> animfix_applies_{0};
+  std::atomic<std::uint64_t> animfix_skips_{0};
+  std::atomic<std::uint64_t> animfix_rejected_{0};
+  std::atomic<std::uint64_t> animfix_skip_no_capture_{0};
+  std::atomic<std::uint64_t> animfix_skip_stale_{0};
+  std::atomic<std::uint64_t> animfix_skip_controller_{0};
+  std::atomic<std::uint64_t> animfix_skip_write_failed_{0};
+  // The anim ticks the driver ran, and the ones that were the **client**
+  // tick (the driver takes a flag: 0 = the server tick, otherwise the client
+  // tick - the correction is written on the client tick, because that is the
+  // graph the local player's hitboxes come from).
+  std::atomic<std::uint64_t> animfix_anim_ticks_{0};
+  std::atomic<std::uint64_t> animfix_client_ticks_{0};
+  // The client anim ticks that ran while the animfix was **on**: the
+  // denominator of the duty cycle (the correction counter only moves while
+  // the animfix is on, so this closes the windows).
+  std::atomic<std::uint64_t> animfix_enabled_client_ticks_{0};
+  std::atomic<std::uint64_t> animfix_corrected_ticks_{0};
+  std::atomic<std::uint64_t> animfix_snapshot_interval_{0};
+  std::atomic<bool> animfix_acted_{false};
+  std::atomic<float> animfix_server_yaw_{0.0F};
+  std::atomic<float> animfix_predicted_yaw_{0.0F};
 };
 
 }  // namespace cs2::control

@@ -308,6 +308,28 @@ control_input_test = executable('control_input_test',
 )
 test('control-input', control_input_test)
 
+# The **local animfix**'s decision logic (which graph-input slots the animfix
+# owns and the validity rule that stops a stale capture from being written
+# over a fresh prediction) - a pure header, so the test compiles it alone.
+# `docs/re/animfix.md` §9.
+control_animfix_test = executable('control_animfix_test',
+  files(
+    'payload/control/tests/test_control_animfix.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+  ],
+  # The animfix's test runs the repository's own inline relocator over the
+  # seams' prologues: they must be hookable (and the parameter setter's must
+  # not be), or the feature would be silently inert.
+  dependencies : hooks_dep,
+)
+test('control-animfix', control_animfix_test,
+  # The seam test reads the dumper's own source, so the pinned prologues and
+  # the signatures the payload resolves cannot drift apart.
+  args : [meson.current_source_dir()],
+)
+
 # The settings **sink** (the payload's entry point) must hand the features the
 # clamped configuration: it used to read the wire fields directly, so a control
 # client's `settings set` could put an out-of-range value into the engine's
@@ -351,6 +373,10 @@ control_sound_test = executable('control_sound_test',
     # name table lives next to it), so the host build needs that include path.
     include_directories('overlay/include'),
   ],
+  # `cs2/control/service.hpp` reaches `cs2/control/input.hpp`, which holds the
+  # local animfix's inline hooks - so the host build needs the hook engine's
+  # include path (and its library, for the destructor).
+  dependencies : hooks_dep,
 )
 test('control-sound', control_sound_test)
 
@@ -515,6 +541,7 @@ if python.found()
     ['settings', 'test_settings'],
     ['heatmap', 'test_heatmap'],
     ['anti-aim', 'test_anti_aim'],
+    ['animfix', 'test_animfix'],
     ['registry', 'test_registry'],
     ['mcp', 'test_mcp'],
     ['settings-table', 'test_settings_table'],

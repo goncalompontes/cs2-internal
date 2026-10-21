@@ -288,6 +288,8 @@ auto Service::handle(const std::string& line, std::string& response) noexcept ->
     do_bhop(arguments, out);
   } else if (command == "strafe") {
     do_strafe(arguments, out);
+  } else if (command == "animfix") {
+    do_animfix(arguments, out);
   } else if (command == "antiaim") {
     do_antiaim(arguments, out);
   } else if (command == "aim") {
@@ -823,8 +825,7 @@ auto Service::input_status() noexcept -> Json {
   result.set("strafe_steered", Json::boolean(input_.strafe_steered()));
   result.set("strafe_steered_ticks",
              Json::number(static_cast<double>(input_.strafe_steered_ticks())));
-  result.set("strafe_ignored",
-             Json::number(static_cast<double>(input_.strafe_ignored())));
+  result.set("strafe_ignored", Json::number(static_cast<double>(input_.strafe_ignored())));
   result.set("strafe_turn", Json::number(input_.strafe_turn()));
   result.set("bhop_presses", Json::number(static_cast<double>(input_.bhop_presses())));
   result.set("bhop_writes", Json::number(static_cast<double>(input_.bhop_writes())));
@@ -843,6 +844,78 @@ auto Service::input_status() noexcept -> Json {
   result.set("bhop_holding_ticks", Json::number(static_cast<double>(input_.bhop_holding_ticks())));
   result.set("bhop_air_ticks", Json::number(static_cast<double>(input_.bhop_air_ticks())));
   result.set("input_local_pawn", Json::number(static_cast<double>(input_.local_pawn())));
+  // The local animfix (`docs/re/animfix.md`): what it did, and the evidence
+  // that it does something — the **server's** aim yaw against the **client's
+  // predicted** one. The difference is the divergence the animfix removes.
+  // `animfix_status` says why the animfix is not ready (a stale calibration
+  // dump, an unhookable seam), so a feature that cannot work says so
+  // instead of looking idle.
+  result.set("animfix", Json::boolean(input_.animfix()));
+  result.set("animfix_ready", Json::boolean(input_.animfix_ready()));
+  result.set("animfix_status", Json::string(input_.animfix_status()));
+  result.set("animfix_acted", Json::boolean(input_.animfix_acted()));
+  result.set("animfix_captures", Json::number(static_cast<double>(input_.animfix_captures())));
+  result.set("animfix_applies", Json::number(static_cast<double>(input_.animfix_applies())));
+  // The units: `animfix_captures` counts the decodes of the local controller,
+  // `animfix_applies` counts the **graph parameters written**, and
+  // `animfix_skips` and the refusal counters count **anim ticks** (one reason
+  // per tick: the capture-level reasons - no capture, aged out, the
+  // controller changed - hold for every slot, so counting them per slot
+  // would multiply them by the number of slots). The write path's own
+  // failures are counted per **slot**, because they are per slot: the
+  // parameter that could not be written is a parameter, not a tick.
+  result.set("animfix_skips", Json::number(static_cast<double>(input_.animfix_skips())));
+  // The refusals, by reason: "the codec has not run yet" must be
+  // distinguishable from "every capture aged out" (a stalled connection or a
+  // server whose snapshot rate the bound does not cover).
+  result.set("animfix_skip_no_capture",
+             Json::number(static_cast<double>(input_.animfix_skip_no_capture())));
+  result.set("animfix_skip_stale", Json::number(static_cast<double>(input_.animfix_skip_stale())));
+  // The anim ticks the driver ran, and the client ones (the correction is
+  // written on the client tick: the server tick of a listen server evaluates
+  // the server's own copies of the entities).
+  result.set("animfix_anim_ticks", Json::number(static_cast<double>(input_.animfix_anim_ticks())));
+  result.set("animfix_client_ticks",
+             Json::number(static_cast<double>(input_.animfix_client_ticks())));
+  // The client anim ticks that ran **while the animfix was on**: the
+  // denominator of the duty cycle. The driver's own counters climb whether
+  // or not the feature is on, so dividing the correction counter by them
+  // would divide two counters with different windows.
+  result.set("animfix_enabled_client_ticks",
+             Json::number(static_cast<double>(input_.animfix_enabled_client_ticks())));
+  // The correction is written on the client tick only; a payload that never
+  // saw one cannot work, and this says so.
+  result.set("animfix_client_tick_seen", Json::boolean(input_.animfix_client_tick_seen()));
+  // The **duty cycle**: the client anim ticks on which the correction won.
+  // Divided by the client anim ticks **while the animfix was on**, it is the
+  // fraction of the frames that carry the server's value - a duty cycle below
+  // 100 % is the oscillation at the server's tick rate that the animfix exists
+  // to remove.
+  result.set("animfix_corrected_ticks",
+             Json::number(static_cast<double>(input_.animfix_corrected_ticks())));
+  result.set("animfix_skip_controller",
+             Json::number(static_cast<double>(input_.animfix_skip_controller())));
+  // The graph parameters the animfix could not write: a failure of its own,
+  // so the operator can tell it from "the controller does not answer".
+  result.set("animfix_skip_write_failed",
+             Json::number(static_cast<double>(input_.animfix_skip_write_failed())));
+  // The server's snapshot rate: the staleness bound is measured against it.
+  result.set("animfix_snapshot_interval_ms",
+             Json::number(static_cast<double>(input_.animfix_snapshot_interval_ms())));
+  // The values the engine's own guard refused (a NaN, an infinity, a value
+  // outside the engine's range). It should be zero.
+  result.set("animfix_rejected", Json::number(static_cast<double>(input_.animfix_rejected())));
+  result.set("animfix_data_valid", Json::boolean(input_.animfix_data_valid()));
+  if (input_.animfix_data_valid()) {
+    result.set("animfix_server_aim_yaw", Json::number(input_.animfix_server_aim_yaw()));
+    result.set("animfix_predicted_aim_yaw", Json::number(input_.animfix_predicted_aim_yaw()));
+    result.set("animfix_aim_yaw_delta", Json::number(input_.animfix_aim_yaw_delta()));
+  } else {
+    // No data yet: `null`, so "nothing observed" is not "no divergence".
+    result.set("animfix_server_aim_yaw", Json());
+    result.set("animfix_predicted_aim_yaw", Json());
+    result.set("animfix_aim_yaw_delta", Json());
+  }
   result.set("predict_ready", Json::boolean(input_.predict_ready()));
   result.set("predict_runs", Json::number(static_cast<double>(input_.predict_runs())));
   result.set("predicted_landing_tick",
@@ -1078,6 +1151,20 @@ void Service::do_strafe(const Json& args, Json& out) noexcept {
   set_ok(out, input_status());
 }
 
+// The local animfix (`docs/re/animfix.md`): `animfix {"on": true}` makes the
+// **server's** animation win for the local player. It is off by default; the
+// status block reports what it did (the captures, the re-applies, the skips
+// and the aim-yaw divergence).
+void Service::do_animfix(const Json& args, Json& out) noexcept {
+  input_.refresh();
+  bool on = true;
+  if (const Json* arg = args.find("on"); arg != nullptr && arg->is_bool()) {
+    on = arg->as_bool();
+  }
+  input_.set_animfix(on);
+  set_ok(out, input_status());
+}
+
 void Service::do_antiaim(const Json& args, Json& out) noexcept {
   input_.refresh();
   bool on = true;
@@ -1092,11 +1179,10 @@ void Service::do_antiaim(const Json& args, Json& out) noexcept {
   // The desync offset (degrees, applied to the camera's yaw), the fake pitch
   // (degrees, clamped to the engine's range), the per-command jitter (degrees)
   // and the side (`0` automatic, `+1` left, `-1` right).
-  input_.set_anti_aim_config(number("yaw_offset", input_.anti_aim_yaw_offset()),
-                              number("pitch", input_.anti_aim_pitch()),
-                              number("jitter", input_.anti_aim_jitter()),
-                              static_cast<int>(number("side",
-                                                     static_cast<float>(input_.anti_aim_side()))));
+  input_.set_anti_aim_config(
+      number("yaw_offset", input_.anti_aim_yaw_offset()), number("pitch", input_.anti_aim_pitch()),
+      number("jitter", input_.anti_aim_jitter()),
+      static_cast<int>(number("side", static_cast<float>(input_.anti_aim_side()))));
   // The movement re-base: **on by default**. Turning it off leaves the fake
   // angles in place and the movement's wish basis follows them — a
   // diagnostic, not a mode to play in. The `move_crc` caveat is reported in
@@ -2294,9 +2380,8 @@ auto Service::movement_status(char* out, std::size_t size) const noexcept -> boo
   std::snprintf(out, size,
                 "strafe %s (%d slice%s, gain %+.0f u/s, steering %s%s, turn "
                 "%+.1f deg) bhop %s (presses %llu)",
-                strafe ? "on" : "off", subticks, subticks == 1 ? "" : "s",
-                input_.strafe_gain(), steering, ignored_note,
-                input_.strafe_turn(), bhop ? "on" : "off",
+                strafe ? "on" : "off", subticks, subticks == 1 ? "" : "s", input_.strafe_gain(),
+                steering, ignored_note, input_.strafe_turn(), bhop ? "on" : "off",
                 static_cast<unsigned long long>(input_.bhop_presses()));
   return true;
 }

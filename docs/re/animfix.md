@@ -903,8 +903,440 @@ must reproduce):
 
 ---
 
+## 9. The ordering measurement (2026-10-21, the T20 implementer)
+
+> **Appended, not rewritten.** Everything above is the RE's own text and
+> stands; this section records the measurement the T20 task required (the
+> order of the snapshot decode and the client's prediction inside one frame)
+> and the corrections the measurement produced. The **live** measurement the
+> task asked for could **not** be run — the agent is in Windows session 0
+> with no GPU, so CS2 cannot start here (`AGENTS.md` §"Launching the game").
+> The measurement below is therefore **static**: it was taken on the same
+> `client.dll` (sha256 `659940c1…`, the live build) with Ghidra 12.1.4
+> through REA, plus a byte-level scan of the module.
+
+### 9.1 What was measured, and how
+
+The RE could not order the two writes because *both* go through pointers
+into a member array and neither has a direct caller (§8, item 4). The
+measurement therefore followed the **writes** instead of the calls:
+
+| question | how it was answered |
+|---|---|
+| What does the **codec** write, and where? | decompile `0x8d9740` and read its call sites' register setup (the *assembly*, not the pseudocode — the pseudocode drops the destination argument) |
+| What does the **prediction** write, and where? | decompile `0x8e3540` (`ReflectPawnState`) and its helpers `0x8e2f70` (`ReflectAim`) / `0x8e3200` (`ReflectMove`) / `0x8be340` |
+| Where does the graph **read** the values? | decompile the setter `0x8492a0` and the AG2 evaluation `0x12e4f90`'s caller `0x38a070` |
+| In which **frame phase** does each run? | the callers of the pawn's reflect (`0xc905e0`), the anim tick (`0x35aeb0`) and the AG2 job (`0x3552f0`) |
+
+### 9.2 The result: the prediction wins, and the server's value never reaches the graph
+
+**The codec** (`0x8d9740`, `void Codec(CCS2PawnGraphController* dst, CClass* src, CSchemaTable*)`)
+decodes the **server's** replicated values into the **destination** controller.
+The destination is its **first argument**: every call site sets
+`LEA R9, [R13 + <slot>]` with `R13` = the first argument, e.g. for
+`m_flAimYawAngle`:
+
+```asm
+0x1808da70c: LEA RAX, [0x181c0ee70]      ; the field-name string
+0x1808da713: MOV qword ptr [RSP + 0x30], -0x7a11b6da   ; the name hash
+0x1808da71c: LEA R9, [R13 + 0x4e8]        ; the destination: the aim-yaw slot
+0x1808da723: MOV qword ptr [RSP + 0x38], RAX
+0x1808da728: LEA R8, [RBP + 0x658]        ; the decoded value
+0x1808da734: LEA RDX, [RSP + 0x30]        ; the name hash
+0x1808da739: MOV RCX, RBX                ; the source object
+0x1808da73c: CALL 0x1808baec0            ; the field writer
+```
+
+**The prediction** never writes those slots. `ReflectPawnState` (`0x8e3540`)
+→ `ReflectAim` (`0x8e2f70`) computes the *client's* aim angles and pushes them
+into the graph through the **parameter setter** `0x8492a0`:
+
+```c
+// FUN_1808e2f70 (ReflectAim), the aim-pitch half
+if ((*(longlong *)(param_1 + 0x4d8) != 0) && (-1 < *(short *)(param_1 + 0x4e0))) {
+  FUN_1808492a0(*(longlong *)(param_1 + 0x4d8), *(short *)(param_1 + 0x4e0), &local_68);
+}
+```
+
+and the setter is the one place a graph parameter's value is written:
+
+```c
+// FUN_1808492a0 — SetGraphParam(node, index, value)
+*(float *)(*(longlong *)(*(longlong *)(node + 0x10) + (longlong)index * 8) + 0x18) = *value;
+```
+
+**So the slot layout is uniform** — `{ value @+0x00, node* @+0x08, int16 index
+@+0x10 }`, stride `0x18` — and the chain is:
+
+```
+the codec      -> controller + 0x4e8      (the server's replicated float)
+the prediction -> setter(node, index)     (the client's predicted float)
+the AG2 graph  <- the parameter at +0x18  (whatever the setter wrote last)
+```
+
+**The prediction is the only writer of the graph's parameters *through the
+setter*.** (The enum/bool slots are pushed with direct stores — see §9.4.3 —
+and the flinch slots by nobody at all; §9.4.3 has the full list.) The server's
+replicated value is *stored* in the slot and then never used: the client's
+prediction is what the graph is evaluated from. That is mechanism (B) of §5 in
+its sharpest form — and it is **not** a question of which of the two runs
+last: the server's value does not reach the graph at all.
+
+### 9.3 The frame phase (the ordering the task asked for)
+
+* The **snapshot decode** (and with it the codec) runs in the client's
+  **network** phase, on the main thread.
+* The **prediction** runs on the **command** path:
+  `CPlayer_MovementServices::ProcessCommand` (`0xa70de0`) → the pawn's virtual
+  `+0xa00` → `0xc905e0` → `ReflectPawnState` (`0x8e3540`). `0xc905e0` is the
+  pawn's virtual at vtable offset `0xa00` (four vtables carry it:
+  `0x1c8ab38`, `0x1c90878`, `0x1c91448`, `0x1c95fb8`).
+* The **AG2 evaluation** runs in the **anim** phase:
+  `CAnimGraphGameSystem::AnimTickUpdate` (`0x35aeb0`) → `FUN_18038a390` (which
+  either runs the job inline or queues it to the thread pool) → the job
+  `0x3552f0` → `FUN_18038a070` (per entity) → **`0x12e4f90`** (the graph
+  evaluation) → `0x12e52b0` (the pose commit).
+
+**The order inside a frame is _inferred_, not measured**: the three phases
+are known (the network decode, the command path, the anim phase), and the
+community's research (`docs/research/animfix.md` §3.1) puts the server's
+animation update after the movement processing — the client's counterpart of
+which is the command path. So **decode → predict → evaluate**, and the
+prediction's write is the last one before the graph reads the parameters:
+**the prediction wins.** What was *measured* is the write path itself
+(§9.2): the prediction is the only writer of the graph's parameters through
+the setter, so the server's value never reaches the graph at all. The
+*ordering* of the two phases is a reading of the engine's frame structure
+that a live run would confirm — and the animfix does not depend on it
+being right (see below).
+
+**The seam this measurement selects** is the **anim tick**
+(`CAnimGraphGameSystem::AnimTickUpdate`, `0x35aeb0`): it is **inferred** to
+run after the prediction in the same tick (see above), and it *contains* the
+AG2 evaluation (the per-entity `FUN_18038a070` → `0x12e4f90`), so a
+correction written there is the one the pose is computed from. The inference
+does not have to be right for the fix to work: the correction is written at
+the **start** of the anim tick and the evaluation happens **inside** it, so
+whatever the prediction did before - or does afterwards, in the next tick -
+the values the graph is evaluated from are the server's.
+
+**And it does not depend on the inferred order.** The correction is written
+at the *start* of the anim tick and the evaluation happens *inside* it, so
+whatever the prediction did before — or whatever it does afterwards, in
+the next tick — the values the graph is evaluated from are the server's. (A
+prediction that runs *after* the anim tick would overwrite the parameters,
+but not before the evaluation: the correction still reaches the pose.) The correction is the setter's own write,
+replicated by hand:
+`*(float *)(*(node + 0x10)[index] + 0x18) = value`.
+
+> **Why not the setter** (`0x8492a0`), which is where the prediction writes
+> and would be the natural seam? It is **not hookable**: its third prologue
+> instruction is `movss xmm0, [rip+0x13c0fa0]` — a RIP-relative load — and
+> the repo's inline relocator rewrites such a displacement as
+> `disp + (target − trampoline)`. `client.dll` is mapped high under ASLR and
+> the trampoline comes from `VirtualAlloc(nullptr, …)` low, so the rewrite is
+> ~141 TB and can never fit in an `int32`: the hook engine bails with
+> `unsupported_instruction`. The anim tick's prologue is RIP-free, so the
+> correction goes there instead. (The repo has hit this limit before — see
+> `docs/control-harness.md` — and the workaround there was a vtable patch,
+> not an inline hook.)
+
+### 9.4 Corrections to the sections above
+
+1. **The codec decodes 14 slots, not 28.** The full list of the fields it
+   writes (each guarded by "is the field in the snapshot?"), with the field
+   names the codec itself carries:
+
+   | slot | field | type written |
+   |---|---|---|
+   | `+0x2d8` | `m_bIsDefusing` | bool |
+   | `+0x2f0` | `m_moveType` | int |
+   | `+0x308` | `m_moveDirectionID` | int |
+   | `+0x470` | `m_flAirHeightAboveGround` | float |
+   | `+0x488` | `m_leftFootTarget` | vector |
+   | `+0x4a0` | `m_rightFootTarget` | vector |
+   | `+0x4b8` | `m_flFlashedAmount` | float |
+   | `+0x4d0` | `m_flAimPitchAngle` | float |
+   | `+0x4e8` | `m_flAimYawAngle` | float |
+   | `+0x500` | `m_flinchHead` | int |
+   | `+0x518` | `m_flinchHeadRestart` | bool |
+   | `+0x530` | `m_flinchBody` | int |
+   | `+0x548` | `m_flinchBodyRestart` | bool |
+   | `+0x560` | `m_flinchIsOnFire` | bool |
+
+   The other 14 slots (`m_flMoveSpeedX/Y`, `m_flMoveSpeedHorizontal`,
+   `m_flPreviousMoveSpeedHorizontal`, `m_flCrouchAmount`,
+   `m_flWeaponDropAmount`, `m_flGroundTurnAngleOrVelocity`, `m_flLadder*`,
+   `m_groundAction`, `m_groundActionDirection`, `m_airAction`,
+   `m_moveIsWalking`) are **registered** as network vars by the schema
+   registration (`0x8daab0`) but the codec never decodes them — the server
+   does not send them. So §5's "the server replicates the 28 graph inputs"
+   is **too strong**: it replicates **14**, and `move_speed_horizontal` /
+   `move_crouch_amount` — the two the T20 specification named — are among the
+   ones it does **not** replicate.
+2. **`0x8daab0` is not a "mirrored codec"**: it is the **schema registration**
+   of `CCS2PawnGraphController` (it carries the field-name strings
+   `m_flMoveSpeedX` … `m_flinchIsOnFire` and registers them). There is only
+   **one** codec, `0x8d9740`.
+3. **The four *float* slots are exactly the ones the prediction rewrites
+   through the setter**: `+0x470` (written by `FUN_1808be340`), `+0x4b8`
+   (by `ReflectPawnState`), `+0x4d0` and `+0x4e8` (by `ReflectAim`). The
+   replicated **enum/bool** slots are pushed into the graph with *direct*
+   stores (`*(undefined8 *)(param_obj + 0x18) = <the enum descriptor>`), which
+   no available seam intercepts — and the **flinch** slots (`+0x500` … `+0x560`)
+   are pushed by **nobody** at all, so the flinch reaction never plays on the
+   client.
+4. The **slot layout** is now known: `{ value @+0x00, node* @+0x08, int16
+   index @+0x10 }`, stride `0x18` — the parameter object the node and the
+   index point at holds the value at `+0x18`.
+5. The anim tick's **second argument is a flag, not a tick count**: the
+   function picks its VProf scope by it (`param_2 == 0` ⇒ "AnimGraph Server
+   Tick", otherwise "AnimGraph Client Tick"). §2's and §6's signature
+   lines still read `int tickCount` - this section is the correction, and
+   they are left as they are (the appended-section rule). Whether the driver
+   runs once per **tick** or once per **frame** is still not established
+   (its caller is reached through a 32-bit-RVA dispatch table that this pass
+   did not resolve), and nothing in the animfix depends on it: the correction
+   is written at the start of the anim tick and the evaluation happens inside
+   it. The animfix uses the flag to write the correction on the **client**
+   tick only (the server tick of a listen server evaluates the server's own
+   copies of the entities).
+
+### 9.5 What is still open
+
+* **The anim-state divergence** (§5, mechanism A) is **not** closed by this
+  work and is not closed by the T20 task: the client's
+  `CCSPlayerAnimationState` is never replicated, so its move type, ground/air
+  action and turn-on-spot angle are the client's own. The experiment that
+  would settle which of the anim state's inputs the server uses differently
+  is still the RE's §8 item 3 (a write-breakpoint on `ms + 0x328` and a diff
+  of the anim state against a remote player's replicated graph inputs).
+* The **enum/bool** graph inputs (the move type, the flinch) are not covered
+  by the animfix: pushing them needs either the engine's static enum
+  descriptor tables (`DAT_182532910` and friends) or a hook on the reflect
+  itself, which is a vtable slot (`+0xa00`) and not an inline-hookable
+  function.
+* The **bone-write seam** (`CSkeletonInstance::SetupBones`, `0xaa0f80`) was
+  **not** used: it runs on the AG2 job's worker thread, it would have to
+  rewrite a **full `CTransform`** (position *and* quaternion) or the hitboxes
+  stretch (`docs/re/aim.md`), and the graph-input seam already fixes the
+  values *before* the pose is computed — so a bone write would be a second,
+  riskier copy of the same fix.
+
+### 9.6 The animfix's validity rule (and why it is not the bone seam)
+
+The implementation (`payload/control/include/cs2/control/animfix.hpp`) captures
+the server's values at the codec and re-applies them **in the anim tick** -
+the place the graph is evaluated (§9.3). The rule that decides whether a
+captured value may be re-applied is the specification's own:
+
+> A captured value may only be re-applied while it is **current**: there
+> must be a capture, it must belong to the live controller, and it must not
+> have **aged out**. A fresh capture is re-applied on **every** client anim
+> tick, so the server's value stays in the graph between the decodes.
+
+**Why it is not consumed.** The engine writes the graph's parameters on the
+**command** path (the prediction) and evaluates the graph on the **anim**
+path, and the driver runs two variants (the client tick and the server tick
+of a listen server). A "correct a slot at most once per capture" rule would
+be consumed by whichever anim tick ran first - and the variant that
+evaluates the pose the player sees would then find nothing to write, so the
+animfix would do nothing at all (or, at a frame rate above the server's,
+leave the client's prediction in three frames out of four: a jitter at the
+server's tick rate). The protection the specification's rule asks for - "a
+stale value must not be written over a fresh prediction" - is the **staleness
+bound** below, and it is enforced on every apply.
+
+**What the bound is about.** It is the age of the server's *data*, and the
+data ages at the server's **snapshot rate**. The animfix measures the
+intervals between the decodes and takes their **median** over a window of
+eight: a median does not move for a single outlier, so one snapshot that
+arrives late (a packet-reordering burst, a Wi-Fi stall, a server-side hitch)
+does not widen the window. The bound is that median **with a margin of two**,
+clamped to 8 ms .. 250 ms.
+
+* The **median** discards the outliers - in both directions.
+* The **margin** covers the jitter: the median is by construction the value
+  that half the intervals exceed, so a capture measured against it would age
+  out in the second half of every gap and the client's prediction would win
+  those frames. Twice the median keeps the duty cycle at 100 % on a regular
+  server and on one with jitter or a quarter of its snapshots late (the
+  status reports the **duty cycle** - the client anim ticks on which the
+  correction won - so the operator can see it).
+* A **total** stall needs no mechanism: it produces no decodes at all, so
+  the estimate does not change, and the capture ages out against it. (A
+  *partial* stall - one late decode - is what the median is for.)
+
+(An earlier cut used a fixed 16 ms window, which was the server's default
+tick interval and therefore refused *every* capture on a server that
+snapshots more slowly - the feature was inert there, and the status could
+not say so.)
+
+Every refusal carries a **reason** - no capture / aged out / the controller
+changed - and the status counts them separately, so "the codec has not run
+yet" is distinguishable from "every capture aged out".
+
+**The hooks are installed on the game's thread.** The inline hook patches its
+target with a 14-byte write that is not atomic, and a patch that lands while
+another thread is *executing* the target can tear. The anim tick is the
+client's tick - it runs on the main thread - so the animfix installs its
+hooks from the CreateMove detour (also the main thread, and not inside the
+anim tick): no thread can be executing the patched function while it is
+patched. (The residual: `InlineHook::original()` is a plain pointer read on
+the detour's side; the hook engine publishes the trampoline *before* it
+patches the target, precisely so the detour always finds it, and the store
+itself is atomic on x86.)
+
+**The bone seam was not used.** `CSkeletonInstance::SetupBones` (`0xaa0f80`)
+would have been the wrong place for this fix: it runs on the AG2 job's
+**worker thread**, it would have to rewrite a **full `CTransform`** (position
+*and* quaternion) or the hitboxes stretch (`docs/re/aim.md`), and - the
+decisive point - the graph-input seam already fixes the values **before** the
+pose is computed, so a bone write would only be a second, riskier copy of the
+same fix.
+
+---
+
 *Companion documents:* the community definition of "animfix" / "local animfix"
 is being written by the research sibling task (`docs/research/animfix.md`; it
 may not be in the tree yet). The hitbox/bone model this report re-derives is
 in [`aim.md`](aim.md) §"Hitboxes / bones"; the shot model is in
 [`aim.md`](aim.md) and [`bullet-trace.md`](bullet-trace.md).
+
+---
+
+## 10. The animfix as it is shipped, corrected (2026-10-21)
+
+This section is an **append**: §9 and everything above it are left as they
+are, and this is the correction of three of their claims, plus the
+diagnostics that go with them. The code is
+`payload/control/include/cs2/control/animfix.hpp` (the pure part) and
+`payload/control/src/input.cpp` (the engine access); the host test that
+pins them is `payload/control/tests/test_control_animfix.cpp`.
+
+### 10.1 The bound's estimator — §9.6's "the median discards the outliers, in both directions" was false
+
+§9.6 says the estimate is the **median** of the eight observed intervals,
+and that the median "discards the outliers - in both directions". The
+estimate was the **lower** median of the whole window
+(`sorted[(count - 1) / 2]`), and that is *not* robust in both directions:
+**four** fast intervals among four normal ones are enough to move it. The
+window then held a 2 ms estimate, the bound (the estimate with the margin
+of two over it) fell to the 8 ms floor, and on a 64 Hz server the capture
+aged out in the second half of every gap: the client's own prediction won
+those frames, which is the oscillation at the server's tick rate that the
+animfix exists to remove. Measured with the repository's own `duty_cycle()`
+helper: **50.3 %** over the burst, against **99.7 %** on a regular server.
+
+**What the code does now.** The floor (`k_min_snapshot_interval_ms`, 8 ms)
+is the shortest snapshot interval the animfix assumes, so an interval
+**shorter** than the floor cannot be a snapshot interval - it is a **burst**
+(a catch-up after a hitch, a re-ordered packet). The estimate does not
+sample those intervals at all; the **lower median** is taken over the
+window's remaining samples.
+
+* A burst of fast decodes - of **any** size - cannot move the estimate: the
+  burst's intervals are not sampled. The same 4x2 ms + 4x16 ms window now
+  measures **99.74 %** (the margin of two over the 16 ms interval is a
+  32 ms bound, and the capture never ages out against it).
+* A **late** decode still cannot move it: the lower median is unchanged,
+  and the window of eight is half late at worst before the estimate moves.
+* The **lower** median is kept on purpose. The mean of the two middle
+  samples would be the larger of the two in exactly the case that matters
+  (half the intervals late), so it would *double* the bound on a connection
+  that has started to hitch - and an inflated bound is the direction that
+  writes a stale capture over the client's fresh prediction.
+* A server that really does snapshot **faster** than the floor is still
+  covered: nothing is sampled, the estimate is 0, and the bound is the
+  floor - which still covers an interval shorter than the floor.
+
+The five scenarios §9.6's numbers were measured on are **unchanged** (the
+repository's own helper, to the digit): 99.7717 % (a 64 Hz server), 99.7500 %
+(jitter 16-19 ms), 99.7717 % (a quarter of the snapshots late), 99.5434 %
+(half of them late), 89.9543 % (a 48 ms hitch every eighth snapshot) and
+22.0165 % (a 500 ms stall). So §9.6's other claim - "twice the median
+keeps the duty cycle at 100 %" - is true only up to the first ticks, before
+the window has filled: the helper measures **99.77 %**, not 100 %.
+
+### 10.2 The duty cycle's counters had mismatched windows
+
+The status block and the scenario reported a **duty cycle** - the fraction
+of the client anim ticks on which the correction won - as
+`animfix_corrected_ticks / animfix_client_ticks`. The two counters have
+**different windows**: the correction counter only moves while the animfix
+is on, and the driver's own client-tick counter climbs on every client tick
+since the payload started (the animfix is **off by default**). The quotient
+is therefore diluted by the payload's uptime: after an hour it reads 0.0 %
+for a feature that wins every tick, and the scenario's verdict says "the
+pose alternates between the server's and the client's aim yaw at the
+server's tick rate" - a false alarm about the exact failure the feature
+exists to remove.
+
+**What the code does now.**
+
+* The payload counts the **client anim ticks that ran while the animfix was
+  on** (`animfix_enabled_client_ticks`), on the same branch as the
+  correction itself. Both counters then have the same window, and their
+  quotient is the duty cycle.
+* The scenario measures the duty cycle over the **watch window** (the
+  deltas), like it already did for the captures, the applies and the skips,
+  and it **fails** when the duty cycle falls below 90 % - the number is the
+  one the animfix exists for, so a note in the verdict string was not
+  enough.
+* The header's accessor comments no longer tell the operator to divide the
+  two absolute counters.
+
+### 10.3 The log: one line per status, not one line per tick
+
+The hooks are installed from the CreateMove detour, which runs on **every
+tick**, and every failure path wrote a line to the payload's log. The log
+helper opens, writes and closes the log file on **every call**, so the
+shipped state (the repository's calibration dump has no animfix signatures,
+so the missing-offset path is taken on every tick of every session) was ~64
+file round trips a second on the game's main thread and ~500 MB of log a
+day - and the log was useless for anything else.
+
+**What the code does now.** The status is **latched**: the log gets a line
+only when the status **changes** (`animfix::StatusLatch`), and the
+successful install is logged once too. The animfix's log has exactly one
+call site, and the host test pins that.
+
+### 10.4 Every refusal carries a reason
+
+§9.6 says "every refusal carries a **reason** ... so 'the codec has not run
+yet' is distinguishable from 'every capture aged out'". Two write-path
+failures moved **no** counter at all: the read of the graph parameter's
+current value, and the **write** itself (the page is not writable, or the
+object was freed between the read and the write). The animfix then silently
+does nothing and the operator sees "skips climbing, no reason counter
+moving" - exactly the ambiguity the rule was meant to remove.
+
+**What the code does now.** The write path's failures are counted, and the
+write has its **own** reason (`write_failed`), so it is distinguishable
+from "the controller does not answer". And the engine's own guard (the NaN
+/ infinity / range test) is counted **once per capture** rather than once
+per apply: the capture is re-applied on every anim tick, so the per-apply
+count climbed at the tick rate and hid how many *snapshots* the server sent
+something the graph must not hold.
+
+### 10.5 Two smaller corrections to §9
+
+* §9.3's two paragraphs - "The inference does not have to be right for the
+  fix to work ..." and "**And it does not depend on the inferred order.**"
+  - say the same thing twice. The second is the fuller statement.
+* §9.6 says the inline hook "patches its target with a 14-byte write". The
+  hook's **jump** is 14 bytes, but the **patched** size is the
+  whole-instruction total the relocator lands on
+  (`payload/hooks/src/inline.cpp`): **15 bytes** for the anim tick's
+  prologue (4+5+1+1+2+2) and 14 for the codec's.
+
+### 10.6 What is still unverified
+
+* The **ordering** inside a frame is still **inferred**, not measured
+  (§9.3): the correction does not depend on it, but no live run has
+  confirmed it.
+* Whether the engine can actually deliver a **burst** of fast decodes is
+  unproven: the estimator is now robust to one, but the trigger has not
+  been observed in a live round.
+* No live run: the numbers above come from the repository's own host test
+  and its helper, not from the game.
