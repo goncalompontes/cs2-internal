@@ -323,6 +323,25 @@ control_core_test = executable('control_core_test',
 )
 test('control-core', control_core_test)
 
+# The live rage objective's **pure rules** (the objective's names and values,
+# the seed policy's names, the weapon's spread pattern) — a pure header, so the
+# test compiles it alone. The mappings used to live inline in `service.cpp`,
+# where no host test can reach them: the Python scenario suite drives a fake
+# pipe and never runs the service, so a test written there would be testing the
+# fake pipe. The header is the same pattern as the chams' target rules
+# (`cs2/features/hook_target.hpp`).
+control_rage_objective_test = executable('control_rage_objective_test',
+  files(
+    'payload/control/tests/test_control_rage_objective.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('control-rage-objective', control_rage_objective_test)
+
 # The auto-strafe's decision maths (the W/A/S/D travel heading, the side's
 # dead zone and hysteresis, and the `AirAccelerate` optimum) — a pure,
 # dependency-free header, built natively so the strafe's maths has a host
