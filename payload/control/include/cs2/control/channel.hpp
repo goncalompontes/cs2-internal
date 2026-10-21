@@ -9,7 +9,23 @@
 #include <string>
 #include <string_view>
 
+#include "cs2/core/handle.hpp"
+
 namespace cs2::control {
+
+// The closer for the pipe handle. The handle is stored opaquely and the
+// closer is supplied by the implementation, so this header stays free of
+// <windows.h> (the platform-independent core must not include it -- see
+// docs/style-guide.md §3).
+struct PipeHandlePolicy {
+  // A pipe that was never opened is a null handle; `CreateNamedPipeA` reports
+  // failure with INVALID_HANDLE_VALUE, which `Channel::open` rejects before
+  // the handle is stored.
+  bool is_valid(void* handle) const noexcept {
+    return handle != nullptr;
+  }
+  void close(void* handle) const noexcept;
+};
 
 class Channel {
  public:
@@ -25,7 +41,7 @@ class Channel {
   [[nodiscard]] bool open(std::string_view name) noexcept;
   void close() noexcept;
   [[nodiscard]] bool valid() const noexcept {
-    return handle_ != nullptr;
+    return handle_.valid();
   }
 
   // Block until a client connects. Returns false when the pipe is closed or the
@@ -42,8 +58,10 @@ class Channel {
   [[nodiscard]] bool write_line(std::string_view bytes) noexcept;
 
  private:
-  void* handle_ = nullptr;  // HANDLE
-  std::string pending_;     // bytes read but not yet terminated by a newline
+  // The pipe's server end. It is owned by the wrapper, so it is released on
+  // every path -- including the ones that return early.
+  core::ScopedHandle<void*, PipeHandlePolicy> handle_{};
+  std::string pending_;  // bytes read but not yet terminated by a newline
 };
 
 }  // namespace cs2::control

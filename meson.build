@@ -41,9 +41,11 @@ subdir('payload/hooks')
 # The shared RAII handle (cs2/core/handle.hpp): the ownership rules are
 # platform-independent, so they have a host regression test (the Windows-only
 # sources that use the wrapper cannot be tested off-Windows).
+subdir('payload/core')
+
 core_handle_test = executable('core_handle_test',
   files('payload/core/tests/test_handle.cpp'),
-  include_directories : include_directories('payload/core/include'),
+  dependencies : core_dep,
 )
 test('core-handle', core_handle_test)
 
@@ -263,6 +265,7 @@ control_core_test = executable('control_core_test',
   ),
   include_directories : [
     include_directories('payload/control/include'),
+    core_inc,
     include_directories('payload/game/include'),
     include_directories('overlay/include'),
   ],
@@ -280,6 +283,7 @@ control_strafe_test = executable('control_strafe_test',
   ),
   include_directories : [
     include_directories('payload/control/include'),
+    core_inc,
   ],
 )
 test('control-strafe', control_strafe_test)
@@ -295,6 +299,7 @@ control_input_test = executable('control_input_test',
   ),
   include_directories : [
     include_directories('payload/control/include'),
+    core_inc,
   ],
 )
 test('control-input', control_input_test)
@@ -322,6 +327,7 @@ control_trigger_test = executable('control_trigger_test',
   ),
   include_directories : [
     include_directories('payload/control/include'),
+    core_inc,
   ],
 )
 test('control-trigger', control_trigger_test)
@@ -336,6 +342,7 @@ control_sound_test = executable('control_sound_test',
   ),
   include_directories : [
     include_directories('payload/control/include'),
+    core_inc,
     include_directories('payload/game/include'),
     include_directories('payload/aim/include'),
     # The control service now reaches the shared settings block (the generated
