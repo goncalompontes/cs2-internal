@@ -154,14 +154,23 @@ by looking at the module — the operator declares, the payload check proves).
 | **T20b** | `protect-vm-interpreter` | the interpreter emitted as IR, the per-call-site thunks, the rewrite of the function's body, the `virtualized` level made real, the differential test | T20a |
 | **T20c** | `protect-vm-payload` | the virtualization applied to the payload's real aim helpers, with the slowdown measured | T20b |
 | **T21** | `protect-strings` | string/constant encryption with a **runtime-derived** key (the mapped image base) | T18 |
+| **T21b** | `protect-strings-out` | the strings leave the image **entirely**: the injector delivers them, or the payload reads them from the host | T21 |
 | **T22** | `protect-integrity` | post-link binder + runtime self-check | T19, T21 |
 | **T23** | `protect-cross-tu` | the cross-TU call graph of the protected functions leaves the image (today 295 of 332 call sites stay direct) | T19 |
 | **T24** | `protect-polymorphism` | the shipped DLL is not signaturable: the build seed is mandatory and drives the layout, the keys and the tables | T19 |
 
-T18-T19 are done. **T20a-T20b are the core**; T20c, T21, T22, T23 and T24 are
-add-ons. The **order changed** in 2026-10-21 after the survey (§1.1):
-**T21 is now the highest-value task**, and T20 is deliberately scoped down.
-T21 and T23 are independent of the VM and can be interleaved with it.
+T18-T19 are done. **T20a is done; T20b and T20c are deferred** — the gate
+measured the eligible set and it is **empty** for the payload's real code
+(§1.3), so the interpreter would protect nothing.
+
+**T21 is the next task** and **T23a** follows it. The **order changed** in
+2026-10-21 after the survey (§1.1): **T21 is now the highest-value task**,
+and T20 is deliberately scoped down. T21 and T23 are independent of the VM and
+can be interleaved with it.
+
+**T21b is the task that would deliver what T21 could not**: the strings are
+encrypted in place, so the image still decrypts itself (§1.2). Getting them
+**out of the image** is what makes a dumped file useless.
 
 ## 3. The verified toolchain facts (all measured on this machine)
 
