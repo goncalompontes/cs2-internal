@@ -220,37 +220,6 @@ pub fn known_signatures() -> Vec<Signature> {
             None,
             None,
         ),
-        // The **chainer twin** of the same codec: `CCS2PawnGraphController`'s
-        // other decode path, the one that goes through the network-var
-        // chainer (the modern codec above goes through a schema table). Both
-        // write the controller's 28 slots, and **which one the engine runs is
-        // a build detail the payload must not guess** — it hooks both, and
-        // the counters say which one ran (`docs/re/animfix.md` §10).
-        //
-        // The signature is built the hard way, because the shape is not
-        // unique: the 14-byte prologue matches **ten** places in the module
-        // and the 44-byte form (the prologue, the frame setup and the first
-        // field's chainer test) still matches **three** — the class's two
-        // siblings (`CCS2WeaponGraphController` at `0x90eb20` and
-        // `CCS2CharacterGraphController` at `0xd29b30`), which are the same
-        // codec shape for three different classes. The pattern therefore
-        // reaches the class's **own** first field: the name hash of
-        // `m_bIsDefusing` (`0xfae2351e`), the one immediate that belongs to
-        // this class alone. Verified with the dumper's own scanner:
-        // **1 match** in `client.dll`. RVA on 659940c1: `0x8daab0`.
-        //
-        // Its 14-byte prologue (`mov [rsp+0x18],rbx / mov [rsp+0x20],rdi /
-        // push rbp / mov rbp,rsp`) is RIP-free, so the inline relocator
-        // accepts it: the trampoline replays the very same bytes on the very
-        // same stack, and the frame the function sets up is the frame it
-        // would have set up itself.
-        sig(
-            "client.dll",
-            "animfix_graph_codec_chainer",
-            "48 89 5C 24 18 48 89 7C 24 20 55 48 8B EC 48 83 EC 30 48 89 74 24 40 48 8B DA E8 ?? ?? ?? ?? 48 83 BB 40 01 00 00 00 48 8D BB 48 01 00 00 74 ?? 33 D2 48 8B CB E8 ?? ?? ?? ?? 84 C0 74 ?? 80 3F 00 74 ?? 48 8B 8B 20 01 00 00 48 8D 35 ?? ?? ?? ?? 45 33 C9 48 89 75 F8 4C 8D 45 18 C7 45 18 FF FF FF FF 48 8D 55 F0 48 C7 45 F0 1E 35 E2 FA",
-            None,
-            None,
-        ),
         // The AG2 **parameter setter** — the one place a graph parameter's
         // value is written (`*(float *)(*(longlong *)(node + 0x10) + index * 8
         // + 0x18) = value`). The client's prediction pushes the local player's

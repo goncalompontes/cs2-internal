@@ -26,9 +26,7 @@ What it reports:
 When the capture never happens, the scenario does **not** report a bare
 "never captured": the **codec counters** say which case it was — the hooked
 codec never ran (H1), it ran for somebody else (H2), or the local controller
-could not be resolved (H2) — and the per-codec split
-(``animfix_codec_calls_modern`` / ``animfix_codec_calls_chainer``) says which
-of the class's two decode paths the engine used.
+could not be resolved (H2).
 
 The player has to **turn** for the divergence to be visible: with a still
 camera the server's and the client's aim yaw agree, and the animfix has
@@ -156,8 +154,6 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
     # player" — and the per-codec split says which of the class's two decode
     # paths the engine used.
     codec_calls = int(final.get("animfix_codec_calls") or 0)
-    codec_calls_modern = int(final.get("animfix_codec_calls_modern") or 0)
-    codec_calls_chainer = int(final.get("animfix_codec_calls_chainer") or 0)
     codec_other_controller = int(final.get("animfix_codec_other_controller") or 0)
     codec_not_local = int(final.get("animfix_codec_not_local") or 0)
     codec_local_calls = int(final.get("animfix_codec_local_calls") or 0)
@@ -230,8 +226,6 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
         "rejected": int(final.get("animfix_rejected") or 0),
         # The **codec counters** and the diagnosis they settle.
         "codec_calls": codec_calls,
-        "codec_calls_modern": codec_calls_modern,
-        "codec_calls_chainer": codec_calls_chainer,
         "codec_other_controller": codec_other_controller,
         "codec_not_local": codec_not_local,
         "codec_local_calls": codec_local_calls,
@@ -265,8 +259,7 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
         raise SessionError(
             "the animfix is on but the payload never captured the server's graph "
             f"inputs (captures +{observed_captures}, applies +{observed_applies}); "
-            f"{codec_diagnosis} — codec calls {codec_calls} "
-            f"(modern {codec_calls_modern}, chainer {codec_calls_chainer}), "
+            f"{codec_diagnosis} — codec calls {codec_calls}, "
             f"other controller {codec_other_controller}, local controller "
             f"unresolved {codec_not_local}, local calls {codec_local_calls}: "
             f"{result}"

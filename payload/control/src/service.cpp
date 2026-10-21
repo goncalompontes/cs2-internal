@@ -928,10 +928,6 @@ auto Service::input_status() noexcept -> Json {
   // used.
   result.set("animfix_codec_calls",
              Json::number(static_cast<double>(input_.animfix_codec_calls())));
-  result.set("animfix_codec_calls_modern",
-             Json::number(static_cast<double>(input_.animfix_codec_calls_modern())));
-  result.set("animfix_codec_calls_chainer",
-             Json::number(static_cast<double>(input_.animfix_codec_calls_chainer())));
   result.set("animfix_codec_other_controller",
              Json::number(static_cast<double>(input_.animfix_codec_other_controller())));
   result.set("animfix_codec_not_local",

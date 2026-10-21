@@ -812,11 +812,10 @@ class Input {
   [[nodiscard]] bool animfix() const noexcept {
     return animfix_enabled_.load();
   }
-  // True when all the hooks (the two graph codecs and the anim tick) are
+  // True when all the hooks (the graph codec and the anim tick) are
   // installed.
   [[nodiscard]] bool animfix_ready() const noexcept {
-    return animfix_codec_hook_.installed() && animfix_codec_chainer_hook_.installed() &&
-           animfix_anim_tick_hook_.installed();
+    return animfix_codec_hook_.installed() && animfix_anim_tick_hook_.installed();
   }
   // **Why** the animfix is not ready ("" when it is). The offsets come from
   // the generated SDK, which is rendered from the gitignored calibration
@@ -924,14 +923,10 @@ class Input {
   [[nodiscard]] bool animfix_data_valid() const noexcept {
     return animfix_data_valid_.load();
   }
-  // The **codec counters**: how many times the hooked codecs ran, and what
+  // The **codec counters**: how many times the hooked codec ran, and what
   // each call was. They are the diagnosis of a capture that never happened:
   //
-  //   * `animfix_codec_calls` — every call of every hooked codec,
-  //   * `animfix_codec_calls_modern` / `animfix_codec_calls_chainer` — the
-  //     same, split by the codec (the **schema-table** one and the
-  //     **network-var chainer** one — both are the codec of
-  //     `CCS2PawnGraphController`),
+  //   * `animfix_codec_calls` — every call of the hooked codec,
   //   * `animfix_codec_other_controller` — the calls whose destination was
   //     **not** the local controller (the codec ran for somebody else),
   //   * `animfix_codec_not_local` — the calls at which the payload could
@@ -945,12 +940,6 @@ class Input {
   // the local player (H2).
   [[nodiscard]] std::uint64_t animfix_codec_calls() const noexcept {
     return animfix_codec_calls_.load();
-  }
-  [[nodiscard]] std::uint64_t animfix_codec_calls_modern() const noexcept {
-    return animfix_codec_calls_modern_.load();
-  }
-  [[nodiscard]] std::uint64_t animfix_codec_calls_chainer() const noexcept {
-    return animfix_codec_calls_chainer_.load();
   }
   [[nodiscard]] std::uint64_t animfix_codec_other_controller() const noexcept {
     return animfix_codec_other_controller_.load();
@@ -1463,24 +1452,18 @@ class Input {
   /// otherwise the client tick), not a tick count.
   using animfix_anim_tick_fn = void (*)(void* self, int client_tick_flag);
   static void __fastcall animfix_codec_detour(void* dst, void* src, void* schema) noexcept;
-  /// The **second** codec of the same class: the chainer-style one (the
-  /// modern codec decodes through a schema table, this one through the
-  /// network-var chainer). Both write the controller's slots, and the
-  /// engine may use either of them — the payload hooks **both** and the
-  /// counters say which one runs (`docs/re/animfix.md` §10).
-  static void __fastcall animfix_codec_chainer_detour(void* dst, void* src,
-                                                       void* schema) noexcept;
   static void __fastcall animfix_anim_tick_detour(void* self, int client_tick_flag) noexcept;
   // Install the two hooks (idempotent).
   void animfix_install() noexcept;
-  // Copy the server's values out of the local controller (the codec detour).
-  void animfix_capture(void* controller) noexcept;
-  // Count one codec call and decide what it was (the codec detours).
+  // Copy the server's values out of the local controller (the anim tick,
+  // right after the codec has reported a decode).
+  void animfix_capture() noexcept;
+  // Count one codec call and decide what it was (the codec detour).
   //
-  // `chainer` says which codec it was: the **modern** one (the schema
-  // table) or the **chainer** one (the network-var chainer). The counters
-  // are what settle the diagnosis (`cs2/control/animfix.hpp`).
-  void animfix_codec_call(void* dst, bool chainer) noexcept;
+  // The detour's own work happens **before** the original: the original is
+  // called as a **tail call**, so the trampoline replays the codec's
+  // prologue on the codec's own stack (see the detour's comment).
+  void animfix_codec_call(void* dst) noexcept;
   // The counters the diagnosis is taken from.
   [[nodiscard]] auto animfix_codec_counters() const noexcept -> animfix::CodecCounters;
   // Put the server's values into the graph's parameters (the anim tick
@@ -1500,7 +1483,6 @@ class Input {
   // the log to one line per distinct status.
   void report_animfix_status(std::string status, std::string log_line) noexcept;
   cs2::hooks::InlineHook animfix_codec_hook_{};
-  cs2::hooks::InlineHook animfix_codec_chainer_hook_{};
   cs2::hooks::InlineHook animfix_anim_tick_hook_{};
   // The capture's state is touched on the **game's main thread** only (the
   // codec decode and the anim tick); the status string is written and read on
@@ -1541,18 +1523,11 @@ class Input {
   std::atomic<bool> animfix_acted_{false};
   std::atomic<float> animfix_server_yaw_{0.0F};
   std::atomic<float> animfix_predicted_yaw_{0.0F};
-  // The **codec counters**: what the hooked codecs did, call by call. They
+  // The **codec counters**: what the hooked codec did, call by call. They
   // are the diagnosis (the capture never happened — *why*?), and they are
   // cheap: a fetch_add per codec call, and the codec runs a few times a
   // second per entity.
-  //
-  // The calls are split by the codec they came from: the **modern** one (the
-  // schema table) and the **chainer** one (the network-var chainer). Both
-  // are the codec of `CCS2PawnGraphController`; which one the engine runs
-  // is a build detail the payload must not guess.
   std::atomic<std::uint64_t> animfix_codec_calls_{0};
-  std::atomic<std::uint64_t> animfix_codec_calls_modern_{0};
-  std::atomic<std::uint64_t> animfix_codec_calls_chainer_{0};
   // The calls whose `dst` was **not** the local controller (the codec ran
   // for somebody else).
   std::atomic<std::uint64_t> animfix_codec_other_controller_{0};
@@ -1561,6 +1536,16 @@ class Input {
   std::atomic<std::uint64_t> animfix_codec_unresolved_{0};
   // The calls that **were** the local player's.
   std::atomic<std::uint64_t> animfix_codec_local_calls_{0};
+  // The **decodes** of the local player's graph inputs: a counter the anim
+  // tick compares against, and the time of the last one. The codec's detour
+  // cannot capture the values itself (its call to the original has to be a
+  // tail call), so it reports the decode and the anim tick does the
+  // capture.
+  std::atomic<std::uint64_t> animfix_decode_seq_{0};
+  std::atomic<std::uint64_t> animfix_decode_at_ms_{0};
+  // The decode the anim tick has already captured. Only the anim tick
+  // touches it (it runs on the game's main thread).
+  std::uint64_t animfix_captured_seq_{0};
 };
 
 }  // namespace cs2::control

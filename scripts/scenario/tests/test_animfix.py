@@ -256,8 +256,6 @@ class TestAnimfixCodecDiagnosis(unittest.TestCase):
             "animfix_predicted_aim_yaw": None,
             "animfix_aim_yaw_delta": None,
             "animfix_codec_calls": 0,
-            "animfix_codec_calls_modern": 0,
-            "animfix_codec_calls_chainer": 0,
             "animfix_codec_other_controller": 0,
             "animfix_codec_not_local": 0,
             "animfix_codec_local_calls": 0,
@@ -280,16 +278,14 @@ class TestAnimfixCodecDiagnosis(unittest.TestCase):
     def test_calls_for_other_controllers_are_h2(self) -> None:
         """The codec runs, but never for the local player."""
         message = self._run(self._block(animfix_codec_calls=12,
-                                        animfix_codec_other_controller=12,
-                                        animfix_codec_calls_modern=12))
+                                        animfix_codec_other_controller=12))
         self.assertIn("H2", message)
         self.assertIn("never for the local controller", message)
 
     def test_an_unresolvable_local_controller_is_h2(self) -> None:
         """The comparison could not be made: a different fix again."""
         message = self._run(self._block(animfix_codec_calls=5,
-                                        animfix_codec_not_local=5,
-                                        animfix_codec_calls_chainer=5))
+                                        animfix_codec_not_local=5))
         self.assertIn("H2", message)
         self.assertIn("could not be resolved", message)
 
@@ -312,9 +308,7 @@ class TestAnimfixCodecDiagnosis(unittest.TestCase):
     def test_the_counters_are_reported(self) -> None:
         """The numbers are in the result: the operator reads them."""
         game = FakeGame(self._block(animfix_codec_calls=7,
-                                    animfix_codec_other_controller=7,
-                                    animfix_codec_calls_modern=4,
-                                    animfix_codec_calls_chainer=3), climbing=False)
+                                    animfix_codec_other_controller=7), climbing=False)
         with self.assertRaises(Exception):
             animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
         self.assertEqual(game.writes[-1], ("animfix", False))

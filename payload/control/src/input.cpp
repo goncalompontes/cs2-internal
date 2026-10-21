@@ -44,7 +44,6 @@ Input* g_active = nullptr;
 // target — so the detour always finds it.
 using animfix_original_fn = void (*)(void* dst, void* src, void* schema);
 animfix_original_fn g_animfix_codec_original = nullptr;
-animfix_original_fn g_animfix_codec_chainer_original = nullptr;
 
 // The animfix's clock: a monotonic millisecond counter. The capture's age
 // is measured with it (`cs2/control/animfix.hpp`'s validity rule).
@@ -1516,40 +1515,44 @@ void __fastcall Input::create_move_input_detour(void* self, int slot, char activ
 
 // The **modern** codec of `CCS2PawnGraphController`: the one that decodes
 // through a schema table. Its first argument is the destination controller.
+//
+// **The stack, and the shape of the detour.** The inline hook's trampoline
+// replays the function's prologue, and the codec's prologue begins with
+// `mov qword ptr [rsp+0x08], rbx` — the caller's shadow slot. A detour that
+// *calls* the trampoline has pushed a return address of its own, so the
+// prologue runs with the stack **eight bytes lower** than the original
+// would have seen, and the store lands eight bytes below the shadow slot —
+// on the detour's own frame.
+//
+// That is why the detour's own work is **before** the call: the detour's
+// arguments (the destination pointer) live in **registers** across it, and
+// nothing the codec's prologue writes can reach them. (The compiler does not
+// emit a sibling call for the trampoline — the call is a `call` — so the
+// shift is there; what the shift must not reach is the detour's state, and
+// it does not.)
 void __fastcall Input::animfix_codec_detour(void* dst, void* src, void* schema) noexcept {
   // A game thread has no TLS block for our mapped image until we install one.
   // (The codec runs on the network thread, so this is not a formality: see
   // `docs/re/camera-split.md`.)
   cs2::tls::ensure_thread_tls();
-  // The original runs **first**: the codec writes the server's values into
-  // the slots, and the capture copies them out afterwards.
-  //
-  // It runs **always** — the codec decodes the server's snapshot, and a
-  // detour that skipped it would leave the game without the server's data.
-  if (g_animfix_codec_original != nullptr) {
-    g_animfix_codec_original(dst, src, schema);
-  }
   Input* input = g_active;
   if (input == nullptr) {
+    // The codec still decodes the server's snapshot: the original runs even
+    // when the payload's own state is gone. (A tail call, too.)
+    if (g_animfix_codec_original != nullptr) {
+      g_animfix_codec_original(dst, src, schema);
+    }
     return;
   }
-  input->animfix_codec_call(dst, /*chainer=*/false);
-}
-
-// The **chainer** codec of the same class: the one that decodes through the
-// network-var chainer (the legacy path). The engine may run either of the
-// two — the payload hooks both, and the counters say which one it used
-// (`docs/re/animfix.md` §10).
-void __fastcall Input::animfix_codec_chainer_detour(void* dst, void* src, void* schema) noexcept {
-  cs2::tls::ensure_thread_tls();
-  if (g_animfix_codec_chainer_original != nullptr) {
-    g_animfix_codec_chainer_original(dst, src, schema);
-  }
-  Input* input = g_active;
-  if (input == nullptr) {
-    return;
-  }
-  input->animfix_codec_call(dst, /*chainer=*/true);
+  // The counters, **before** the original: the detour's own work must not
+  // outlive the call (see above).
+  input->animfix_codec_call(dst);
+  // The original — the decode itself.
+  reinterpret_cast<animfix_codec_fn>(input->animfix_codec_hook_.original())(dst, src, schema);
+  // The decode is **done**: the server's values are in the controller's
+  // slots, and only now may the anim tick pick them up (a capture that ran
+  // before the decode would take the *previous* snapshot's values).
+  input->animfix_decode_seq_.fetch_add(1, std::memory_order_release);
 }
 
 // One codec call: what it was.
@@ -1559,13 +1562,19 @@ void __fastcall Input::animfix_codec_chainer_detour(void* dst, void* src, void* 
 // for the local player (H2). They are counted **whatever the capture then
 // does** — the capture is filtered by the local controller, and the filter
 // is exactly what the counters measure.
-void Input::animfix_codec_call(void* dst, bool chainer) noexcept {
+//
+// The detour cannot **capture** here: the capture needs the values the codec
+// has just written, and the detour's call to the original is a **call** (the
+// compiler emits no sibling call for it), so the codec's prologue runs with
+// the stack shifted — and the detour's own state must not be on the stack
+// across that call. The capture therefore happens in the **anim tick**,
+// which reads the controller's slots (the server's values — the prediction
+// never writes them, `docs/re/animfix.md` §9.2) as soon as the codec has
+// reported that a decode happened. The decode's own timestamp is recorded
+// here, so the capture's age is measured from the decode and not from the
+// anim tick.
+void Input::animfix_codec_call(void* dst) noexcept {
   animfix_codec_calls_.fetch_add(1, std::memory_order_relaxed);
-  if (chainer) {
-    animfix_codec_calls_chainer_.fetch_add(1, std::memory_order_relaxed);
-  } else {
-    animfix_codec_calls_modern_.fetch_add(1, std::memory_order_relaxed);
-  }
   const std::uintptr_t local = animfix_controller();
   if (local == 0) {
     // The comparison was **impossible**: the payload does not know the local
@@ -1581,10 +1590,10 @@ void Input::animfix_codec_call(void* dst, bool chainer) noexcept {
     return;
   }
   animfix_codec_local_calls_.fetch_add(1, std::memory_order_relaxed);
-  if (!animfix_enabled_.load()) {
-    return;
-  }
-  animfix_capture(dst);
+  // The local player's graph inputs have just been decoded: the server's
+  // values are in the controller's slots. The anim tick picks them up.
+  animfix_decode_at_ms_.store(animfix_now_ms(), std::memory_order_relaxed);
+  animfix_decode_seq_.fetch_add(1, std::memory_order_relaxed);
 }
 
 auto Input::animfix_codec_counters() const noexcept -> animfix::CodecCounters {
@@ -1617,6 +1626,16 @@ void __fastcall Input::animfix_anim_tick_detour(void* self, int client_tick_flag
   // the graph for the later anim ticks of the same tick, and the pose would
   // oscillate at the server's tick rate.)
   if (client_tick_flag != 0 && input->animfix_enabled_.load()) {
+    // The **capture**: the server's values, picked up as soon as the codec
+    // has decoded them. The codec's detour cannot capture them itself (its
+    // call to the original has to be a tail call — the stack must not
+    // shift), so it reports the decode and the capture happens here, in the
+    // anim tick, before the correction is applied.
+    const std::uint64_t decoded = input->animfix_decode_seq_.load(std::memory_order_acquire);
+    if (decoded != input->animfix_captured_seq_) {
+      input->animfix_captured_seq_ = decoded;
+      input->animfix_capture();
+    }
     input->animfix_apply();
     // The **duty cycle**'s denominator: the client anim ticks that ran
     // while the animfix was **on**. The correction counter only moves while
@@ -1648,10 +1667,24 @@ auto Input::animfix_controller() const noexcept -> std::uintptr_t {
   return controller;
 }
 
-void Input::animfix_capture(void* controller) noexcept {
+// The **capture**: the server's values for the tracked slots, copied out of
+// the local controller.
+//
+// The values are the ones the codec has just written (`docs/re/animfix.md`
+// §9.2: the codec writes the server's replicated values into the slots, and
+// the client's prediction never writes those slots — it pushes its own
+// values into the graph through the parameter setter instead). The capture
+// runs in the **anim tick**, right after the codec's detour has reported a
+// decode, because the codec's detour cannot capture itself: its call to the
+// original has to be a tail call (the stack must not shift — see the detour).
+//
+// The capture is stamped with the **decode's** time, not with the anim
+// tick's: the age of the server's data is measured from the moment it
+// arrived.
+void Input::animfix_capture() noexcept {
   const std::uintptr_t local = animfix_controller();
-  if (local == 0 || controller != reinterpret_cast<void*>(local)) {
-    return;  // another entity's controller
+  if (local == 0) {
+    return;  // no local controller (the pawn is gone)
   }
   std::array<float, animfix::k_tracked_slot_count> values{};
   for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
@@ -1660,14 +1693,16 @@ void Input::animfix_capture(void* controller) noexcept {
       return;
     }
   }
-  const std::uint64_t now = animfix_now_ms();
+  const std::uint64_t decoded_at = animfix_decode_at_ms_.load(std::memory_order_relaxed);
   std::uint64_t interval = 0;
   {
     const std::lock_guard<std::mutex> lock(animfix_mutex_);
-    animfix::store(animfix_capture_, local, values, now);
+    animfix::store(animfix_capture_, local, values, decoded_at);
     // The server's snapshot rate: the animfix's staleness bound is measured
-    // against it (see `animfix::snapshot_bound_ms`).
-    animfix::observe_decode(animfix_clock_, now);
+    // against it (see `animfix::snapshot_bound_ms`). The interval is
+    // measured between the **decodes** — the codec's own timestamps, not the
+    // anim ticks' — so the estimate is exact.
+    animfix::observe_decode(animfix_clock_, decoded_at);
     // The estimate reads the clock, so it is taken **under the lock** like
     // every other access to it.
     interval = animfix::snapshot_interval_ms(animfix_clock_);
@@ -1910,8 +1945,7 @@ void Input::report_animfix_status(std::string status, std::string log_line) noex
 // *before* it patches the target, precisely so the detour always finds it;
 // the write is a plain pointer store, which is atomic on x86.)
 void Input::animfix_install() noexcept {
-  if (animfix_codec_hook_.installed() && animfix_codec_chainer_hook_.installed() &&
-      animfix_anim_tick_hook_.installed()) {
+  if (animfix_codec_hook_.installed() && animfix_anim_tick_hook_.installed()) {
     return;
   }
   const cs2::game::ModuleInfo module = cs2::game::find_module("client.dll");
@@ -1921,23 +1955,19 @@ void Input::animfix_install() noexcept {
     return;
   }
   const OffsetInfo* codec = find_offset("animfix_graph_codec");
-  const OffsetInfo* chainer = find_offset("animfix_graph_codec_chainer");
   const OffsetInfo* anim_tick = find_offset("animfix_anim_tick");
-  if (codec == nullptr || chainer == nullptr || anim_tick == nullptr) {
+  if (codec == nullptr || anim_tick == nullptr) {
     // The offsets come from the generated SDK, which is rendered from the
     // **calibration dump** — a build-specific, gitignored artifact. A dump
     // that predates this feature has no entry for it, and the animfix would
     // then be silently inert. Say so, loudly, in the log and in the status.
-    const std::string missing = codec == nullptr ? "animfix_graph_codec"
-                             : chainer == nullptr ? "animfix_graph_codec_chainer"
-                                                  : "animfix_anim_tick";
+    const std::string missing = codec == nullptr ? "animfix_graph_codec" : "animfix_anim_tick";
     const std::string status = "the calibration dump has no '" + missing +
                                "' signature (re-run scripts/calibrate-live.py to refresh it)";
     report_animfix_status(status, status);
     return;
   }
-  if (codec->module != "client.dll" || chainer->module != "client.dll" ||
-      anim_tick->module != "client.dll") {
+  if (codec->module != "client.dll" || anim_tick->module != "client.dll") {
     report_animfix_status("the animfix's signatures are not from client.dll",
                           "the animfix's signatures are not from client.dll");
     return;
@@ -1953,7 +1983,9 @@ void Input::animfix_install() noexcept {
       return;
     }
   }
-  // The **modern** codec (the schema-table one).
+  // The **graph codec** — the one netvar codec of `CCS2PawnGraphController`
+  // (`docs/re/animfix.md` §9.4.2: there is only one; `0x8daab0` is the
+  // class's *schema registration*, not a second codec).
   if (!animfix_codec_hook_.installed()) {
     const auto error =
         animfix_codec_hook_.install(reinterpret_cast<void*>(module.base + codec->rva),
@@ -1967,26 +1999,9 @@ void Input::animfix_install() noexcept {
     g_animfix_codec_original =
         reinterpret_cast<animfix_original_fn>(animfix_codec_hook_.original());
   }
-  // The **chainer** codec (the network-var chainer one) — the same class, the
-  // other decode path. Both are hooked, because which one the engine runs is
-  // a build detail (the counters say), and the capture is filtered by the
-  // controller anyway.
-  if (!animfix_codec_chainer_hook_.installed()) {
-    const auto error = animfix_codec_chainer_hook_.install(
-        reinterpret_cast<void*>(module.base + chainer->rva),
-        reinterpret_cast<void*>(&Input::animfix_codec_chainer_detour));
-    if (error.has_value()) {
-      const std::string status = std::string("the graph codec's chainer twin is not hookable: ") +
-                                 cs2::hooks::to_string(*error);
-      report_animfix_status(status, status);
-      return;
-    }
-    g_animfix_codec_chainer_original =
-        reinterpret_cast<animfix_original_fn>(animfix_codec_chainer_hook_.original());
-  }
   // The success is logged **once**: the latch keeps the line to one, no
   // matter how many ticks go by.
-  report_animfix_status("ok", "the graph codecs and the anim tick are hooked");
+  report_animfix_status("ok", "the graph codec and the anim tick are hooked");
 }
 
 auto Input::current_cmd() noexcept -> void* {
