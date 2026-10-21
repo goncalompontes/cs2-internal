@@ -184,6 +184,18 @@ add_test(NAME protect-str-ir-test
           --policy ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/str.policy.json
           --work ${CMAKE_CURRENT_BINARY_DIR}/str-ir-test)
 
+# The differential test of the string protection: the same fixture is built
+# twice -- once with the pass and once without -- as a DLL, and the two
+# builds have to agree. It is a DLL because the key is derived from the
+# instance handle, and only the OS loader calls DllMain with the real one.
+add_test(NAME protect-str-diff-test
+  COMMAND ${CS2_PROTECT_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/str_diff_test.py
+          --clang-cl ${LLVM_TOOLS_BINARY_DIR}/clang-cl.exe
+          --plugin $<TARGET_FILE:Cs2Protect>
+          --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/str_fixture.cpp
+          --policy ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/str.policy.json
+          --work ${CMAKE_CURRENT_BINARY_DIR}/str-diff-test)
+
 # The readers of the coverage: a malformed file has to be reported and
 # ignored (never a traceback), and the coverage of another tree has to be
 # skipped (it would count every rewrite twice).
