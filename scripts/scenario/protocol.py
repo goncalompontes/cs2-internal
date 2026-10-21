@@ -553,6 +553,7 @@ class InputStatus(TypedDict, total=False):
     animfix_skip_controller: int
     animfix_anim_ticks: int
     animfix_client_ticks: int
+    animfix_client_tick_seen: bool
     animfix_corrected_ticks: int
     animfix_snapshot_interval_ms: int
     animfix_rejected: int

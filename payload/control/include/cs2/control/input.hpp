@@ -851,6 +851,13 @@ class Input {
   [[nodiscard]] std::uint64_t animfix_corrected_ticks() const noexcept {
     return animfix_corrected_ticks_.load();
   }
+  // True when the driver has run a **client** tick at all. The correction is
+  // written on the client tick only, so a payload that never saw one cannot
+  // work - this says so instead of leaving the operator to infer it from the
+  // counters.
+  [[nodiscard]] bool animfix_client_tick_seen() const noexcept {
+    return animfix_client_ticks_.load() != 0;
+  }
   [[nodiscard]] std::uint64_t animfix_skip_controller() const noexcept {
     return animfix_skip_controller_.load();
   }
@@ -1375,9 +1382,11 @@ class Input {
   // is the belt to that braces (and the counters the control thread reads
   // are atomic).
   using animfix_codec_fn = void (*)(void* dst, void* src, void* schema);
-  using animfix_anim_tick_fn = void (*)(void* self, int tick_count);
+  /// The anim tick's second argument is a **flag** (0 = the server tick,
+  /// otherwise the client tick), not a tick count.
+  using animfix_anim_tick_fn = void (*)(void* self, int client_tick_flag);
   static void __fastcall animfix_codec_detour(void* dst, void* src, void* schema) noexcept;
-  static void __fastcall animfix_anim_tick_detour(void* self, int tick_count) noexcept;
+  static void __fastcall animfix_anim_tick_detour(void* self, int client_tick_flag) noexcept;
   // Install the two hooks (idempotent).
   void animfix_install() noexcept;
   // Copy the server's values out of the local controller (the codec detour).

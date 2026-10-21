@@ -13,16 +13,17 @@
 // validity rule is what prevents it, so the rule is pinned here, in all of
 // its clauses:
 //
-//   * a capture is **consumed once per slot** ("captured *this* frame"): the
-//     animfix corrects a slot at most once per capture, so a value that has
-//     already been written over the fresh prediction is never written again;
+//   * a fresh capture is **not consumed** by a re-apply: it is re-applied on
+//     every client anim tick while it is fresh, so the server's value stays
+//     in the graph between the decodes (the engine writes the parameters on
+//     the command path and evaluates the graph on the anim path);
 //   * a capture that has **aged out** is refused outright — and the bound is
 //     the **observed snapshot interval** (the server's rate), pinned against
 //     literals, so it cannot be loosened without the test noticing.
 //
 // The refusal **reasons** are pinned too: the operator has to be able to
 // tell "the codec has not run yet" from "every capture aged out" and from
-// "the capture was already used".
+// "the controller is not the one the capture came from".
 //
 // The engine's layout is pinned as well: the slot offsets, the stride, the
 // four slots the server replicates as floats, and the shape of the graph
@@ -336,7 +337,7 @@ void test_an_aged_out_capture_is_refused() {
 
 // The refusal reasons are distinguishable: the operator has to be able to
 // tell "the codec has not run yet" from "every capture aged out" and from
-// "the capture was already used".
+// "the controller is not the one the capture came from".
 void test_the_refusal_reasons_are_distinguishable() {
   animfix::Capture capture = captured_at(1000);
   // A capture for another controller (the pawn respawned).

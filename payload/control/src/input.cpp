@@ -1600,6 +1600,13 @@ void Input::animfix_apply() noexcept {
   // through the captured `(node, index)` pairs would then be a write into
   // freed memory — a corruption, which is worse than a fault.
   const std::uintptr_t controller = animfix_controller();
+  if (controller == 0) {
+    // No local pawn (dead, or the map is changing): nothing to correct, and
+    // the operator can see it.
+    count_animfix_refusal(animfix::Refusal::controller);
+    animfix_skips_.fetch_add(1);
+    return;
+  }
   const std::uint64_t now = animfix_now_ms();
   // The write targets are read from the **live** controller, not from the
   // capture: the AG2 instance inside it is a separate object, and it can be
@@ -1613,10 +1620,17 @@ void Input::animfix_apply() noexcept {
     const std::size_t offset = animfix::slot_offset(slot);
     std::uintptr_t node = 0;
     if (!cs2::game::read(controller + offset + animfix::slot_node_offset(slot), node)) {
+      // The controller does not answer: the local pawn is gone, or the
+      // controller is being re-created. Counted, so the operator can tell
+      // "idle because I am dead" from "broken".
+      count_animfix_refusal(animfix::Refusal::controller);
+      animfix_skips_.fetch_add(1);
       return;
     }
     std::int16_t index = 0;
     if (!cs2::game::read(controller + offset + animfix::slot_index_offset(slot), index)) {
+      count_animfix_refusal(animfix::Refusal::controller);
+      animfix_skips_.fetch_add(1);
       return;
     }
     targets[i] = animfix::Target{node, index};
@@ -1654,12 +1668,14 @@ void Input::animfix_apply() noexcept {
     // parameter object -> the value.
     std::uintptr_t array = 0;
     if (!cs2::game::read(targets[i].node + animfix::k_node_array_offset, array) || array == 0) {
+      count_animfix_refusal(animfix::Refusal::controller);
       continue;
     }
     std::uintptr_t object = 0;
     const std::uint64_t element =
         array + static_cast<std::uint64_t>(targets[i].index) * animfix::k_parameter_stride;
     if (!cs2::game::read(element, object) || object == 0) {
+      count_animfix_refusal(animfix::Refusal::controller);
       continue;
     }
     const std::uintptr_t value_address = object + animfix::k_parameter_value_offset;

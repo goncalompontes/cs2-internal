@@ -353,8 +353,8 @@ inline void mark_applied(Capture& capture) noexcept {
 
 // Why a re-apply was refused. The operator has to be able to tell "the
 // codec has not run yet" from "every capture aged out" (a stalled
-// connection) and from "the capture was already used" (the specification's
-// once-per-capture rule) — otherwise a feature that refuses everything
+// connection) and from "the controller is not the one the capture came
+// from" (the pawn respawned) — otherwise a feature that refuses everything
 // looks like a feature that is merely idle.
 enum class Refusal : std::size_t {
   none = 0,     // the re-apply is allowed
