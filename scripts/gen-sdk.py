@@ -13,15 +13,50 @@ Usage: gen-sdk.py [--live] [DUMP_DIR] [OUT_DIR] [STAMP]
 
 Any subset of the dumps may be missing; missing inputs simply produce empty
 sections. The dumper is built (release) on demand if no binary is present.
+
+Where the dumper binary is depends on cargo: ``CARGO_TARGET_DIR`` moves the
+whole target directory (which is how a worktree keeps cargo's output out of
+itself), and the release binary is then at ``<CARGO_TARGET_DIR>/release/``.
+Without it the binary is in the dumper crate's own target directory.
 """
 import os
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+
+#: The repository root (the script lives in ``scripts/``).
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def dumper_exe_name() -> str:
+    """The dumper binary's file name on this platform."""
+    return "cs2-dumper.exe" if os.name == "nt" else "cs2-dumper"
+
+
+def dumper_binary(root: Path, env: Mapping[str, str] | None = None) -> Path:
+    """Where cargo put (or will put) the dumper binary.
+
+    Cargo honours ``CARGO_TARGET_DIR``: when it is set the whole target
+    directory moves there, and the release binary is at
+    ``<CARGO_TARGET_DIR>/release/<exe>``.  When it is not set the binary is in
+    the dumper crate's own target directory,
+    ``external/dumper/target/release/<exe>``.
+
+    The path is resolved in a function - not inline in ``main`` - so it can be
+    unit tested without a cargo build.  ``env`` is the environment to read
+    (the process environment by default); a relative ``CARGO_TARGET_DIR`` is
+    relative to the working directory, which is cargo's own rule.
+    """
+    environment: Mapping[str, str] = os.environ if env is None else env
+    target_dir = environment.get("CARGO_TARGET_DIR")
+    if target_dir:
+        return Path(target_dir) / "release" / dumper_exe_name()
+    return root / "external" / "dumper" / "target" / "release" / dumper_exe_name()
 
 
 def main(argv: list[str]) -> int:
-    root = Path(__file__).resolve().parent.parent
+    root = ROOT
 
     args = list(argv)
     live = False
@@ -49,8 +84,7 @@ def main(argv: list[str]) -> int:
             dumper_args += [f"--{name}-json", str(path)]
             found += 1
 
-    exe = "cs2-dumper.exe" if os.name == "nt" else "cs2-dumper"
-    binary = root / "external" / "dumper" / "target" / "release" / exe
+    binary = dumper_binary(root)
     if not binary.is_file():
         print("gen-sdk: building cs2-dumper (release)", file=sys.stderr)
         subprocess.run(
