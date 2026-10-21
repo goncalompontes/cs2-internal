@@ -91,8 +91,33 @@ per-weapon profiles) is described in `docs/ragebot.md` and audited in
 injection, live state and overlay are validated on native Windows — see
 `docs/handoff.md` and `docs/windows-validation.md`.
 
-**Uncommitted:** yes. Preserve the current worktree, including edits in this follow-up and
-the existing `AGENTS.md` / `docs/style-guide.md` changes.
+**Uncommitted:** no — the integration tree is clean (2026-10-21). The
+open work is in the task worktrees under `C:\Users\gpmpo\cs2-wt\` (one per
+agent, each on its own branch) and in the task board
+(`orchestrate.status({project: "cs2"})`).
+
+**What is open now** (the specifications are in `docs/orchestration/`):
+
+* **T26 — the chams' draw hook.** The target is **re-derived** (the real
+  `CAnimatableSceneObjectDesc::DrawPrimitive` is at `scenesystem.dll + 0x580A0`
+  — nine arguments, the material at index 3, exactly the payload's existing
+  typedef). The task resolves it through a **dumper signature** (ADR-0012),
+  **verifies the prologue** before it patches, and removes the `thread_local`
+  guard. See `docs/handoff-wave2.md` §5.2.
+* **T27 — the third-person camera's crash.** The hook's address is **valid**
+  on the live build; the fault is the **`thread_local` in the detour** (the
+  payload is manually mapped — the game's threads have no TLS block). See
+  `docs/handoff-wave2.md` §5.1b.
+* **T28 — the curated offsets, resolved offline.** The dumper's `--file` mode
+  resolves the same signatures **without the game**, so a new signature
+  becomes usable without the operator launching CS2.
+
+**The protection workstream is out of scope** (the operator's decision,
+2026-10-21): `docs/handoff-protect.md`'s T20 (the virtualization) is not a
+task for this repository.
+
+**The live run** — the one thing static review cannot close — has its own
+checklist: **[`docs/operator-live-check.md`](docs/operator-live-check.md)**.
 
 ## Static RE tooling (REA + Ghidra)
 
