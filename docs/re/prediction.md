@@ -257,3 +257,207 @@ in-tick landing on a command's *last* frame be answered before the command is
 re-sent. On a listen server every frame re-runs the same command, so the
 reuse-frame patch is sufficient.
 
+## The TLS defect (2026-10-21)
+
+The manual `RunCommand` simulation's copy of the movement services was a
+`thread_local`:
+
+```cpp
+// payload/control/src/input.cpp (before)
+thread_local std::array<std::byte, k_movement_services_size> svc_copy;
+```
+
+On a manually mapped image that construct **cannot work**, and it fails
+**silently** — no crash, no log, the prediction simply off. This section
+records the diagnosis, the proof, and what replaced it.
+
+### The diagnosis
+
+The payload is **manually mapped**: the Windows loader never loads it, so it
+never allocates the per-thread TLS block a `thread_local` resolves against.
+
+* The injector reserves a slot in the *target* with `TlsAlloc` and writes the
+  index into the image's `__tls_index`
+  (`injector/src/main.cpp`, `setup_tls`).
+* The entry stub installs the per-thread block **on the entry thread only**
+  (`make_entry_stub`: `mov rax, gs:[0x58]` / `mov [rax+rcx*8], rdx`). The
+  entry thread is the injector's remote thread, not one of the game's.
+* `cs2::tls::ensure_thread_tls()` (`payload/tls/src/bootstrap.cpp`) installs
+  one by hand — but it **refuses** an index that is not below 64
+  (`k_inline_tls_slots`), because the in-TEB array holds only the first 64
+  slots and the rest live in expansion blocks. The live build's index is
+  **154** (`docs/re/camera-split.md`).
+
+So on a game's thread the image's `thread_local` resolves against a block
+pointer that was never written.
+
+### The proof
+
+**The image.** The built `payload.dll`'s TLS directory (before the fix):
+
+```
+TLSDirectory {
+  StartAddressOfRawData: 0x180340000
+  EndAddressOfRawData:   0x180340FE8      <- 0xFE8 bytes of template
+  AddressOfIndex:        0x180254E38      <- the image's __tls_index
+  SizeOfZeroFill:        0x0
+}
+```
+
+`0xFE8` = the prediction's `0xFE0` snapshot + the two 4-byte guards the
+features carry (`payload/features/src/thirdperson.cpp`,
+`payload/features/src/chams.cpp`).
+
+**The access.** The prediction's copy, in the disassembly of the built image
+(`0x18005e8bd`):
+
+```
+movl  0x1f6575(%rip), %eax   # 0x180254e38   <- __tls_index
+movq  %gs:0x58, %rcx                          <- TEB->ThreadLocalStoragePointer
+movq  (%rcx,%rax,8), %rax                     <- tls_array[index]  (the block)
+leaq  0x8(%rax), %rbx                         <- &svc_copy  (block + 8)
+movl  $0xfe0, %r8d
+callq cs2::game::read_bytes
+```
+
+The camera's guard uses the same sequence (`0x18000ddef`, and the read at
+`0x18000ddfc`: `cmpl $0x0, 0x4(%rax)`) — which is why the third-person
+camera's crash was a **read of `0x4`**: the block was null and the guard read
+`[null+4]`.
+
+**The refusal.** `ensure_thread_tls` in the same image (`0x18003434c`):
+
+```
+movl  (%rax), %r15d        <- the index
+cmpq  $0x3f, %r15         <- 63
+ja    <return>            <- index >= 64: refuse
+```
+
+**The consequence.** A harness that reproduces the mapped image's condition
+(`TlsAlloc`, the entry stub's `gs:[0x58]` write, and the payload's access
+sequence verbatim) shows what the copy does on a thread that never ran the
+stub. The harness is a scratch program, not part of the tree: it calls
+`TlsAlloc`, installs a block the way the entry stub does, and runs the
+access sequence above.
+
+```
+TlsAlloc index = 1
+entry thread: slot[1] = 0000000000000000 (the loader never set it)
+  [other thread] slot[1] = 0000000000000000
+  [other thread] the snapshot resolves to 0000000000000008
+live index 154: the snapshot resolves to 0000000000000008
+read_bytes(source, 0000000000000008, 0xFE0) -> FALSE (the prediction returns false, silently)
+with the block installed: the snapshot resolves to 00000124E6660008, read_bytes -> true
+a stack local resolves to 0000000E7E93D990, read_bytes -> true
+```
+
+The slot a `TlsAlloc` reserved is null on every thread the loader did not
+initialise; the block is therefore null, the snapshot resolves to `0x8`, and
+`ReadProcessMemory` refuses the invalid **destination** — the fault-safe
+reader answers *false*. `simulate_landing` returns false, and **nothing is
+logged**. That is the "headline feature off, no error anywhere" shape.
+
+### What was changed, and why
+
+The copy is now **the caller's buffer**: a plain local of the prediction's
+step, and the logic lives in a pure, host-testable header.
+
+* `payload/control/include/cs2/control/prediction_copy.hpp` (new) — the
+  snapshot's type (`MovementServicesSnapshot`, a `std::array<std::byte, 0xFE0>`)
+  and the two helpers: `snapshot()` (read the engine's object through the
+  fault-safe reader) and `restore()` (put it back). The helpers keep **no
+  state of their own**: the buffer is the caller's, so there is no per-thread
+  storage, no lock and no global state.
+* `payload/control/src/input.cpp` — `svc_copy` is a plain local of
+  `simulate_landing`; the constant moved to the header
+  (`prediction::MOVEMENT_SERVICES_SIZE`); the restore goes through the
+  header's helper.
+* A failed snapshot is now **logged once**
+  (`[cs2-payload] prediction: the movement services could not be read — the
+  prediction is off`), so a future failure of this kind is loud rather than
+  silent.
+
+**Why a local and not a per-instance buffer.** The copy's lifetime is one
+prediction step (read → simulate → restore), and the step is not deeply
+nested: the call chain is the `CreateMove` detour → `simulate_landing` → the
+engine's `RunCommand` (which does not re-enter the payload's hook), so the
+deepest frame of ours is two. The cost is one frame of `0x10C8` bytes
+(4296: the `0xFE0` snapshot plus the step's other locals) on the game's main
+thread, and a `__chkstk` stack probe (the frame passes 4 KB). `__chkstk` is a
+**local** function of the image (the static CRT), so the manual map is
+unaffected — it adds no import. A per-instance buffer instead would be shared
+mutable state that the control thread could touch at the same time as the
+game thread, and it would need a lock; the prediction's own state is atomic
+and lock-free today.
+
+**What the image looks like now.** The TLS template shrank to the two
+features' guards, and the prediction's TLS access is gone:
+
+```
+TLSDirectory {
+  StartAddressOfRawData: 0x180340000
+  EndAddressOfRawData:   0x180340008      <- 0x8 bytes: the two guards
+  AddressOfIndex:        0x180254E38
+}
+```
+
+`grep` for `gs:0x58` in the new image finds two sites: the camera's guard
+(`0x18000ddef`) and `ensure_thread_tls` itself (`0x180034352`). The
+prediction's own access is not among them.
+
+### The test
+
+`payload/control/tests/test_control_prediction.cpp` (the host test
+`control-prediction`) drives the copy against a fake engine object and pins
+three properties:
+
+* the copy round trips — the snapshot holds the engine's bytes and the
+  restore puts them back after the simulation changed them;
+* a failed read leaves the engine's object alone (nothing is written back);
+* the copy is **the caller's buffer** — the reader is handed the caller's
+  address, and two steps never share a buffer.
+
+The last check is a **source** check over the control module's own headers
+and sources (the comments and string literals are stripped first, so the
+prose that states the rule does not trip it): the prediction's path must not
+carry a `thread_local`. Both kinds of check fail when the defect comes back:
+re-introducing the `thread_local` in `input.cpp` fails the source check, and
+making the helper keep a buffer of its own fails the caller's-buffer check.
+
+### The sweep: every `thread_local` in the payload
+
+| file | what | on a game's thread? | fate |
+|---|---|---|---|
+| `payload/control/src/input.cpp` | the prediction's copy of the movement services | yes (the `CreateMove` detour) | **fixed here** — a plain local |
+| `payload/features/src/thirdperson.cpp:39` | `g_camera_depth`, the third-person camera's re-entrancy guard | yes (the camera thread) | **not mine** — `payload/features/**` is another task's file. The T27 branch (`feat/t27-thirdperson-crash`, commit `64f1590`) replaces it with a per-owner depth in a pure header; it is **not merged** into the integration tree yet |
+| `payload/features/src/chams.cpp:122` | `g_draw_depth`, the chams' draw-hook guard | yes (the render thread) | **not mine** — the T26 task's file. `feat/t26-chams-draw-hook` (commit `e8fe41d`) already replaced it with an atomic; that branch is **not merged** either |
+| `payload/third_party/imgui/imgui.cpp` | documentation comments only | — | nothing to fix |
+
+The rule the payload is heading for: **no `thread_local` in the payload**. The
+control module follows it today — the host test `control-prediction` enforces
+it by reading the repository's own sources — and the two features' guards are
+one merge away. The overlay and the injector are **loaded normally** (a
+Vulkan layer and an executable), so a `thread_local` there is ordinary C++;
+neither carries one today.
+
+### What is still unverified
+
+* **The live run.** Nothing here was run against CS2: the agent sits in
+  session 0 (no GPU), so the game cannot be started. The disassembly, the
+  TLS directory and the harness above are static/offline evidence.
+* **The defect was latent, not observed.** `Input::simulate_landing` has
+  **no call site** in the tree: the record-based bhop replaced the manual
+  `RunCommand` simulation (see the header of this file), and the manual path
+  is kept "for reference only" behind `predict(on)`. The copy would have
+  failed silently the moment the manual simulation was wired up again — the
+  bug was a trap, not a live outage. The **active** prediction (the
+  record-based bhop) reads the engine's landing record directly and never
+  touched this buffer, so it was unaffected.
+* **The 4 KB frame on the game's main thread** is argued from the call graph
+  and the measured frame size, not measured in the game. The `__chkstk` probe
+  is the standard one; it is a local function of the image.
+* **The live TLS index (154)** is the value the T27 work recorded from the
+  live crash; it is not reproducible offline (it is the target process's
+  `TlsAlloc` result). The refusal that matters (`index >= 64`) is in the
+  image's own code and is reproduced above.
+
