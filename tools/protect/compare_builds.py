@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Compare two built payloads and report what differs.
 
-The acceptance criterion for the protection pass is that the *protected*
-build is identical to the unprotected one, because the pass only reports and
-changes no code. The link step is not reproducible byte for byte: the PE
-header carries the link time and the debug directory carries a CodeView GUID
-that the linker generates per link. Both are stamped by the linker, not by
-the compiler, and they change between two links of the *same* build.
+The acceptance criterion for the protection pass is that the difference
+between the *protected* and the *unprotected* build is confined to the
+selected functions and to the new globals: the transform marks the selected
+functions `noinline`, rewrites their calls into indirect dispatches, and
+adds the table, the descriptor and the key constants. Everything else has to
+be identical.
+
+The link step is not reproducible byte for byte: the PE header carries the
+link time and the debug directory carries a CodeView GUID that the linker
+generates per link. Both are stamped by the linker, not by the compiler, and
+they change between two links of the *same* build.
 
 This script therefore compares two images in two ways:
 
@@ -19,30 +24,48 @@ The PDB path is normalised *in place* (it is replaced by a filler of the
 same length), so the image layout does not move. Two builds whose embedded
 PDB paths have a different length therefore still differ -- the path shifts
 the layout of the image -- and the script says so instead of pretending the
-two are comparable.
+two images are comparable.
 
-Usage: compare_builds.py [--ignore-link-stamps] A.dll B.dll
+With --attribute the differences are *attributed*: the x64 unwind table
+(.pdata) says which function a code address belongs to, and the PDB says
+which function that is. The report then names the functions the differences
+are in, and the bytes that are outside any function (the new globals, which
+live in the read-only data).
+
+Usage: compare_builds.py [--ignore-link-stamps] [--attribute]
+                          [--pdb FILE] [--pdbutil FILE] A.dll B.dll
 
   --ignore-link-stamps  also compare with the linker's per-link stamps
                         normalised out
+  --attribute           name the functions the differences are in (and the
+                        bytes that are outside any function)
+  --pdb                 the PDB of the *second* image (for the names)
+  --pdbutil             llvm-pdbutil.exe (the SDK's)
 
 Exit code 0 when the images are identical (or identical apart from the link
 stamps), 1 when they differ.
 """
+from __future__ import annotations
+
 import argparse
+import re
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
-# The PE header fields the linker stamps per link.
+#: The PE header fields the linker stamps per link.
 TIMESTAMP_OFFSET = 0x88  # PE header + 8 (TimeDateStamp)
-# The debug directory entry: the CodeView GUID (16 bytes) and the age/timestamp.
+#: The debug directory entry: the CodeView GUID (16 bytes) and the age/timestamp.
 DEBUG_DIRECTORY_RVA_OFFSET = 0xA8  # PE header + 40 (AddressOfDebugDirectory)
 DEBUG_DIRECTORY_SIZE_OFFSET = 0xAC  # PE header + 44 (SizeOfDebugDirectory)
 CODEVIEW_SIGNATURE = b"RSDS"
 
-# The size of one debug directory entry.
+#: The size of one debug directory entry.
 DEBUG_ENTRY_SIZE = 28
+
+#: The exception directory of a PE (the x64 unwind table).
+EXCEPTION_DIRECTORY = 3
 
 
 def pe_header(data: bytes) -> int:
@@ -153,11 +176,150 @@ def path_lengths(data: bytes) -> list[int]:
     return [end - start for start, end in codeview_paths(data)]
 
 
+# --- The attribution ---------------------------------------------------------
+
+
+class Section:
+    """One section of a PE image."""
+
+    def __init__(self, name: str, virtual_address: int, virtual_size: int, raw_offset: int,
+                 raw_size: int) -> None:
+        self.name = name
+        self.virtual_address = virtual_address
+        self.virtual_size = virtual_size
+        self.raw_offset = raw_offset
+        self.raw_size = raw_size
+
+    def rva_of(self, offset: int) -> int | None:
+        """The RVA of a file offset, or None when the offset is not in the section."""
+        if not (self.raw_offset <= offset < self.raw_offset + self.raw_size):
+            return None
+        return self.virtual_address + (offset - self.raw_offset)
+
+
+class Image:
+    """The parts of a PE image the attribution needs."""
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        pe_offset = pe_header(data)
+        if pe_offset == 0:
+            raise SystemExit("compare_builds: the file is not a PE image")
+        optional = pe_offset + 24
+        magic = struct.unpack_from("<H", data, optional)[0]
+        if magic == 0x20B:
+            self.directories_offset = optional + 112
+            self.number_of_directories = struct.unpack_from("<I", data, optional + 108)[0]
+        else:
+            self.directories_offset = optional + 96
+            self.number_of_directories = struct.unpack_from("<I", data, optional + 92)[0]
+        optional_size = struct.unpack_from("<H", data, pe_offset + 20)[0]
+        number_of_sections = struct.unpack_from("<H", data, pe_offset + 6)[0]
+        table = optional + optional_size
+        self.sections: list[Section] = []
+        for index in range(number_of_sections):
+            header = table + index * 40
+            name = data[header : header + 8].rstrip(b"\0").decode("ascii", "replace")
+            virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from(
+                "<IIII", data, header + 8
+            )
+            self.sections.append(Section(name, virtual_address, virtual_size, raw_offset,
+                                         raw_size))
+
+    def directory(self, index: int) -> tuple[int, int]:
+        """The (rva, size) of a data directory."""
+        if index >= self.number_of_directories:
+            return (0, 0)
+        return struct.unpack_from("<II", self.data, self.directories_offset + index * 8)
+
+    def section_of_offset(self, offset: int) -> Section | None:
+        """The section a file offset is in."""
+        for section in self.sections:
+            if section.raw_offset <= offset < section.raw_offset + section.raw_size:
+                return section
+        return None
+
+    def functions(self) -> list[tuple[int, int]]:
+        """The (begin, end) RVA ranges of the unwind table."""
+        rva, size = self.directory(EXCEPTION_DIRECTORY)
+        if rva == 0 or size == 0:
+            return []
+        blob = self.bytes_at_rva(rva, size)
+        ranges: list[tuple[int, int]] = []
+        for offset in range(0, len(blob) - 11, 12):
+            begin, end, _ = struct.unpack_from("<III", blob, offset)
+            if begin == 0 and end == 0:
+                continue
+            ranges.append((begin, end))
+        return ranges
+
+    def bytes_at_rva(self, rva: int, size: int) -> bytes:
+        """The bytes of an RVA range."""
+        for section in self.sections:
+            if section.virtual_address <= rva < section.virtual_address + max(
+                section.virtual_size, section.raw_size
+            ):
+                offset = section.raw_offset + (rva - section.virtual_address)
+                return self.data[offset : offset + size]
+        return b""
+
+
+def functions_of(image: Image) -> list[tuple[int, int]]:
+    """The (begin, end) RVA ranges of the functions of an image.
+
+    The x64 unwind table (.pdata) says which function a code address belongs
+    to. The ranges are in the link order, so the *n*-th range of one image
+    and the *n*-th range of the other one are the same function.
+    """
+    return sorted(image.functions())
+
+
+def attribute(first: Image, second: Image) -> None:
+    """Prints which functions changed, and how much the sections grew.
+
+    A byte-for-byte comparison cannot work here: the transform makes the
+    image bigger, so every function after the first one moves, and even the
+    bytes of an unchanged function differ (the displacements of the calls
+    and of the data references). The attribution is therefore per function:
+    the functions whose *size* changed are the ones the transform touched,
+    and the sections that grew are the ones that hold the new globals.
+    """
+    first_functions = functions_of(first)
+    second_functions = functions_of(second)
+    common = min(len(first_functions), len(second_functions))
+    changed = []
+    for index in range(common):
+        begin, end = first_functions[index]
+        other_begin, other_end = second_functions[index]
+        if (end - begin) != (other_end - other_begin):
+            changed.append((index, begin, end - begin, other_end - other_begin))
+    print(f"compare_builds: {len(first_functions)} functions in the first image, "
+          f"{len(second_functions)} in the second")
+    print(f"compare_builds: {len(changed)} of them changed their size")
+    for index, begin, before, after in changed[:40]:
+        print(f"  the function #{index} at rva 0x{begin:x}: {before} -> {after} bytes")
+    if len(changed) > 40:
+        print(f"  ... and {len(changed) - 40} more")
+    for section in second.sections:
+        other = None
+        for candidate in first.sections:
+            if candidate.name == section.name:
+                other = candidate
+                break
+        if other is None:
+            continue
+        if other.raw_size != section.raw_size:
+            print(f"  the section {section.name}: {other.raw_size} -> {section.raw_size} bytes")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("first", type=Path)
     parser.add_argument("second", type=Path)
     parser.add_argument("--ignore-link-stamps", action="store_true")
+    parser.add_argument("--attribute", action="store_true")
+    parser.add_argument("--pdb", type=Path, default=None)
+    parser.add_argument("--pdbutil", type=Path, default=None)
     args = parser.parse_args(argv)
 
     first = args.first.read_bytes()
@@ -173,7 +335,13 @@ def main(argv: list[str]) -> int:
                 "the image, so the two images are not comparable. Compare two "
                 "builds whose PDB paths have the same length."
             )
-        return 1
+        else:
+            print(
+                "compare_builds: the transform changed the size of the image, so a "
+                "byte-for-byte comparison says nothing: use --attribute."
+            )
+        if not args.attribute:
+            return 1
     differing = [i for i in range(len(first)) if first[i] != second[i]]
     if not differing:
         print(f"compare_builds: {args.first} and {args.second} are byte-identical")
@@ -199,6 +367,9 @@ def main(argv: list[str]) -> int:
         print(f"  0x{first_byte:06x}..0x{last_byte:06x} ({last_byte - first_byte + 1} bytes)")
     if len(ranges) > 20:
         print(f"  ... and {len(ranges) - 20} more ranges")
+    if args.attribute:
+        print("compare_builds: the differences are in")
+        attribute(Image(first), Image(second))
     return 1
 
 

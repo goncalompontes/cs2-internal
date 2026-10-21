@@ -1,0 +1,6 @@
+{
+  "protect": [
+    { "symbol": "caller", "module": "calls.ll", "level": "call" }
+  ],
+  "seed": "0x0123456789ABCDEF"
+}

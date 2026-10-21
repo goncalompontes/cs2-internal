@@ -12,8 +12,13 @@
 //   * the selection -- an entry that named a function that cannot be
 //     protected protects nothing, and the build has to say so;
 //   * the coverage file -- two modules must not write the same file, and a
-//     blocked entry must be recorded as blocked.
+//     blocked entry must be recorded as blocked;
+//   * the transform -- the calls of a selected function become indirect
+//     dispatches, the calls that cannot be rewritten are left alone, the
+//     level that is not implemented yet is refused, and a selected function
+//     that did not survive is reported.
 
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +28,9 @@
 #include <vector>
 
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
@@ -30,6 +38,7 @@
 #include "config.hpp"
 #include "report.hpp"
 #include "selection.hpp"
+#include "transform.hpp"
 
 namespace {
 
@@ -255,6 +264,287 @@ void test_coverage() {
   std::filesystem::remove_all(directory, error);
 }
 
+/// The transform -------------------------------------------------------------
+
+/// The mixer of the transform, in the test.
+///
+/// The test decodes the descriptor with it, so a wrong index is caught even
+/// when the shape of the rewritten IR is right.
+constexpr std::uint64_t k_mix_multiplier = 0x9E3779B97F4A7C15ULL;
+constexpr std::uint64_t k_mix_xor = 0xBF58476D1CE4E5B9ULL;
+constexpr unsigned k_mix_rotate = 31;
+
+[[nodiscard]] auto mix64(std::uint64_t value) noexcept -> std::uint64_t {
+  value *= k_mix_multiplier;
+  value ^= k_mix_xor;
+  return (value << k_mix_rotate) | (value >> (64U - k_mix_rotate));
+}
+
+/// A module with a caller that calls a target, and the four calls that the
+/// pass must not rewrite.
+[[nodiscard]] auto build_transform_module(llvm::LLVMContext& context)
+    -> std::unique_ptr<llvm::Module> {
+  static constexpr std::string_view k_ir = R"(
+define i32 @target(i32 %x) {
+entry:
+  %r = add i32 %x, 1
+  ret i32 %r
+}
+
+define i32 @variadic_target(i32 %x, ...) {
+entry:
+  ret i32 %x
+}
+
+define i32 @musttail_target(i32 %x) {
+entry:
+  ret i32 %x
+}
+
+define void @sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x) {
+entry:
+  store i64 0, ptr %out
+  ret void
+}
+
+define i32 @caller(i32 %x) {
+entry:
+  %out = alloca { i64, i64, i64 }, align 8
+  %a = call i32 @target(i32 %x)
+  %b = call i32 (i32, ...) @variadic_target(i32 %x, i32 %x)
+  call void @sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x)
+  %d = add i32 %a, %b
+  br i1 true, label %tail, label %exit
+
+tail:
+  %r = musttail call i32 @musttail_target(i32 %x)
+  ret i32 %r
+
+exit:
+  ret i32 %d
+}
+)";
+  llvm::SMDiagnostic error;
+  auto module = llvm::parseAssemblyString(k_ir, error, context);
+  if (module == nullptr) {
+    std::string message;
+    llvm::raw_string_ostream stream(message);
+    error.print("protect_tests", stream);
+    std::fprintf(stderr, "FAIL: the transform module does not parse: %s\n", stream.str().c_str());
+    ++g_failures;
+    return nullptr;
+  }
+  module->setModuleIdentifier("transform.obj");
+  return module;
+}
+
+/// The calls of a function, in order.
+[[nodiscard]] auto calls_of(llvm::Function& function) -> std::vector<llvm::CallBase*> {
+  std::vector<llvm::CallBase*> calls;
+  for (llvm::BasicBlock& block : function) {
+    for (llvm::Instruction& instruction : block) {
+      if (auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+        calls.push_back(call);
+      }
+    }
+  }
+  return calls;
+}
+
+/// The value of a constant global.
+[[nodiscard]] auto constant_value(llvm::Module& module, llvm::StringRef name) -> std::uint64_t {
+  llvm::GlobalVariable* global = module.getGlobalVariable(name, /*AllowLocal=*/true);
+  if (global == nullptr) {
+    return 0;
+  }
+  const auto* value = llvm::dyn_cast<llvm::ConstantInt>(global->getInitializer());
+  if (value == nullptr) {
+    return 0;
+  }
+  return value->getZExtValue();
+}
+
+/// The elements of a constant array.
+///
+/// An array of integers is a `ConstantDataArray` and an array of pointers is
+/// a `ConstantArray`: the two are not related in the IR.
+[[nodiscard]] auto elements_of(llvm::Constant* constant) -> std::vector<llvm::Constant*> {
+  std::vector<llvm::Constant*> elements;
+  if (auto* data = llvm::dyn_cast<llvm::ConstantDataSequential>(constant)) {
+    for (unsigned index = 0; index < data->getNumElements(); ++index) {
+      elements.push_back(data->getElementAsConstant(index));
+    }
+    return elements;
+  }
+  if (auto* array = llvm::dyn_cast<llvm::ConstantArray>(constant)) {
+    for (const llvm::Use& operand : array->operands()) {
+      elements.push_back(llvm::cast<llvm::Constant>(operand.get()));
+    }
+  }
+  return elements;
+}
+
+void test_transform() {
+  llvm::LLVMContext context;
+  const auto module = build_transform_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  check(selection.selected.size() == 1, "the caller is selected");
+
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  check(recorded.functions.size() == 1, "the selection is recorded");
+  check(recorded.entries.size() == 1, "the policy entry is recorded");
+
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 1, "exactly one call is rewritten");
+  check(result.functions[0].skipped.size() == 3, "exactly three calls are skipped");
+  check(result.table_size == 1, "the table holds one callee");
+  check(result.descriptor_size == 1, "the descriptor holds one slot");
+  check(result.vanished.empty(), "no function vanished");
+
+  // The call to the target is indirect now, and the other three are the
+  // calls they were.
+  llvm::Function* caller = module->getFunction("caller");
+  check(caller != nullptr, "the caller is still there");
+  if (caller == nullptr) {
+    return;
+  }
+  const auto calls = calls_of(*caller);
+  check(calls.size() == 4, "the caller still makes four calls");
+  std::size_t indirect = 0;
+  for (const llvm::CallBase* call : calls) {
+    if (call->getCalledFunction() == nullptr) {
+      ++indirect;
+    }
+  }
+  check(indirect == 1, "exactly one call is indirect");
+  check(calls.size() > 1 && calls[1]->getCalledFunction() != nullptr &&
+            calls[1]->getCalledFunction()->getName() == "variadic_target",
+        "the variadic call was rewritten");
+  check(calls.size() > 2 && calls[2]->getCalledFunction() != nullptr &&
+            calls[2]->getCalledFunction()->getName() == "sret_target",
+        "the sret call was rewritten");
+  check(calls.size() > 3 && calls[3]->isMustTailCall(),
+        "the musttail call was rewritten");
+
+  // The table holds the target.
+  llvm::GlobalVariable* table = module->getGlobalVariable("cs2.protect.table", /*AllowLocal=*/true);
+  check(table != nullptr, "the table global exists");
+  if (table != nullptr) {
+    const auto elements = elements_of(table->getInitializer());
+    check(elements.size() == 1, "the table holds one entry");
+    check(elements.size() == 1 && elements[0] == module->getFunction("target"),
+          "the table does not hold the target");
+  }
+
+  // The descriptor holds an encrypted index, and the decode really yields
+  // the index of the target.
+  llvm::GlobalVariable* descriptor = module->getGlobalVariable("cs2.protect.desc", /*AllowLocal=*/true);
+  check(descriptor != nullptr, "the descriptor global exists");
+  std::uint64_t cipher = 0;
+  if (descriptor != nullptr) {
+    const auto elements = elements_of(descriptor->getInitializer());
+    check(elements.size() == 1, "the descriptor holds one slot");
+    if (elements.size() == 1) {
+      const auto* value = llvm::dyn_cast<llvm::ConstantInt>(elements[0]);
+      check(value != nullptr, "the descriptor holds an integer");
+      if (value != nullptr) {
+        cipher = value->getZExtValue();
+      }
+    }
+  }
+  check(cipher != 0, "the descriptor holds the plain index: it is not encrypted");
+
+  const std::uint64_t key = mix64(constant_value(*module, "cs2.protect.key0") ^
+                                  constant_value(*module, "cs2.protect.key1") ^
+                                  constant_value(*module, "cs2.protect.key2"));
+  check((cipher ^ key) == 0, "the decode does not yield the index of the target");
+}
+
+void test_level_gate() {
+  llvm::LLVMContext context;
+  const auto module = build_transform_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  // A policy that asks for the level of T20: the function is selected, but
+  // this task does not transform it, and the entry protects nothing.
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::virtualized});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  check(selection.selected.size() == 1, "the caller is selected");
+  check(selection.selected[0].level == cs2::protect::ProtectionLevel::virtualized,
+        "the level of the function is the level of the entry");
+  check(!selection.policy_matches[0].matched, "the entry did not match");
+  check(selection.policy_matches[0].unimplemented, "the entry is not implemented");
+
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+  check(result.unimplemented.size() == 1, "the function is not transformed");
+  check(result.table_size == 0, "no table is created");
+  check(result.descriptor_size == 0, "no descriptor is created");
+  check(module->getGlobalVariable("cs2.protect.table", /*AllowLocal=*/true) == nullptr, "the module has no table");
+
+  // The coverage records the entry as unimplemented, so that the
+  // whole-build check fails for it.
+  const auto entries = cs2::protect::coverage_entries(recorded, "transform.obj", result.vanished);
+  check(entries.size() == 1, "the coverage has one entry");
+  check(entries[0].state == cs2::protect::EntryState::unimplemented,
+        "the coverage does not record the unimplemented level");
+}
+
+void test_vanished() {
+  llvm::LLVMContext context;
+  const auto module = build_transform_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  // A selection that names a function that is not in the module: the
+  // optimiser deleted it, and the protection would be silently lost.
+  cs2::protect::SelectionResult selection;
+  cs2::protect::Selection selected;
+  selected.symbol = "gone";
+  selected.qualified = "cs2::aim::gone";
+  selected.level = cs2::protect::ProtectionLevel::call;
+  selection.selected.push_back(selected);
+  cs2::protect::PolicyMatch match;
+  match.pattern = "cs2::aim::gone";
+  match.matched = true;
+  selection.policy_matches.push_back(match);
+
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  check(recorded.functions.size() == 1, "the selection is recorded");
+
+  cs2::protect::Config config;
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+  check(result.vanished.size() == 1, "the vanished function is reported");
+  check(result.functions.empty(), "nothing was transformed");
+
+  // The coverage records the entry as vanished, so that the whole-build
+  // check fails for it.
+  const auto entries = cs2::protect::coverage_entries(recorded, "transform.obj", result.vanished);
+  check(entries.size() == 1, "the coverage has one entry");
+  check(entries[0].state == cs2::protect::EntryState::vanished,
+        "the coverage does not record the vanished function");
+}
+
 }  // namespace
 
 auto main() -> int {
@@ -262,6 +552,9 @@ auto main() -> int {
   test_qualified_name();
   test_selection();
   test_coverage();
+  test_transform();
+  test_level_gate();
+  test_vanished();
   if (g_failures != 0) {
     std::printf("protect: %d check(s) failed\n", g_failures);
     return 1;
