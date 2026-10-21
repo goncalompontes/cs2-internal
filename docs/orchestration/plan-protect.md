@@ -111,17 +111,27 @@ overlay, and a **global initializer**. So the strings the payload's feature
 list is made of **cannot leave the payload's image** by any in-place scheme:
 the address is baked into the table.
 
-Measured on a protected build: of the 54 literals the pass reports as
-"protected", **29 are still plaintext in the shipped DLL** — only 25 really
-left it. The reason is structural, and it is the same shape as the event
-names.
+Measured on a protected build: of the literals the pass reports as
+"protected", **a third to a half are still plaintext in the shipped DLL** —
+the feature-key table is one global initializer, and a literal that **any**
+module refuses survives the link (`linkonce_odr`), so the *module* that
+protects it does not decide whether it leaves the image. With the repo
+policy: 77 protected per module, **54 really absent**, 23 still in it (13 as a
+whole string, 10 as the **prefix** of another string). With a different
+policy the reviewer measured 25 absent of 54 — the same shape.
 
 So the honest statement of T21's value is: **the payload's own feature-key
 list is not protectable in place.** What T21 delivers is the machinery and
-25 literals; what the payload needs is a **data-model change** — the names
-arriving at run time (from the injector, or hashed and looked up in a table
-the payload builds at run time). That is **T21b**, and it is now the highest
-value string task, not an optional extra.
+about half the literals; what the payload needs is a **data-model change** —
+the names arriving at run time (from the injector, or hashed and looked up in
+a table the payload builds at run time). That is **T21b**, and it is now the
+highest value string task, not an optional extra.
+
+The lesson generalises, and it is the same one the cross-TU task hit: **a
+per-module pass cannot decide anything about a symbol the linker may keep.**
+Both tasks now make the *image-level* check the authority, and the per-module
+claim says "in this module".
+
 
 ### 1.3 The measurement: the VM cannot protect the aim maths
 
