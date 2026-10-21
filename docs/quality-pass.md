@@ -839,6 +839,7 @@ three cases.
 | `6ed7dc3` | **docs(quality-pass):** the handle counts are re-measured at the tip (M1) |
 | `819f6c9` | **docs(quality-pass):** the tables name the commit they were measured at (M4) |
 | `f08e018` | **docs(quality-pass):** the m6 row says what the payload step compiles (M3) |
+| `35bead2` | **docs(quality-pass):** the sweep's last measurement names its commit (M4) |
 
 ---
 
