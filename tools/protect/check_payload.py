@@ -13,13 +13,23 @@ through an encrypted descriptor. The image has to survive that:
     registers the unwind table and treats its absence as fatal);
   * the number of the encrypted dispatches in the protected image is the
     number of the calls the pass reports having rewritten -- and it is zero
-    in the unprotected one.
+    in the unprotected one;
+  * every dispatch *reaches the right callee*: the check decodes the
+    descriptor of the image with the key the pass used, resolves the index
+    in the table of the image and compares the address with the code of the
+    image.
 
-The last check is the one that catches the dangerous failure: the key is a
+The last two are the ones that catch the dangerous failures. The key is a
 compile-time key, so the whole dispatch is a compile-time constant, and a
-compiler that folds it away leaves a *direct* call behind. The image would
+compiler that folds it away leaves a *direct* call behind: the image would
 then behave exactly like the unprotected one, and the protection would be
-void.
+void. And a dispatch that reaches the *wrong* callee does not crash: it
+calls another function, which is the failure mode this project exists to
+avoid.
+
+The cipher is repeated here (the plugin's `transform.cpp` is the other
+half): the check has to know what the call site computes, and a change of
+the cipher has to change both.
 
 Usage: check_payload.py --protected FILE --unprotected FILE --objdump FILE
                        [--coverage DIR] [--policy FILE]
@@ -27,13 +37,24 @@ Usage: check_payload.py --protected FILE --unprotected FILE --objdump FILE
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
-import re
 import struct
-import subprocess
 import sys
 from pathlib import Path
+
+from protect_checks import (
+    MIX_MULTIPLIER,
+    MIX_XOR,
+    Coverage,
+    Failure,
+    DispatchSite,
+    PeImage,
+    count_dispatches,
+    disassemble,
+    find_dispatch_sites,
+    mix64,
+    read_coverage,
+)
 
 #: The relocations the mapper applies. 10 is IMAGE_REL_BASED_DIR64.
 IMAGE_REL_BASED_DIR64 = 10
@@ -45,98 +66,10 @@ EXCEPTION_DIRECTORY = 3
 BASE_RELOCATION_DIRECTORY = 5
 
 
-class Failure(Exception):
-    """A check that did not hold."""
-
-
 def check(condition: bool, what: str) -> None:
     """Fails the check with a message that says what did not hold."""
     if not condition:
         raise Failure(what)
-
-
-# --- The PE image ------------------------------------------------------------
-
-
-class Section:
-    """One section of a PE image."""
-
-    def __init__(self, name: str, virtual_address: int, virtual_size: int, raw_offset: int,
-                 raw_size: int) -> None:
-        self.name = name
-        self.virtual_address = virtual_address
-        self.virtual_size = virtual_size
-        self.raw_offset = raw_offset
-        self.raw_size = raw_size
-
-    def contains_rva(self, rva: int) -> bool:
-        """Whether an RVA falls in this section."""
-        return self.virtual_address <= rva < self.virtual_address + max(self.virtual_size,
-                                                                       self.raw_size)
-
-
-class PeImage:
-    """The parts of a PE image the checks need."""
-
-    def __init__(self, data: bytes) -> None:
-        self.data = data
-        if data[:2] != b"MZ":
-            raise Failure("the file is not a PE image")
-        pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
-        if data[pe_offset : pe_offset + 4] != b"PE\0\0":
-            raise Failure("the file is not a PE image")
-        coff = pe_offset + 4
-        self.machine = struct.unpack_from("<H", data, coff)[0]
-        number_of_sections = struct.unpack_from("<H", data, coff + 2)[0]
-        optional_size = struct.unpack_from("<H", data, pe_offset + 20)[0]
-        optional = coff + 20
-        magic = struct.unpack_from("<H", data, optional)[0]
-        if magic == 0x20B:
-            self.image_base = struct.unpack_from("<Q", data, optional + 24)[0]
-            directories = optional + 112
-        else:
-            self.image_base = struct.unpack_from("<I", data, optional + 28)[0]
-            directories = optional + 96
-        number_of_directories = struct.unpack_from("<I", data, optional + 108 if magic == 0x20B
-                                                  else optional + 92)[0]
-
-        self.sections: list[Section] = []
-        table = optional + optional_size
-        for index in range(number_of_sections):
-            header = table + index * 40
-            name = data[header : header + 8].rstrip(b"\0").decode("ascii", "replace")
-            virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from(
-                "<IIII", data, header + 8
-            )
-            self.sections.append(Section(name, virtual_address, virtual_size, raw_offset,
-                                         raw_size))
-
-        self.directories: list[tuple[int, int]] = []
-        for index in range(min(number_of_directories, 16)):
-            self.directories.append(
-                struct.unpack_from("<II", data, directories + index * 8)
-            )
-
-    def directory(self, index: int) -> tuple[int, int]:
-        """The (rva, size) of a data directory."""
-        if index >= len(self.directories):
-            return (0, 0)
-        return self.directories[index]
-
-    def section_of(self, name: str) -> Section | None:
-        """The section with a name."""
-        for section in self.sections:
-            if section.name == name:
-                return section
-        return None
-
-    def bytes_at_rva(self, rva: int, size: int) -> bytes:
-        """The bytes of an RVA range."""
-        for section in self.sections:
-            if section.contains_rva(rva):
-                offset = section.raw_offset + (rva - section.virtual_address)
-                return self.data[offset : offset + size]
-        raise Failure(f"the RVA 0x{rva:x} is not in any section")
 
 
 # --- The checks --------------------------------------------------------------
@@ -248,40 +181,152 @@ def check_unwind_table(image: PeImage) -> int:
     return entries
 
 
-def count_dispatches(objdump: Path, binary: Path) -> int:
-    """The number of encrypted dispatches in a binary.
+def check_constants(image: PeImage, sites: list[DispatchSite]) -> None:
+    """The constants of the mixer have to be in the read-only data.
 
-    A dispatch is an indirect call through the table: `call *(%rX,%rY,8)`.
-    The direct call that the pass replaced is gone, so the count is the
-    number of the call sites the pass rewrote.
+    The call site reads them from the globals of the image, so the value the
+    dispatch uses is the value the pass encrypted the descriptor with. A
+    constant that the backend materialised as an instruction immediate
+    instead can be a *different* one -- the X86 backend of this LLVM loses a
+    bit of a 64-bit immediate in the shape the transform emits -- and the
+    dispatch would then reach a wrong address without a crash. The constant
+    is therefore in the data of the image, and the data holds it exactly.
     """
-    completed = subprocess.run([str(objdump), "-d", str(binary)], capture_output=True, text=True)
-    if completed.returncode != 0:
-        raise Failure(f"objdump failed on '{binary}':\n{completed.stderr}")
-    return len(re.findall(r"(?:callq|jmpq)\s+\*\(%r[a-z0-9]+,%r[a-z0-9]+,8\)", completed.stdout))
+    data = image.section_of(".rdata")
+    check(data is not None, "the image has no read-only data section")
+    assert data is not None
+    blob = image.data[data.raw_offset : data.raw_offset + data.raw_size]
+    for name, expected in (("the multiplier", MIX_MULTIPLIER), ("the xor constant", MIX_XOR)):
+        needle = expected.to_bytes(8, "little")
+        check(
+            needle in blob,
+            f"{name} (0x{expected:016x}) is not in the read-only data of the image: the call "
+            "site does not read it from a global, and the backend may have materialised it "
+            "as a different value",
+        )
 
 
-def reported_rewrites(coverage: Path, policy: Path) -> int:
-    """The number of the calls the pass reports having rewritten.
+def site_reads(image: PeImage, site: DispatchSite, expected: int) -> bool:
+    """Whether the dispatch reads the given constant from the image.
 
-    The coverage files carry one line per selected function with the number
-    of the rewritten calls (`fn <symbol> rewritten=<n> skipped=<n>`).
+    The constant has to be read from a global of the image: a constant that
+    the backend materialised as an instruction immediate can be a *different*
+    value (the X86 backend of this LLVM loses a bit of a 64-bit immediate in
+    this shape), and a wrong constant means a wrong call target.
     """
-    if not policy.is_file():
-        return 0
-    digest = hashlib.sha256(policy.read_bytes()).hexdigest().upper()
-    total = 0
-    for path in sorted(coverage.glob("*.cov")):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if f"policy-sha256 {digest}" not in text:
+    for reference in site.references:
+        try:
+            if image.u64_at_rva(reference) == expected:
+                return True
+        except Failure:
             continue
-        for line in text.splitlines():
-            if not line.startswith("fn "):
+    return False
+
+
+def check_dispatch_targets(image: PeImage, sites: list[DispatchSite],
+                           coverage: list[Coverage]) -> int:
+    """Every dispatch has to reach the callee the descriptor names.
+
+    The check decodes the descriptor of the image with the key the pass used
+    and resolves the index in the table of the image: the address the
+    dispatch calls has to be the address of the table entry, and that address
+    has to be code. A dispatch that reaches a wrong address is the failure
+    the pass exists to prevent, and it does not crash: it calls another
+    function.
+
+    The coverage files carry the key of every module; a file that does not
+    match any table of the image belongs to another build and is not
+    evidence about this one.
+    """
+    matched: dict[int, Coverage] = {}
+
+    for entry in coverage:
+        if entry.table_size == 0 or not entry.key_parts:
+            continue
+        for site in sites:
+            if site.table is None or site.table in matched:
                 continue
-            for part in line.split():
-                if part.startswith("rewritten="):
-                    total += int(part.split("=", 1)[1])
+            if not site_reads(image, site, entry.mix_multiplier):
+                continue
+            if not site_reads(image, site, entry.mix_xor):
+                continue
+            if not all(site_reads(image, site, part) for part in entry.key_parts):
+                continue
+            matched[site.table] = entry
+            break
+
+    for entry in coverage:
+        if entry.rewritten > 0 and entry.path not in {item.path for item in matched.values()}:
+            print(
+                f"check_payload: the coverage '{entry.path.name}' describes no table of this "
+                "image: it belongs to another build and is not counted"
+            )
+
+    total = 0
+    for site in sites:
+        found: Coverage | None = matched.get(site.table) if site.table is not None else None
+        if found is None:
+            raise Failure(
+                f"the dispatch at 0x{site.address:x} has no coverage: the image and the "
+                "coverage do not belong to the same build"
+            )
+        resolved = resolve_site(image, site, found)
+        check(
+            resolved is not None,
+            f"the dispatch at 0x{site.address:x} does not decode to a callee of the image",
+        )
+        assert resolved is not None
+        check(
+            image.is_code_address(resolved),
+            f"the dispatch at 0x{site.address:x} calls 0x{resolved:x}, which is not code "
+            "in this image",
+        )
+        total += 1
     return total
+
+
+def resolve_site(image: PeImage, site: DispatchSite, entry: Coverage) -> int | None:
+    """The address the dispatch at a site calls, or None when it does not decode.
+
+    The decode is the one the call site performs: the key is the xor of the
+    three key constants, the mixer is the one of the plugin, and the index
+    selects the entry of the table.
+    """
+    key = 0
+    for part in entry.key_parts:
+        key ^= part
+    mixed = mix64(key)
+
+    if site.table is None:
+        return None
+
+    # The descriptor: the reference whose value decodes to an index of the
+    # table.
+    descriptor = None
+    for reference in site.references:
+        try:
+            value = image.u64_at_rva(reference)
+        except Failure:
+            continue
+        index = value ^ mixed
+        if index < entry.table_size:
+            descriptor = reference
+            break
+    if descriptor is None:
+        return None
+
+    index = image.u64_at_rva(descriptor) ^ mixed
+    if index >= entry.table_size:
+        return None
+    try:
+        return image.u64_at_rva(site.table + 8 * index)
+    except Failure:
+        return None
+
+
+def reported_rewrites(coverage: list[Coverage]) -> int:
+    """The number of the calls the pass reports having rewritten."""
+    return sum(entry.rewritten for entry in coverage)
 
 
 def main(argv: list[str]) -> int:
@@ -293,10 +338,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--policy", type=Path, default=None)
     args = parser.parse_args(argv)
 
-    coverage = args.coverage
-    if coverage is None:
+    coverage_dir = args.coverage
+    if coverage_dir is None:
         env = os.environ.get("CS2_PROTECT_COVERAGE", "").strip()
-        coverage = Path(env) if env else None
+        coverage_dir = Path(env) if env else None
     policy = args.policy
     if policy is None:
         env = os.environ.get("CS2_PROTECT_CONFIG", "").strip()
@@ -314,19 +359,35 @@ def main(argv: list[str]) -> int:
         entries = check_unwind_table(protected)
         print(f"check_payload: the unwind table has {entries} entries")
 
-        plain_dispatches = count_dispatches(args.objdump, args.unprotected)
-        protected_dispatches = count_dispatches(args.objdump, args.protected)
-        print(f"check_payload: the protected image has {protected_dispatches} encrypted dispatches, "
-              f"the unprotected one {plain_dispatches}")
-        check(plain_dispatches == 0, "the unprotected image has an encrypted dispatch")
-        if coverage is not None and policy is not None:
-            expected = reported_rewrites(coverage, policy)
+        plain_sites = find_dispatch_sites(disassemble(args.objdump, args.unprotected),
+                                          unprotected.image_base, unprotected)
+        protected_sites = find_dispatch_sites(disassemble(args.objdump, args.protected),
+                                              protected.image_base, protected)
+        print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
+              f"dispatches, the unprotected one {len(plain_sites)}")
+        check(len(plain_sites) == 0, "the unprotected image has an encrypted dispatch")
+
+        check_constants(protected, protected_sites)
+
+        files: list[Coverage] = []
+        if coverage_dir and policy:
+            files, skipped = read_coverage(coverage_dir, policy)
+            for name, reason, rewritten in skipped:
+                if rewritten > 0:
+                    print(f"check_payload: the coverage '{name}' is skipped: {reason}")
+            if skipped:
+                print(f"check_payload: {len(skipped)} coverage files do not describe this "
+                      "build and are not counted")
+        if files:
+            expected = reported_rewrites(files)
             check(
-                protected_dispatches == expected,
-                f"the protected image has {protected_dispatches} encrypted dispatches, but the "
+                len(protected_sites) == expected,
+                f"the protected image has {len(protected_sites)} encrypted dispatches, but the "
                 f"pass reported {expected} rewrites: the compiler folded the dispatch away",
             )
             print(f"check_payload: the pass reported {expected} rewrites, and the image has them")
+            resolved = check_dispatch_targets(protected, protected_sites, files)
+            print(f"check_payload: {resolved} dispatches decode to a callee of the image")
         else:
             print("check_payload: no coverage given: the number of the rewrites is not checked")
     except Failure as error:

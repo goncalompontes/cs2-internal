@@ -20,12 +20,23 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+# The dispatch analysis is shared with the payload check: the two have to
+# agree on what a dispatch is, and a copy of the counter in two places is a
+# counter that can drift.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from protect_checks import (  # noqa: E402
+    MIX_MULTIPLIER,
+    MIX_XOR,
+    PeImage,
+    count_dispatches,
+)
 
 VSWHERE = Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
 KNOWN_VCVARS = Path(
@@ -123,19 +134,35 @@ def compile_fixture(
     return run(command, environment, vcvars)
 
 
-def count_dispatches(objdump: Path, binary: Path) -> int:
-    """The number of encrypted dispatches in a binary.
+def check_constants(binary: Path) -> None:
+    """The constants of the mixer must be in the data and not in the code.
 
-    A dispatch is an indirect call through the table: `call *(%rX,%rY,8)`.
-    The direct call that the pass replaced is gone, so the count is the
-    number of call sites the pass rewrote.
+    The X86 backend of this LLVM loses a bit of a 64-bit immediate in the
+    shape the transform emits: the constant that reaches the image is not
+    the constant the pass encrypted the descriptor with, and the dispatch
+    then calls a wrong address -- without a crash. The constants therefore
+    live in globals, and this is the assertion that they stay there.
     """
-    completed = subprocess.run(
-        [str(objdump), "-d", str(binary)], capture_output=True, text=True
-    )
-    if completed.returncode != 0:
-        raise Failure(f"objdump failed on '{binary}':\n{completed.stderr}")
-    return len(re.findall(r"(?:callq|jmpq)\s+\*\(%r[a-z0-9]+,%r[a-z0-9]+,8\)", completed.stdout))
+    image = PeImage(binary.read_bytes())
+    data = image.section_of(".rdata")
+    code = image.section_of(".text")
+    if data is None or code is None:
+        raise Failure("the binary has no .text or no .rdata section")
+    data_bytes = image.data[data.raw_offset : data.raw_offset + data.raw_size]
+    code_bytes = image.data[code.raw_offset : code.raw_offset + code.raw_size]
+    for name, value in (("the multiplier", MIX_MULTIPLIER), ("the xor constant", MIX_XOR)):
+        needle = value.to_bytes(8, "little")
+        if needle not in data_bytes:
+            raise Failure(
+                f"{name} (0x{value:016x}) is not in the read-only data of the binary: the "
+                "call site does not read it from a global, and the backend may have "
+                "materialised it as a different value"
+            )
+        if needle in code_bytes:
+            raise Failure(
+                f"{name} (0x{value:016x}) is materialised as an instruction immediate: the "
+                "backend may have got it wrong, and the dispatch would call a wrong address"
+            )
 
 
 def main(argv: list[str]) -> int:
@@ -212,6 +239,7 @@ def check_result(args: argparse.Namespace) -> None:
     # would not notice -- this one does.
     plain_dispatches = count_dispatches(args.objdump, plain)
     protected_dispatches = count_dispatches(args.objdump, protected)
+    check_constants(protected)
     check(
         protected_dispatches == plain_dispatches + rewritten,
         f"the protected binary has {protected_dispatches} dispatches and the unprotected one "

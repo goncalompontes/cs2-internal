@@ -36,6 +36,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# The coverage format is shared with the payload check: the plugin writes it
+# and the two readers have to agree on it.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from protect_checks import Coverage, read_coverage as read_coverage_files  # noqa: E402
+
 #: The keys the policy file may carry.
 POLICY_KEYS = ("protect", "deny", "seed")
 
@@ -138,49 +144,47 @@ def default_coverage_dir(policy_path: str) -> Path:
     return Path(root) / "cs2-protect-coverage" / digest
 
 
-def read_coverage(coverage_dir: Path, digest: str) -> tuple[dict[str, str], bool]:
+def read_coverage(coverage_dir: Path, policy_path: Path) -> tuple[dict[str, str], bool]:
     """The state of every policy entry, over every coverage file of this policy.
 
     The state of an entry is "matched" (it named a function that is
     protected), "blocked" (it named a function that cannot be protected),
     "unimplemented" (it named a function whose protection level is not
-    implemented yet), "vanished" (the selected function did not survive to the
-    transform phase) or "unmatched" (it named nothing in that module).
+    implemented yet), "vanished" (the selected function did not survive to
+    the transform phase) or "unmatched" (it named nothing in that module).
 
     The second value says whether any coverage file belongs to this policy at
     all: when none does, the coverage is stale (the policy changed after the
     last compile) and the check cannot say anything.
+
+    A coverage file that does not describe *this* build is not evidence about
+    it: a file that was edited by hand (its content digest does not match)
+    and a file of an earlier state of the source (the digest of the source
+    does not match) are skipped, and the reason is reported. Without that, a
+    file left behind by another build would fail the build of a good one.
     """
     states: dict[str, str] = {}
     current = False
     if not coverage_dir.is_dir():
         return states, current
-    for path in sorted(coverage_dir.glob("*.cov")):
-        entries: dict[str, str] = {}
-        policy_digest = ""
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            key, _, value = line.partition(" ")
-            if key == "policy-sha256":
-                policy_digest = value.strip().upper()
-            elif key == "entry":
-                state, _, rest = value.partition(" ")
-                if state in ("blocked", "unimplemented"):
-                    reason, _, pattern = rest.partition(" ")
-                    entries[pattern.strip()] = f"{state}:{reason.strip()}"
-                else:
-                    entries[rest.strip()] = state.strip()
-        if policy_digest != digest:
+    digest = hashlib.sha256(policy_path.read_bytes()).hexdigest().upper()
+    files, skipped = read_coverage_files(coverage_dir, policy_path)
+    for name, reason, rewritten in skipped:
+        if rewritten > 0:
+            print(f"check_policy: the coverage '{name}' is skipped: {reason}", file=sys.stderr)
+    for entry in files:
+        if entry.policy != digest:
             # The coverage of another policy; it says nothing about this one.
             continue
         current = True
-        for pattern, state in entries.items():
+        for pattern, state in entry.states().items():
             if pattern not in states or state_priority(state) > state_priority(states[pattern]):
                 states[pattern] = state
     return states, current
 
 
-def prune_stale_coverage(coverage_dir: Path, digest: str) -> int:
-    """Remove the coverage files of the *other* policies.
+def prune_stale_coverage(coverage_dir: Path, policy_path: Path) -> int:
+    """Remove the coverage files that do not describe this build.
 
     The directory is keyed by the policy path, so an edited policy leaves the
     files of the previous version behind. They say nothing about the current
@@ -189,12 +193,18 @@ def prune_stale_coverage(coverage_dir: Path, digest: str) -> int:
     check may run again (a rebuild that compiles nothing) and has to find
     its evidence.
 
+    A file of the current policy that does not describe the current build --
+    an older plugin wrote it, or it was edited by hand -- is removed too:
+    it is not evidence about anything, and leaving it would let it be
+    counted by a later check.
+
     The pruning runs *after* the build, so it cannot race with a compile
     that is writing its coverage.
     """
     removed = 0
     if not coverage_dir.is_dir():
         return removed
+    digest = hashlib.sha256(policy_path.read_bytes()).hexdigest().upper()
     for path in coverage_dir.glob("*.cov"):
         policy_digest = ""
         try:
@@ -205,7 +215,11 @@ def prune_stale_coverage(coverage_dir: Path, digest: str) -> int:
                     break
         except OSError:
             continue
-        if policy_digest != digest:
+        stale = policy_digest != digest
+        if not stale:
+            entry = Coverage(path)
+            stale = not entry.intact or not entry.source_is_current()
+        if stale:
             try:
                 path.unlink()
                 removed += 1
@@ -265,7 +279,7 @@ def main(argv: list[str]) -> int:
         coverage_dir = Path(env) if env else default_coverage_dir(policy_path)
 
     digest = hashlib.sha256(policy_file.read_bytes()).hexdigest().upper()
-    states, current = read_coverage(coverage_dir, digest)
+    states, current = read_coverage(coverage_dir, policy_file)
     if not current:
         print(
             f"check_policy: {policy_path}: no coverage of this policy in "
@@ -359,7 +373,7 @@ def main(argv: list[str]) -> int:
     if failed:
         return 1
 
-    prune_stale_coverage(coverage_dir, digest)
+    prune_stale_coverage(coverage_dir, policy_file)
     print(f"check_policy: {len(patterns)} policy entries matched")
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)

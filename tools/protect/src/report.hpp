@@ -51,6 +51,23 @@ struct CoverageFunction {
   std::size_t skipped{0};
 };
 
+/// What the transform put into the module.
+///
+/// The payload check needs it to decode the descriptor of the *image* and to
+/// compare the resolved address with the table entry: the check has to prove
+/// that the dispatched callee is the right one, not only that the number of
+/// the dispatches is right.
+struct CoverageProtect {
+  std::size_t table_size{0};
+  std::size_t descriptor_size{0};
+  /// The parts of the key, in the order the call site combines them.
+  std::vector<std::uint64_t> key_parts;
+  /// The multiplier of the mixer, as the call site uses it.
+  std::uint64_t mix_multiplier{0};
+  /// The xor constant of the mixer, as the call site uses it.
+  std::uint64_t mix_xor{0};
+};
+
 /// Prints the selection report of one module to stderr.
 void write_report(const llvm::Module& module, const SelectionResult& result, const Config& config);
 
@@ -81,15 +98,22 @@ void write_transform_report(const llvm::Module& module, const TransformResult& r
 /// what each module decided; tools/protect/check_policy.py reads them all
 /// after the build and fails it when an entry matched nothing.
 ///
-/// The file name carries the policy digest and the module identifier, so
-/// that the coverage of one policy is never mistaken for the coverage of
-/// another, and so that two sources never write the same file. The name does
-/// not depend on the build directory, so a rebuild overwrites the file
-/// instead of adding to the directory.
+/// The file name carries the policy digest and the module's identity *inside
+/// the source tree* (its path relative to the root the policy and the source
+/// share), so that the coverage of one policy is never mistaken for the
+/// coverage of another, and so that two sources never write the same file.
+/// The name does not depend on the build directory: two worktrees of one
+/// tree write the *same* file, so a rebuild overwrites the coverage instead
+/// of leaving a stale copy of it behind (a stale copy would make the
+/// payload check count the rewrites twice).
+///
+/// The file also carries the digest of the source file and a digest of its
+/// own content, so that a reader can tell a coverage file of *this* build
+/// from one of another build or from a file that was edited by hand.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
                                   const std::vector<CoverageEntry>& entries,
-                                  const std::vector<CoverageFunction>& functions)
-    -> std::optional<std::string>;
+                                  const std::vector<CoverageFunction>& functions,
+                                  const CoverageProtect& protect) -> std::optional<std::string>;
 
 /// Writes the machine-readable coverage of one module from a selection.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,

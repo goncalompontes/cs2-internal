@@ -27,12 +27,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-#: The mixer of the transform. The test recomputes the key from the image,
-#: so a change of the cipher has to change the test too.
-MIX_MULTIPLIER = 0x9E3779B97F4A7C15
-MIX_XOR = 0xBF58476D1CE4E5B9
-MIX_ROTATE = 31
-MASK64 = (1 << 64) - 1
+# The cipher is shared with the payload check: a copy of the mixer in two
+# places is a mixer that can drift, and the test would decode the descriptor
+# with a different mixer than the pass encrypted it with.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from protect_checks import (  # noqa: E402
+    MASK64,
+    MIX_MULTIPLIER,
+    MIX_XOR,
+    mix64,
+    signed64,
+)
 
 
 class Failure(Exception):
@@ -43,19 +49,6 @@ def check(condition: bool, what: str) -> None:
     """Fails the test with a message that says what did not hold."""
     if not condition:
         raise Failure(what)
-
-
-def mix64(value: int) -> int:
-    """The mixer of the transform, in Python."""
-    value = (value * MIX_MULTIPLIER) & MASK64
-    value ^= MIX_XOR
-    value = ((value << MIX_ROTATE) | (value >> (64 - MIX_ROTATE))) & MASK64
-    return value
-
-
-def signed64(value: int) -> int:
-    """The signed spelling of a 64-bit value (the IR prints negative ones)."""
-    return value - (1 << 64) if value >= (1 << 63) else value
 
 
 def body_of(ir: str, function: str) -> str:
@@ -213,16 +206,46 @@ def check_ir(ir: str) -> None:
         f"the caller calls an unexpected symbol: {sorted(symbols)}",
     )
 
-    # The decode reads the key and the descriptor with *volatile* loads, and
-    # that is load-bearing: the key is a compile-time key, so the whole
-    # dispatch is a compile-time constant, and a compiler that folds it
-    # leaves a direct call behind -- the protection is void and the program
-    # still behaves the same. The differential test checks the machine code;
-    # this test checks that the barrier is still there.
+    # The decode reads the key, the constants of the mixer and the
+    # descriptor with *volatile* loads, and that is load-bearing: the key is
+    # a compile-time key, so the whole dispatch is a compile-time constant,
+    # and a compiler that folds it leaves a direct call behind -- the
+    # protection is void and the program still behaves the same. The
+    # differential test checks the machine code; this test checks that the
+    # barrier is still there.
     volatile_loads = re.findall(r"load volatile i64", caller)
     check(
-        len(volatile_loads) == 4,
-        f"the decode has {len(volatile_loads)} volatile loads and not four",
+        len(volatile_loads) == 6,
+        f"the decode has {len(volatile_loads)} volatile loads and not six",
+    )
+
+    # The constants of the mixer live in globals and not in the instruction
+    # stream. The X86 backend of this LLVM mis-materialises a 64-bit
+    # immediate in this shape (it loses a bit of it), and a wrong constant
+    # is a wrong call target -- not a crash. A constant in a global is
+    # written by the object writer, so it reaches the image bit for bit.
+    for name, value in (("mixmul", MIX_MULTIPLIER), ("mixxor", MIX_XOR)):
+        found = re.search(rf"@cs2\.protect\.{name} = private unnamed_addr constant i64 (-?\d+)", ir)
+        check(found is not None, f"the constant '{name}' is missing")
+        assert found is not None
+        check(
+            int(found.group(1)) & MASK64 == value,
+            f"the constant '{name}' does not hold the value of the mixer",
+        )
+        signed = signed64(value)
+        check(
+            re.search(rf"\b{signed}\b", caller) is None,
+            f"the constant '{name}' is an immediate of the caller: the backend may "
+            "materialise it wrongly",
+        )
+
+    # The GEP into the table is not `inbounds`: the index is a value the
+    # image computes at run time, and an out-of-range index would then be
+    # poison by the letter of the reference -- and the call through it would
+    # be undefined behaviour instead of a wrong address.
+    check(
+        "getelementptr inbounds ptr, ptr @cs2.protect.table" not in caller,
+        "the GEP into the table promises `inbounds`",
     )
 
 

@@ -7,14 +7,16 @@
 #include <system_error>
 #include <utility>
 
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/SHA256.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace cs2::protect {
 
 namespace {
 
-/// The file name of the source file, for the report prefix.
+/// The file name of the module, for the report prefix.
 [[nodiscard]] auto module_tag(std::string_view module_id) noexcept -> std::string_view {
   const auto slash = module_id.find_last_of("/\\");
   return slash == std::string_view::npos ? module_id : module_id.substr(slash + 1);
@@ -25,6 +27,93 @@ namespace {
   char buffer[19];
   std::snprintf(buffer, sizeof(buffer), "0x%016llx", static_cast<unsigned long long>(seed));
   return std::string(buffer);
+}
+
+/// The digest of a string, in hexadecimal.
+[[nodiscard]] auto digest_of(std::string_view text) -> std::string {
+  llvm::SHA256 hasher;
+  hasher.update(text);
+  return llvm::toHex(hasher.final());
+}
+
+/// The digest of a file, in hexadecimal ("" when it cannot be read).
+[[nodiscard]] auto file_digest(const std::filesystem::path& path) -> std::string {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    return {};
+  }
+  const std::string content((std::istreambuf_iterator<char>(input)),
+                            std::istreambuf_iterator<char>());
+  if (input.bad()) {
+    return {};
+  }
+  return digest_of(content);
+}
+
+/// The absolute path of the source file of a module.
+///
+/// The compiler may be given a relative path -- the build directory is the
+/// working directory of the compile -- and the coverage has to name a file
+/// that a reader can find: the path is resolved against the working
+/// directory and normalised.
+[[nodiscard]] auto absolute_source(const llvm::Module& module) -> std::filesystem::path {
+  const std::filesystem::path source(module.getSourceFileName());
+  if (source.is_absolute()) {
+    return source.lexically_normal();
+  }
+  std::error_code error;
+  const std::filesystem::path current = std::filesystem::current_path(error);
+  if (error) {
+    return source.lexically_normal();
+  }
+  return (current / source).lexically_normal();
+}
+
+/// The longest directory prefix that two paths share.
+[[nodiscard]] auto common_root(const std::filesystem::path& first,
+                               const std::filesystem::path& second) -> std::filesystem::path {
+  std::filesystem::path root;
+  auto left = first.begin();
+  auto right = second.begin();
+  while (left != first.end() && right != second.end() && *left == *right) {
+    root /= *left;
+    ++left;
+    ++right;
+  }
+  return root;
+}
+
+/// The identity of the module inside the source tree.
+///
+/// The absolute path of the source file is *not* usable as the identity: two
+/// worktrees of one tree (or a rebuild after a directory was renamed) would
+/// write two coverage files for one module, and the stale one would make the
+/// payload check count the rewrites twice. The path relative to the root the
+/// policy file and the source file share is the same in every worktree.
+///
+/// The policy file normally lives in the tree (`tools/protect/`), so the root
+/// is the root of the repository. When the policy lives outside the tree, the
+/// absolute path is the fallback: the coverage is then per worktree, which is
+/// still correct, only less tidy.
+[[nodiscard]] auto module_identity(const Config& config, const llvm::Module& module)
+    -> std::string {
+  // The source file name is the path the compiler was given, resolved to an
+  // absolute path. A bare name (a module that was built without a source
+  // file -- a test fixture, for instance) names nothing, and the module
+  // identifier names it instead.
+  const std::filesystem::path raw(module.getSourceFileName());
+  std::filesystem::path source = raw.parent_path().empty()
+                                     ? std::filesystem::path(module.getModuleIdentifier())
+                                     : absolute_source(module);
+  if (!config.policy_path.empty()) {
+    const std::filesystem::path root =
+        common_root(config.policy_path.parent_path(), source.parent_path());
+    const std::filesystem::path relative = source.lexically_relative(root);
+    if (!relative.empty() && relative.is_relative()) {
+      return relative.generic_string();
+    }
+  }
+  return source.generic_string();
 }
 
 /// The state of a policy entry in one module.
@@ -242,7 +331,8 @@ auto coverage_entries(const RecordedSelection& selection, std::string_view modul
 
 auto write_coverage(const Config& config, const llvm::Module& module,
                     const std::vector<CoverageEntry>& entries,
-                    const std::vector<CoverageFunction>& functions) -> std::optional<std::string> {
+                    const std::vector<CoverageFunction>& functions, const CoverageProtect& protect)
+    -> std::optional<std::string> {
   if (!config.policy) {
     return std::nullopt;
   }
@@ -255,12 +345,12 @@ auto write_coverage(const Config& config, const llvm::Module& module,
   }
 
   // One file per (policy, module): the policy digest keeps the coverage of
-  // two policies apart, and the module identifier keeps two sources apart.
-  // The name does not depend on the build directory, so a rebuild in
-  // another build directory overwrites the file instead of adding to the
-  // directory.
+  // two policies apart, and the module's identity inside the source tree
+  // keeps two sources apart. The identity does not depend on the build
+  // directory, so two worktrees of one tree write the same file and a
+  // rebuild overwrites it instead of leaving a stale copy behind.
   const std::string name =
-      hex_seed(derive_seed(config.policy_digest, module.getModuleIdentifier())) + ".cov";
+      hex_seed(derive_seed(config.policy_digest, module_identity(config, module))) + ".cov";
   const std::filesystem::path path = config.coverage_dir / name;
 
   // The whole coverage in one buffer, written in one go: a source that is
@@ -270,6 +360,28 @@ auto write_coverage(const Config& config, const llvm::Module& module,
   std::string text;
   text += "policy-sha256 " + config.policy_digest + "\n";
   text += "module " + module.getSourceFileName() + "\n";
+  // The path and the digest of the source file: a reader can tell a coverage
+  // file of this build from one of an earlier state of the same source, and
+  // it can find the file the digest belongs to.
+  const std::filesystem::path source = absolute_source(module);
+  const std::string source_digest = file_digest(source);
+  if (!source_digest.empty()) {
+    text += "source-path " + source.generic_string() + "\n";
+    text += "source-sha256 " + source_digest + "\n";
+  }
+  if (protect.table_size > 0) {
+    // What the call site decodes with. The payload check reads it to decode
+    // the descriptor of the image and to compare the resolved address with
+    // the table entry.
+    text += "protect table=" + std::to_string(protect.table_size);
+    text += " descriptor=" + std::to_string(protect.descriptor_size);
+    text += " multiplier=" + hex_seed(protect.mix_multiplier);
+    text += " xor=" + hex_seed(protect.mix_xor);
+    for (const std::uint64_t part : protect.key_parts) {
+      text += " key=" + hex_seed(part);
+    }
+    text += "\n";
+  }
   for (const CoverageEntry& entry : entries) {
     text += "entry ";
     text += to_string(entry.state);
@@ -293,6 +405,10 @@ auto write_coverage(const Config& config, const llvm::Module& module,
     text += std::to_string(function.skipped);
     text += "\n";
   }
+  // The digest of everything above: a file that was edited by hand (or
+  // truncated) does not describe the build, and a reader that trusts it
+  // would count a rewrite that never happened.
+  text += "content-sha256 " + digest_of(text) + "\n";
 
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   if (!out) {
@@ -308,7 +424,7 @@ auto write_coverage(const Config& config, const llvm::Module& module,
 
 auto write_coverage(const Config& config, const llvm::Module& module, const SelectionResult& result)
     -> std::optional<std::string> {
-  return write_coverage(config, module, coverage_entries(result), {});
+  return write_coverage(config, module, coverage_entries(result), {}, CoverageProtect{});
 }
 
 }  // namespace cs2::protect

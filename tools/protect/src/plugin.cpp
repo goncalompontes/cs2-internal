@@ -217,7 +217,14 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
       functions.push_back(cs2::protect::CoverageFunction{transform.symbol, transform.rewritten,
                                                          transform.skipped.size()});
     }
-    if (const auto error = cs2::protect::write_coverage(settings, module, entries, functions)) {
+    cs2::protect::CoverageProtect protect;
+    protect.table_size = result.table_size;
+    protect.descriptor_size = result.descriptor_size;
+    protect.mix_multiplier = result.mix_multiplier;
+    protect.mix_xor = result.mix_xor;
+    protect.key_parts.assign(result.key_parts.begin(), result.key_parts.end());
+    if (const auto error =
+            cs2::protect::write_coverage(settings, module, entries, functions, protect)) {
       llvm::errs() << "[cs2-protect] " << *error << "\n";
       llvm::report_fatal_error("cs2-protect: the coverage could not be written",
                                /*gen_crash_diag=*/false);

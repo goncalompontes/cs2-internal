@@ -481,7 +481,17 @@ auto select_functions(const llvm::Module& module, const Config& config) -> Selec
       if (source != SelectionSource::annotation) {
         source = SelectionSource::policy;
       }
-      level = config.policy.value().protect[named.front()].level;
+      // The level that applies to the function is the *strongest* level any
+      // of the entries that name it asks for. A function that one entry
+      // wants virtualized is not transformed at the call level, so the call
+      // entry must not claim it either (the specification's rule: an entry
+      // that asks for a level the function did not get protects nothing).
+      level = ProtectionLevel::call;
+      for (const std::size_t index : named) {
+        if (config.policy.value().protect[index].level == ProtectionLevel::virtualized) {
+          level = ProtectionLevel::virtualized;
+        }
+      }
     }
     if (!selected) {
       result.skipped.push_back(Skipped{symbol, qualified, SkipReason::not_annotated});
@@ -517,8 +527,12 @@ auto select_functions(const llvm::Module& module, const Config& config) -> Selec
     for (const std::size_t index : named) {
       // The entry is only "matched" when this task transforms the function:
       // an entry that asks for a level that is not implemented yet protects
-      // nothing, and the build has to say so.
-      if (config.policy.value().protect[index].level == ProtectionLevel::call) {
+      // nothing, and the build has to say so. The state follows the level
+      // that was *applied* to the function: an entry that named a function
+      // that was selected at the virtualized level did not get its level,
+      // and claiming "matched" would be a coverage file that promises a
+      // protection that does not exist.
+      if (level == ProtectionLevel::call) {
         match_entry(result.policy_matches[index]);
       } else {
         unimplement_entry(result.policy_matches[index]);

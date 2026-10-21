@@ -34,14 +34,25 @@ constexpr std::uint64_t k_mix_xor = 0xBF58476D1CE4E5B9ULL;
 /// How far the mixer rotates its result.
 constexpr unsigned k_mix_rotate = 31;
 
-/// The number of constants the key is split into.
-constexpr std::size_t k_key_parts = 3;
-
 /// The names of the globals the transform adds to the module.
 constexpr std::string_view k_table_name = "cs2.protect.table";
 constexpr std::string_view k_descriptor_name = "cs2.protect.desc";
 constexpr std::string_view k_key_names[k_key_parts] = {"cs2.protect.key0", "cs2.protect.key1",
                                                        "cs2.protect.key2"};
+
+/// The names of the globals that hold the constants of the mixer.
+///
+/// The mixer constants do **not** go into the instruction stream as 64-bit
+/// immediates. The X86 backend of the SDK's LLVM 22.1.8 mis-materialises a
+/// 64-bit constant in this shape: `xor i64 %mul, 0xBF58476D1CE4E5B9` becomes
+/// `movabsq $0xBF58476C1CE4E5B9` -- one bit of the constant is lost. The
+/// dispatch still reached the right callee, but only because the lost bit
+/// happened to be the sign bit of the index and the table's stride is 8
+/// bytes: three coincidences, and the next constant would not have been so
+/// lucky. A constant in a global is written by the object writer, so it
+/// reaches the image bit for bit.
+constexpr std::string_view k_multiplier_name = "cs2.protect.mixmul";
+constexpr std::string_view k_xor_name = "cs2.protect.mixxor";
 
 /// The named metadata the early phase records the selection in.
 constexpr std::string_view k_functions_metadata = "cs2.protect.functions";
@@ -157,8 +168,14 @@ void permute(std::vector<llvm::Function*>& callees, std::uint64_t seed) {
     // to hide.
     return CallSkipReason::indirect_callee;
   }
-  if (callee->isDeclaration()) {
-    // An import or an intrinsic: it is in the import table anyway.
+  if (callee->isIntrinsic()) {
+    // An intrinsic has no body to call: the backend expands it.
+    return CallSkipReason::intrinsic_callee;
+  }
+  if (callee->isDeclarationForLinker()) {
+    // An import, an intrinsic or an `available_externally` function: none of
+    // them has code in this module, so a table entry for it would resolve to
+    // zero and the dispatch would call address zero.
     return CallSkipReason::external_callee;
   }
   if (llvm::isa<llvm::InvokeInst>(call)) {
@@ -191,16 +208,18 @@ void permute(std::vector<llvm::Function*>& callees, std::uint64_t seed) {
       return "musttail";
     case CallSkipReason::external_callee:
       return "external_callee";
+    case CallSkipReason::intrinsic_callee:
+      return "intrinsic_callee";
     case CallSkipReason::optnone_callee:
       return "optnone_callee";
     case CallSkipReason::invoke:
       return "invoke";
     case CallSkipReason::indirect_callee:
       return "indirect_callee";
-    case CallSkipReason::unselected_caller:
-      return "unselected_caller";
     default:
-      return "external_callee";
+      // An enumerator that this build does not know: say so, do not report a
+      // reason that is not the one.
+      return "unknown";
   }
 }
 
@@ -417,6 +436,20 @@ auto transform_module(llvm::Module& module, const Config& config,
     key_globals[i]->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   }
 
+  // The constants of the mixer live in globals as well, and not in the
+  // instruction stream: the X86 backend of this LLVM mis-materialises a
+  // 64-bit immediate in this shape (see k_multiplier_name). A global is
+  // written by the object writer, so the value that reaches the image is the
+  // value the pass encrypted the descriptor with.
+  llvm::GlobalVariable* multiplier = new llvm::GlobalVariable(
+      module, i64_type, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+      llvm::ConstantInt::get(i64_type, k_mix_multiplier), k_multiplier_name);
+  multiplier->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+  llvm::GlobalVariable* xor_constant = new llvm::GlobalVariable(
+      module, i64_type, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+      llvm::ConstantInt::get(i64_type, k_mix_xor), k_xor_name);
+  xor_constant->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+
   // The rewrite. The decode is inline arithmetic: a call to a shared helper
   // would add a stack frame to every call site.
   //
@@ -429,6 +462,11 @@ auto transform_module(llvm::Module& module, const Config& config,
   // optimiser reverts the rewrite in most of the payload's modules, and the
   // protection is void. A volatile load is the cheapest barrier that keeps
   // the image read-only (a writable table would be patched at run time).
+  //
+  // The two constants of the mixer are read the same way, for a different
+  // reason: a volatile load is never folded into an immediate, so the value
+  // that the call site uses is the value in the image and not a value the
+  // backend may have mis-materialised.
   for (std::size_t slot = 0; slot < sites.size(); ++slot) {
     Site& site = sites[slot];
     llvm::IRBuilder<> builder(site.call);
@@ -438,8 +476,10 @@ auto transform_module(llvm::Module& module, const Config& config,
         builder.CreateXor(mixed, builder.CreateLoad(i64_type, key_globals[1], /*isVolatile=*/true));
     mixed =
         builder.CreateXor(mixed, builder.CreateLoad(i64_type, key_globals[2], /*isVolatile=*/true));
-    mixed = builder.CreateMul(mixed, llvm::ConstantInt::get(i64_type, k_mix_multiplier));
-    mixed = builder.CreateXor(mixed, llvm::ConstantInt::get(i64_type, k_mix_xor));
+    llvm::Value* factor = builder.CreateLoad(i64_type, multiplier, /*isVolatile=*/true);
+    mixed = builder.CreateMul(mixed, factor);
+    llvm::Value* constant = builder.CreateLoad(i64_type, xor_constant, /*isVolatile=*/true);
+    mixed = builder.CreateXor(mixed, constant);
     llvm::Value* low = builder.CreateShl(mixed, k_mix_rotate);
     llvm::Value* high = builder.CreateLShr(mixed, 64U - k_mix_rotate);
     mixed = builder.CreateOr(low, high);
@@ -450,7 +490,13 @@ auto transform_module(llvm::Module& module, const Config& config,
     llvm::Value* cipher = builder.CreateLoad(i64_type, slot_address, /*isVolatile=*/true);
     llvm::Value* index = builder.CreateXor(cipher, mixed);
 
-    llvm::Value* entry_address = builder.CreateInBoundsGEP(pointer_type, table, index);
+    // The GEP into the table is *not* `inbounds`: the index is a value the
+    // image computes at run time, and the pass has no right to promise that
+    // it is inside the table. An out-of-range index would then be poison by
+    // the letter of the reference, and the call through it would be
+    // undefined behaviour; without the promise it is a wrong address, which
+    // is a bug the payload check can see.
+    llvm::Value* entry_address = builder.CreateGEP(pointer_type, table, index);
     llvm::Value* callee = builder.CreateLoad(pointer_type, entry_address);
 
     // The call keeps its function type, its attributes and its calling
@@ -465,6 +511,9 @@ auto transform_module(llvm::Module& module, const Config& config,
 
   result.table_size = callees.size();
   result.descriptor_size = sites.size();
+  result.key_parts = parts;
+  result.mix_multiplier = k_mix_multiplier;
+  result.mix_xor = k_mix_xor;
   return result;
 }
 

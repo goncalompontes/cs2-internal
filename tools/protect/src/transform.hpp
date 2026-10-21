@@ -18,6 +18,7 @@
 // record is also what lets the late phase notice a selected function that did
 // not survive the optimiser.
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -31,6 +32,12 @@ class Module;
 }  // namespace llvm
 
 namespace cs2::protect {
+
+/// The number of constants the key is split into.
+///
+/// The key is split so that it does not appear as a single constant in the
+/// image (the specification's design A).
+inline constexpr std::size_t k_key_parts = 3;
 
 /// Why a call was not rewritten.
 enum class CallSkipReason : std::uint8_t {
@@ -50,7 +57,6 @@ enum class CallSkipReason : std::uint8_t {
                        ///< EH edges yet.
   indirect_callee,     ///< the call is already indirect: there is nothing to
                        ///< hide.
-  unselected_caller,   ///< the caller is not selected.
 };
 
 [[nodiscard]] auto to_string(CallSkipReason reason) noexcept -> const char*;
@@ -98,6 +104,17 @@ struct TransformResult {
                                                 ///< level is not implemented.
   std::size_t table_size{0};
   std::size_t descriptor_size{0};
+  /// The parts of the key, in the order the call site combines them.
+  ///
+  /// The coverage records them, so that the payload check can decode the
+  /// descriptor of the image and compare the resolved address with the table
+  /// entry: the check must prove that the *dispatched* callee is the right
+  /// one, not only that the number of the dispatches is right.
+  std::array<std::uint64_t, k_key_parts> key_parts{};
+  /// The multiplier of the mixer, as the call site uses it.
+  std::uint64_t mix_multiplier{0};
+  /// The xor constant of the mixer, as the call site uses it.
+  std::uint64_t mix_xor{0};
 };
 
 /// Records the selection of the early phase in the module's metadata.

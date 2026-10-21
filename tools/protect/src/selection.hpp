@@ -62,14 +62,14 @@ struct Skipped {
 /// function, but this task does not transform it, so the build has to fail
 /// for it as well.
 struct PolicyMatch {
-  std::string pattern;     ///< the glob of the entry.
-  std::string module;      ///< the scope of the entry ("" = any module).
+  std::string pattern;                           ///< the glob of the entry.
+  std::string module;                            ///< the scope of the entry ("" = any module).
   ProtectionLevel level{ProtectionLevel::call};  ///< the level of the entry.
-  bool applicable{false};  ///< the scope of the entry names this module.
-  bool matched{false};     ///< the entry named a function that is protected.
-  bool blocked{false};     ///< the entry named a function that cannot be protected.
-  bool unimplemented{false};                 ///< the entry named a function whose level is not
-                                             ///< implemented yet.
+  bool applicable{false};                        ///< the scope of the entry names this module.
+  bool matched{false};                           ///< the entry named a function that is protected.
+  bool blocked{false};        ///< the entry named a function that cannot be protected.
+  bool unimplemented{false};  ///< the entry named a function whose level is not
+                              ///< implemented yet.
   std::optional<SkipReason> blocked_reason;  ///< why it cannot be protected.
 };
 
