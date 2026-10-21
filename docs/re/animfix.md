@@ -1126,19 +1126,29 @@ captured value may be re-applied is the specification's own:
 > A captured value may only be re-applied if it was captured **this frame**.
 > A capture corrects a slot **at most once**; only a newer decode (a newer
 > generation) can correct it again. A capture that has **aged out** - older
-> than one client frame (16 ms, which is also one of the server's 64 Hz
-> ticks) - is refused outright.
+> than the **observed snapshot interval** - is refused outright.
 
 The first clause is what keeps a capture from being written over the
 client's fresh prediction again and again; the second refuses a capture that
 aged out (a stalled connection, a dead player, a paused game), where the
 server's value describes a pose the server has long left behind: writing it
 over the client's fresh prediction would move the local hitboxes
-*backwards*, which is worse than not fixing them at all. The refusals are
-counted (`animfix_skips`).
+*backwards*, which is worse than not fixing them at all.
 
-Because the correction lands in the **same tick** as the decode, the bound
-can be tight: the capture is at most one tick old when it is used.
+**What the bound is about.** It is the age of the server's *data*, and the
+data ages at the server's **snapshot rate**: the animfix measures the
+interval between two decodes (an exponential moving average, so a stall -
+which produces no decodes at all - cannot widen it) and judges a capture
+against that interval. A 64 Hz server's values may be 16 ms old, a 30 Hz
+server's 33 ms: the bound follows the server, not the client's frame rate.
+(An earlier cut used a fixed 16 ms window, which was the server's default
+tick interval and therefore refused *every* capture on a server that
+snapshots more slowly - the feature was inert there, and the status could
+not say so.)
+
+Every refusal carries a **reason** - no capture / aged out / already used /
+the controller changed - and the status counts them separately, so "the codec
+has not run yet" is distinguishable from "every capture aged out".
 
 **The hooks are installed on the game's thread.** The inline hook patches its
 target with a 14-byte write that is not atomic, and a patch that lands while
