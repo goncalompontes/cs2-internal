@@ -3,6 +3,8 @@
 //! This is the seam between the raw scanner and the generated SDK consumed by
 //! the C++ payload. It starts small and grows as analysis progresses.
 
+use std::collections::BTreeMap;
+
 use crate::pattern::{Pattern, Signature};
 use serde::{Deserialize, Serialize};
 
@@ -298,6 +300,28 @@ pub fn signature_modules() -> Vec<String> {
     modules
 }
 
+/// How many curated signatures the registry holds, per module.
+///
+/// The offline offset resolver compares the number of signatures a module
+/// resolved (plus the number that did **not**) against this count: a module
+/// that was not really scanned - a wrong file, a module name that does not
+/// match - shows up as a shortfall instead of a silent success.
+pub fn signature_counts() -> BTreeMap<String, usize> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for signature in known_signatures() {
+        *counts.entry(signature.module.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// How many curated signatures the registry holds for one module.
+pub fn signature_count(module: &str) -> usize {
+    known_signatures()
+        .iter()
+        .filter(|signature| signature.module == module)
+        .count()
+}
+
 /// Resolve every curated signature that targets `module` against a mapped
 /// module image. A signature that does not match is reported as absent so a
 /// build that moved or dropped a global is visible rather than silent.
@@ -357,5 +381,22 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(signature_modules(), from_registry);
+    }
+
+    /// The counts agree with the registry: they add up to the number of
+    /// signatures, and every module the list names has at least one.
+    #[test]
+    fn signature_counts_match_the_registry() {
+        let counts = signature_counts();
+        let total: usize = counts.values().sum();
+        assert_eq!(total, known_signatures().len());
+        assert_eq!(
+            counts.keys().cloned().collect::<Vec<String>>(),
+            signature_modules()
+        );
+        for (module, count) in &counts {
+            assert!(*count > 0, "{module} has curated signatures");
+            assert_eq!(*count, signature_count(module));
+        }
     }
 }
