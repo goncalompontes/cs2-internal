@@ -578,7 +578,9 @@ the whole point of this pass:
    writes *empty* SDK headers), 44/44 host tests, the payload build (the
    cross file, `/MT`, and a `payload.dll` that imports no CRT), the Vulkan
    clone and the overlay build, the injector build, the Python suite (404),
-   the type gate, and the style gate with the pinned clang-tidy.
+   the type gate, and the style gate with the pinned clang-tidy. The tree
+   was re-run that way **again after the second re-review's fixes** (the
+   same list, on the final tree).
 3. **The SDK the payload is built against.** The SDK headers
    (`payload/sdk/*.hpp`) are generated from the calibration dumps, and the
    dumps are git-ignored: they come from a live calibration against a
@@ -777,6 +779,22 @@ failure family as F2, one door over.
 | **m5** | the workflow header said the payload compiles against the headers the host build generates, and that the host build runs first for that reason | it does not: the payload project has its own `sdk-headers` target, so the payload build regenerates the headers itself | the fresh-tree run shows the generator twice |
 | **m6** | the CI spends a minute building the Rust dumper and pulling crates from crates.io, only to write *empty* headers | **the generator stays**, and the crates and the build are cached (the key follows the dumper's lock file). A checked-in stub was considered and declined: the payload would then be compiled against a *frozen* shape of the generated headers instead of the current one, and the stub would rot whenever the generator's output changes — a compile gate that quietly stops being one | the fresh-tree workflow still passes end to end, with the cache step in it |
 | the nits | the "Pinned" header in `requirements-dev.txt` is contradicted by the MCP SDK's range; the CI job had no timeout; the workflow never said which ninja meson used; §3 did not mention the policy's requirements; the type checker's cache was not ignored | all five are fixed: the exception is named, the job has `timeout-minutes`, the versions are printed, §3 says what a policy must satisfy, and `.mypy_cache/` is ignored | — |
+
+### 9.7 The second re-review's commits
+
+| commit | what it changed |
+|---|---|
+| `c4769f8` | **fix(core):** the wrapper asks the policy whether it can work at all (M1) |
+| `48d6ff1` | **docs(core):** the policy contract says when `close` is asked (m3) |
+| `5ca04bf` | **ci:** the payload step does not depend on the host build (m5) |
+| `1319419` | **ci:** the dumper's crates and build are cached (m6) |
+| `5bda778` | **docs(dev):** the pin rule has one exception, and says so (a nit) |
+| `5489a08` | **ci:** a timeout for the job, and the build tools' versions in the log (nits) |
+| `f208595` | **chore(git):** the type checker's cache is ignored explicitly (a nit) |
+| `b212124` | **style(core):** the new test's local handle is const (the finding the new test brought) |
+| `187361d` | **docs(quality-pass):** the M1 evidence names its build directory, and the report mentions the policy's requirements (m4, a nit) |
+| `8cdef05` | **docs(quality-pass):** 6.2 publishes the command the numbers come from (m1) |
+| `b824a9e` | **docs(quality-pass):** the clang-tidy table is re-measured at the tip (m2) |
 
 ---
 
