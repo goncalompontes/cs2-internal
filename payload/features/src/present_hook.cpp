@@ -13,53 +13,13 @@
 #endif
 
 namespace cs2::features {
-namespace {
 
-#if defined(_WIN32)
-// Append a line to the payload log (under the payload's writable data dir) so
-// hook activity is observable from outside the target. Uses Win32 file I/O, not
-// the CRT (a manually mapped module only has static-CRT per-thread state on the
-// injector's entry thread).
-void log_line(const char* text) noexcept {
-  using CreateFileAFn = HANDLE(__stdcall*)(const char*, unsigned long, unsigned long, void*,
-                                           unsigned long, unsigned long, HANDLE);
-  static CreateFileAFn create_file = nullptr;
-  if (create_file == nullptr) {
-    HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
-    if (kernel32 == nullptr) {
-      return;
-    }
-    create_file = reinterpret_cast<CreateFileAFn>(GetProcAddress(kernel32, "CreateFileA"));
-    if (create_file == nullptr) {
-      return;
-    }
-  }
-  char path[MAX_PATH];
-  if (!cs2::game::data_file_path("cs2-payload.log", path, sizeof(path))) {
-    return;
-  }
-
-  constexpr unsigned long k_file_append_data = 0x4;
-  constexpr unsigned long k_file_share_read = 0x1;
-  constexpr unsigned long k_open_always = 0x4;
-  constexpr unsigned long k_file_attribute_normal = 0x80;
-  HANDLE file = create_file(path, k_file_append_data, k_file_share_read, nullptr,
-                            k_open_always, k_file_attribute_normal, nullptr);
-  if (file == nullptr || file == INVALID_HANDLE_VALUE) {
-    return;
-  }
-  std::size_t length = 0;
-  while (text[length] != '\0') {
-    ++length;
-  }
-  unsigned long written = 0;
-  WriteFile(file, text, static_cast<unsigned long>(length), &written, nullptr);
-  WriteFile(file, "\n", 1, &written, nullptr);
-  CloseHandle(file);
-}
-#endif
-
-}  // namespace
+// The present hook's activity is logged through the payload's shared log
+// writer (`cs2::game::append_log`): it appends a line to the payload log
+// under the payload's writable data dir, so the hook's activity is observable
+// from outside the target. It uses Win32 file I/O, not the CRT (a manually
+// mapped module only has static-CRT per-thread state on the injector's entry
+// thread).
 
 PresentHook::PresentHook(render::UiBackend& backend, Overlay& overlay, Menu* menu) noexcept
     : backend_(&backend), overlay_(&overlay), menu_(menu) {}
@@ -79,27 +39,27 @@ auto PresentHook::install() noexcept -> bool {
     return true;
   }
 #if defined(_WIN32)
-  log_line("present hook: install begin (dxgi method-table interposer)");
+  cs2::game::append_log("present hook: install begin (dxgi method-table interposer)");
   // Only interpose when the graphics stack is already present (the game). Keeps
   // the payload safe to map into non-graphical targets.
   if (GetModuleHandleW(L"dxgi.dll") == nullptr || GetModuleHandleW(L"d3d11.dll") == nullptr) {
     std::puts("[cs2-features] dxgi/d3d11 not loaded; skipping Present hook");
-    log_line("present hook: dxgi/d3d11 not loaded; skipped");
+    cs2::game::append_log("present hook: dxgi/d3d11 not loaded; skipped");
     return false;
   }
 
   // Replaces the swapchain Present/ResizeBuffers slots in the discovered method
   // table instead of MinHook-patching the Present function body (DXVK only
   // conditionally reserves a hot-patchable Present entry; ADR-0015).
-  log_line("present hook: interposing (discovering method tables)");
+  cs2::game::append_log("present hook: interposing (discovering method tables)");
   if (!interposer_.install(&present_callback, &resize_callback, this)) {
     std::puts("[cs2-features] DXGI interposition failed");
-    log_line("present hook: DXGI interposition FAILED");
+    cs2::game::append_log("present hook: DXGI interposition FAILED");
     return false;
   }
   installed_ = true;
   std::puts("[cs2-features] IDXGISwapChain::Present interposed (DXGI method table)");
-  log_line("present hook installed (dxgi method-table interposer)");
+  cs2::game::append_log("present hook installed (dxgi method-table interposer)");
   return true;
 #else
   return false;
@@ -134,7 +94,7 @@ void PresentHook::on_present(void* swapchain) noexcept {
     return;
   }
   if (frames_ == 1) {
-    log_line("present hook: first Present call");
+    cs2::game::append_log("present hook: first Present call");
   }
   auto* chain = static_cast<IDXGISwapChain*>(swapchain);
   ID3D11Device* device = nullptr;
@@ -178,7 +138,7 @@ void PresentHook::on_present(void* swapchain) noexcept {
 
   if (!backend_ready_) {
     backend_ready_ = backend_ != nullptr && backend_->initialize(context_);
-    log_line(backend_ready_ ? "ui backend initialized" : "ui backend init FAILED");
+    cs2::game::append_log(backend_ready_ ? "ui backend initialized" : "ui backend init FAILED");
   }
 
   if (backend_ready_ && backend_ != nullptr) {
@@ -194,7 +154,7 @@ void PresentHook::on_present(void* swapchain) noexcept {
     }
     backend_->render(context_, model);
     if (frames_ % 300 == 0) {
-      log_line("presenting frames");
+      cs2::game::append_log("presenting frames");
     }
   }
 #endif

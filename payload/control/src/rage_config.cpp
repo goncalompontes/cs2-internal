@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "cs2/core/handle.hpp"
 #include "cs2/game/log.hpp"
 
 #if defined(_WIN32)
@@ -53,10 +54,62 @@ using ReadFileFn = int(__stdcall*)(HANDLE, void*, unsigned long, unsigned long*,
 using WriteFileFn = int(__stdcall*)(HANDLE, const void*, unsigned long, unsigned long*, void*);
 using CloseHandleFn = int(__stdcall*)(HANDLE);
 
-auto kernel_fn(const char* name) noexcept -> void* {
+// The kernel32 entry points the config's file I/O needs. They are resolved by
+// name rather than imported: the payload is manually mapped, so it does not
+// rely on the loader filling an import table.
+//
+// The load and the save need different subsets of them, and each checks the
+// subset it uses, so one resolution serves both.
+struct KernelFileApi {
+  CreateFileAFn create_file = nullptr;
+  ReadFileFn read_file = nullptr;
+  WriteFileFn write_file = nullptr;
+  CloseHandleFn close_handle = nullptr;
+};
+
+auto kernel_file_api() noexcept -> KernelFileApi {
   const HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
-  return kernel32 == nullptr ? nullptr : reinterpret_cast<void*>(GetProcAddress(kernel32, name));
+  if (kernel32 == nullptr) {
+    return {};
+  }
+  KernelFileApi api{};
+  api.create_file = reinterpret_cast<CreateFileAFn>(GetProcAddress(kernel32, "CreateFileA"));
+  api.read_file = reinterpret_cast<ReadFileFn>(GetProcAddress(kernel32, "ReadFile"));
+  api.write_file = reinterpret_cast<WriteFileFn>(GetProcAddress(kernel32, "WriteFile"));
+  api.close_handle = reinterpret_cast<CloseHandleFn>(GetProcAddress(kernel32, "CloseHandle"));
+  return api;
 }
+
+// The closer for the config file's handle: the `CloseHandle` that was resolved
+// from kernel32, so the file is released by exactly the entry point the rest
+// of this file uses.
+struct FilePolicy {
+  CloseHandleFn close_handle = nullptr;
+
+  // The closer is resolved from kernel32 at run time, so a policy that does
+  // not carry one cannot work: it cannot release the file. The wrapper asks
+  // this before it asks the policy anything else, so a policy without a
+  // closer is never asked to close anything.
+  [[nodiscard]] bool usable() const noexcept {
+    return close_handle != nullptr;
+  }
+
+  [[nodiscard]] bool is_valid(void* handle) const noexcept {
+    return handle != nullptr && handle != INVALID_HANDLE_VALUE;
+  }
+  void close(void* handle) const noexcept {
+    if (close_handle != nullptr) {
+      close_handle(static_cast<HANDLE>(handle));
+      return;
+    }
+    // A null closer is a programming error, not a state to recover from: the
+    // callers resolve the entry points and check them before they open a
+    // file, so this cannot happen on a path that exists. Say so in the
+    // payload's log instead of leaking the handle in silence.
+    cs2::game::append_log(
+        "rage config: the resolved CloseHandle is null; the file handle leaks");
+  }
+};
 #endif
 
 }  // namespace
@@ -84,13 +137,8 @@ auto rage_profile_find(RageConfigStore& store, const char* weapon, bool create) 
 auto rage_config_load(RageConfigStore& store) noexcept -> bool {
   store.count = 0;
 #if defined(_WIN32)
-  using CreateFileA = CreateFileAFn;
-  using ReadFileT = ReadFileFn;
-  using CloseHandleT = CloseHandleFn;
-  auto create_file = reinterpret_cast<CreateFileA>(kernel_fn("CreateFileA"));
-  auto read_file = reinterpret_cast<ReadFileT>(kernel_fn("ReadFile"));
-  auto close_handle = reinterpret_cast<CloseHandleT>(kernel_fn("CloseHandle"));
-  if (create_file == nullptr || read_file == nullptr || close_handle == nullptr) {
+  const KernelFileApi api = kernel_file_api();
+  if (api.create_file == nullptr || api.read_file == nullptr || api.close_handle == nullptr) {
     return false;
   }
   char path[MAX_PATH];
@@ -101,15 +149,21 @@ auto rage_config_load(RageConfigStore& store) noexcept -> bool {
   constexpr unsigned long k_share_read = 0x1UL;
   constexpr unsigned long k_open_existing = 0x3UL;
   constexpr unsigned long k_file_attribute_normal = 0x80UL;
-  HANDLE file = create_file(path, k_generic_read, k_share_read, nullptr, k_open_existing,
-                            k_file_attribute_normal, nullptr);
-  if (file == nullptr || file == INVALID_HANDLE_VALUE) {
-    return false;
-  }
-  char buffer[k_max_file_bytes] = {};
   unsigned long read = 0;
-  const int ok = read_file(file, buffer, sizeof(buffer) - 1, &read, nullptr);
-  close_handle(file);
+  int ok = 0;
+  char buffer[k_max_file_bytes] = {};
+  {
+    // The handle is owned by the wrapper, so every path out of this block
+    // releases it -- including the early return above (which never got one).
+    const core::ScopedHandle<void*, FilePolicy> file(
+        api.create_file(path, k_generic_read, k_share_read, nullptr, k_open_existing,
+                        k_file_attribute_normal, nullptr),
+        FilePolicy{api.close_handle});
+    if (!file.valid()) {
+      return false;
+    }
+    ok = api.read_file(static_cast<HANDLE>(file.get()), buffer, sizeof(buffer) - 1, &read, nullptr);
+  }  // the file is released here, before the buffer is parsed
   if (ok == 0) {
     return false;
   }
@@ -177,27 +231,29 @@ auto rage_config_save(const RageConfigStore& store) noexcept -> bool {
     }
     used += written;
   }
-  using CreateFileA = CreateFileAFn;
-  using WriteFileT = WriteFileFn;
-  using CloseHandleT = CloseHandleFn;
-  auto create_file = reinterpret_cast<CreateFileA>(kernel_fn("CreateFileA"));
-  auto write_file = reinterpret_cast<WriteFileT>(kernel_fn("WriteFile"));
-  auto close_handle = reinterpret_cast<CloseHandleT>(kernel_fn("CloseHandle"));
-  if (create_file == nullptr || write_file == nullptr || close_handle == nullptr) {
+  const KernelFileApi api = kernel_file_api();
+  if (api.create_file == nullptr || api.write_file == nullptr || api.close_handle == nullptr) {
     return false;
   }
   constexpr unsigned long k_generic_write = 0x40000000UL;
   constexpr unsigned long k_share_read = 0x1UL;
   constexpr unsigned long k_create_always = 0x2UL;
   constexpr unsigned long k_file_attribute_normal = 0x80UL;
-  HANDLE file = create_file(path, k_generic_write, k_share_read, nullptr, k_create_always,
-                            k_file_attribute_normal, nullptr);
-  if (file == nullptr || file == INVALID_HANDLE_VALUE) {
-    return false;
-  }
-  unsigned long written = 0;
-  const int ok = write_file(file, buffer, static_cast<unsigned long>(used), &written, nullptr);
-  close_handle(file);
+  // The handle is owned by the wrapper, so every path out of this block
+  // releases it.
+  int ok = 0;
+  {
+    const core::ScopedHandle<void*, FilePolicy> file(
+        api.create_file(path, k_generic_write, k_share_read, nullptr, k_create_always,
+                        k_file_attribute_normal, nullptr),
+        FilePolicy{api.close_handle});
+    if (!file.valid()) {
+      return false;
+    }
+    unsigned long written = 0;
+    ok = api.write_file(static_cast<HANDLE>(file.get()), buffer, static_cast<unsigned long>(used),
+                        &written, nullptr);
+  }  // the file is released here, before the result is returned
   return ok != 0;
 #else
   (void)store;

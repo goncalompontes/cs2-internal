@@ -6,12 +6,28 @@
 #
 #   pip install -r requirements-dev.txt
 #
-# Pinned: a gate that changes its mind between runs is not a gate.
+# Pinned: a gate that changes its mind between runs is not a gate. The one
+# exception is the MCP SDK, which is a range on purpose: the test that
+# needs it skips itself when the package is absent, so its version is not
+# a gate.
+
+# The build system. Pinned like the rest: a build that changes its mind
+# between runs is not a build either. These are the versions this repository
+# is verified with (the CI installs them from this file).
+meson==1.11.2
+ninja==1.13.0
 
 # The type checker. `scripts/typecheck.py` runs it over `scripts/scenario` and
 # exits non-zero on an error — the configuration lives in `pyproject.toml`
 # (`[tool.mypy]`).
 mypy==1.14.1
+
+# The style gate's clang-tidy (`scripts/clang-tidy-fix.py --check`). Pinned to
+# the LLVM release the gated groups were baselined with: a gate that changes
+# its mind between runs is not a gate. The package ships the LLVM binary; the
+# CI puts it first on PATH so the gate cannot silently run the runner's own
+# (unpinned) LLVM.
+clang-tidy==22.1.8
 
 # The MCP SDK. Only the *reference client* test needs it (it drives the MCP
 # server with the real client); that test is skipped when the package is

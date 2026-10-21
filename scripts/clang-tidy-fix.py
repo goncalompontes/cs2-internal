@@ -22,13 +22,23 @@ USAGE
     python scripts/clang-tidy-fix.py --group modernize-safe --apply         # write
     python scripts/clang-tidy-fix.py --apply --format --commit              # defaults, tidy, commit
     python scripts/clang-tidy-fix.py --group trailing-return-type --apply
+    python scripts/clang-tidy-fix.py --check                                # the gate
 
     Review with `git diff`, then rebuild before committing:
         meson compile -C build && meson test -C build
 
+CHECK MODE
+    `--check` runs the selected groups **without writing anything** and fails
+    when a selected group reports a finding. Without `--group`/`--checks` the
+    selected groups are the *gated* ones (GATED_GROUPS below, `--list-gate`),
+    so the command is the regression gate: a change that introduces a finding
+    under a gated group fails it.
+
 EXIT STATUS
-    0  no translation units failed to analyse
-    1  at least one translation unit failed (its output is shown)
+    0  no translation units failed to analyse (and, in check mode, no gated
+       group reported a finding)
+    1  at least one translation unit failed (its output is shown), or a gated
+       group reported a finding in check mode
 """
 
 from __future__ import annotations
@@ -185,11 +195,43 @@ GROUP_DOCS: dict[str, str] = {
 # semantics-preserving modernisations.
 DEFAULT_GROUPS = ("modernize-safe", "modernize-types")
 
+# The groups the tree is expected to be **clean** under. `--check` selects
+# them by default, and a finding in one of them fails the check.
+#
+# WHY ONLY THESE
+#     The tree is not clang-tidy-clean historically (docs/style-guide.md §7),
+#     and the other groups cannot be gated as they stand:
+#       * `const` has three findings left, all pre-existing;
+#       * `modernize-types` wants `auto` exactly where the style guide wants
+#         the type spelled out ("auto where the type is evident; spell the
+#         type out when it carries meaning"), so gating it would fight the
+#         house style;
+#       * `modernize-safe` wants `return {x};` in places where the explicit
+#         constructor reads better;
+#       * `readability`/`readability-extra`/`trailing-return-type`/
+#         `modernize-extra` still have findings in the files the concurrent
+#         control-channel work owns, and in a vendored header;
+#       * `misc-extra`'s three findings are false positives (a redundant
+#         comparison that is not redundant).
+#     Widening the gate is a deliberate act: clear the group's findings, then
+#     add it here. `performance` and `nodiscard` are the two that catch the
+#     mistakes that matter -- a copy in a hot path, and a dropped result.
+GATED_GROUPS: tuple[str, ...] = ("performance", "nodiscard")
+
 DEFAULT_HEADER_FILTER = r".*(payload|overlay|injector|tools)/.*"
 DEFAULT_EXCLUDE_HEADER_FILTER = r"(^|/)(third_party|external|toolchain|subprojects)/"
 NO_HEADER_FILTER = r"^$"  # matches nothing: diagnostics restricted to main files
 
 DIAG_RE = re.compile(r"\[([a-zA-Z0-9][a-zA-Z0-9._-]*)\]\s*$")
+
+# The compiler's own diagnostics are not findings of a check group. A
+# translation unit that does not compile is reported by the sweep's "failed on
+# N translation unit(s)" path (clang-tidy prints "Error while processing"), and
+# counting it as a finding of the group would make the gate say "performance
+# reported a finding" and send the reader hunting a style problem that does
+# not exist. (Compiler *warnings* need no rule: clang-tidy filters them out
+# with the check selection, so they never reach the counter.)
+NON_FINDING_CHECKS = frozenset({"clang-diagnostic-error"})
 
 
 def rel(path: Path) -> str:
@@ -302,7 +344,7 @@ def parse_findings(output: str) -> Counter[str]:
         if ": warning:" not in line and ": error:" not in line:
             continue
         match = DIAG_RE.search(line.rstrip())
-        if match:
+        if match and match.group(1) not in NON_FINDING_CHECKS:
             counts[match.group(1)] += 1
     return counts
 
@@ -343,9 +385,13 @@ def run_group(
     exclude_header_filter: str,
     apply: bool,
     verbose: bool,
-) -> list[str]:
+    group: str = "",
+    reported: set[str] | None = None,
+) -> tuple[list[str], Counter[str]]:
     failures: list[str] = []
     findings: Counter[str] = Counter()
+    if reported is None:
+        reported = set()
 
     def work(item: tuple[Path, Path]) -> tuple[Path, bool, Counter[str], str]:
         source, build_dir = item
@@ -361,13 +407,43 @@ def run_group(
         findings.update(counts)
         if not ok:
             failures.append(rel(source))
-            print(f"\n--- clang-tidy failed on {rel(source)} ---", file=sys.stderr)
-            print(output, file=sys.stderr)
+            # A translation unit that fails in two groups is one translation
+            # unit: its output is shown once, and the summary counts it once.
+            if rel(source) not in reported:
+                reported.add(rel(source))
+                print(f"\n--- clang-tidy failed on {rel(source)} (group: {group}) ---",
+                      file=sys.stderr)
+                print(output, file=sys.stderr)
         elif verbose and counts:
             print(f"  {rel(source)}: {sum(counts.values())} finding(s)")
 
-    run_group.last_findings = findings  # type: ignore[attr-defined]
-    return failures
+    return failures, findings
+
+
+def gated_findings(selected: list[str], per_group: dict[str, Counter[str]]) -> list[str]:
+    """The selected groups that reported a finding.
+
+    This is the decision the check mode turns into an exit code, and it is
+    kept separate from the sweep itself so it can be tested without running
+    clang-tidy (see scripts/scenario/tests/test_clang_tidy_fix.py).
+    """
+    return [name for name in selected if sum(per_group.get(name, Counter()).values()) > 0]
+
+
+def distinct_failures(failures: list[str]) -> list[str]:
+    """The translation units that failed, each of them once.
+
+    The failures are collected per group, so a translation unit that fails
+    in two groups is listed twice -- but it is still *one* translation
+    unit, and the count the gate prints must not count it twice.
+    """
+    seen: set[str] = set()
+    unique: list[str] = []
+    for source in failures:
+        if source not in seen:
+            seen.add(source)
+            unique.append(source)
+    return unique
 
 
 # --- reporting ------------------------------------------------------------
@@ -427,6 +503,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("-v", "--verbose", action="store_true", help="show per-file finding counts")
     parser.add_argument("--list-groups", action="store_true", help="list groups and exit")
     parser.add_argument("--list-files", action="store_true", help="list the translation units to scan and exit")
+    parser.add_argument("--check", action="store_true",
+                        help="check mode: write nothing, and fail when a selected group reports a finding "
+                             "(the selected groups are the gated ones unless --group/--checks is given)")
+    parser.add_argument("--gate", action="append", metavar="NAME",
+                        help="replace the gated groups (repeatable); see --list-gate")
+    parser.add_argument("--list-gate", action="store_true", help="list the gated groups and exit")
     return parser.parse_args(argv)
 
 
@@ -453,8 +535,30 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{name}{marker}\n    {GROUP_DOCS.get(name, '')}\n    {', '.join(checks)}")
         return 0
 
+    # The gated groups: the ones a check run must be clean under. `--gate`
+    # replaces the set, so a wider (or narrower) gate is a deliberate act.
+    gate = list(args.gate) if args.gate else list(GATED_GROUPS)
+    for name in gate:
+        if name not in GROUPS:
+            die(f"unknown group '{name}'; see --list-groups")
+
+    if args.list_gate:
+        print("the gated groups (a finding in one of them fails --check):")
+        for name in gate:
+            marker = " [gated]" if name in GATED_GROUPS else ""
+            print(f"  {name}{marker}\n    {GROUP_DOCS.get(name, '')}")
+        return 0
+
+    # In check mode the gated groups are the selection, unless the caller
+    # picked the groups explicitly.
+    if args.check and not args.group and not args.checks:
+        args.group = list(gate)
+
     groups = resolve_groups(args)
     apply = args.apply or args.commit
+    if args.check:
+        # A check never writes: it reports, it does not fix.
+        apply = False
     plan = build_plan(args)
 
     if args.list_files:
@@ -476,12 +580,14 @@ def main(argv: list[str] | None = None) -> int:
     header_filter = NO_HEADER_FILTER if args.no_headers else args.header_filter
 
     print(f"repo    {REPO_ROOT}")
-    print(f"mode    {'APPLY' if apply else 'dry run'}   jobs={jobs}")
+    print(f"mode    {'CHECK' if args.check else ('APPLY' if apply else 'dry run')}   jobs={jobs}")
     print(f"plan    {len(plan)} translation unit(s)")
     print(f"groups  {', '.join(name for name, _ in groups)}")
 
     watch = sorted({p for p, _ in plan} | set(tracked_sources()))
     failed: list[str] = []
+    reported: set[str] = set()
+    per_group: dict[str, Counter[str]] = {}
 
     for name, checks in groups:
         # clang-tidy *merges* --checks with the Checks list in .clang-tidy rather
@@ -489,10 +595,11 @@ def main(argv: list[str] | None = None) -> int:
         # every "group" would silently run the whole .clang-tidy set.
         checks_csv = "-*," + ",".join(checks)
         before = snapshot(watch)
-        failed.extend(
-            run_group(clang_tidy, plan, checks_csv, jobs, header_filter,
-                      args.exclude_header_filter, apply, args.verbose)
-        )
+        group_failures, findings = run_group(clang_tidy, plan, checks_csv, jobs, header_filter,
+                                             args.exclude_header_filter, apply, args.verbose,
+                                             name, reported)
+        failed.extend(group_failures)
+        per_group[name] = findings
         after = snapshot(watch)
         changed = sorted(p for p in after if before.get(p) != after[p])
 
@@ -501,16 +608,27 @@ def main(argv: list[str] | None = None) -> int:
                 die("--format requested but clang-format is not on PATH")
             subprocess.run([clang_format, "-i", *[str(p) for p in changed]], cwd=REPO_ROOT, check=True)
 
-        report(name, checks, len(plan), run_group.last_findings, changed)  # type: ignore[attr-defined]
+        report(name, checks, len(plan), findings, changed)
 
         if apply and args.commit and changed:
             stage(changed, f"chore(clang-tidy): apply {name} fixes")
 
     if failed:
-        print(f"\nfailed on {len(failed)} translation unit(s):", file=sys.stderr)
-        for name in failed:
+        # A translation unit that failed in two groups is still one
+        # translation unit: the count must not count it twice.
+        distinct = distinct_failures(failed)
+        print(f"\nfailed on {len(distinct)} translation unit(s):", file=sys.stderr)
+        for name in distinct:
             print(f"  {name}", file=sys.stderr)
         return 1
+
+    if args.check:
+        dirty = gated_findings([name for name, _ in groups], per_group)
+        if dirty:
+            print(f"\ncheck FAILED: {', '.join(dirty)} reported a finding", file=sys.stderr)
+            return 1
+        print("\ncheck OK: the selected groups report no finding")
+        return 0
 
     if not apply:
         print("\nThis was a dry run. Re-run with --apply to write the fixes.")

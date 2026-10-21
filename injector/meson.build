@@ -37,7 +37,7 @@ else
   executable('injector',
     'src/main.cpp',
     loader_src,
-    include_directories : loader_inc,
+    include_directories : [loader_inc, include_directories('../payload/core/include')],
     install : false)
 
   # Test aids: a benign victim process and a CRT-less trivial DLL to load into

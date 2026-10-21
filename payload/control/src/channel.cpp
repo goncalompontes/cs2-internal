@@ -20,8 +20,12 @@ Channel::~Channel() {
 
 #if defined(_WIN32)
 
+void PipeHandlePolicy::close(void* handle) const noexcept {
+  CloseHandle(static_cast<HANDLE>(handle));
+}
+
 auto Channel::open(std::string_view name) noexcept -> bool {
-  if (handle_ != nullptr) {
+  if (handle_.valid()) {
     return true;
   }
   const std::string path(name);
@@ -31,24 +35,21 @@ auto Channel::open(std::string_view name) noexcept -> bool {
   if (pipe == INVALID_HANDLE_VALUE) {
     return false;
   }
-  handle_ = pipe;
+  handle_.reset(pipe);
   pending_.clear();
   return true;
 }
 
 void Channel::close() noexcept {
-  if (handle_ != nullptr) {
-    CloseHandle(static_cast<HANDLE>(handle_));
-    handle_ = nullptr;
-  }
+  handle_.reset();
   pending_.clear();
 }
 
 auto Channel::accept() noexcept -> bool {
-  if (handle_ == nullptr) {
+  if (!handle_.valid()) {
     return false;
   }
-  if (ConnectNamedPipe(static_cast<HANDLE>(handle_), nullptr) != FALSE) {
+  if (ConnectNamedPipe(static_cast<HANDLE>(handle_.get()), nullptr) != FALSE) {
     return true;
   }
   // A client that connected between CreateNamedPipe and ConnectNamedPipe makes
@@ -57,14 +58,14 @@ auto Channel::accept() noexcept -> bool {
 }
 
 void Channel::disconnect() noexcept {
-  if (handle_ != nullptr) {
-    DisconnectNamedPipe(static_cast<HANDLE>(handle_));
+  if (handle_.valid()) {
+    DisconnectNamedPipe(static_cast<HANDLE>(handle_.get()));
   }
   pending_.clear();
 }
 
 auto Channel::read_line(std::string& out) noexcept -> bool {
-  if (handle_ == nullptr) {
+  if (!handle_.valid()) {
     return false;
   }
   for (;;) {
@@ -79,7 +80,8 @@ auto Channel::read_line(std::string& out) noexcept -> bool {
     }
     char buffer[2048];
     DWORD read = 0;
-    if (ReadFile(static_cast<HANDLE>(handle_), buffer, sizeof(buffer), &read, nullptr) == FALSE ||
+    if (ReadFile(static_cast<HANDLE>(handle_.get()), buffer, sizeof(buffer), &read, nullptr) ==
+            FALSE ||
         read == 0) {
       return false;  // client disconnected or the pipe broke
     }
@@ -88,7 +90,7 @@ auto Channel::read_line(std::string& out) noexcept -> bool {
 }
 
 auto Channel::write_line(std::string_view bytes) noexcept -> bool {
-  if (handle_ == nullptr) {
+  if (!handle_.valid()) {
     return false;
   }
   std::string payload(bytes);
@@ -98,7 +100,7 @@ auto Channel::write_line(std::string_view bytes) noexcept -> bool {
   while (remaining > 0) {
     const auto chunk = static_cast<DWORD>(remaining > k_pipe_buffer ? k_pipe_buffer : remaining);
     DWORD written = 0;
-    if (WriteFile(static_cast<HANDLE>(handle_), data, chunk, &written, nullptr) == FALSE) {
+    if (WriteFile(static_cast<HANDLE>(handle_.get()), data, chunk, &written, nullptr) == FALSE) {
       return false;
     }
     if (written == 0) {
@@ -111,6 +113,11 @@ auto Channel::write_line(std::string_view bytes) noexcept -> bool {
 }
 
 #else
+
+void PipeHandlePolicy::close(void* handle) const noexcept {
+  // The host branch never opens a pipe, so there is nothing to close.
+  (void)handle;
+}
 
 auto Channel::open(std::string_view /*name*/) noexcept -> bool {
   return false;

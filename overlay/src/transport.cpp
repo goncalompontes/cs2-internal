@@ -10,6 +10,9 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+
+#include "cs2/core/handle.hpp"
+#include "cs2/core/win_handle.hpp"
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -66,30 +69,35 @@ auto ensure_mapped() -> bool {
     return false;
   }
 
-  HANDLE file =
-      CreateFileA(g_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE) {
+  core::ScopedKernelHandle mapping;
+  {
+    // The file and the mapping are owned by their wrappers, so every path out
+    // of this function releases them.
+    const core::ScopedKernelHandle file(
+        CreateFileA(g_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!file.valid()) {
+      return false;
+    }
+    mapping.reset(CreateFileMappingA(static_cast<HANDLE>(file.get()), nullptr, PAGE_READWRITE, 0,
+                                     static_cast<DWORD>(sizeof(wire::Shared)), nullptr));
+  }  // the file is released here, as before
+  if (!mapping.valid()) {
     return false;
   }
-  HANDLE mapping = CreateFileMappingA(file, nullptr, PAGE_READWRITE, 0,
-                                      static_cast<DWORD>(sizeof(wire::Shared)), nullptr);
-  CloseHandle(file);
-  if (mapping == nullptr) {
-    return false;
-  }
-  void* view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(wire::Shared));
+  void* view = MapViewOfFile(static_cast<HANDLE>(mapping.get()), FILE_MAP_ALL_ACCESS, 0, 0,
+                             sizeof(wire::Shared));
   if (view == nullptr) {
-    CloseHandle(mapping);
-    return false;
+    return false;  // the mapping is released by its wrapper
   }
   auto* shared = static_cast<wire::Shared*>(view);
   if (!wire::segment_is_compatible(shared->magic, shared->version)) {
     UnmapViewOfFile(view);
-    CloseHandle(mapping);
-    return false;
+    return false;  // the mapping is released by its wrapper
   }
-  g_mapping = mapping;
+  // The layer keeps the mapping for its lifetime, so the wrapper hands the
+  // ownership over instead of releasing it.
+  g_mapping = mapping.release();
   g_shared = shared;
   overlay_log("cs2-overlay: shared segment mapped at %s", g_path);
   return true;

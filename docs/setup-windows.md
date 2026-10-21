@@ -147,7 +147,10 @@ LSP.
 
 ```powershell
 # 1. Vendored Vulkan headers (git-ignored; needed by the overlay).
-git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers external/Vulkan-Headers
+#    The tag is pinned: the overlay's include path must be the same on every
+#    machine (the CI clones the same tag -- see .github/workflows/ci.yml).
+git clone --depth 1 --branch vulkan-sdk-1.4.363.0 `
+  https://github.com/KhronosGroup/Vulkan-Headers external/Vulkan-Headers
 
 # 2. vcvars64: MSVC + Windows SDK environment, LLVM already on PATH.
 & 'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat'
@@ -158,7 +161,9 @@ set CC=clang-cl
 set CXX=clang-cl
 
 # 4. The three Windows targets.
-meson setup build-payload  payload
+#    The payload is configured with the cross file: it pins the *static* CRT
+#    (b_vscrt = mt), which the manually mapped DLL needs (docs/architecture.md).
+meson setup build-payload  payload --cross-file toolchain/windows-msvc.ini
 meson compile -C build-payload
 meson setup build-injector injector
 meson compile -C build-injector

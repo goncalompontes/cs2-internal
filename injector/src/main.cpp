@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+#include "cs2/core/handle.hpp"
+#include "cs2/core/win_handle.hpp"
 #include "cs2/loader/mapping.hpp"
 #include "cs2/loader/pe.hpp"
 
@@ -46,22 +48,23 @@ auto rd32(const std::byte* p) -> std::uint32_t {
 }
 
 auto find_pid(const char* name) -> std::uint32_t {
-  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (snapshot == INVALID_HANDLE_VALUE) {
+  // The snapshot is owned by the wrapper, so it is released on every path.
+  const cs2::core::ScopedKernelHandle snapshot(
+      CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+  if (!snapshot.valid()) {
     return 0;
   }
   PROCESSENTRY32 entry{};
   entry.dwSize = sizeof(entry);
   std::uint32_t pid = 0;
-  if (Process32First(snapshot, &entry) != 0) {
+  if (Process32First(static_cast<HANDLE>(snapshot.get()), &entry) != 0) {
     do {
       if (_stricmp(entry.szExeFile, name) == 0) {
         pid = entry.th32ProcessID;
         break;
       }
-    } while (Process32Next(snapshot, &entry) != 0);
+    } while (Process32Next(static_cast<HANDLE>(snapshot.get()), &entry) != 0);
   }
-  CloseHandle(snapshot);
   return pid;
 }
 
@@ -69,20 +72,20 @@ auto peb_module_base(HANDLE process, const char* name) -> std::optional<std::uin
 
 auto remote_module_base(HANDLE process, const char* name) -> std::optional<std::uintptr_t> {
   const DWORD pid = GetProcessId(process);
-  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-  if (snapshot != INVALID_HANDLE_VALUE) {
+  const cs2::core::ScopedKernelHandle snapshot(
+      CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid));
+  if (snapshot.valid()) {
     MODULEENTRY32 entry{};
     entry.dwSize = sizeof(entry);
     std::optional<std::uintptr_t> base;
-    if (Module32First(snapshot, &entry) != 0) {
+    if (Module32First(static_cast<HANDLE>(snapshot.get()), &entry) != 0) {
       do {
         if (_stricmp(entry.szModule, name) == 0) {
           base = reinterpret_cast<std::uintptr_t>(entry.modBaseAddr);
           break;
         }
-      } while (Module32Next(snapshot, &entry) != 0);
+      } while (Module32Next(static_cast<HANDLE>(snapshot.get()), &entry) != 0);
     }
-    CloseHandle(snapshot);
     if (base.has_value()) {
       return base;
     }
@@ -203,23 +206,27 @@ auto peb_module_base(HANDLE process, const char* name) -> std::optional<std::uin
 void dump_target_modules(HANDLE process) {
   const DWORD pid = GetProcessId(process);
   std::printf("injector: --- toolhelp ---\n");
-  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-  if (snapshot == INVALID_HANDLE_VALUE) {
-    std::printf("  snapshot FAILED (err %lu)\n", GetLastError());
-  } else {
-    MODULEENTRY32 entry{};
-    entry.dwSize = sizeof(entry);
-    if (Module32First(snapshot, &entry) != 0) {
-      int count = 0;
-      do {
-        std::printf("  %-32s 0x%llx\n", entry.szModule,
-                    static_cast<unsigned long long>(
-                        reinterpret_cast<std::uintptr_t>(entry.modBaseAddr)));
-      } while ((Module32Next(snapshot, &entry) != 0) && ++count < 80);
+  {
+    // The snapshot is released at the end of this block -- the same point it
+    // was released at before the wrapper took it over.
+    const cs2::core::ScopedKernelHandle snapshot(
+        CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid));
+    if (!snapshot.valid()) {
+      std::printf("  snapshot FAILED (err %lu)\n", GetLastError());
     } else {
-      std::printf("  Module32First FAILED (err %lu)\n", GetLastError());
+      MODULEENTRY32 entry{};
+      entry.dwSize = sizeof(entry);
+      if (Module32First(static_cast<HANDLE>(snapshot.get()), &entry) != 0) {
+        int count = 0;
+        do {
+          std::printf("  %-32s 0x%llx\n", entry.szModule,
+                      static_cast<unsigned long long>(
+                          reinterpret_cast<std::uintptr_t>(entry.modBaseAddr)));
+        } while ((Module32Next(static_cast<HANDLE>(snapshot.get()), &entry) != 0) && ++count < 80);
+      } else {
+        std::printf("  Module32First FAILED (err %lu)\n", GetLastError());
+      }
     }
-    CloseHandle(snapshot);
   }
   std::printf("injector: --- peb ---\n");
   const std::uintptr_t peb = remote_peb(process);
@@ -450,16 +457,18 @@ auto setup_tls(HANDLE process, std::uintptr_t remote_base, const cs2::loader::pe
   if (!tls_alloc) {
     return slot;
   }
-  HANDLE thread = CreateRemoteThread(process, nullptr, 0,
-                                     reinterpret_cast<LPTHREAD_START_ROUTINE>(*tls_alloc), nullptr,
-                                     0, nullptr);
-  if (thread == nullptr) {
-    return slot;
-  }
-  WaitForSingleObject(thread, 5000);
   DWORD index = TLS_OUT_OF_INDEXES;
-  GetExitCodeThread(thread, &index);
-  CloseHandle(thread);
+  {
+    const cs2::core::ScopedKernelHandle thread(
+        CreateRemoteThread(process, nullptr, 0,
+                           reinterpret_cast<LPTHREAD_START_ROUTINE>(*tls_alloc), nullptr, 0,
+                           nullptr));
+    if (!thread.valid()) {
+      return slot;
+    }
+    WaitForSingleObject(static_cast<HANDLE>(thread.get()), 5000);
+    GetExitCodeThread(static_cast<HANDLE>(thread.get()), &index);
+  }  // the thread handle is released here, as before
   if (index == TLS_OUT_OF_INDEXES) {
     return slot;
   }
@@ -511,14 +520,16 @@ auto ensure_module(HANDLE process, const std::string& name) -> std::optional<std
   if (!write_remote(process, reinterpret_cast<std::uintptr_t>(memory), wide_name.c_str(), bytes)) {
     return std::nullopt;
   }
-  HANDLE thread = CreateRemoteThread(process, nullptr, 0,
-                                     reinterpret_cast<LPTHREAD_START_ROUTINE>(*load_library),
-                                     memory, 0, nullptr);
-  if (thread == nullptr) {
-    return std::nullopt;
-  }
-  WaitForSingleObject(thread, 10000);
-  CloseHandle(thread);
+  {
+    const cs2::core::ScopedKernelHandle thread(
+        CreateRemoteThread(process, nullptr, 0,
+                           reinterpret_cast<LPTHREAD_START_ROUTINE>(*load_library), memory, 0,
+                           nullptr));
+    if (!thread.valid()) {
+      return std::nullopt;
+    }
+    WaitForSingleObject(static_cast<HANDLE>(thread.get()), 10000);
+  }  // the thread handle is released here, as before
   // Re-enumerate: the returned HMODULE may exceed the 32-bit thread exit code.
   return remote_module_base(process, name.c_str());
 }
@@ -664,16 +675,17 @@ auto register_exception_table(HANDLE process, std::uintptr_t remote_base,
       !write_remote(process, reinterpret_cast<std::uintptr_t>(memory), stub.data(), stub.size())) {
     return false;
   }
-  HANDLE thread = CreateRemoteThread(process, nullptr, 0,
-                                     reinterpret_cast<LPTHREAD_START_ROUTINE>(memory), nullptr, 0,
-                                     nullptr);
-  if (thread == nullptr) {
-    return false;
-  }
-  WaitForSingleObject(thread, 5000);
   DWORD exit_code = 0;
-  GetExitCodeThread(thread, &exit_code);
-  CloseHandle(thread);
+  {
+    const cs2::core::ScopedKernelHandle thread(
+        CreateRemoteThread(process, nullptr, 0,
+                           reinterpret_cast<LPTHREAD_START_ROUTINE>(memory), nullptr, 0, nullptr));
+    if (!thread.valid()) {
+      return false;
+    }
+    WaitForSingleObject(static_cast<HANDLE>(thread.get()), 5000);
+    GetExitCodeThread(static_cast<HANDLE>(thread.get()), &exit_code);
+  }  // the thread handle is released here, as before
   return exit_code != 0;
 }
 
@@ -687,20 +699,20 @@ void print_usage() {
 
 auto main(int argc, char** argv) -> int {
   if (argc > 1 && std::strcmp(argv[1], "--procs") == 0) {
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE) {
+    const cs2::core::ScopedKernelHandle snapshot(
+        CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+    if (!snapshot.valid()) {
       std::printf("injector: process snapshot FAILED (err %lu)\n", GetLastError());
       return 1;
     }
     PROCESSENTRY32 entry{};
     entry.dwSize = sizeof(entry);
-    if (Process32First(snapshot, &entry) != 0) {
+    if (Process32First(static_cast<HANDLE>(snapshot.get()), &entry) != 0) {
       do {
         std::printf("  pid %-6u ppid %-6u %s\n", entry.th32ProcessID, entry.th32ParentProcessID,
                     entry.szExeFile);
-      } while (Process32Next(snapshot, &entry) != 0);
+      } while (Process32Next(static_cast<HANDLE>(snapshot.get()), &entry) != 0);
     }
-    CloseHandle(snapshot);
     return 0;
   }
   if (argc < 3) {
@@ -877,17 +889,18 @@ auto main(int argc, char** argv) -> int {
     return 1;
   }
 
-  HANDLE thread = CreateRemoteThread(process, nullptr, 0,
-                                     reinterpret_cast<LPTHREAD_START_ROUTINE>(stub_mem), nullptr,
-                                     0, nullptr);
-  if (thread == nullptr) {
-    std::printf("injector: CreateRemoteThread failed: %lu\n", GetLastError());
-    return 1;
-  }
-  WaitForSingleObject(thread, 15000);
   DWORD exit_code = 0;
-  GetExitCodeThread(thread, &exit_code);
-  CloseHandle(thread);
+  {
+    const cs2::core::ScopedKernelHandle thread(
+        CreateRemoteThread(process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(stub_mem),
+                           nullptr, 0, nullptr));
+    if (!thread.valid()) {
+      std::printf("injector: CreateRemoteThread failed: %lu\n", GetLastError());
+      return 1;
+    }
+    WaitForSingleObject(static_cast<HANDLE>(thread.get()), 15000);
+    GetExitCodeThread(static_cast<HANDLE>(thread.get()), &exit_code);
+  }  // the thread handle is released here, as before
   std::printf("injector: entry returned %lu\n", exit_code);
   return 0;
 }

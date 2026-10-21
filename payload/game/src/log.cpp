@@ -5,6 +5,9 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+
+#include "cs2/core/handle.hpp"
+#include "cs2/core/win_handle.hpp"
 #endif
 
 namespace cs2::game {
@@ -84,15 +87,17 @@ void append_log(std::string_view text) noexcept {
   constexpr unsigned long k_file_share_read = 0x1;
   constexpr unsigned long k_open_always = 0x4;
   constexpr unsigned long k_file_attribute_normal = 0x80;
-  HANDLE file = create_file(path, k_file_append_data, k_file_share_read, nullptr, k_open_always,
-                            k_file_attribute_normal, nullptr);
-  if (file == nullptr || file == INVALID_HANDLE_VALUE) {
+  // The handle is owned by the wrapper, so it is released on every path.
+  const core::ScopedKernelHandle file(
+      create_file(path, k_file_append_data, k_file_share_read, nullptr, k_open_always,
+                  k_file_attribute_normal, nullptr));
+  if (!file.valid()) {
     return;
   }
   unsigned long written = 0;
-  WriteFile(file, text.data(), static_cast<unsigned long>(text.size()), &written, nullptr);
-  WriteFile(file, "\n", 1, &written, nullptr);
-  CloseHandle(file);
+  WriteFile(static_cast<HANDLE>(file.get()), text.data(), static_cast<unsigned long>(text.size()),
+            &written, nullptr);
+  WriteFile(static_cast<HANDLE>(file.get()), "\n", 1, &written, nullptr);
 #else
   (void)text;
 #endif

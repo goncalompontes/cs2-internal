@@ -1,0 +1,215 @@
+# The project's continuous integration.
+#
+# It runs the verify loop that docs/style-guide.md §7 and the handoff notes
+# prescribe, on a Windows runner:
+#
+#   * the host build (meson) and the host test suite,
+#   * the Windows payload, overlay and injector builds (clang-cl),
+#   * the Python suite (the scenario harness),
+#   * the type gate (mypy),
+#   * the style gate (the clang-tidy sweep's check mode).
+#
+# WHAT IT DOES NOT COVER (deliberately -- see docs/quality-pass.md):
+#   * the live game: a CI runner has no GPU and no interactive session, so
+#     nothing here exercises the payload in CS2. The live checks stay manual
+#     (docs/windows-validation.md).
+#   * the protection pass: `-Dprotect=true` needs the LLVM pass plugin and a
+#     policy file, which are not in the tree.
+#   * the Vulkan layer's runtime behaviour: the layer is only compiled here.
+#   * the injector against a real target: the injector's own test aids
+#     (a benign victim, a trivial DLL) are built, not run against a target.
+#   * the format check: the tree is deliberately not clang-format-clean
+#     (docs/style-guide.md §7 rule 3), so a format check would be red on
+#     its first run. The style gate -- the sweep's check mode over the
+#     groups the tree is clean under -- is the check that exists.
+#
+# WHAT THE PAYLOAD STEP ACTUALLY BUILDS: the payload with an **empty SDK**.
+# The SDK headers (payload/sdk/*.hpp) are generated from the calibration
+# dumps, and the dumps are git-ignored (they come from a live calibration
+# against a running game), so on a fresh runner -- and on a fresh checkout
+# -- the generator writes *empty* headers and the payload is built with zero
+# offsets. The CI's payload.dll is therefore a *compile* of the payload, not
+# the shipped artifact: the shipped one is built after a calibration
+# (docs/windows-validation.md). The schema-facing code is guarded by
+# `#if __has_include("schemas/client_dll.hpp")`, so with an empty SDK it is
+# **compiled out**: the payload step is a compile gate for the non-schema
+# code only, and the SDK paths are compiled after a local calibration.
+# Both projects generate the headers themselves -- the host project and the
+# payload project each have their own `sdk-headers` target -- so the payload
+# step does not depend on the host build having run first.
+#
+# THE COMPILER IS THE RUNNER IMAGE'S. clang-cl comes from the image's LLVM
+# (C:\Program Files\LLVM\bin) and is **not** pinned: there is no way to
+# install a specific LLVM from a package the runner already has, and no pip
+# package that ships the compiler. The tree was verified locally with
+# clang-cl 22.1.8; the image (windows-2025) ships 20.1.8, which maps
+# /std:c++latest to the same -std=c++26. No __cplusplus *value* is assumed:
+# the tree has no __cplusplus conditionals of its own, so the two compilers
+# do not have to agree on one. The tree uses no clang-21+ language features
+# either -- so the exposure is low, but it is **not** verified. If the
+# image's LLVM ever changes in a way that matters, the fix is to pin it (the
+# way clang-tidy is pinned) or to move the payload build into a container.
+#
+# THE RUNNER IMAGE THIS WORKFLOW RUNS ON (windows-2025, **pinned**):
+#   * Windows Server 2025
+#   * LLVM 20.1.8 -- the compiler (clang-cl). The *style gate* does not use
+#     it: it runs the pinned clang-tidy 22.1.8 (requirements-dev.txt).
+#   * MSVC 14.51 -- the CRT, the Windows SDK and lib.exe, through
+#     ilammy/msvc-dev-cmd (the same toolset the local build uses)
+#   * Rust/Cargo 1.99 -- the SDK generator (the step above checks for it)
+#   * Python 3.12.10 -- the image's; the workflow uses setup-python's 3.11
+#   * Ninja 1.13.2 -- the image's; the workflow installs the pinned 1.13.0
+#   * no meson -- the workflow installs the pinned 1.11.2
+#
+# The label is `windows-2025` and not `windows-latest`: `windows-latest` is a
+# moving label, and the facts above were **observed on windows-2025**. The
+# file's own rule -- "a gate that changes its mind between runs is not a
+# gate" (requirements-dev.txt:9) -- applies to the runner as much as it
+# applies to the tools, and the compiler is the one thing the workflow
+# deliberately leaves unpinned. The image is refreshed inside the label, so a
+# tool version can still drift; when it does, this block is re-read and
+# updated with it.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build and test
+    # The label is pinned, not `windows-latest`: the header above records the
+    # facts of the windows-2025 image, and a floating label would turn them
+    # into fiction without failing anything.
+    runs-on: windows-2025
+    # The whole verify loop takes a few minutes. The cap keeps a hung step
+    # from holding the runner (and says in the log that it was the cap).
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # The MSVC environment: the toolchain (the CRT, the Windows SDK) and
+      # `lib.exe` come from it, and clang-cl needs its include and lib paths.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: the build tools
+        run: |
+          python -m pip install --upgrade pip
+          # The pinned build system (meson, ninja) and the pinned gate tools
+          # (mypy, clang-tidy). The file's own rule: "a gate that changes its
+          # mind between runs is not a gate".
+          python -m pip install -r requirements-dev.txt
+          # The versions the build used, in the log: meson prints the ninja
+          # it picked, and this says which one that is.
+          meson --version
+          ninja --version
+
+      - name: the compiler (clang-cl) and the LLVM tools
+        run: |
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "CC=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CXX=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      # The SDK headers are generated by the Rust dumper: scripts/gen-sdk.py
+      # builds it with cargo when the binary is not in the tree. Every build
+      # of the host project and of the payload therefore needs a Rust
+      # toolchain, which the runner image ships. This step says so out loud:
+      # without it, the build fails deep inside a build step with "cargo not
+      # found".
+      #
+      # The dumper stays in the build on purpose: the payload is compiled
+      # against the *generated* headers, and a checked-in stub was considered
+      # and declined -- a frozen stub is no closer to the real shape than the
+      # empty headers are, and it rots whenever the generator's output
+      # changes. What the step proves is what the header above says: a
+      # compile of the payload's non-schema code.
+      # The price is a Rust toolchain and the dumper's crates -- and
+      # the cache below makes that price small: the crates are fetched once
+      # and the dumper is not rebuilt on every run.
+      - name: the Rust toolchain (the SDK generator)
+        run: |
+          if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            throw "cargo is required: the SDK headers are generated by the Rust dumper (scripts/gen-sdk.py)"
+          }
+          cargo --version
+
+      - name: the dumper's crates and build (cached)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            external/dumper/target
+          key: dumper-${{ runner.os }}-${{ hashFiles('external/dumper/Cargo.lock') }}
+
+      - name: the host build (configure)
+        run: meson setup build .
+
+      - name: the host build (compile)
+        run: meson compile -C build
+
+      - name: the host tests
+        run: meson test -C build
+
+      # The payload is **manually mapped** into the game and deliberately
+      # avoids the CRT (ADR-0010), so it must be linked against the *static*
+      # CRT: the cross file is what pins `b_vscrt = 'mt'`. Without it meson
+      # picks `md`, and the DLL then imports MSVCP140.dll / VCRUNTIME140.dll /
+      # ucrtbase.dll, which the injector's manual loader would have to
+      # resolve inside cs2.exe -- an artifact nobody has run in the game.
+      # The cross file is the documented configuration (docs/architecture.md).
+      - name: the payload build (configure)
+        run: meson setup build-payload payload --cross-file toolchain/windows-msvc.ini
+
+      - name: the payload build (compile)
+        run: meson compile -C build-payload
+
+      # The Vulkan headers are **git-ignored** (a large, non-redistributable
+      # download -- see .gitignore and docs/setup-windows.md §5), so
+      # `actions/checkout` cannot fetch them: the overlay's
+      # `include_directories('../external/Vulkan-Headers/include')` fails at
+      # *configure* time without them, and the whole job is red. The runner
+      # clones them here, exactly as docs/setup-windows.md §5 says a
+      # developer does. The tag is pinned: the gate must build the same
+      # headers every run.
+      - name: the Vulkan headers
+        run: |
+          git clone --depth 1 --branch vulkan-sdk-1.4.363.0 `
+            https://github.com/KhronosGroup/Vulkan-Headers external/Vulkan-Headers
+
+      - name: the overlay build (configure)
+        run: meson setup build-overlay overlay
+
+      - name: the overlay build (compile)
+        run: meson compile -C build-overlay
+
+      - name: the injector build (configure)
+        run: meson setup build-injector injector
+
+      - name: the injector build (compile)
+        run: meson compile -C build-injector
+
+      - name: the Python suite
+        run: python -m unittest discover -s scripts/scenario/tests -t scripts
+
+      - name: the type gate
+        run: python scripts/typecheck.py
+
+      # The style gate runs the **pinned** clang-tidy (the LLVM release the
+      # gated groups were baselined with). The runner ships its own LLVM, so
+      # the pinned binary is put first on PATH: otherwise the gate would
+      # silently run a different version and its verdict would mean nothing.
+      - name: the style gate
+        run: |
+          $pinned = python -c "import clang_tidy, os; print(os.path.join(os.path.dirname(clang_tidy.__file__), 'data', 'bin'))"
+          $env:PATH = "$pinned;$env:PATH"
+          clang-tidy --version
+          python scripts/clang-tidy-fix.py --check

@@ -38,6 +38,26 @@ subdir('payload/loader')
 # Hook engine (built natively here for its tests).
 subdir('payload/hooks')
 
+# The shared RAII handle (cs2/core/handle.hpp). The ownership rules are
+# platform-independent, so they have a host regression test, which the module
+# wires up itself (payload/core/meson.build).
+subdir('payload/core')
+
+# The control and the features headers reach the shared RAII handle:
+# `cs2/control/channel.hpp` -- and `cs2/control/service.hpp`, which includes
+# the channel -- and `cs2/features/model_publisher.hpp` include
+# `cs2/core/handle.hpp`. A target that includes one of those headers
+# therefore needs the core include directory as well, so the pairs are
+# published here as dependencies instead of being re-listed in every test: a
+# new host test that includes a control header takes `control_host_dep` and
+# compiles.
+control_host_dep = declare_dependency(
+  include_directories : [include_directories('payload/control/include'), core_inc],
+)
+features_host_dep = declare_dependency(
+  include_directories : [include_directories('payload/features/include'), core_inc],
+)
+
 # World-to-screen projection math (header-only, platform-independent), built
 # natively so the matrix convention has a host regression test.
 game_matrix_test = executable('game_matrix_test', 'payload/game/tests/test_matrix.cpp',
@@ -253,11 +273,10 @@ control_core_test = executable('control_core_test',
     'payload/control/src/settings_access.cpp',
   ),
   include_directories : [
-    include_directories('payload/control/include'),
     include_directories('payload/game/include'),
     include_directories('overlay/include'),
   ],
-  dependencies : settings_table_dep,
+  dependencies : [control_host_dep, settings_table_dep],
 )
 test('control-core', control_core_test)
 
@@ -269,9 +288,7 @@ control_strafe_test = executable('control_strafe_test',
   files(
     'payload/control/tests/test_control_strafe.cpp',
   ),
-  include_directories : [
-    include_directories('payload/control/include'),
-  ],
+  dependencies : control_host_dep,
 )
 test('control-strafe', control_strafe_test)
 
@@ -302,9 +319,7 @@ control_input_test = executable('control_input_test',
   files(
     'payload/control/tests/test_control_input.cpp',
   ),
-  include_directories : [
-    include_directories('payload/control/include'),
-  ],
+  dependencies : control_host_dep,
 )
 test('control-input', control_input_test)
 
@@ -351,9 +366,7 @@ control_trigger_test = executable('control_trigger_test',
   files(
     'payload/control/tests/test_control_trigger.cpp',
   ),
-  include_directories : [
-    include_directories('payload/control/include'),
-  ],
+  dependencies : control_host_dep,
 )
 test('control-trigger', control_trigger_test)
 
@@ -366,7 +379,6 @@ control_sound_test = executable('control_sound_test',
     'payload/control/src/event_ring.cpp',
   ),
   include_directories : [
-    include_directories('payload/control/include'),
     include_directories('payload/game/include'),
     include_directories('payload/aim/include'),
     # The control service now reaches the shared settings block (the generated
@@ -376,7 +388,7 @@ control_sound_test = executable('control_sound_test',
   # `cs2/control/service.hpp` reaches `cs2/control/input.hpp`, which holds the
   # local animfix's inline hooks - so the host build needs the hook engine's
   # include path (and its library, for the destructor).
-  dependencies : hooks_dep,
+  dependencies : [control_host_dep, hooks_dep],
 )
 test('control-sound', control_sound_test)
 
@@ -392,11 +404,11 @@ features_config_test = executable('features_config_test',
     'payload/game/src/log.cpp',
   ),
   include_directories : [
-    include_directories('payload/features/include'),
     include_directories('overlay/include'),
     include_directories('payload/game/include'),
     include_directories('payload/render/include'),
   ],
+  dependencies : features_host_dep,
 )
 test('features-config', features_config_test)
 
@@ -470,11 +482,11 @@ menu_pages_test = executable('menu_pages_test',
   include_directories : [
     include_directories('overlay/include'),
     include_directories('overlay/tests'),
-    include_directories('payload/features/include'),
     include_directories('payload/game/include'),
     include_directories('payload/render/include'),
     include_directories('payload/third_party/imgui'),
   ],
+  dependencies : features_host_dep,
 )
 test('menu-pages', menu_pages_test)
 
@@ -546,6 +558,7 @@ if python.found()
     ['mcp', 'test_mcp'],
     ['settings-table', 'test_settings_table'],
     ['sdk-generator', 'test_sdk_generator'],
+    ['clang-tidy-fix', 'test_clang_tidy_fix'],
   ]
   foreach suite : scenario_suites
     test('scenario-' + suite[0], python,

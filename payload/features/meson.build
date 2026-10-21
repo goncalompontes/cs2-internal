@@ -7,12 +7,12 @@ features_lib = static_library('cs2_features',
         'src/esp_players.cpp', 'src/esp_skeleton.cpp', 'src/esp_hitboxes.cpp',
         'src/esp_radar.cpp', 'src/esp_world.cpp', 'src/esp_world_class.cpp',
         'src/esp_sound.cpp', 'src/esp_providers.cpp', 'src/chams.cpp'),
-  include_directories : [features_inc, include_directories('../../overlay/include')],
+  include_directories : [features_inc, include_directories('../../overlay/include'), core_inc],
   dependencies : [hooks_dep, render_dep, game_dep, diag_dep, tls_dep, aim_dep],
 )
 
 features_dep = declare_dependency(
   link_with : features_lib,
-  include_directories : [features_inc, include_directories('../../overlay/include')],
+  include_directories : [features_inc, include_directories('../../overlay/include'), core_inc],
   dependencies : [game_dep, render_dep, diag_dep, tls_dep, aim_dep],
 )

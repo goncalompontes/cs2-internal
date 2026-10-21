@@ -16,6 +16,9 @@ __pycache__/
 *.pyc
 .venv/
 uv.lock
+# The type checker's cache (scripts/typecheck.py writes it in the source root;
+# mypy ignores its own cache directory too, this is belt and braces)
+.mypy_cache/
 
 # Rust
 target/
