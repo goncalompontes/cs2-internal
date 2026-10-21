@@ -113,6 +113,19 @@ auto camera_engine() noexcept -> CameraEngine {
   return engine;
 }
 
+auto live_camera_engine(std::uintptr_t client_base, bool build_verified,
+                        std::uintptr_t input_object) noexcept -> CameraEngine {
+  // The live reader, bound to the caller's facts: no module lookup, no
+  // allocation. This is what the per-frame path uses.
+  CameraEngine engine;
+  engine.client_base = client_base;
+  engine.build_verified = build_verified;
+  engine.input_object = input_object;
+  engine.read_bytes = &live_read_bytes;
+  engine.read_context = nullptr;
+  return engine;
+}
+
 auto read_published_view(int slot) noexcept -> CameraState {
   return read_published_view(camera_engine(), slot);
 }
@@ -137,14 +150,13 @@ auto read_third_person_switch() noexcept -> bool {
   return read_third_person_state().switch_on;
 }
 
-auto write_third_person_state(const ThirdPersonParams& params, float pitch, float yaw) noexcept
-    -> bool {
+auto write_third_person_state(const CameraEngine& engine, const ThirdPersonParams& params, float pitch,
+                               float yaw) noexcept -> bool {
   // The offsets are build-specific: a write on another build would land in
   // the wrong field of the input object.
-  if (!client_build_verified()) {
+  if (!engine.build_verified) {
     return false;
   }
-  const CameraEngine engine = camera_engine();
   const std::uintptr_t block = engine.input_object;
   if (block == 0) {
     return false;
@@ -172,10 +184,12 @@ auto write_third_person_state(const ThirdPersonParams& params, float pitch, floa
 }
 
 auto clear_third_person_switch() noexcept -> bool {
-  if (!client_build_verified()) {
+  // One module lookup: the engine carries the build gate and the input
+  // object.
+  const CameraEngine engine = camera_engine();
+  if (!engine.build_verified) {
     return false;
   }
-  const CameraEngine engine = camera_engine();
   const std::uintptr_t block = engine.input_object;
   if (block == 0 || !readable(engine, block + k_switch_offset, 1)) {
     return false;
