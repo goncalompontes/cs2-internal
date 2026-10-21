@@ -37,12 +37,13 @@ is the **instruction**.
 
 ### 2.1 The instruction that faults
 
-A `thread_local` access on x64 is three instructions:
+A `thread_local` access on x64 is four instructions:
 
 ```
 mov  eax, dword ptr [_tls_index]      ; the image's TLS index
 mov  r8,  qword ptr gs:[58h]          ; TEB->ThreadLocalStoragePointer
 mov  rax, qword ptr [r8+rax*8]         ; the per-thread block pointer
+cmp  dword ptr [rax+offset],0         ; the variable inside the block
 ```
 
 The **third** one reads the slot array (the TEB's own memory — always
@@ -399,9 +400,10 @@ test was run against it, and the copy was discarded:
 
 **The eight-thread case is not flaky.** It was run **3000 times** against
 this guard (the reviewer's harness, `proto_test_shipped.cpp`, which drives
-the shipped case in a loop): **0 failures**. The same harness against the
-previous, single-pass guard: **49 failures in 3000** — a thread's
-legitimate entry was refused, or a recursion got through.
+the shipped case in a loop): **0 failures**. The review measured the same
+harness against the previous, single-pass guard: **49 failures in 3000** — a
+thread's legitimate entry was refused, or a recursion got through. The whole
+test binary was run 500 times on this tree: **0 failures**.
 
 ## 8. What the detour no longer does
 
