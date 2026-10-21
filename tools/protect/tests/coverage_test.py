@@ -66,21 +66,26 @@ def write_coverage(path: Path, policy_digest: str, source: Path, rewritten: int)
                     encoding="utf-8")
 
 
-def write_string_coverage(path: Path, policy_digest: str, source: Path) -> None:
+def write_string_coverage(path: Path, policy_digest: str, source: Path,
+                          field: str = "sha256") -> None:
     """Writes a coverage file with the section of the string protection.
 
     The digests of the literals are salted with the seed of the build, and
     the coverage names the salt and carries its proof -- the salt itself is
     not in the file.
+
+    The field is named by the caller: the current one is `digest=` (the
+    digest is salted), and a coverage of an older build names it
+    `sha256=`. Both are read.
     """
     body = (
         f"policy-sha256 {policy_digest}\n"
         f"module {source.name}\n"
         f"source-path {source.as_posix()}\n"
         f"source-sha256 {digest_of(source.read_bytes())}\n"
-        "str-salt build-seed sha256=" + "A" * 64 + "\n"
-        "str protected len=7 sha256=" + "B" * 64 + " uses=1 functions=1\n"
-        "str refused len=11 sha256=" + "C" * 64 + " uses=0 functions=0 "
+        f"str-salt build-seed {field}=" + "A" * 64 + "\n"
+        f"str protected len=7 {field}=" + "B" * 64 + " uses=1 functions=1\n"
+        f"str refused len=11 {field}=" + "C" * 64 + " uses=0 functions=0 "
         "reason=escapes_to_initializer\n"
     )
     path.write_text(body + f"content-sha256 {digest_of(body.encode('utf-8'))}\n",
@@ -175,10 +180,13 @@ def check_the_readers(root: Path) -> None:
 
     # The section of the string protection: the salt of the digests and the
     # digests themselves. A coverage of an older build has no salt line,
-    # and its digests are unsalted -- both are read.
+    # and its digests are unsalted -- both are read. The field that names
+    # the digest is read under both names as well: the current one is
+    # `digest=` (the digest is salted), the older one is `sha256=`.
     strings = root / "strings"
     strings.mkdir()
-    write_string_coverage(strings / "0x8.cov", policy_digest, tree / "payload" / "solver.cpp")
+    write_string_coverage(strings / "0x8.cov", policy_digest, tree / "payload" / "solver.cpp",
+                          field="digest")
     read = read_coverage(strings, policy, tree)
     check(len(read.files) == 1, "the reader did not read the coverage of the strings")
     if read.files:
@@ -189,6 +197,7 @@ def check_the_readers(root: Path) -> None:
         if len(entry.strings) == 2:
             check(entry.strings[0].state == "protected", "the reader did not read the verdict")
             check(entry.strings[0].length == 7, "the reader did not read the length")
+            check(entry.strings[0].digest == "B" * 64, "the reader did not read the digest")
             check(entry.strings[1].reason == "escapes_to_initializer",
                   "the reader did not read the refusal reason")
     older = strings / "0x9.cov"
@@ -207,6 +216,9 @@ def check_the_readers(root: Path) -> None:
     if older_entry:
         check(older_entry[0].str_salt == "", "an older coverage claims a salt")
         check(len(older_entry[0].strings) == 1, "the reader did not read the older literal")
+        if older_entry[0].strings:
+            check(older_entry[0].strings[0].digest == "D" * 64,
+                  "the reader did not read the digest of the older coverage")
 
 
 def check_the_image_reader() -> None:

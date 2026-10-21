@@ -279,7 +279,7 @@ void write_transform_report(const llvm::Module& module, const TransformResult& r
 }
 
 void write_string_report(const llvm::Module& module, const StringResult& result,
-                          const Config& config) {
+                         const Config& config) {
   const std::string module_id = module.getSourceFileName();
   const std::string_view tag = module_tag(module_id);
 

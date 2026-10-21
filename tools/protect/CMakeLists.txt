@@ -207,3 +207,10 @@ set_tests_properties(protect-str-ir-test protect-str-diff-test
 # skipped (it would count every rewrite twice).
 add_test(NAME protect-coverage-test
   COMMAND ${CS2_PROTECT_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/coverage_test.py)
+
+# The image scan of the protected strings: the plaintext of a literal has to
+# be found at **every offset** of the image, because the MSVC ABI merges a
+# literal with a longer one that ends with it. A scan that only looks at the
+# start of the runs misses that leak and counts it as absent.
+add_test(NAME protect-image-scan-test
+  COMMAND ${CS2_PROTECT_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/image_scan_test.py)

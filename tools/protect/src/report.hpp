@@ -105,7 +105,7 @@ void write_transform_report(const llvm::Module& module, const TransformResult& r
 /// protected or refused (and why). The report goes to stderr, so it may name
 /// the content: the *coverage* may not.
 void write_string_report(const llvm::Module& module, const StringResult& result,
-                          const Config& config);
+                         const Config& config);
 
 /// The coverage entries of a selection result.
 [[nodiscard]] auto coverage_entries(const SelectionResult& result) -> std::vector<CoverageEntry>;

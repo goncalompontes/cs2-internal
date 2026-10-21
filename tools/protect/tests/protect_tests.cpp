@@ -722,10 +722,8 @@ entry:
 void test_string_policy() {
   cs2::protect::Policy policy;
   policy.strings = {"healthy", "cs2_*"};
-  check(cs2::protect::string_selected(policy, "healthy"),
-        "an exact glob selects the literal");
-  check(cs2::protect::string_selected(policy, "cs2_esp"),
-        "a wildcard glob selects the literal");
+  check(cs2::protect::string_selected(policy, "healthy"), "an exact glob selects the literal");
+  check(cs2::protect::string_selected(policy, "cs2_esp"), "a wildcard glob selects the literal");
   check(!cs2::protect::string_selected(policy, "other"),
         "a literal that matches nothing is not selected");
 
@@ -775,8 +773,7 @@ void test_string_gate() {
   // The function that is selected at the `virtualized` level: the VM's blob
   // format and the string blob format must not meet.
   cs2::protect::RecordedSelection selection;
-  selection.functions.push_back(
-      {"uses_virtual", "", cs2::protect::ProtectionLevel::virtualized});
+  selection.functions.push_back({"uses_virtual", "", cs2::protect::ProtectionLevel::virtualized});
 
   const auto verdict = [&](const char* name) -> std::optional<cs2::protect::StringSkipReason> {
     llvm::GlobalVariable* global = module->getGlobalVariable(name, /*AllowLocal=*/true);
@@ -791,7 +788,7 @@ void test_string_gate() {
   check(!verdict(".str.plain").has_value(), "a plain literal passes the gate");
 
   const auto check_reason = [&](const char* name, cs2::protect::StringSkipReason expected,
-                                 const char* what) {
+                                const char* what) {
     const auto actual = verdict(name);
     if (actual.has_value() && *actual == expected) {
       return;
@@ -806,8 +803,7 @@ void test_string_gate() {
                "a literal in a global initializer is refused");
   check_reason(".str.shape", cs2::protect::StringSkipReason::unsupported_shape,
                "a literal that is not a sequence of bytes is refused");
-  check_reason(".str.empty", cs2::protect::StringSkipReason::empty,
-               "an empty literal is refused");
+  check_reason(".str.empty", cs2::protect::StringSkipReason::empty, "an empty literal is refused");
   check_reason(".str.short", cs2::protect::StringSkipReason::too_short,
                "a literal that is shorter than the minimum is refused");
   check_reason(".str.optnone", cs2::protect::StringSkipReason::optnone_function,
@@ -845,8 +841,7 @@ void test_string_transform() {
   std::filesystem::remove_all(directory, error);
   config.coverage_dir = directory;
 
-  const cs2::protect::StringResult result =
-      cs2::protect::transform_strings(*module, config, {});
+  const cs2::protect::StringResult result = cs2::protect::transform_strings(*module, config, {});
   check(result.protected_count == 1, "one literal is protected");
   check(result.refused_count == 0, "no literal is refused");
   check(result.decodes == 1, "one decode is emitted");
@@ -900,8 +895,7 @@ void test_string_transform() {
   }
 
   // The coverage carries the length and the digest, never the content.
-  const std::vector<cs2::protect::CoverageString> covered =
-      cs2::protect::coverage_strings(result);
+  const std::vector<cs2::protect::CoverageString> covered = cs2::protect::coverage_strings(result);
   check(covered.size() == 1, "the coverage has one literal");
   if (!covered.empty()) {
     check(covered[0].length == 7, "the coverage records the length");
@@ -970,8 +964,8 @@ void test_string_address_space() {
   if (!result.literals.empty()) {
     check(result.literals[0].reason.has_value(), "the refusal has a reason");
     if (result.literals[0].reason.has_value()) {
-      check_equal(cs2::protect::to_string(*result.literals[0].reason),
-                  "unsupported_address_space", "the refusal names the address space");
+      check_equal(cs2::protect::to_string(*result.literals[0].reason), "unsupported_address_space",
+                  "the refusal names the address space");
     }
   }
   // The literal is left exactly as it is.
