@@ -249,6 +249,27 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
   return entry;
 }
 
+/// Reads a list of strings: the `strings` and `strings_deny` sections.
+[[nodiscard]] auto parse_string_list(const llvm::json::Object& object, std::string_view key)
+    -> std::expected<std::vector<std::string>, std::string> {
+  std::vector<std::string> values;
+  const llvm::json::Array* array = object.getArray(key);
+  if (array == nullptr) {
+    if (object.get(key) != nullptr) {
+      return std::unexpected(std::string("'") + std::string(key) + "' must be an array");
+    }
+    return values;
+  }
+  for (const llvm::json::Value& item : *array) {
+    const auto text = item.getAsString();
+    if (!text.has_value()) {
+      return std::unexpected(std::string("a '") + std::string(key) + "' entry must be a string");
+    }
+    values.emplace_back(*text);
+  }
+  return values;
+}
+
 [[nodiscard]] auto parse_policy(const llvm::json::Value& root)
     -> std::expected<Policy, std::string> {
   const llvm::json::Object* object = root.getAsObject();
@@ -256,9 +277,11 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
     return std::unexpected(std::string("the policy file must contain a JSON object"));
   }
   for (const std::string& key : sorted_keys(*object)) {
-    if (key != "protect" && key != "deny" && key != "seed") {
+    if (key != "protect" && key != "deny" && key != "seed" && key != "strings" &&
+        key != "strings_deny" && key != "strings_min_length") {
       return std::unexpected(std::string("unknown key in the policy file: '") + key +
-                             "' (expected 'protect', 'deny' or 'seed')");
+                             "' (expected 'protect', 'deny', 'seed', 'strings', 'strings_deny' "
+                             "or 'strings_min_length')");
     }
   }
 
@@ -298,6 +321,27 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
     policy.seed = *parsed;
   } else if (object->get("seed") != nullptr) {
     return std::unexpected(std::string("'seed' must be a hexadecimal string"));
+  }
+
+  auto strings = parse_string_list(*object, "strings");
+  if (!strings) {
+    return std::unexpected(strings.error());
+  }
+  policy.strings = std::move(*strings);
+
+  auto strings_deny = parse_string_list(*object, "strings_deny");
+  if (!strings_deny) {
+    return std::unexpected(strings_deny.error());
+  }
+  policy.strings_deny = std::move(*strings_deny);
+
+  if (const auto minimum = object->getInteger("strings_min_length"); minimum.has_value()) {
+    if (*minimum < 0) {
+      return std::unexpected(std::string("'strings_min_length' must not be negative"));
+    }
+    policy.strings_min_length = static_cast<std::size_t>(*minimum);
+  } else if (object->get("strings_min_length") != nullptr) {
+    return std::unexpected(std::string("'strings_min_length' must be a number"));
   }
   return policy;
 }

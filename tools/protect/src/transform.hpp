@@ -39,6 +39,65 @@ namespace cs2::protect {
 /// image (the specification's design A).
 inline constexpr std::size_t k_key_parts = 3;
 
+// --- The cipher ---------------------------------------------------------------
+//
+// The cipher lives here, and not in the transform's implementation, because
+// the string transform (T21) uses it as well: a second mixer is a mixer that
+// can drift from the first one, and the payload check would then decode with
+// a different mixer than the pass encrypted with.
+//
+// The mixer constants do **not** go into the instruction stream as 64-bit
+// immediates: the X86 backend of the SDK's LLVM 22.1.8 mis-materialises a
+// 64-bit constant in this shape (see `tools/protect/README.md` §12). Every
+// 64-bit constant a call site needs lives in a global and is read with a
+// volatile load.
+
+/// The multiplier of the mixer (the bits of the golden ratio).
+inline constexpr std::uint64_t k_mix_multiplier = 0x9E3779B97F4A7C15ULL;
+/// The xor constant of the mixer.
+inline constexpr std::uint64_t k_mix_xor = 0xBF58476D1CE4E5B9ULL;
+/// How far the mixer rotates its result.
+inline constexpr unsigned k_mix_rotate = 31;
+
+/// Rotates a 64-bit value to the left.
+[[nodiscard]] inline auto rotate_left(std::uint64_t value, unsigned amount) noexcept
+    -> std::uint64_t {
+  return (value << amount) | (value >> (64U - amount));
+}
+
+/// The mixer. The IR that the transform emits computes exactly this, so the
+/// value the pass encrypts with is the value the call site decrypts with.
+[[nodiscard]] inline auto mix64(std::uint64_t value) noexcept -> std::uint64_t {
+  value *= k_mix_multiplier;
+  value ^= k_mix_xor;
+  return rotate_left(value, k_mix_rotate);
+}
+
+/// The next value of a seeded stream (splitmix64).
+[[nodiscard]] inline auto splitmix64(std::uint64_t& state) noexcept -> std::uint64_t {
+  state += 0x9E3779B97F4A7C15ULL;
+  std::uint64_t value = state;
+  value = (value ^ (value >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+  value = (value ^ (value >> 27U)) * 0x94D049BB133111EBULL;
+  return value ^ (value >> 31U);
+}
+
+/// The seed of one module: the build seed mixed with the module id, so that
+/// two modules of one build do not share a key and two builds do not either.
+[[nodiscard]] inline auto module_seed(const Config& config, std::string_view module_id) noexcept
+    -> std::uint64_t {
+  std::uint64_t base = 0;
+  if (config.seed.has_value()) {
+    base = *config.seed;
+  } else if (config.policy.has_value() && config.policy->seed.has_value()) {
+    base = *config.policy->seed;
+  } else {
+    base = derive_seed(module_id, "cs2.protect");
+  }
+  std::uint64_t state = base ^ derive_seed(module_id, "cs2.protect.module");
+  return splitmix64(state);
+}
+
 /// Why a call was not rewritten.
 enum class CallSkipReason : std::uint8_t {
   variadic_callee,     ///< the callee is variadic: the indirect call cannot

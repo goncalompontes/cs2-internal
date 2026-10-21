@@ -278,6 +278,54 @@ void write_transform_report(const llvm::Module& module, const TransformResult& r
                << " descriptor=" << result.descriptor_size << "\n";
 }
 
+void write_string_report(const llvm::Module& module, const StringResult& result,
+                          const Config& config) {
+  const std::string module_id = module.getSourceFileName();
+  const std::string_view tag = module_tag(module_id);
+
+  llvm::errs() << "[cs2-protect] " << tag << ": str: " << result.protected_count
+               << " literals protected, " << result.refused_count << " refused\n";
+
+  for (const StringLiteral& literal : result.literals) {
+    llvm::errs() << "[cs2-protect] " << tag << ": str: \"" << literal.content << "\" ("
+                 << literal.length << " bytes";
+    if (literal.protected_literal) {
+      llvm::errs() << ", " << literal.uses << " uses, " << literal.functions << " function";
+      if (literal.functions != 1) {
+        llvm::errs() << "s";
+      }
+      llvm::errs() << "): protected\n";
+      continue;
+    }
+    llvm::errs() << "): refused (";
+    llvm::errs() << to_string(*literal.reason) << ")\n";
+  }
+
+  if (config.verbose) {
+    llvm::errs() << "[cs2-protect] " << tag << ": str: " << result.plaintext_bytes
+                 << " bytes of plaintext left the image, " << result.blob_bytes
+                 << " bytes of ciphertext, " << result.decodes << " decodes\n";
+  }
+}
+
+auto coverage_strings(const StringResult& result) -> std::vector<CoverageString> {
+  std::vector<CoverageString> entries;
+  entries.reserve(result.literals.size());
+  for (const StringLiteral& literal : result.literals) {
+    CoverageString entry;
+    entry.length = literal.length;
+    entry.digest = digest_of(literal.content);
+    entry.uses = literal.uses;
+    entry.functions = literal.functions;
+    entry.protected_literal = literal.protected_literal;
+    if (literal.reason.has_value()) {
+      entry.reason = to_string(*literal.reason);
+    }
+    entries.push_back(std::move(entry));
+  }
+  return entries;
+}
+
 auto coverage_entries(const SelectionResult& result) -> std::vector<CoverageEntry> {
   std::vector<CoverageEntry> entries;
   entries.reserve(result.policy_matches.size());
@@ -336,8 +384,8 @@ auto coverage_entries(const RecordedSelection& selection, std::string_view modul
 
 auto write_coverage(const Config& config, const llvm::Module& module,
                     const std::vector<CoverageEntry>& entries,
-                    const std::vector<CoverageFunction>& functions, const CoverageProtect& protect)
-    -> std::optional<std::string> {
+                    const std::vector<CoverageFunction>& functions, const CoverageProtect& protect,
+                    const std::vector<CoverageString>& strings) -> std::optional<std::string> {
   if (!config.policy) {
     return std::nullopt;
   }
@@ -408,6 +456,25 @@ auto write_coverage(const Config& config, const llvm::Module& module,
     text += std::to_string(function.rewritten);
     text += " skipped=";
     text += std::to_string(function.skipped);
+    text += "\n";
+  }
+  // The literals: the length and a digest of the content, never the content
+  // itself. The coverage is a file, and a file holds the strings.
+  for (const CoverageString& literal : strings) {
+    text += "str ";
+    text += literal.protected_literal ? "protected" : "refused";
+    text += " len=";
+    text += std::to_string(literal.length);
+    text += " sha256=";
+    text += literal.digest;
+    text += " uses=";
+    text += std::to_string(literal.uses);
+    text += " functions=";
+    text += std::to_string(literal.functions);
+    if (!literal.reason.empty()) {
+      text += " reason=";
+      text += literal.reason;
+    }
     text += "\n";
   }
   // The digest of everything above: a file that was edited by hand (or

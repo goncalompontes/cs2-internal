@@ -17,6 +17,7 @@
 
 #include "config.hpp"
 #include "selection.hpp"
+#include "strings.hpp"
 #include "transform.hpp"
 
 namespace llvm {
@@ -68,6 +69,23 @@ struct CoverageProtect {
   std::uint64_t mix_xor{0};
 };
 
+/// One literal of the coverage file.
+///
+/// The coverage **must not** carry the content of a protected string: the
+/// coverage is a file, and a file holds the strings. It carries the length
+/// and a digest of the content instead, which is enough for the payload
+/// check to prove that the plaintext is not in the image.
+struct CoverageString {
+  std::size_t length{0};
+  /// The SHA-256 of the content, in hexadecimal.
+  std::string digest;
+  std::size_t uses{0};
+  std::size_t functions{0};
+  bool protected_literal{false};
+  /// The refusal reason ("" when the literal was protected).
+  std::string reason;
+};
+
 /// Prints the selection report of one module to stderr.
 void write_report(const llvm::Module& module, const SelectionResult& result, const Config& config);
 
@@ -79,8 +97,23 @@ void write_report(const llvm::Module& module, const SelectionResult& result, con
 void write_transform_report(const llvm::Module& module, const TransformResult& result,
                             const Config& config);
 
+/// Prints the string report of one module to stderr.
+///
+/// The report names every literal the policy selected, and whether it was
+/// protected or refused (and why). The report goes to stderr, so it may name
+/// the content: the *coverage* may not.
+void write_string_report(const llvm::Module& module, const StringResult& result,
+                          const Config& config);
+
 /// The coverage entries of a selection result.
 [[nodiscard]] auto coverage_entries(const SelectionResult& result) -> std::vector<CoverageEntry>;
+
+/// The coverage entries of a string result.
+///
+/// The content of a literal is **not** in the coverage: the entry carries the
+/// length and the digest of the content, and that is enough for the payload
+/// check to prove that the plaintext is not in the image.
+[[nodiscard]] auto coverage_strings(const StringResult& result) -> std::vector<CoverageString>;
 
 /// The coverage entries of a recorded selection.
 ///
@@ -113,7 +146,8 @@ void write_transform_report(const llvm::Module& module, const TransformResult& r
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
                                   const std::vector<CoverageEntry>& entries,
                                   const std::vector<CoverageFunction>& functions,
-                                  const CoverageProtect& protect) -> std::optional<std::string>;
+                                  const CoverageProtect& protect,
+                                  const std::vector<CoverageString>& strings = {}) -> std::optional<std::string>;
 
 /// Writes the machine-readable coverage of one module from a selection.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,

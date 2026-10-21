@@ -22,6 +22,7 @@ add_library(Cs2Protect SHARED
   src/config.cpp
   src/selection.cpp
   src/report.cpp
+  src/strings.cpp
   src/transform.cpp
 )
 
@@ -124,6 +125,7 @@ add_executable(cs2-protect-tests
   src/config.cpp
   src/selection.cpp
   src/report.cpp
+  src/strings.cpp
   src/transform.cpp
 )
 target_compile_features(cs2-protect-tests PRIVATE ${CS2_PROTECT_CXX_STANDARD})
