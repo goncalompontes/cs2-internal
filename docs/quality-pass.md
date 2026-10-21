@@ -460,9 +460,10 @@ git show e539bc6:<path> | grep -c '[^[:space:]]'
 grep -c '[^[:space:]]' <path>
 ```
 
-The table is the state at commit `b212124` (the tip of the branch when this
-round's numbers were taken); the two commands above reproduce it, and they
-move with the tree.
+The table is the state at commit `9fb8875` — the last commit on the branch
+that touches a source file: every commit after it touches only the workflow
+and this report, so the numbers are still the tip's numbers. The two
+commands above reproduce the table, and they move with the tree.
 
 | file | before | after |
 |---|---|---|
@@ -489,13 +490,15 @@ declarations and the comments that say why.
 dirs, with the sweep's header filters. The two columns are two different
 commits, and the table says which: the first is the state **before this
 pass's own style commit** (`d2b884c`, i.e. with the refactors applied and
-the new code not yet tidied), the second is **the tip** of the branch when
-this round's numbers were taken (`b212124`; the re-review round re-ran the
-sweep over all ten groups there). The base commit's numbers were not
-measured separately: the sweep analyses the tree in place, and the base is
-fifteen commits back.
+the new code not yet tidied), the second is the state at `9fb8875` — the
+last commit on the branch that touches a source file, so the commits after
+it (the workflow and this report) do not move the numbers, and they are
+therefore still the tip's numbers. The re-review round re-ran the sweep
+over all ten groups there, and this round re-ran it over all ten again, at
+the same commit. The base commit's numbers were not measured separately:
+the sweep analyses the tree in place, and the base is 52 commits back.
 
-| group | with the refactors | at the tip (`b212124`) |
+| group | with the refactors | at the tip (`9fb8875`) |
 |---|---|---|
 | `performance` | 0 | 0 |
 | `nodiscard` | 1 | **0** |
