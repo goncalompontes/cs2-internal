@@ -113,7 +113,7 @@ Ordered from the network snapshot to the hitbox transform.
 | 0c | **The anim state update** | **`CCSPlayerAnimationState::Update`** | **`0x8a5d70`** | `void CCSPlayerAnimationState::Update(CCSPlayerAnimationState* this)` | the entity (`this+0x10`), the eye angles, the velocity | the anim state's fields (see §3) |
 | 0d | **The abs-angle write** (the CS2 `SetAbsAngles`) | the angle writer | **`0x22b470`** | `void SetAbsAngles(C_BaseEntity* entity, const QAngle* angles)` | the scene node (`entity+0x330`) | the scene node's angles; it also **invalidates the bone cache** (`0x9d09b0`) |
 | 0 | Snapshot decode | the per-class netvar codec (`CNetworkVarChainer` lookups by name hash) | — (per class) | `void Codec(CClass* dst, CClass* src, CSchemaTable*)` | the entity snapshot | every replicated netvar (`m_flAnimTime`, the velocities, `m_angEyeAngles`, `m_networkAnimTiming`, the sequence layer …) |
-| 1 | Anim tick driver | `CAnimGraphGameSystem::AnimTickUpdate` | `0x35aeb0` | `void CAnimGraphGameSystem::AnimTickUpdate(CAnimGraphGameSystem* this, int tickCount)` | the entity list, the anim time | the per-frame update list (`this+0x10110`), the frame clock (`this+0xe4`) |
+| 1 | Anim tick driver | `CAnimGraphGameSystem::AnimTickUpdate` | `0x35aeb0` | `void CAnimGraphGameSystem::AnimTickUpdate(CAnimGraphGameSystem* this, int clientTick)` | the entity list, the anim time | the per-frame update list (`this+0x10110`), the frame clock (`this+0xe4`) |
 | 2 | Build the AG2 work list | `CAnimGraphGameSystem::UpdateAnimGraph2Animations` | `0x38a390` | `void CAnimGraphGameSystem::UpdateAnimGraph2Animations(CAnimGraphGameSystem* this, int* list)` | the update list | the job list (`this+0x10110`, 0x60-byte entries) and the job named `"UpdateAnimGraph2Animations"` |
 | 3 | Job executor | the AG2 evaluate job | `0x3552f0` | `void Job(CAnimGraphGameSystem** ctx)` | the job list | per entity: calls `0x12e4f90`, `0x12e52b0`, then the entity virtual `+0x898` |
 | 4 | Graph evaluation | AG2 instance update | `0x12e4f90` | `void AG2Update(AG2Instance* this, …, float dt, …)` | the graph inputs, the sequence layer, `dt` | the evaluated pose (task outputs) |
@@ -608,7 +608,7 @@ window is padded with `0x90` after the 14-byte jump.
 | the per-command boundary | `0xa72860` | NO (18 B: `48 8B C4 48 81 EC C8 …` + `48 89 58 …`) | `48 8B C4 48 81 EC C8 00 00 00 48 89 58 10 48 89` | `void RunCommand(CPlayer_MovementServices* this, CUserCmd* cmd)` | the "end of CreateMove" equivalent: it is where the globals are faked (`client+0x2230090`) and restored, and where the movement processing (→ the anim state update) runs. Not hookable inline — use the `CreateMove` detour instead. |
 | `CPlayer_MovementServices::ProcessCommand` | `0xa70de0` | ? | — | `void ProcessCommand(CPlayer_MovementServices*, CUserCmd*)` | the frame inside which the anim state update and the abs-angle write happen |
 | `CSkeletonInstance::SetupBones` | **`0xaa0f80`** | **YES** (15 B) | `48 89 4C 24 08 / 55 53 56 57 / 41 54 41 55 41 56` → 15 whole bytes, no branch, no RIP | `void CSkeletonInstance::SetupBones(CSkeletonInstance* this, uint boneFlags)` | **the post-animation hook.** Detour: call `original()`, then overwrite the bones in `this+0x1c0` (or the specific bones) and return. The hitbox path reads the same array, so the fix is visible immediately. |
-| `CAnimGraphGameSystem::AnimTickUpdate` | **`0x35aeb0`** | **YES** (15 B) | `89 54 24 10 / 48 89 4C 24 08 / 55 57 / 41 54 41 55` → 15 bytes | `void CAnimGraphGameSystem::AnimTickUpdate(CAnimGraphGameSystem* this, int tickCount)` | **the pre-animation hook.** Detour: patch the local pawn's anim state / graph inputs *before* `original()` runs the graph. |
+| `CAnimGraphGameSystem::AnimTickUpdate` | **`0x35aeb0`** | **YES** (15 B) | `89 54 24 10 / 48 89 4C 24 08 / 55 57 / 41 54 41 55` → 15 bytes | `void CAnimGraphGameSystem::AnimTickUpdate(CAnimGraphGameSystem* this, int clientTick)` | **the pre-animation hook.** Detour: patch the local pawn's anim state / graph inputs *before* `original()` runs the graph. |
 | AG2 instance update | **`0x12e4f90`** | **YES** (14 B) | `40 53 / 48 83 EC 30 / 48 8B 44 24 60 / 48 8B DA` → exactly 14 bytes | `void AG2Update(AG2Instance* this, …, float dt, …)` | per-entity graph evaluation; a detour can patch the graph inputs for the local pawn just before the evaluation. |
 | the graph-input codec | **`0x8d9740`** | **YES** (14 B) | `48 89 5C 24 08 / 55 56 57 / 41 54 41 55 41 56` → exactly 14 bytes | `void Codec(CCS2PawnGraphController* dst, CClass* src, CSchemaTable*)` | **the "let the server win" hook**: the decoded *server* values pass through here; a detour can capture them (and stop the local prediction from overwriting them). |
 | the mirrored codec | **`0x8daab0`** | **YES** (14 B) | `48 89 5C 24 18 / 48 89 7C 24 20 / 55 / 48 8B EC` → exactly 14 bytes | idem | the twin of the above |
@@ -997,15 +997,31 @@ last: the server's value does not reach the graph at all.
   `0x3552f0` → `FUN_18038a070` (per entity) → **`0x12e4f90`** (the graph
   evaluation) → `0x12e52b0` (the pose commit).
 
-So the order inside a frame is **decode → predict → evaluate**, and the
-prediction's write is the last one before the graph reads the parameters.
-**The prediction wins.**
+**The order inside a frame is _inferred_, not measured**: the three phases
+are known (the network decode, the command path, the anim phase), and the
+community's research (`docs/research/animfix.md` §3.1) puts the server's
+animation update after the movement processing — the client's counterpart of
+which is the command path. So **decode → predict → evaluate**, and the
+prediction's write is the last one before the graph reads the parameters:
+**the prediction wins.** What was *measured* is the write path itself
+(§9.2): the prediction is the only writer of the graph's parameters through
+the setter, so the server's value never reaches the graph at all. The
+*ordering* of the two phases is a reading of the engine's frame structure
+that a live run would confirm — and the animfix does not depend on it
+being right (see below).
 
 **The seam this measurement selects** is the **anim tick**
 (`CAnimGraphGameSystem::AnimTickUpdate`, `0x35aeb0`): it runs *after* the
 prediction in the same tick, and it *contains* the AG2 evaluation (the
 per-entity `FUN_18038a070` → `0x12e4f90`), so a correction written there is
-the one the pose is computed from. The correction is the setter's own write,
+the one the pose is computed from.
+
+**And it does not depend on the inferred order.** The correction is written
+at the *start* of the anim tick and the evaluation happens *inside* it, so
+whatever the prediction did before — or whatever it does afterwards, in
+the next tick — the values the graph is evaluated from are the server's. (A
+prediction that runs *after* the anim tick would overwrite the parameters,
+but not before the evaluation: the correction still reaches the pose.) The correction is the setter's own write,
 replicated by hand:
 `*(float *)(*(node + 0x10)[index] + 0x18) = value`.
 
@@ -1069,6 +1085,15 @@ replicated by hand:
 4. The **slot layout** is now known: `{ value @+0x00, node* @+0x08, int16
    index @+0x10 }`, stride `0x18` — the parameter object the node and the
    index point at holds the value at `+0x18`.
+5. The anim tick's **second argument is a flag, not a tick count**: the
+   function picks its VProf scope by it (`param_2 == 0` ⇒ "AnimGraph Server
+   Tick", otherwise "AnimGraph Client Tick"). §2's signature line said
+   `int tickCount`; it is corrected to `int clientTick` here. Whether the
+   driver runs once per **tick** or once per **frame** is still not
+   established (its caller is reached through a 32-bit-RVA dispatch table
+   that this pass did not resolve), and nothing in the animfix depends on
+   it: the correction is written at the start of the anim tick and the
+   evaluation happens inside it.
 
 ### 9.5 What is still open
 

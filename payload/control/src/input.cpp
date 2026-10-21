@@ -1518,7 +1518,7 @@ void __fastcall Input::animfix_codec_detour(void* dst, void* src, void* schema) 
   input->animfix_capture(dst);
 }
 
-void __fastcall Input::animfix_anim_tick_detour(void* self, int tick_count) noexcept {
+void __fastcall Input::animfix_anim_tick_detour(void* self, int client_tick) noexcept {
   Input* input = g_active;
   if (input == nullptr) {
     return;
@@ -1529,8 +1529,10 @@ void __fastcall Input::animfix_anim_tick_detour(void* self, int tick_count) noex
   if (input->animfix_enabled_.load()) {
     input->animfix_apply();
   }
+  // `client_tick` is a **flag** (0 = the server tick, otherwise the client
+  // tick), not a tick count: the function picks its VProf scope by it.
   reinterpret_cast<animfix_anim_tick_fn>(input->animfix_anim_tick_hook_.original())(self,
-                                                                                   tick_count);
+                                                                                   client_tick);
 }
 
 auto Input::animfix_controller() const noexcept -> std::uintptr_t {

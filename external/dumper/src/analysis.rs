@@ -221,13 +221,19 @@ pub fn known_signatures() -> Vec<Signature> {
         // The AG2 **parameter setter** — the one place a graph parameter's
         // value is written (`*(float *)(*(longlong *)(node + 0x10) + index * 8
         // + 0x18) = value`). The client's prediction pushes the local player's
-        // values through it. It is **not hookable**: its third prologue
-        // instruction is a RIP-relative load whose displacement cannot be
-        // relocated to the trampoline (the module is mapped high, the
-        // trampoline low), so the animfix re-applies the server's values in
-        // the anim tick instead. The pattern is unique; the RIP-relative
-        // displacement is relocated by the inline hook. RVA on 659940c1:
-        // `0x8492a0`.
+        // values through it.
+        //
+        // It is **not hookable**: its third prologue instruction is a
+        // RIP-relative load whose displacement cannot be relocated to the
+        // trampoline (the module is mapped high, the trampoline low), so the
+        // animfix re-applies the server's values in the anim tick instead.
+        // The signature is kept because the host test (`control-animfix`) uses
+        // it as the **counter-example**: the relocator rewrites this
+        // prologue's displacement (so the hook only works when the module and
+        // the trampoline live close together), while the anim tick's
+        // prologue needs no relocation at all. The pattern is unique; the
+        // RIP-relative displacement is relocated by the inline hook. RVA on
+        // 659940c1: `0x8492a0`.
         sig(
             "client.dll",
             "animfix_param_setter",
@@ -235,11 +241,13 @@ pub fn known_signatures() -> Vec<Signature> {
             None,
             None,
         ),
-        // `CAnimGraphGameSystem::AnimTickUpdate` — the per-tick animation
-        // driver, and the place the AG2 graph is evaluated. It runs **after**
-        // the client's prediction in the same tick, so a correction written
-        // here is the one the pose is computed from. Its 15-byte prologue is
-        // RIP-free (the relocator accepts it). RVA on 659940c1: `0x35aeb0`.
+        // `CAnimGraphGameSystem::AnimTickUpdate` — the animation driver, and
+        // the place the AG2 graph is evaluated. It runs **after** the
+        // client's prediction in the same tick, so a correction written here
+        // is the one the pose is computed from. Its 15-byte prologue is
+        // RIP-free (the relocator accepts it at any address distance). The
+        // second argument is a **flag** (0 = the server tick, otherwise the
+        // client tick), not a tick count. RVA on 659940c1: `0x35aeb0`.
         sig(
             "client.dll",
             "animfix_anim_tick",
