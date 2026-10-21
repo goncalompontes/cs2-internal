@@ -105,7 +105,7 @@ void test_nothing_is_reapplied_before_the_first_capture() {
 // A fresh capture is re-applied — once.
 void test_a_fresh_capture_is_reapplied() {
   animfix::Capture capture{};
-  animfix::store(capture, server_values(42.0F), 1000);
+  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
   const auto value = animfix::take(capture, animfix::Slot::aim_yaw, 1000);
   assert(value.has_value());
   assert(nearly(*value, 42.0F));
@@ -118,7 +118,7 @@ void test_a_fresh_capture_is_reapplied() {
 // itself.
 void test_a_capture_is_consumed_once_per_slot() {
   animfix::Capture capture{};
-  animfix::store(capture, server_values(42.0F), 1000);
+  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
   assert(animfix::take(capture, animfix::Slot::aim_yaw, 1000).has_value());
   // The same capture, again: refused.
   assert(!animfix::take(capture, animfix::Slot::aim_yaw, 1000).has_value());
@@ -135,9 +135,9 @@ void test_a_capture_is_consumed_once_per_slot() {
 // animfix may correct the slot again.
 void test_a_new_capture_reopens_the_slots() {
   animfix::Capture capture{};
-  animfix::store(capture, server_values(42.0F), 1000);
+  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
   assert(animfix::take(capture, animfix::Slot::aim_yaw, 1000).has_value());
-  animfix::store(capture, server_values(43.0F), 1016);
+  animfix::store(capture, 0x1000, server_values(43.0F), 1016);
   const auto value = animfix::take(capture, animfix::Slot::aim_yaw, 1016);
   assert(value.has_value());
   assert(nearly(*value, 43.0F));
@@ -153,7 +153,7 @@ void test_a_new_capture_reopens_the_slots() {
 // raised.
 void test_an_aged_out_capture_is_refused() {
   animfix::Capture capture{};
-  animfix::store(capture, server_values(42.0F), 1000);
+  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
   // One frame later: still fresh.
   assert(animfix::may_reapply(capture, animfix::Slot::aim_yaw, 1000 + k_one_frame_ms));
   // Two frames later: aged out.
@@ -173,10 +173,10 @@ void test_the_bound_is_one_frame() {
 // again: the animfix recovers as soon as the connection does.
 void test_a_refreshed_capture_works_again() {
   animfix::Capture capture{};
-  animfix::store(capture, server_values(42.0F), 1000);
+  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
   const std::uint64_t too_late = 1000 + k_two_frames_ms;
   assert(!animfix::take(capture, animfix::Slot::aim_yaw, too_late).has_value());
-  animfix::store(capture, server_values(44.0F), too_late);
+  animfix::store(capture, 0x1000, server_values(44.0F), too_late);
   const auto value = animfix::take(capture, animfix::Slot::aim_yaw, too_late);
   assert(value.has_value());
   assert(nearly(*value, 44.0F));
@@ -189,7 +189,7 @@ void test_a_refreshed_capture_works_again() {
 void test_the_capture_keeps_its_own_copy() {
   animfix::Capture capture{};
   std::array<float, animfix::k_tracked_slot_count> values = server_values(42.0F);
-  animfix::store(capture, values, 1000);
+  animfix::store(capture, 0x1000, values, 1000);
   values[animfix::slot_position(animfix::Slot::aim_yaw)] = 999.0F;
   const auto value = animfix::take(capture, animfix::Slot::aim_yaw, 1000);
   assert(value.has_value());
@@ -201,7 +201,7 @@ void test_the_capture_keeps_its_own_copy() {
 void test_the_freshness_of_a_capture() {
   animfix::Capture capture{};
   assert(!animfix::capture_is_fresh(capture, 1000));  // no capture at all
-  animfix::store(capture, server_values(42.0F), 1000);
+  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
   assert(animfix::capture_is_fresh(capture, 1000));
   assert(animfix::capture_is_fresh(capture, 1000 + k_one_frame_ms));
   assert(!animfix::capture_is_fresh(capture, 1000 + k_two_frames_ms));
@@ -245,6 +245,27 @@ void test_the_engines_own_guard_is_reproduced() {
   const float largest = 2147483520.0F;  // 2^31 - 128
   assert(animfix::value_is_writable(largest));
   assert(animfix::value_is_writable(-largest));
+}
+
+// --- the controller the capture belongs to -----------------------------------
+
+// The write goes to the graph parameters of the **live** controller. A local
+// pawn that dies and respawns gets a new `CCS2PawnGraphController`, and the
+// old one — with its AG2 instance — is freed: the `(node, index)` pairs
+// captured from it then point into freed memory, and a write through them
+// would be a write into freed memory (corruption, which is worse than a
+// fault).
+void test_the_capture_must_belong_to_the_live_controller() {
+  animfix::Capture capture{};
+  // No capture: it belongs to nothing.
+  assert(!animfix::capture_matches_controller(capture, 0x1000));
+  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
+  // The controller the capture came from: it matches.
+  assert(animfix::capture_matches_controller(capture, 0x1000));
+  // A different controller (the pawn respawned): it does not.
+  assert(!animfix::capture_matches_controller(capture, 0x2000));
+  // The live controller is not known (0): it does not.
+  assert(!animfix::capture_matches_controller(capture, 0));
 }
 
 // --- the target lookup ----------------------------------------------------
@@ -399,6 +420,7 @@ auto main() -> int {
   test_a_refreshed_capture_works_again();
   test_the_capture_keeps_its_own_copy();
   test_the_engines_own_guard_is_reproduced();
+  test_the_capture_must_belong_to_the_live_controller();
   test_only_the_animfixs_own_slots_are_recognised();
   test_the_four_slots_must_be_distinct();
   test_the_seams_prologues_are_hookable();

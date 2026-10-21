@@ -210,8 +210,8 @@ inline constexpr double k_engine_value_limit = 2.1474836e9;
 inline constexpr std::uint64_t k_max_capture_age_ms = 16;
 
 // The captured state: the server's values for the tracked slots, the
-// generation they were captured at, and the generation each slot was last
-// re-applied at.
+// generation they were captured at, the generation each slot was last
+// re-applied at, and **the controller the values came from**.
 //
 // A decode **replaces** the capture (the values are copied out of the
 // controller's slots, which the client's prediction never writes), so the
@@ -222,18 +222,41 @@ struct Capture {
   std::array<std::uint64_t, k_tracked_slot_count> applied{};
   std::uint64_t generation{0};
   std::uint64_t captured_at_ms{0};
+  std::uintptr_t controller{0};
   bool valid{false};
 };
 
 // Record a capture: the server's values for the tracked slots, copied out of
 // the controller. The copy is the point — the slots are rewritten every
 // frame, so a live pointer would not be a capture at all.
-inline void store(Capture& capture, const std::array<float, k_tracked_slot_count>& values,
+//
+// The controller is recorded with it: the write goes to the graph parameters
+// *of that controller*, and a local pawn that dies and respawns gets a new
+// one — the old one (and its AG2 instance) is freed, and writing through the
+// captured `(node, index)` pairs would be a write into freed memory.
+inline void store(Capture& capture, std::uintptr_t controller,
+                  const std::array<float, k_tracked_slot_count>& values,
                   std::uint64_t now_ms) noexcept {
   capture.values = values;
   capture.generation += 1;
   capture.captured_at_ms = now_ms;
+  capture.controller = controller;
   capture.valid = true;
+}
+
+// True when the capture still belongs to the controller the animfix is
+// about to write to.
+//
+// The local pawn can die and respawn: the old `CCS2PawnGraphController` and
+// its AG2 instance are freed, and the `(node, index)` pairs captured from it
+// then point into freed memory. A read of a freed-but-mapped page can succeed
+// and yield a garbage pointer, and the write would then land on a mapped
+// garbage address — corruption, which is worse than a fault. So the animfix
+// re-reads the live controller before it writes and refuses the frame when
+// it is not the one the capture came from.
+[[nodiscard]] inline auto capture_matches_controller(const Capture& capture,
+                                                     std::uintptr_t controller) noexcept -> bool {
+  return capture.valid && capture.controller != 0 && capture.controller == controller;
 }
 
 // True when the capture is **fresh**: it exists and it has not aged out.

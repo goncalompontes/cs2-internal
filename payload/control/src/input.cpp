@@ -1581,7 +1581,7 @@ void Input::animfix_capture(void* controller) noexcept {
   {
     const std::lock_guard<std::mutex> lock(animfix_mutex_);
     animfix_targets_ = targets;
-    animfix::store(animfix_capture_, values, animfix_now_ms());
+    animfix::store(animfix_capture_, local, values, animfix_now_ms());
   }
   animfix_targets_valid_.store(true);
   animfix_captures_.fetch_add(1);
@@ -1601,12 +1601,23 @@ void Input::animfix_apply() noexcept {
   if (!animfix_targets_valid_.load()) {
     return;
   }
+  // The write goes to the graph parameters of the **live** controller, so the
+  // capture must belong to it: a local pawn that died and respawned has a new
+  // controller, and the old one (with its AG2 instance) is freed. Writing
+  // through the captured `(node, index)` pairs would then be a write into
+  // freed memory — a corruption, which is worse than a fault.
+  const std::uintptr_t controller = animfix_controller();
   const std::uint64_t now = animfix_now_ms();
   {
     const std::lock_guard<std::mutex> lock(animfix_mutex_);
+    if (!animfix::capture_matches_controller(animfix_capture_, controller)) {
+      // No capture, a capture for another controller, or one that aged out:
+      // nothing may be written over the client's fresh prediction. Counted
+      // once per anim tick.
+      animfix_skips_.fetch_add(1);
+      return;
+    }
     if (!animfix::capture_is_fresh(animfix_capture_, now)) {
-      // No capture, or one that aged out: nothing may be written over the
-      // client's fresh prediction. Counted once per anim tick.
       animfix_skips_.fetch_add(1);
       return;
     }
