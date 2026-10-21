@@ -37,6 +37,7 @@ REA, headless). Findings are recorded per subsystem.
 - [`aim.md`](aim.md) — shot model: spread/inaccuracy, the shot seed, trace API, hitboxes, penetration params
 - [`lagcomp.md`](lagcomp.md) — lag compensation & backtracking: rewind tick, per-entity records, interp history
 - [`subtick.md`](subtick.md) — sub-tick input: view-angle history, move steps, button steps
+- [`angle-split.md`](angle-split.md) — the angle channels: the command's own `viewangles` vs the silent `input_history` vs the pawn's eye angles (the anti-aim's split)
 - [`engine2.md`](engine2.md) — console-command path (`exec`), game event system
 - [`vphysics2.md`](vphysics2.md) — collision geometry (Rubikon `Rn` hulls/meshes) for the ragebot
 - [`occlusion.md`](occlusion.md) — world-solids enumeration for the occlusion heatmap (query interface, sweep ABI)
