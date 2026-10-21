@@ -518,6 +518,81 @@ struct Decision {
   return decision;
 }
 
+// --- the codec diagnosis ---------------------------------------------------
+
+// The animfix's capture is **filtered by the local controller**: the codec
+// must have run *for the local player*, or there is nothing to capture.
+//
+// The counters below say which of the two possible failures it is:
+//
+//   * `calls` — every call of the hooked codec's detour, whatever the capture
+//     then did,
+//   * `other_controller` — the calls whose `dst` was **not** the local
+//     controller: the codec ran, but for somebody else,
+//   * `unresolved` — the calls at which the payload could not resolve the
+//     local controller at all, so the comparison was impossible, and
+//   * `local_calls` — the calls that **were** the local player's.
+//
+// `calls == 0` ⇒ **H1**: the hooked codec never runs — not for the local
+// player and not for anybody else. `calls > 0` and `local_calls == 0` ⇒ **H2**:
+// the codec runs, but never for the local player (or the comparison is wrong).
+enum class CodecDiagnosis : std::size_t {
+  no_calls = 0,     // H1: the hooked codec never ran
+  unresolved = 1,   // H2: the local controller could not be resolved
+  not_local = 2,    // H2: the codec ran, but never for the local controller
+  local = 3,        // the codec ran for the local controller
+};
+
+// The counters the diagnosis is taken from.
+struct CodecCounters {
+  std::uint64_t calls{0};
+  std::uint64_t other_controller{0};
+  std::uint64_t unresolved{0};
+  std::uint64_t local_calls{0};
+};
+
+// The diagnosis the counters settle.
+//
+// The order matters: each case **rules the others out**, and the first one
+// the counters prove is the one that is reported.
+//
+// The `unresolved` case is reported before the `not_local` one only when no
+// call was the local player's: the two are then indistinguishable (a codec
+// call that could not be compared is not evidence of a codec call for
+// somebody else), and "the comparison was impossible" is the more precise of
+// the two — it says what to look at next.
+[[nodiscard]] constexpr auto classify_codec(const CodecCounters& counters) noexcept
+    -> CodecDiagnosis {
+  if (counters.calls == 0) {
+    return CodecDiagnosis::no_calls;
+  }
+  if (counters.local_calls == 0 && counters.unresolved > 0) {
+    return CodecDiagnosis::unresolved;
+  }
+  if (counters.local_calls == 0) {
+    return CodecDiagnosis::not_local;
+  }
+  return CodecDiagnosis::local;
+}
+
+// The diagnosis as text: the status block the operator reads and the log
+// line. It says what the counters **proved**, not what the feature should
+// do — a diagnosis, not a symptom.
+[[nodiscard]] constexpr auto codec_diagnosis_text(CodecDiagnosis diagnosis) noexcept
+    -> const char* {
+  switch (diagnosis) {
+    case CodecDiagnosis::no_calls:
+      return "the hooked codec never ran";
+    case CodecDiagnosis::unresolved:
+      return "the local controller could not be resolved";
+    case CodecDiagnosis::not_local:
+      return "the codec ran, but never for the local controller";
+    case CodecDiagnosis::local:
+      return "the codec ran for the local controller";
+  }
+  return "the codec diagnosis is unknown";
+}
+
 // --- the evidence ---------------------------------------------------------
 
 // The signed difference between the server's aim yaw and the client's

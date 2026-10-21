@@ -230,6 +230,96 @@ class TestAnimfixDutyCycle(unittest.TestCase):
         self.assertIsNone(result["duty_cycle"])
 
 
+class TestAnimfixCodecDiagnosis(unittest.TestCase):
+    """The **diagnosis** the codec counters settle.
+
+    The failure this exists for: a scenario that says "nothing was captured"
+    and stops there. That is a *symptom* — the operator cannot tell "the
+    codec never ran" (the seam is wrong) from "the codec ran for somebody
+    else" (the comparison is wrong) from "the local controller could not be
+    resolved" (the payload's own state is stale). Each of the three needs a
+    different fix, so the scenario must name which one it was.
+    """
+
+    @staticmethod
+    def _block(**counters: Any) -> dict[str, Any]:
+        block: dict[str, Any] = {
+            "animfix": True,
+            "animfix_ready": True,
+            "animfix_status": "ok",
+            "animfix_acted": False,
+            "animfix_captures": 0,
+            "animfix_applies": 0,
+            "animfix_skips": 0,
+            "animfix_data_valid": False,
+            "animfix_server_aim_yaw": None,
+            "animfix_predicted_aim_yaw": None,
+            "animfix_aim_yaw_delta": None,
+            "animfix_codec_calls": 0,
+            "animfix_codec_calls_modern": 0,
+            "animfix_codec_calls_chainer": 0,
+            "animfix_codec_other_controller": 0,
+            "animfix_codec_not_local": 0,
+            "animfix_codec_local_calls": 0,
+        }
+        block.update(counters)
+        return block
+
+    def _run(self, block: dict[str, Any]) -> str:
+        game = FakeGame(block, climbing=False)
+        with self.assertRaises(Exception) as raised:
+            animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
+        return str(raised.exception)
+
+    def test_no_codec_call_is_h1(self) -> None:
+        """Not one call: the hooked codec never runs."""
+        message = self._run(self._block())
+        self.assertIn("H1", message)
+        self.assertIn("never ran", message)
+
+    def test_calls_for_other_controllers_are_h2(self) -> None:
+        """The codec runs, but never for the local player."""
+        message = self._run(self._block(animfix_codec_calls=12,
+                                        animfix_codec_other_controller=12,
+                                        animfix_codec_calls_modern=12))
+        self.assertIn("H2", message)
+        self.assertIn("never for the local controller", message)
+
+    def test_an_unresolvable_local_controller_is_h2(self) -> None:
+        """The comparison could not be made: a different fix again."""
+        message = self._run(self._block(animfix_codec_calls=5,
+                                        animfix_codec_not_local=5,
+                                        animfix_codec_calls_chainer=5))
+        self.assertIn("H2", message)
+        self.assertIn("could not be resolved", message)
+
+    def test_a_healthy_payload_is_not_diagnosed_as_broken(self) -> None:
+        """The codec ran for the local player: the diagnosis says so."""
+        diagnosis = animfix_scenario.diagnose_codec(9, 8, 0, 1)
+        self.assertIn("local controller", diagnosis)
+        self.assertNotIn("H1", diagnosis)
+        self.assertNotIn("H2", diagnosis)
+
+    def test_the_diagnosis_agrees_with_the_payloads_own(self) -> None:
+        """The scenario and the payload must not tell different stories."""
+        self.assertIn("never ran", animfix_scenario.diagnose_codec(0, 0, 0, 0))
+        self.assertIn("never for the local controller",
+                      animfix_scenario.diagnose_codec(3, 3, 0, 0))
+        self.assertIn("could not be resolved",
+                      animfix_scenario.diagnose_codec(3, 0, 3, 0))
+        self.assertIn("local controller", animfix_scenario.diagnose_codec(3, 2, 0, 1))
+
+    def test_the_counters_are_reported(self) -> None:
+        """The numbers are in the result: the operator reads them."""
+        game = FakeGame(self._block(animfix_codec_calls=7,
+                                    animfix_codec_other_controller=7,
+                                    animfix_codec_calls_modern=4,
+                                    animfix_codec_calls_chainer=3), climbing=False)
+        with self.assertRaises(Exception):
+            animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
+        self.assertEqual(game.writes[-1], ("animfix", False))
+
+
 class TestAnimfixScenario(unittest.TestCase):
     """The scenario's contract: observation-only, and it reports the evidence."""
 

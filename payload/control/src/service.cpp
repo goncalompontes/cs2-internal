@@ -389,6 +389,21 @@ void Service::do_state(Json& out) noexcept {
   set_ok(out, to_json(snapshot));
 }
 
+// Keep the local pawn current for the animfix's capture (see the header).
+void Service::refresh_local_pawn() noexcept {
+  if (!reader_.has_value()) {
+    refresh_reader(true);
+  }
+  if (!reader_.has_value()) {
+    return;
+  }
+  const game::Snapshot snapshot = reader_->snapshot();
+  refresh_reader(snapshot.valid);
+  if (snapshot.valid) {
+    note_local_pawn(snapshot);
+  }
+}
+
 void Service::do_exec(const Json& args, Json& out) noexcept {
   const Json* line = args.find("line");
   if (line == nullptr || !line->is_string()) {
@@ -906,6 +921,25 @@ auto Service::input_status() noexcept -> Json {
   // outside the engine's range). It should be zero.
   result.set("animfix_rejected", Json::number(static_cast<double>(input_.animfix_rejected())));
   result.set("animfix_data_valid", Json::boolean(input_.animfix_data_valid()));
+  // The **codec counters**: what the hooked codecs did. They are the
+  // diagnosis of a capture that never happened — "the codec never ran" (H1)
+  // against "the codec ran, but not for the local player" (H2) — and the
+  // per-codec split says which of the class's two decode paths the engine
+  // used.
+  result.set("animfix_codec_calls",
+             Json::number(static_cast<double>(input_.animfix_codec_calls())));
+  result.set("animfix_codec_calls_modern",
+             Json::number(static_cast<double>(input_.animfix_codec_calls_modern())));
+  result.set("animfix_codec_calls_chainer",
+             Json::number(static_cast<double>(input_.animfix_codec_calls_chainer())));
+  result.set("animfix_codec_other_controller",
+             Json::number(static_cast<double>(input_.animfix_codec_other_controller())));
+  result.set("animfix_codec_not_local",
+             Json::number(static_cast<double>(input_.animfix_codec_not_local())));
+  result.set("animfix_codec_local_calls",
+             Json::number(static_cast<double>(input_.animfix_codec_local_calls())));
+  result.set("animfix_codec_diagnosis",
+             Json::string(animfix::codec_diagnosis_text(input_.animfix_codec_diagnosis())));
   if (input_.animfix_data_valid()) {
     result.set("animfix_server_aim_yaw", Json::number(input_.animfix_server_aim_yaw()));
     result.set("animfix_predicted_aim_yaw", Json::number(input_.animfix_predicted_aim_yaw()));
@@ -981,6 +1015,12 @@ auto Service::input_status() noexcept -> Json {
 
 void Service::do_input(const Json& args, Json& out) noexcept {
   input_.refresh();
+  // The animfix's capture needs the local pawn to be current (see
+  // `refresh_local_pawn`): it is the way to the local controller the capture
+  // compares against.
+  if (input_.animfix()) {
+    refresh_local_pawn();
+  }
   if (const Json* via = args.find("via"); via != nullptr && via->is_string()) {
     const std::string_view name = via->as_string();
     if (name == "usercmd") {

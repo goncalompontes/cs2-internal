@@ -41,6 +41,14 @@
 // parameter the correction writes. Those are the numbers the engine access
 // uses to read the server's values and to find the parameter, so a wrong
 // offset here would silently read the wrong field.
+//
+// The **codec seams** are pinned as well: the class has **two** decode paths
+// (the schema-table one and the network-var chainer one), the payload hooks
+// both, and the counters say which one the engine ran — that is the
+// difference between a diagnosis ("the codec never ran") and a symptom
+// ("nothing was captured"). The chainer twin's signature is pinned as text
+// (it carries wildcards) and its prologue as bytes, and the prologue must be
+// **relocation-free** like the other seams'.
 
 #include <array>
 #include <cassert>
@@ -645,10 +653,33 @@ constexpr unsigned char k_codec_pattern[] = {
 constexpr unsigned char k_setter_pattern[] = {0xf3, 0x41, 0x0f, 0x10, 0x08, 0x4c, 0x8b, 0xc9,
                                               0xf3, 0x0f, 0x10, 0x05, 0xa0, 0x0f, 0x3c, 0x01};
 
+// The **chainer twin** of the codec (`CCS2PawnGraphController`'s other
+// decode path, the one that goes through the network-var chainer instead of
+// the schema table — the live build, sha256 659940c1..., RVA 0x8daab0).
+//
+// Its 14-byte prologue is the window the inline hook copies. Unlike the
+// modern codec's, it ends in `push rbp / mov rbp,rsp` — and that is still
+// safe: the trampoline replays the very same bytes on the very same stack
+// (the detour jumps to it, so the stack is the callee's entry stack), so the
+// frame the function sets up is the frame it would have set up itself.
+//
+// The **whole** signature cannot be pinned as bytes: it carries wildcards
+// (the call displacements and the RIP-relative load), so it is pinned as the
+// **text** the dumper carries - and the wildcards are what make it unique
+// in the module while still matching the class.
+constexpr unsigned char k_chainer_codec_prologue[] = {0x48, 0x89, 0x5c, 0x24, 0x18, 0x48, 0x89,
+                                                       0x7c, 0x24, 0x20, 0x55, 0x48, 0x8b, 0xec};
+constexpr const char* k_chainer_codec_signature =
+    "48 89 5C 24 18 48 89 7C 24 20 55 48 8B EC 48 83 EC 30 48 89 74 24 40 48 8B DA E8 ?? "
+    "?? ?? ?? 48 83 BB 40 01 00 00 00 48 8D BB 48 01 00 00 74 ?? 33 D2 48 8B CB E8 ?? ?? "
+    "?? ?? 84 C0 74 ?? 80 3F 00 74 ?? 48 8B 8B 20 01 00 00 48 8D 35 ?? ?? ?? ?? 45 33 C9 "
+    "48 89 75 F8 4C 8D 45 18 C7 45 18 FF FF FF FF 48 8D 55 F0 48 C7 45 F0 1E 35 E2 FA";
+
 // The window the inline hook copies: the first bytes of the pattern.
 constexpr std::size_t k_anim_tick_prologue_size = 15;
 constexpr std::size_t k_codec_prologue_size = 14;
 constexpr std::size_t k_setter_prologue_size = 16;
+constexpr std::size_t k_chainer_codec_prologue_size = 14;
 
 // The repository's root, so the test can read the dumper's own source.
 auto test_repository_root(int argc, char** argv) -> std::string {
@@ -675,6 +706,10 @@ auto signature_pattern(const std::string& source, const std::string& name) -> st
 }
 
 // The bytes of a dumper signature.
+//
+// A **wildcard** byte ("??") is read as 0: the caller compares only the
+// concrete head of the pattern (the prologue the hook copies), and a
+// signature that wildcards the prologue would not resolve the seam at all.
 auto signature_bytes(const std::string& source, const std::string& name)
     -> std::vector<unsigned char> {
   std::vector<unsigned char> bytes{};
@@ -684,7 +719,11 @@ auto signature_bytes(const std::string& source, const std::string& name)
     const std::size_t end = pattern.find(' ', i);
     const std::string byte = pattern.substr(i, end == std::string::npos ? end : end - i);
     if (!byte.empty()) {
-      bytes.push_back(static_cast<unsigned char>(std::stoul(byte, nullptr, 16)));
+      if (byte.find('?') != std::string::npos) {
+        bytes.push_back(0);
+      } else {
+        bytes.push_back(static_cast<unsigned char>(std::stoul(byte, nullptr, 16)));
+      }
     }
     if (end == std::string::npos) {
       break;
@@ -717,6 +756,32 @@ void test_the_pinned_prologues_are_the_dumpers_signatures(const std::string& roo
   assert(matches("animfix_anim_tick", k_anim_tick_pattern, sizeof(k_anim_tick_pattern)));
   assert(matches("animfix_graph_codec", k_codec_pattern, sizeof(k_codec_pattern)));
   assert(matches("animfix_param_setter", k_setter_pattern, sizeof(k_setter_pattern)));
+}
+
+// The **chainer twin**'s signature is pinned as text: it carries wildcards
+// (the call displacements and the RIP-relative load), and the payload
+// resolves the seam through the whole of it. A signature that drifted would
+// resolve the wrong function - or nothing - and the animfix would be
+// silently inert again.
+//
+// The **prologue** is pinned as bytes against the signature's head, so the
+// two cannot drift apart: the hook copies the prologue, and the signature
+// must start with it.
+void test_the_chainer_codec_signature_is_the_dumpers(const std::string& root) {
+  assert(!root.empty());
+  std::ifstream dumper(root + "/external/dumper/src/analysis.rs");
+  assert(dumper.good());
+  const std::string source((std::istreambuf_iterator<char>(dumper)),
+                           std::istreambuf_iterator<char>());
+  assert(signature_pattern(source, "animfix_graph_codec_chainer") ==
+         std::string(k_chainer_codec_signature));
+  // The head of the signature is the prologue the hook copies: the first
+  // fourteen byte tokens of the pattern are the fourteen bytes of the
+  // prologue, so the two cannot drift apart.
+  const std::vector<unsigned char> head = signature_bytes(
+      source, "animfix_graph_codec_chainer");
+  assert(head.size() >= k_chainer_codec_prologue_size);
+  assert(std::memcmp(head.data(), k_chainer_codec_prologue, k_chainer_codec_prologue_size) == 0);
 }
 
 // **The seam must be hookable by the repository's own relocator, at any
@@ -784,6 +849,53 @@ void test_the_seams_prologues_are_hookable() {
   const Outcome setter = probe(k_setter_pattern, k_setter_prologue_size);
   assert(setter.installed);  // it fits here, where both live close together
   assert(setter.rewritten);
+  // The chainer twin's prologue: accepted, and **nothing to rewrite** — so
+  // the second seam is hookable wherever the module and the trampoline live.
+  const Outcome chainer = probe(k_chainer_codec_prologue, k_chainer_codec_prologue_size);
+  assert(chainer.installed);
+  assert(!chainer.rewritten);
+}
+
+// --- the codec diagnosis ---------------------------------------------------
+
+// The **diagnosis**: the counters say which of the two hypotheses holds —
+// the hooked codec never runs (H1), or it runs but not for the local player
+// (H2).
+//
+// The failure this test exists for is a **silent** one: a diagnosis that
+// always says "the codec never ran" (or always "it ran for somebody else")
+// would leave the operator with a plausible sentence and no information —
+// and the feature would be "fixed" by hooking a codec that is not the
+// problem. So every case is pinned, including the one that says the codec
+// *did* run for the local player.
+void test_the_codec_counters_settle_the_hypothesis() {
+  // H1: not a single call — the hooked codec never runs.
+  const animfix::CodecCounters silent{};
+  assert(animfix::classify_codec(silent) == animfix::CodecDiagnosis::no_calls);
+  // H2: the codec runs, but every call is somebody else's.
+  const animfix::CodecCounters others{.calls = 12, .other_controller = 12};
+  assert(animfix::classify_codec(others) == animfix::CodecDiagnosis::not_local);
+  // H2: the comparison could not be made at all (the local controller could
+  // not be resolved) — the more precise of the two, and the one that says
+  // what to look at next.
+  const animfix::CodecCounters unresolved{.calls = 5, .unresolved = 5};
+  assert(animfix::classify_codec(unresolved) == animfix::CodecDiagnosis::unresolved);
+  // The codec ran for the local player: the capture is expected to happen.
+  const animfix::CodecCounters ours{.calls = 9, .other_controller = 8, .local_calls = 1};
+  assert(animfix::classify_codec(ours) == animfix::CodecDiagnosis::local);
+  // A local call wins over an unresolved one: the codec *did* run for us.
+  const animfix::CodecCounters mixed{.calls = 4, .unresolved = 1, .local_calls = 3};
+  assert(animfix::classify_codec(mixed) == animfix::CodecDiagnosis::local);
+  // The texts are what the operator reads: each case says something
+  // different, and none of them is empty.
+  assert(std::strcmp(animfix::codec_diagnosis_text(animfix::CodecDiagnosis::no_calls),
+                     "the hooked codec never ran") == 0);
+  assert(std::strcmp(animfix::codec_diagnosis_text(animfix::CodecDiagnosis::unresolved),
+                     "the local controller could not be resolved") == 0);
+  assert(std::strcmp(animfix::codec_diagnosis_text(animfix::CodecDiagnosis::not_local),
+                     "the codec ran, but never for the local controller") == 0);
+  assert(std::strcmp(animfix::codec_diagnosis_text(animfix::CodecDiagnosis::local),
+                     "the codec ran for the local controller") == 0);
 }
 
 // --- the evidence ---------------------------------------------------------
@@ -825,7 +937,9 @@ auto main(int argc, char** argv) -> int {
   test_the_capture_must_belong_to_the_live_controller();
   test_the_four_slots_must_be_distinct();
   test_the_pinned_prologues_are_the_dumpers_signatures(repository_root);
+  test_the_chainer_codec_signature_is_the_dumpers(repository_root);
   test_the_seams_prologues_are_hookable();
+  test_the_codec_counters_settle_the_hypothesis();
   test_the_aim_yaw_difference_is_signed_and_wrapped();
   std::puts("control-animfix: ok");
   return 0;

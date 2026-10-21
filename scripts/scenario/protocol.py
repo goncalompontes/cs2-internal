@@ -567,6 +567,18 @@ class InputStatus(TypedDict, total=False):
     animfix_server_aim_yaw: float | None
     animfix_predicted_aim_yaw: float | None
     animfix_aim_yaw_delta: float | None
+    # The **codec counters** (`docs/re/animfix.md` §10): what the hooked
+    # codecs did, call by call. They are the diagnosis of a capture that
+    # never happened — "the codec never ran" (H1) against "the codec ran,
+    # but not for the local player" (H2) — and the per-codec split says
+    # which of the class's two decode paths the engine used.
+    animfix_codec_calls: int
+    animfix_codec_calls_modern: int
+    animfix_codec_calls_chainer: int
+    animfix_codec_other_controller: int
+    animfix_codec_not_local: int
+    animfix_codec_local_calls: int
+    animfix_codec_diagnosis: str
 
 
 class MoveSampleDict(TypedDict):
