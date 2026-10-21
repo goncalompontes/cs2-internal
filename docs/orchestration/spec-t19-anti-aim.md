@@ -65,11 +65,31 @@ computes none today (`docs/re/angle-split.md` §5.4). The community's Weave
 note says a modified `forward`/`side` move is rejected by the server unless
 the command is re-serialised and the CRC recomputed.
 
-**You must not guess the CRC.** The spec's file-ownership section tells you
-what to do instead: implement the anti-aim behind a **gate** that is **off by
-default** until the CRC question is settled, and report it as an open blocker.
-An anti-aim that silently breaks the operator's movement is worse than one
-that is not enabled.
+> **CORRECTED 2026-10-21, after the adversarial review.** This section's
+> original premise was **wrong**, and the review proved it from this
+> repository's own measurements:
+>
+> * `docs/re/strafing.md:240` (the measured table): the **analog move**
+>   (`forwardmove`/`leftmove` + the raw axes) — "the **direction** is honoured
+>   — it *does* take over the air movement". The payload's auto-strafe already
+>   writes exactly the fields the re-base would write, and the server honours
+>   it (measured at +85 u/s per hop).
+> * `docs/re/angle-split.md` §5.4: the client **never writes** `move_crc` at
+>   all. If the server verified the move values against it, *every* command —
+>   modified or not — would be rejected.
+> * Weave's note describes a **different** code path: it **re-serialises**
+>   the command, which is what makes its CRC stale. The payload writes **in
+>   place**, after the engine built the command.
+>
+> **So the CRC is not load-bearing on this build**, and a gate that makes the
+> feature inert protects against a risk that does not exist. The gate must
+> therefore default **open**, with "we do not recompute the CRC" kept as a
+> **caveat in the status** — not as a gate.
+
+**You must not guess the CRC.** And you must not gate the feature on a risk
+this build's evidence excludes. If you keep any gate, it must be reported
+with an honest name and an honest meaning — the status must say what is
+actually gated.
 
 ## The base branch
 
@@ -249,6 +269,11 @@ You own:
   **not** hand-edit the generated SDK headers)
 * `scripts/scenario/scenarios/anti_aim.py` (new) and the scenario's
   registration/tests
+* `scripts/scenario/protocol.py` — the scenario's typed view of the payload's
+  status block. **Added to the ownership list by the 2026-10-21 review**: the
+  scenario reads the anti-aim's status keys through the typed `InputStatus`,
+  and a `total=False` TypedDict rejects unknown keys in mypy, so the edit is
+  **necessary** and **purely additive**.
 * `docs/re/` or `docs/research/` — **only** if you measure something new that
   belongs there (with the repo's evidence standard)
 
