@@ -550,3 +550,140 @@ broke the game. Nothing in the payload hooks a lambda.
 | `0x1800580A0` / `0x580A0` | scenesystem | the real `CAnimatableSceneObjectDesc::DrawPrimitive` |
 | `0x180678360` / `0x678360` | scenesystem | the **lambda**'s type descriptor — the wrong target |
 
+
+## 9. The draw detour's guard, and the install's refusal latch
+
+This section records the two fixes the adversarial review of the draw hook
+(commit `1bcb407`) forced, and the evidence behind them. Nothing here
+changes the target: §8 stands.
+
+### 9.1 The re-entrancy guard is per owner, not process-wide
+
+§8.5 said the draw and the original it calls are synchronous on one thread,
+so a plain depth counter gives the same protection as a `thread_local` one.
+**That was wrong**, and the way it was wrong is the interesting part: a
+process-wide counter does not merely mis-count, it **refuses**.
+
+The guard's early return does not forward the draw. It returns without
+calling the original, so the primitive is **not drawn at all** — a hole in
+the model for that frame, and a silent one (the counters do not even see it:
+the early return happens before `seen_`).
+
+The second thread is not hypothetical. The live `scenesystem.dll`:
+
+* imports `g_pThreadPool`, `CThreadedJob` and `CThreadSemaphore` from
+  `tier0.dll`;
+* carries the job bodies `CSceneSystem::Thread_RenderSceneDrawList`,
+  `Thread_RenderViewLayer`, `Thread_RenderGpuCullingLayer` and
+  `Thread_ProcessProceduralLayer`, the `RenderLayerDrawListPart` unit, the
+  `CParallelLambdaJob` and `CUtlMultiJobProcessor` types, and the profiler
+  string `"%.1fms culling, %.1fms rendering in %i jobs"`;
+* carries the `sc_disableThreading` convar — the kill switch, so the
+  threading is **on** by default.
+
+`CAnimatableSceneObjectDesc::DrawPrimitive` is reached only through the
+desc's vtable slot 1 (the batch wrapper), which is exactly the draw-list
+path those jobs walk. So two jobs can be inside the detour at the same
+instant, and the second one's draw was dropped.
+
+The repository's own rule for this class of guard
+(`docs/orchestration/spec-t27-thirdperson-crash.md` §4.1) says it outright:
+
+> The guard must **not** refuse another thread's call … a shared counter that
+> makes one thread's call return early would silently drop that thread's
+> camera update. A **per-owner** design (the thread id that owns the depth,
+> plus an atomic depth) satisfies both.
+
+So the guard is now the **shared, per-owner** one
+(`payload/features/include/cs2/features/recursion_guard.hpp`, taken from the
+third-person camera's task — the tree holds exactly one implementation of
+it, and the host test `payload/features/tests/test_chams_guard.cpp` fails if
+a second one appears):
+
+* the owner is the **OS thread id** (`GetCurrentThreadId()`), so a call from
+  another thread is never mistaken for a recursion — it is drawn;
+* the state is one 64-bit word per slot (owner in the high half, depth in
+  the low half), so a claim and a release are one compare-exchange: no lock,
+  no allocation, no `thread_local`;
+* the guard is held **across** the trampoline call — that is the recursion
+  it exists to break, so a guard released before the call would protect
+  nothing — and it is released on **every** path. The holder
+  (`cs2/features/guard_scope.hpp`) enters the guard in its constructor and
+  leaves it in its destructor, so an early return cannot forget it.
+
+A `thread_local` is still not an option: the payload is manually mapped and
+its TLS block is not installed on the game's threads, so a thread-local read
+on that path faults inside the payload (`read addr=0x4` on the camera's
+detour).
+
+### 9.2 The refusal latch follows the operator's switch
+
+The install path keeps a **refusal latch**: a refused install is reported
+once (`game::append_log` opens, writes and closes a file per call, and the
+path runs on the render thread), so the attempt is not repeated every frame.
+
+The latch was never cleared. The operator switched the chams off and on
+again and the latch survived the switch-off, so:
+
+* the next switch-on never reached the report at all — the refusal was
+  never reported again, and the log was silent about it;
+* the HUD read `hook=installing` **forever**, which is a lie: no install
+  was being attempted, and the reason the hook is not installed was gone.
+
+The rule is now pure and in the decision header
+(`cs2::features::hook_target`):
+
+* `may_attempt_install(enabled, refused)` — the feature has to be on and the
+  last attempt must not have been refused;
+* `refusal_after_switch(enabled, refused)` — the latch follows the switch:
+  switching the feature **off** clears it, so the next switch-on retries the
+  install and reports the refusal again (which is what the log's own latch
+  reset was always for);
+* `must_report(reported, status)` — the log writes a line only when the
+  state changes.
+
+The counters are reset with it: a re-enable shows the new hook's own
+numbers, not the previous session's.
+
+### 9.3 The status line does not allocate
+
+The status line is built on the game's render thread, once per frame, so it
+is written **straight into the caller's buffer**
+(`Chams::status_line(char*, std::size_t)`), the way the sibling providers
+(`Service::rage_status`, `movement_status`) do it. The description is a
+`string_view`, so it is printed with a precision (`%.*s`) instead of being
+copied into a temporary `std::string`.
+
+The state reads `hook=installed` when the hook is in place — not `hook=on`,
+which was easy to confuse with the *feature* being on (`off` is the
+feature's own idle state).
+
+### 9.4 The module identity is checked strictly
+
+The offset's module used to be checked only when it was **not empty**, so an
+offset that named no module skipped the check altogether. The generated SDK
+always fills the module (the dumper writes `off.module`), so this was not
+exploitable — but the strict form is the same length and has no hole.
+
+### 9.5 What is still open
+
+1. **The live run.** No live run was possible: the agent session is session
+   0, with no GPU and no interactive desktop. The detour has still never run
+   against the real draw.
+2. **The calibration dump** in the tree has no `scene_draw_primitive`
+   entry, so the chams stay dormant — with the reason *no offset* — until
+   the operator refreshes it with `scripts/calibrate-live.py`.
+3. **The thread-pool overlap** is established from the module's imports and
+   its job bodies, not from a live trace: the fix is the per-owner guard
+   either way, but the number of threads that actually overlap in one frame
+   has not been measured.
+
+### 9.6 The evidence index for this section
+
+| Where | What it proves |
+|---|---|
+| `payload/features/include/cs2/features/recursion_guard.hpp` | the shared, per-owner guard (taken from the third-person camera's task) |
+| `payload/features/include/cs2/features/guard_scope.hpp` | the holder: entered in the constructor, released in the destructor |
+| `payload/features/tests/test_chams_guard.cpp` | another thread's call is not refused; the scope releases on every path; the tree holds one implementation |
+| `payload/features/tests/test_chams_target.cpp` | the refusal latch follows the switch, and the refusal is reported again after a re-enable |
+| `payload/features/include/cs2/features/hook_target.hpp` | the pure rules: `may_attempt_install`, `refusal_after_switch`, `must_report` |

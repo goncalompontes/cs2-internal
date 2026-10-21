@@ -158,7 +158,7 @@ broke the game. Nothing in this task hooks a lambda again.
 // the hook target of the chams. Resolved as a function entry (the match
 // start). The 20-byte prologue is unique in `scenesystem.dll` on the
 // build the RE measured (sha256 040eb851…, PE timestamp 0x6ACFCD4F);
-// `docs/re/chams.md` §7 records the measurement.
+// `docs/re/chams.md` §8 records the measurement.
 sig(
     "scenesystem.dll",
     "scene_draw_primitive",
