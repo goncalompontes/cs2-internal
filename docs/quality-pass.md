@@ -427,7 +427,7 @@ git grep -E -h -c '^\s*(const\s+)?HANDLE\s+\w+\s*=' -- $(cat /tmp/t21-files.txt)
 
 | what | before | after |
 |---|---|---|
-| `CloseHandle` (occurrences of the token) | 35 | 14 |
+| `CloseHandle` (occurrences of the token) | 35 | 15 |
 | raw `HANDLE` locals | 25 | 5 |
 
 Before, the 35 occurrences were: 9 in `rage_config.cpp`, 8 in the injector, 4
@@ -435,12 +435,13 @@ in the model publisher, 3 in the contended `service.cpp`, 3 in the overlay's
 transport, 2 in the watchdog, 2 in the config store, and one each in the
 present hook, the payload log, the channel and the injector's test aid.
 
-Of the 14 that are left: 7 are in `rage_config.cpp` (the type aliases, the
-comments and the policy's own `close`), 2 are the shared policy in
-`cs2/core/win_handle.hpp`, 1 is the channel's closer, **3 are in the
-contended `service.cpp`** (F3, F4), and 1 is the injector's trivial test aid.
-The count is of *occurrences of the token*, not of call sites: seven of the
-fourteen are the type aliases and the comments the method also counts.
+Of the 15 that are left: 7 are in `rage_config.cpp` (the type aliases, the
+comments and the string literals), 3 are the shared policy in
+`cs2/core/win_handle.hpp` (two comments and the policy's own `close`), 1 is
+the channel's closer, **3 are in the contended `service.cpp`** (F3, F4), and 1
+is the injector's trivial test aid. The count is of *occurrences of the
+token*, not of call sites: nine of the fifteen are aliases, comments and
+string literals that the method also counts, and only six are calls.
 
 Of the 5 remaining raw `HANDLE` locals: 1 is the channel's local (handed
 straight to the wrapper), 1 is the contended `service.cpp`, 1 is the overlay's
@@ -745,7 +746,7 @@ fresh checkout of the final tree — every step green (§7.2).
 | **F4** | the failures are collected per group, so one broken file that failed in both gated groups was reported as *two* translation units | the failed list is de-duplicated (`distinct_failures`), and a file's output is shown once, with the group that found it | a broken `payload/game/src/log.cpp`: the gate says "failed on 1 translation unit(s)" (it said 2) and exits 1 |
 | **F5** | the compiler is the runner image's LLVM and is **not** pinned; the workflow header claimed the configuration this repository is verified with locally | the header says the compiler is the image's, states the exposure (the image ships 20.1.8, the tree was verified with 22.1.8; the same `-std=c++26`, no `__cplusplus` conditionals) and records the image facts the workflow relies on | — |
 | **F6** | `meson` and `ninja` were installed unpinned in the same step that installs the pinned `requirements-dev.txt` | both are pinned in `requirements-dev.txt` (meson 1.11.2, ninja 1.13.0) and installed from it | — |
-| **F7** | §6.1's numbers did not follow from the method printed next to them (35 → 14 tokens and 25 → 5 raw locals are what the documented regexes give) | §6.1 publishes the exact commands and the numbers they produce | the commands were run verbatim in git bash: 35, 14, 25, 5 |
+| **F7** | §6.1's numbers did not follow from the method printed next to them: the table said "31 → 12 call sites" and the documented regexes give 35 → 14 tokens and 25 → 5 raw locals | §6.1 publishes the exact commands and the numbers they produce | the commands were run verbatim in git bash: **35, 15, 25, 5** — the `CloseHandle` count was 14 when this round was fixed and became 15 with the M1 commit `c4769f8` (the third mention in `win_handle.hpp`'s `usable()` comment); §6.1 is re-measured at the tip |
 
 ### 9.5 The re-review's commits
 
