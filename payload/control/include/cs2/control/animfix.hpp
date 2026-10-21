@@ -20,14 +20,21 @@
 //    → `ReflectAim` / `ReflectMove`) pushes the *client's* values into the
 //    AG2 graph through the parameter **setter** — and it does so for exactly
 //    those four float slots. The prediction never writes the replicated value
-//    in the slot, so the **server's value never reaches the graph**: the
-//    prediction is the only writer, and the graph is evaluated from it.
+//    in the slot, so the **server's value never reaches the graph**: through
+//    the setter, the prediction is the only writer.
 //
-// The animfix therefore has one job: hand the setter the **server's** value
-// instead of the client's, for the local player's four float slots. That is
-// the seam that needs **no ordering assumption** — the correction lands
-// exactly where the prediction writes, so it does not matter whether the
-// snapshot decode runs before or after the prediction inside one frame.
+// So the animfix has one job: put the **server's** value into the graph
+// instead of the client's, for the local player's four float slots.
+//
+// **Where the correction goes.** The graph is evaluated in
+// `CAnimGraphGameSystem::AnimTickUpdate` (`0x35aeb0`), which is *after* the
+// client's prediction in the same tick (§9.3), so the correction is applied
+// there — in the anim tick, before the evaluation. The parameter write is
+// the setter's own (`*(float *)(*(node + 0x10)[index] + 0x18) = value`),
+// replicated here because the setter itself is **not hookable**: its third
+// prologue instruction is a RIP-relative load whose displacement cannot be
+// relocated to the trampoline (the module is mapped high, the trampoline
+// low), so the repo's inline relocator refuses it.
 //
 // What is left open (and deliberately so): the **anim-state** divergence.
 // The client's `CCSPlayerAnimationState` is never replicated, so the move
@@ -59,6 +66,14 @@ inline constexpr std::size_t k_slot_count = 28;
 inline constexpr std::size_t k_slot_value_offset = 0x00;
 inline constexpr std::size_t k_slot_node_offset = 0x08;
 inline constexpr std::size_t k_slot_index_offset = 0x10;
+
+// Inside the AG2 parameter **node**: the array of parameter objects, the
+// stride of that array, and the offset of the value inside a parameter
+// object. The setter's own write is
+// `*(float *)(*(node + 0x10)[index] + 0x18) = value`.
+inline constexpr std::size_t k_node_array_offset = 0x10;
+inline constexpr std::size_t k_parameter_stride = 8;
+inline constexpr std::size_t k_parameter_value_offset = 0x18;
 
 // The slots the animfix owns: the four the server replicates **as floats**
 // and the client's prediction rewrites through the parameter setter. The
@@ -104,16 +119,13 @@ inline constexpr std::size_t k_tracked_slot_count = k_tracked_slots.size();
 }
 
 // The AG2 parameter a slot writes to: the node pointer and the parameter's
-// index inside that node. The prediction's write is recognised by this pair.
+// index inside that node.
 struct Target {
   std::uintptr_t node{0};
   std::int16_t index{0};
 };
 
-// The tracked slot a write to `(node, index)` belongs to, if any. The
-// prediction writes the graph's parameters through the setter, and the
-// animfix recognises **its own** four slots by this pair — a write to any
-// other parameter (another entity's, another class's) is left alone.
+// The tracked slot a write to `(node, index)` belongs to, if any.
 //
 // A slot whose node is null is not bound to a graph parameter yet, so it
 // cannot be recognised (and a null node must not match an unbound slot).
@@ -131,20 +143,46 @@ struct Target {
   return std::nullopt;
 }
 
+// True when the four tracked slots point at four **different** graph
+// parameters. Two slots that share a `(node, index)` pair would collide in
+// `find_slot` (the first match wins) and one of them would silently never
+// be corrected — so the capture refuses such a controller.
+[[nodiscard]] inline auto targets_are_distinct(
+    const std::array<Target, k_tracked_slot_count>& targets) noexcept -> bool {
+  for (std::size_t i = 0; i < k_tracked_slot_count; ++i) {
+    if (targets[i].node == 0) {
+      return false;  // an unbound slot
+    }
+    for (std::size_t j = i + 1; j < k_tracked_slot_count; ++j) {
+      if (targets[i].node == targets[j].node && targets[i].index == targets[j].index) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 // --- the validity rule ----------------------------------------------------
 
 // How old a capture may be before it is refused, in milliseconds on the
-// caller's monotonic clock. The server ticks at 64 Hz, so 32 ms is about
-// **two of its ticks**: the capture still describes the server's current
-// animation. The bound only bites when the connection stalls (or the player
-// dies, or the game is paused) — then the server's value describes a pose it
-// left behind, and writing it over the client's fresh prediction would move
-// the local hitboxes *backwards*, which is worse than not fixing them at
-// all.
-inline constexpr std::uint64_t k_max_capture_age_ms = 32;
+// caller's monotonic clock.
+//
+// **One client frame** (16 ms at 60 Hz) — and, just as much, **one of the
+// server's 64 Hz ticks** (15.6 ms): the capture must describe the server's
+// animation of the tick that is being drawn. A capture that is older has
+// aged out (a stalled connection, a dead player, a paused game) and the
+// server's value then describes a pose it has left behind — writing it over
+// the client's fresh prediction would move the local hitboxes *backwards*,
+// which is worse than not fixing them at all.
+//
+// The bound is on the **age of the data**, not on the time since the
+// receipt: a decode re-stamps the capture, so the age is measured from the
+// decode that produced the values.
+inline constexpr std::uint64_t k_max_capture_age_ms = 16;
 
-// The captured state: the server's values for the tracked slots and the time
-// they arrived.
+// The captured state: the server's values for the tracked slots, the
+// generation they were captured at, and the generation each slot was last
+// re-applied at.
 //
 // A decode **replaces** the capture (the values are copied out of the
 // controller's slots, which the client's prediction never writes), so the
@@ -152,6 +190,7 @@ inline constexpr std::uint64_t k_max_capture_age_ms = 32;
 // accumulation and never a superseded one.
 struct Capture {
   std::array<float, k_tracked_slot_count> values{};
+  std::array<std::uint64_t, k_tracked_slot_count> applied{};
   std::uint64_t generation{0};
   std::uint64_t captured_at_ms{0};
   bool valid{false};
@@ -168,41 +207,51 @@ inline void store(Capture& capture, const std::array<float, k_tracked_slot_count
   capture.valid = true;
 }
 
+// True when the capture is **fresh**: it exists and it has not aged out.
+// (Whether it was already re-applied for a given slot is a separate
+// question — see `may_reapply`.)
+[[nodiscard]] inline auto capture_is_fresh(const Capture& capture, std::uint64_t now_ms) noexcept
+    -> bool {
+  return capture.valid && (now_ms - capture.captured_at_ms) <= k_max_capture_age_ms;
+}
+
 // May the captured value for `slot` be re-applied now?
 //
-// Two conditions, both required:
-//   * there is a capture at all (the codec has run at least once), and
-//   * the capture is **fresh**: it is not older than
-//     `k_max_capture_age_ms`.
+// Three conditions, all required:
+//   * there is a capture at all (the codec has run at least once),
+//   * the capture is **not stale** (it is younger than
+//     `k_max_capture_age_ms`), and
+//   * the capture has **not been re-applied for this slot yet**.
 //
-// The second condition is the "captured *this* frame" rule: the server's
-// value describes the server's animation of at most the last two ticks, and
-// a capture that has aged out describes a pose the server has long left
-// behind.
-//
-// The capture is deliberately **not** consumed by a re-apply. The engine
-// writes a graph parameter more than once per decode (the prediction runs
-// from the command path *and* from the frame path), and only the **last**
-// write before the graph is evaluated matters: a rule that allowed one
-// re-apply per capture would leave the client's own value in the graph, and
-// the animfix would do nothing at all.
+// The last one is the specification's rule: *"a captured value may only be
+// re-applied if it was captured **this** frame"*. A capture corrects a slot
+// at most once; only a newer decode (a newer generation) can correct it
+// again. That is what keeps a capture from being written over the client's
+// fresh prediction again and again, and it is why the bound above can be
+// tight: the correction lands in the same tick as the decode.
 [[nodiscard]] inline auto may_reapply(const Capture& capture, Slot slot,
                                       std::uint64_t now_ms) noexcept -> bool {
   if (!capture.valid) {
     return false;
   }
-  if (slot_position(slot) >= k_tracked_slot_count) {
+  const std::size_t position = slot_position(slot);
+  if (position >= k_tracked_slot_count) {
     return false;
+  }
+  if (capture.applied[position] >= capture.generation) {
+    return false;  // this capture was already re-applied for this slot
   }
   return (now_ms - capture.captured_at_ms) <= k_max_capture_age_ms;
 }
 
-// The captured value for `slot`, if the validity rule allows it.
-[[nodiscard]] inline auto take(const Capture& capture, Slot slot, std::uint64_t now_ms) noexcept
+// Take the captured value for `slot` if the validity rule allows it. The
+// slot is marked as re-applied, so the same capture is never used twice.
+[[nodiscard]] inline auto take(Capture& capture, Slot slot, std::uint64_t now_ms) noexcept
     -> std::optional<float> {
   if (!may_reapply(capture, slot, now_ms)) {
     return std::nullopt;
   }
+  capture.applied[slot_position(slot)] = capture.generation;
   return capture.values[slot_position(slot)];
 }
 
