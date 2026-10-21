@@ -79,10 +79,14 @@ hook fires; the offsets refresh offline reproduces the dump exactly.
 | # | severity | finding | where | fix |
 |---|---|---|---|---|
 | **H1** | blocker (historical) | The draw hook's target came from an RTTI **lambda** type; a lambda's `operator()` is static, so the nine-argument detour shifted the whole argument list and the game crashed with `0xc0000005`. The real target is `scenesystem.dll + 0x580A0` — a nine-argument member function whose signature is **exactly** the payload's existing typedef (the material at index 3). | `payload/features/src/chams.cpp` | **merged** (the signature, the pure decision function, the prologue verification) |
-| **H2** | major | The re-entrancy guard was **process-wide** and its early return **drops the draw**. The scene system renders the draw list on the **tier0 thread pool** (`g_pThreadPool`, `Thread_RenderSceneDrawList`, `"rendering in %i jobs"`, `sc_disableThreading`), so two jobs can be inside the detour at once. | `chams.cpp` | **`feat/t26-chams-draw-hook`** (the fix round: a per-owner guard, held across the trampoline call) |
-| **H3** | minor | After a refusal the status stuck at "installing" forever and the refusal was never re-reported (`install_failed_` was never cleared). | `chams.cpp` | **`feat/t26-chams-draw-hook`** (the fix round) |
-| **H4** | minor | `status_line()` allocated a `std::string` **on the game's render thread, every frame**. | `chams.cpp` | **`feat/t26-chams-draw-hook`** (the fix round) |
-| **H5** | nit | Two new public accessors were dead code; the module-identity check skipped an empty module string; `describe(installed)` returned `"on"`; the counters were not reset on toggle. | `chams.cpp` | **`feat/t26-chams-draw-hook`** (the fix round) |
+| **H2** | major | The re-entrancy guard was **process-wide** and its early return **drops the draw**. The scene system renders the draw list on the **tier0 thread pool** (`g_pThreadPool`, `Thread_RenderSceneDrawList`, `"rendering in %i jobs"`, `sc_disableThreading`), so two jobs can be inside the detour at once. | `chams.cpp` | **fixed** by the per-owner guard (the branch's fix round) |
+| **H2a** | **major** | **The per-owner guard exposes a desc-cache race.** The guard lets two jobs into the draw path *by design*, but the desc cache is published with three separate atomics (the desc last) — a protocol that is safe for **one** writer and not for two. Two descs that hash to the same slot (`(desc >> 4) & 63` — routine with hundreds of models) can leave a reader seeing **desc A with entity B**, so the chams are decided on the **wrong player** (the CT's model chamsed, the T not). The reviewer's probe of the exact protocol reproduced **965–3048** such mismatches per run. `desc_cache_stamp_` is a second, simpler race (a plain `std::uint64_t`). The branch's own comments now contradict each other (`chams.cpp:202-210` says two threads may be inside; `chams.hpp:256` says "the render thread owns the cache"). | `payload/features/include/cs2/features/chams.hpp` (the `DescEntry`), `payload/features/src/chams.cpp` (the publish protocol) | **not fixed — this is the "fully fix the chams" work** (see §10) |
+| **H3** | minor | After a refusal the status stuck at "installing" forever and the refusal was never re-reported (`install_failed_` was never cleared). | `chams.cpp` | **fixed** by the fix round — but the *wiring* is not pinned by a test (deleting the clear leaves the suite green) |
+| **H4** | minor | `status_line()` allocated a `std::string` **on the game's render thread, every frame**. | `chams.cpp` | **fixed** by the fix round (`snprintf` into the caller's buffer) |
+| **H5** | minor | Two new public accessors were dead code; the module-identity check skipped an empty module string; `describe(installed)` returned `"on"`; the counters were not reset on toggle. | `chams.cpp` | **fixed** by the fix round |
+| **H6** | minor | **Nothing pins that the guard is held *across* the trampoline call** — moving the scope after the original leaves the suite green, and that is the guard's entire purpose (the recursion it breaks happens *inside* the call to the original). | the test | **not fixed — deferred** |
+| **H7** | minor | The shared guard's **fail-open** rationale is the camera's ("refusing would drop a camera update"); for the chams the arithmetic is the other way round: a refusal drops **one primitive**, while failing open lets the recursion run until the stack overflows (`0xc00000fd`) and takes the renderer with it. | `recursion_guard.hpp` | **not fixed — deferred** |
+| **H8** | nit | `docs/re/chams.md` names `test_chams_guard.cpp`; the file is `test_chams_draw_hook.cpp`. The shared header cites `docs/re/thirdperson.md`, which arrives with T27. | the docs | **not fixed — deferred** |
 
 ---
 
@@ -171,3 +175,84 @@ otherwise.
 **2026-10-21 — the protection workstream and `cpp-modernization` are out of
 scope** (see §8); the findings in the tree that belong to them stay as they
 are.
+
+---
+
+## 11. The next session's work (the operator's list, 2026-10-21)
+
+Two items, in the operator's order. **Neither has been started** — this
+section is the plan, not the work.
+
+### 11.1 Fully fix the chams
+
+The feature is in place (the target is resolved through a dumper signature and
+verified against the prologue ✓) and the guard is per-owner ✓. What is left
+is the **race the per-owner guard exposed** (**H2a**) and the test gaps around
+it (**H3**, **H6**, **H7**, **H8**).
+
+The recipe the review measured and the fix round's own review confirmed:
+
+1. **The desc cache must be safe for two writers.** The options the review
+   gave: publish the whole entry as one word (the desc pointer and the entity
+   do not fit in 64 bits together, so a **seqlock** — a per-slot sequence that
+   is odd while a writer is inside and even when stable — is the natural
+   form), or give each slot a generation and re-check it after the fill. The
+   reviewer's probe (the protocol copied verbatim, four threads, two descs
+   colliding in one slot) is the **acceptance test**: it must report **zero**
+   mismatches.
+2. **`desc_cache_stamp_` must be atomic**, and `g_active` and
+   `hooks::InlineHook::trampoline_` (written by the payload's thread, read by
+   the render threads) for the same reason.
+3. **The counters' reset** must not break `seen == chams + skip`: three
+   separate stores while the render thread increments them break the relation
+   for the width of that window. The cheapest honest answer is to **not reset
+   them** (the operator reads the difference between two `[state]` lines).
+4. **The tests must pin what the fix is for**: the latch clear's *wiring*
+   (deleting it must fail the suite) and the **order** of the guard's scope
+   relative to the trampoline call (moving the scope after the call must fail
+   the suite — that is the guard's whole purpose).
+5. **The fail-open rationale must be revisited for the draw path** (H7): for
+   the camera, refusing is worse than failing open; for the chams it is the
+   other way round — a refusal drops one primitive, a fail-open recursion
+   kills the renderer.
+
+### 11.2 Remake the ragebot on the community's Monte-Carlo approach
+
+**The existing implementation stays** — the new solver goes alongside it on a
+**new branch** (the operator's instruction), so the current damage-field
+solver remains available and comparable.
+
+The repository has already done the research, and it is the right starting
+point — `docs/research/aim-objective-math.md` §2 (what the community does)
+and §3 (the engine's actual spread kernel):
+
+* **velocity** (CS2, all rights reserved — *read it for ideas, do not copy
+  code*) computes the hitchance by **Monte-Carlo over 64/128/256 seed
+  indices**, calling the engine's own `weapon_calculate_spread(seed+1, …)` and
+  a **ray-vs-capsule** test, with the engine's `trace_bullet` for the real
+  penetration. The ordering is **lexicographic**: can-kill first, then the
+  highest probability of any hit, then the hitgroup preference.
+* The engine's own kernel is **assembly-verified** in `docs/re/aim.md`
+  (`FX_FireBullets` → `FUN_180d23460`, RVA `0xd23460`):
+  `RandomSeed(seed)`; per pellet `r1, a1` (spread) and `r2, a2` (inaccuracy);
+  `off = (r1·cos a1 + r2·cos a2, r1·sin a1 + r2·sin a2)` in the (right, up)
+  tangent frame. The support is exactly `|off| ≤ S + I` and the radial law is
+  **uniform in radius** (rim-heavy) — the two facts a Gaussian blur gets
+  wrong.
+* The research's own caveat, which the new solver must respect: "the 256-sample
+  loop is **not** a Monte-Carlo over the *actual* shot*" — it averages over
+  hypothetical seeds, and the **seed is a function of the angles** (velocity's
+  `find_spread_correction` searches for an angle whose seed produces a better
+  offset). So the seed the sampler uses is the decision, and the repo's own
+  RE on the spread cone is the authority for it.
+* The repo's pieces that the new solver can reuse: `payload/aim/spread.hpp`
+  (the spread model), `payload/aim/hitbox.hpp` (the capsule test),
+  `payload/aim/occlusion.hpp` and `penetration.hpp` (the real trace), and the
+  host benchmark over a saved cell set (`docs/ragebot-perf.md` §3.9) for the
+  cost — the current cone objective is 20–35 ms for 717 cells, so a
+  sample-based objective has to be counted carefully.
+
+The first decision for the next session: **the seed**. Is the new solver's
+hit chance the probability over the *shot that would be taken* (the seed the
+engine would use for that pose) or the expectation over seeds? The community
+does the first, and the research says that is what works in practice.
