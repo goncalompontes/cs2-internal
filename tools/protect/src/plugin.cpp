@@ -296,7 +296,8 @@ class VmAnalysisPass : public llvm::PassInfoMixin<VmAnalysisPass> {
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
     const cs2::protect::Config settings = configuration();
 
-    const cs2::protect::SelectionResult selection = cs2::protect::select_functions(module, settings);
+    const cs2::protect::SelectionResult selection =
+        cs2::protect::select_functions(module, settings);
     std::vector<std::string> symbols;
     std::vector<std::string> virtualized;
     for (const cs2::protect::Selection& selected : selection.selected) {

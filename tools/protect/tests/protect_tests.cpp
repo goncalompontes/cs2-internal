@@ -609,7 +609,7 @@ void test_level_gate_two_entries() {
 
 /// The number of the instructions of one opcode.
 [[nodiscard]] auto count_of(const std::vector<cs2::protect::VmOpcode>& opcodes,
-                             cs2::protect::VmOpcode opcode) -> std::size_t {
+                            cs2::protect::VmOpcode opcode) -> std::size_t {
   std::size_t count = 0;
   for (const cs2::protect::VmOpcode candidate : opcodes) {
     if (candidate == opcode) {
@@ -620,8 +620,7 @@ void test_level_gate_two_entries() {
 }
 
 /// A function that the virtualizer must refuse, and the reason it must give.
-void check_refused(llvm::Function& function, cs2::protect::VmRefusal expected,
-                   const char* what) {
+void check_refused(llvm::Function& function, cs2::protect::VmRefusal expected, const char* what) {
   const auto result = analyze(function);
   if (result.virtualizable) {
     std::fprintf(stderr, "FAIL: %s (the function was accepted)\n", what);
@@ -630,8 +629,7 @@ void check_refused(llvm::Function& function, cs2::protect::VmRefusal expected,
   }
   if (result.failure.reason != expected) {
     std::fprintf(stderr, "FAIL: %s (expected '%s', got '%s')\n", what,
-                 cs2::protect::to_string(expected),
-                 cs2::protect::to_string(result.failure.reason));
+                 cs2::protect::to_string(expected), cs2::protect::to_string(result.failure.reason));
     ++g_failures;
   }
 }
@@ -641,8 +639,7 @@ void check_accepted(llvm::Function& function, const char* what) {
   const auto result = analyze(function);
   if (!result.virtualizable) {
     std::fprintf(stderr, "FAIL: %s (refused: %s: %s)\n", what,
-                 cs2::protect::to_string(result.failure.reason),
-                 result.failure.detail.c_str());
+                 cs2::protect::to_string(result.failure.reason), result.failure.detail.c_str());
     ++g_failures;
   }
 }
@@ -653,7 +650,7 @@ void test_vm_virtualizable() {
   llvm::Module module("vm.obj", context);
   auto* function = llvm::Function::Create(
       llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
-                               {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
+                              {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
       llvm::GlobalValue::ExternalLinkage, "add_one", &module);
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
   llvm::IRBuilder<> builder(entry);
@@ -668,8 +665,9 @@ void test_vm_virtualizable() {
   // The instructions: the constant, the addition and the return.
   check(result.instructions == 3, "the function has three instructions");
   check(result.calls == 0, "the function makes no call");
-  check(result.bytecode_bytes == cs2::protect::k_header_bytes + 3 * cs2::protect::k_instruction_bytes,
-        "the container holds the header and the instruction stream");
+  check(
+      result.bytecode_bytes == cs2::protect::k_header_bytes + 3 * cs2::protect::k_instruction_bytes,
+      "the container holds the header and the instruction stream");
 
   // The header is the contract: it names the layout of the frame.
   check(result.header.magic == cs2::protect::k_vm_magic, "the header carries the magic");
@@ -679,24 +677,26 @@ void test_vm_virtualizable() {
         "the header names the argument region");
   check(result.header.call_slots == cs2::protect::k_frame_call_slots,
         "the header names the call scratch");
-  check(result.header.instruction_count == result.instructions, "the header names the instructions");
+  check(result.header.instruction_count == result.instructions,
+        "the header names the instructions");
   check(result.frame_bytes == cs2::protect::k_frame_bytes, "the frame is the fixed size");
 
   // The container is encrypted: the magic is not in the clear.
   check(result.blob.size() == result.bytecode_bytes, "the blob is the container");
-  check(result.blob[0] != static_cast<std::uint8_t>(cs2::protect::k_vm_magic & 0xFFU) ||
-            result.blob[1] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 8U) & 0xFFU) ||
-            result.blob[2] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 16U) & 0xFFU) ||
-            result.blob[3] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 24U) & 0xFFU),
-        "the container is not encrypted: the magic is in the clear");
+  check(
+      result.blob[0] != static_cast<std::uint8_t>(cs2::protect::k_vm_magic & 0xFFU) ||
+          result.blob[1] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 8U) & 0xFFU) ||
+          result.blob[2] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 16U) & 0xFFU) ||
+          result.blob[3] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 24U) & 0xFFU),
+      "the container is not encrypted: the magic is in the clear");
 
   // The opcodes are permuted: the canonical number of an opcode is not the
   // byte in the container.
   const auto [perm_a, perm_b] = cs2::protect::opcode_permutation(0x5EED5EED5EED5EEDULL);
   check(perm_a % 2 == 1, "the multiplier of the permutation is odd");
-  check(cs2::protect::canonical_opcode(cs2::protect::permuted_opcode(
-                                             cs2::protect::VmOpcode::Add, perm_a, perm_b),
-                                         perm_a, perm_b) == cs2::protect::VmOpcode::Add,
+  check(cs2::protect::canonical_opcode(
+            cs2::protect::permuted_opcode(cs2::protect::VmOpcode::Add, perm_a, perm_b), perm_a,
+            perm_b) == cs2::protect::VmOpcode::Add,
         "the permutation is invertible");
 }
 
@@ -706,7 +706,7 @@ void test_vm_parallel_copy() {
   llvm::Module module("swap.obj", context);
   auto* function = llvm::Function::Create(
       llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
-                               {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
+                              {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
       llvm::GlobalValue::ExternalLinkage, "swap", &module);
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
   llvm::BasicBlock* loop = llvm::BasicBlock::Create(context, "loop", function);
@@ -788,7 +788,7 @@ void test_vm_flags() {
   llvm::Module module("flags.obj", context);
   auto* function = llvm::Function::Create(
       llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
-                               {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
+                              {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
       llvm::GlobalValue::ExternalLinkage, "flags", &module);
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
   llvm::IRBuilder<> builder(entry);
@@ -822,7 +822,7 @@ void test_vm_freeze() {
   llvm::Module module("undef.obj", context);
   auto* function = llvm::Function::Create(
       llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
-                               {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
+                              {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
       llvm::GlobalValue::ExternalLinkage, "undef", &module);
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
   llvm::IRBuilder<> builder(entry);
@@ -858,9 +858,9 @@ void test_vm_refusals() {
 
   // A variadic function.
   {
-    auto* function = llvm::Function::Create(
-        llvm::FunctionType::get(i32, {i32}, true), llvm::GlobalValue::ExternalLinkage,
-        "variadic_function", &module);
+    auto* function =
+        llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, true),
+                               llvm::GlobalValue::ExternalLinkage, "variadic_function", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     builder.CreateRet(function->getArg(0));
@@ -873,8 +873,7 @@ void test_vm_refusals() {
     auto* callee = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, true),
                                           llvm::GlobalValue::ExternalLinkage, "printf", &module);
     auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                             llvm::GlobalValue::ExternalLinkage, "caller",
-                                             &module);
+                                            llvm::GlobalValue::ExternalLinkage, "caller", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     builder.CreateRet(builder.CreateCall(callee, {function->getArg(0)}));
@@ -884,16 +883,15 @@ void test_vm_refusals() {
 
   // An indirect call.
   {
-    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                             llvm::GlobalValue::ExternalLinkage, "indirect",
-                                             &module);
+    auto* function =
+        llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                               llvm::GlobalValue::ExternalLinkage, "indirect", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     auto* pointer = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context));
     builder.CreateRet(builder.CreateCall(function->getFunctionType(), pointer,
-                                               llvm::ArrayRef<llvm::Value*>{function->getArg(0)}));
-    check_refused(*function, cs2::protect::VmRefusal::indirect_call,
-                  "an indirect call is refused");
+                                         llvm::ArrayRef<llvm::Value*>{function->getArg(0)}));
+    check_refused(*function, cs2::protect::VmRefusal::indirect_call, "an indirect call is refused");
   }
 
   // A float.
@@ -904,15 +902,13 @@ void test_vm_refusals() {
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     builder.CreateRet(builder.getInt32(0));
-    check_refused(*function, cs2::protect::VmRefusal::unsupported_type,
-                  "a float is refused");
+    check_refused(*function, cs2::protect::VmRefusal::unsupported_type, "a float is refused");
   }
 
   // A `memcpy` whose length is not a constant.
   {
     auto* function = llvm::Function::Create(llvm::FunctionType::get(void_type, {i32}, false),
-                                             llvm::GlobalValue::ExternalLinkage, "dynamic",
-                                             &module);
+                                            llvm::GlobalValue::ExternalLinkage, "dynamic", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     auto* buffer = builder.CreateAlloca(llvm::Type::getInt8Ty(context), nullptr, "buffer");
@@ -926,8 +922,7 @@ void test_vm_refusals() {
   // The address of the function is taken.
   {
     auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                             llvm::GlobalValue::ExternalLinkage, "taken",
-                                             &module);
+                                            llvm::GlobalValue::ExternalLinkage, "taken", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     auto* slot = builder.CreateAlloca(llvm::PointerType::getUnqual(context), nullptr, "slot");
@@ -940,8 +935,7 @@ void test_vm_refusals() {
   // More slots than the budget.
   {
     auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                             llvm::GlobalValue::ExternalLinkage, "wide",
-                                             &module);
+                                            llvm::GlobalValue::ExternalLinkage, "wide", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     llvm::Value* value = function->getArg(0);
@@ -958,18 +952,17 @@ void test_vm_refusals() {
     auto* personality = llvm::Function::Create(
         llvm::FunctionType::get(i32, {llvm::PointerType::getUnqual(context)}, false),
         llvm::GlobalValue::ExternalLinkage, "__gxx_personality_v0", &module);
-    auto* throwing = llvm::Function::Create(
-        llvm::FunctionType::get(i32, {i32}, false), llvm::GlobalValue::ExternalLinkage, "throwing",
-        &module);
+    auto* throwing =
+        llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                               llvm::GlobalValue::ExternalLinkage, "throwing", &module);
     auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                             llvm::GlobalValue::ExternalLinkage, "eh", &module);
+                                            llvm::GlobalValue::ExternalLinkage, "eh", &module);
     function->setPersonalityFn(personality);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::BasicBlock* normal = llvm::BasicBlock::Create(context, "normal", function);
     llvm::BasicBlock* unwind = llvm::BasicBlock::Create(context, "unwind", function);
     llvm::IRBuilder<> builder(entry);
-    llvm::Value* result =
-        builder.CreateInvoke(throwing, normal, unwind, function->getArg(0));
+    llvm::Value* result = builder.CreateInvoke(throwing, normal, unwind, function->getArg(0));
     builder.SetInsertPoint(normal);
     builder.CreateRet(result);
     builder.SetInsertPoint(unwind);
@@ -980,9 +973,9 @@ void test_vm_refusals() {
 
   // A volatile access.
   {
-    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                             llvm::GlobalValue::ExternalLinkage, "volatile",
-                                             &module);
+    auto* function =
+        llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                               llvm::GlobalValue::ExternalLinkage, "volatile", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     auto* slot = builder.CreateAlloca(i32, nullptr, "slot");
@@ -996,9 +989,9 @@ void test_vm_refusals() {
 
   // A recursion.
   {
-    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                             llvm::GlobalValue::ExternalLinkage, "recursive",
-                                             &module);
+    auto* function =
+        llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                               llvm::GlobalValue::ExternalLinkage, "recursive", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     builder.CreateRet(builder.CreateCall(function, {function->getArg(0)}));
@@ -1007,12 +1000,11 @@ void test_vm_refusals() {
 
   // A callee that is itself selected at the virtualized level.
   {
-    auto* callee = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                          llvm::GlobalValue::ExternalLinkage, "virtualized",
-                                          &module);
+    auto* callee =
+        llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                               llvm::GlobalValue::ExternalLinkage, "virtualized", &module);
     auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                             llvm::GlobalValue::ExternalLinkage, "caller",
-                                             &module);
+                                            llvm::GlobalValue::ExternalLinkage, "caller", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     builder.CreateRet(builder.CreateCall(callee, {function->getArg(0)}));
@@ -1028,15 +1020,15 @@ void test_vm_refusals() {
 
   // An instruction the lowering does not model.
   {
-    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                             llvm::GlobalValue::ExternalLinkage, "unsupported",
-                                             &module);
+    auto* function =
+        llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                               llvm::GlobalValue::ExternalLinkage, "unsupported", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     // A `ctpop`: the ISA has no opcode for it.
     builder.CreateRet(builder.CreateCall(
         llvm::Intrinsic::getOrInsertDeclaration(&module, llvm::Intrinsic::ctpop, i32,
-                                                          llvm::ArrayRef<llvm::Type*>{i32}),
+                                                llvm::ArrayRef<llvm::Type*>{i32}),
         {function->getArg(0)}));
     check_refused(*function, cs2::protect::VmRefusal::unsupported_instruction,
                   "an instruction the lowering does not model is refused");
@@ -1056,7 +1048,7 @@ void test_vm_call() {
     builder.CreateRet(builder.CreateAdd(callee->getArg(0), callee->getArg(1)));
   }
   auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                           llvm::GlobalValue::ExternalLinkage, "caller", &module);
+                                          llvm::GlobalValue::ExternalLinkage, "caller", &module);
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
   llvm::IRBuilder<> builder(entry);
   builder.CreateRet(builder.CreateCall(callee, {function->getArg(0), builder.getInt32(2)}));

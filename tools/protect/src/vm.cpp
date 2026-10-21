@@ -265,7 +265,9 @@ void write_le(std::vector<std::uint8_t>& buffer, std::size_t offset, T value) {
 class Lowerer {
  public:
   Lowerer(llvm::Function& function, const VmOptions& options)
-      : function_(function), options_(options), data_layout_(function.getParent()->getDataLayout()) {}
+      : function_(function),
+        options_(options),
+        data_layout_(function.getParent()->getDataLayout()) {}
 
   /// Lowers the function. An empty optional means that the function was
   /// lowered; otherwise the optional holds the refusal.
@@ -287,16 +289,24 @@ class Lowerer {
   }
 
   /// The instructions of the lowered function.
-  [[nodiscard]] auto code() const -> const std::vector<VmInstruction>& { return code_; }
+  [[nodiscard]] auto code() const -> const std::vector<VmInstruction>& {
+    return code_;
+  }
 
   /// The number of slots the function uses.
-  [[nodiscard]] auto slot_count() const -> std::size_t { return next_slot_; }
+  [[nodiscard]] auto slot_count() const -> std::size_t {
+    return next_slot_;
+  }
 
   /// The entries of the pool.
-  [[nodiscard]] auto pool() const -> const std::vector<VmPoolEntry>& { return pool_; }
+  [[nodiscard]] auto pool() const -> const std::vector<VmPoolEntry>& {
+    return pool_;
+  }
 
   /// The call sites of the function.
-  [[nodiscard]] auto call_sites() const -> const std::vector<VmCallSite>& { return call_sites_; }
+  [[nodiscard]] auto call_sites() const -> const std::vector<VmCallSite>& {
+    return call_sites_;
+  }
 
  private:
   // --- the state ---
@@ -326,9 +336,13 @@ class Lowerer {
     return labels_.size() - 1;
   }
 
-  void place_label(std::size_t label) { labels_[label] = code_.size(); }
+  void place_label(std::size_t label) {
+    labels_[label] = code_.size();
+  }
 
-  void emit(VmInstruction instruction) { code_.push_back(instruction); }
+  void emit(VmInstruction instruction) {
+    code_.push_back(instruction);
+  }
 
   void branch_to(VmOpcode opcode, std::size_t label) {
     VmInstruction instruction;
@@ -711,8 +725,8 @@ class Lowerer {
   struct GepIndex {
     const llvm::Value* value{nullptr};  ///< the index itself.
     std::uint64_t scale{0};             ///< the multiplier of the index, in bytes.
-    bool is_field{false};  ///< the index selects a field: the offset is the
-                           ///< offset of the field, not a multiple of it.
+    bool is_field{false};               ///< the index selects a field: the offset is the
+                                        ///< offset of the field, not a multiple of it.
   };
 
   /// The type an index walks into.
@@ -904,9 +918,9 @@ class Lowerer {
         llvm::isa<llvm::InsertValueInst>(instruction)) {
       return VmFailure{VmRefusal::unsupported_type, "the instruction works on an aggregate"};
     }
-    return VmFailure{VmRefusal::unsupported_instruction,
-                     "the instruction '" + std::string(instruction.getOpcodeName()) +
-                         "' is not modelled"};
+    return VmFailure{
+        VmRefusal::unsupported_instruction,
+        "the instruction '" + std::string(instruction.getOpcodeName()) + "' is not modelled"};
   }
 
   /// Masks the result of an operation whose type is an `i1`.
@@ -995,9 +1009,9 @@ class Lowerer {
         opcode = VmOpcode::AShr;
         break;
       default:
-        return VmFailure{VmRefusal::unsupported_instruction,
-                         "the operation '" + std::string(binary.getOpcodeName()) +
-                             "' is not modelled"};
+        return VmFailure{
+            VmRefusal::unsupported_instruction,
+            "the operation '" + std::string(binary.getOpcodeName()) + "' is not modelled"};
     }
 
     std::uint8_t flags = 0;
@@ -1023,7 +1037,8 @@ class Lowerer {
     // `sub 0, x` is a negation and `xor x, -1` is a complement: the ISA
     // has an opcode for each, and the interpreter does not have to work
     // out which one it is.
-    if (opcode == VmOpcode::Sub && is_zero(binary.getOperand(0)) && !is_zero(binary.getOperand(1))) {
+    if (opcode == VmOpcode::Sub && is_zero(binary.getOperand(0)) &&
+        !is_zero(binary.getOperand(1))) {
       code_.back().opcode = VmOpcode::Neg;
       code_.back().src2 = k_no_slot;
     }
@@ -1066,9 +1081,9 @@ class Lowerer {
     }
     const auto kind = compare_kind(compare.getPredicate());
     if (!kind.has_value()) {
-      return VmFailure{VmRefusal::unsupported_instruction,
-                       "the comparison '" + std::string(compare.getOpcodeName()) +
-                           "' is not modelled"};
+      return VmFailure{
+          VmRefusal::unsupported_instruction,
+          "the comparison '" + std::string(compare.getOpcodeName()) + "' is not modelled"};
     }
     const auto dst = slot_of(&compare);
     const auto src1 = slot_of(compare.getOperand(0));
@@ -1114,8 +1129,8 @@ class Lowerer {
       instruction.width = target_width;
       instruction.dst = *dst;
       instruction.src1 = *src;
-      instruction.aux = static_cast<std::uint32_t>(*kind) |
-                        (static_cast<std::uint32_t>(source_width) << 8U);
+      instruction.aux =
+          static_cast<std::uint32_t>(*kind) | (static_cast<std::uint32_t>(source_width) << 8U);
       emit(instruction);
       mask_if_bool(cast.getType(), *dst);
       return std::nullopt;
@@ -1180,9 +1195,9 @@ class Lowerer {
         return std::nullopt;
       }
       default:
-        return VmFailure{VmRefusal::unsupported_instruction,
-                         "the conversion '" + std::string(cast.getOpcodeName()) +
-                             "' is not modelled"};
+        return VmFailure{
+            VmRefusal::unsupported_instruction,
+            "the conversion '" + std::string(cast.getOpcodeName()) + "' is not modelled"};
     }
   }
 
@@ -1363,8 +1378,7 @@ class Lowerer {
     for (const llvm::Use& argument : call.args()) {
       const auto slot = slot_of(argument.get());
       if (!slot.has_value()) {
-        return VmFailure{VmRefusal::unsupported_instruction,
-                         "an argument of the call has no slot"};
+        return VmFailure{VmRefusal::unsupported_instruction, "an argument of the call has no slot"};
       }
       VmInstruction push;
       push.opcode = VmOpcode::Arg;
@@ -1661,9 +1675,9 @@ class Lowerer {
       return std::nullopt;
     }
     if (phis.size() > k_frame_argument_slots) {
-      return VmFailure{VmRefusal::too_many_slots,
-                       "the parallel copy needs " + std::to_string(phis.size()) +
-                           " cells of the argument stack"};
+      return VmFailure{VmRefusal::too_many_slots, "the parallel copy needs " +
+                                                      std::to_string(phis.size()) +
+                                                      " cells of the argument stack"};
     }
     for (llvm::PHINode* phi : phis) {
       const auto* incoming = phi->getIncomingValueForBlock(&predecessor);
@@ -1850,8 +1864,8 @@ auto analyze_function(llvm::Function& function, const VmOptions& options) -> VmF
 }
 
 auto analyze_module(llvm::Module& module, const Config& config,
-                     std::span<const std::string> symbols,
-                     std::span<const std::string> virtualized_symbols) -> std::vector<VmFunction> {
+                    std::span<const std::string> symbols,
+                    std::span<const std::string> virtualized_symbols) -> std::vector<VmFunction> {
   VmOptions options;
   options.seed = module_seed(config, module.getSourceFileName());
   options.virtualized_symbols = virtualized_symbols;

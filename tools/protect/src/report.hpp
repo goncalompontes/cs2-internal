@@ -148,8 +148,8 @@ void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& 
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
                                   const std::vector<CoverageEntry>& entries,
                                   const std::vector<CoverageFunction>& functions,
-                                  const CoverageProtect& protect,
-                                  std::span<const CoverageVm> vm) -> std::optional<std::string>;
+                                  const CoverageProtect& protect, std::span<const CoverageVm> vm)
+    -> std::optional<std::string>;
 
 /// Writes the machine-readable coverage of one module from a selection.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,

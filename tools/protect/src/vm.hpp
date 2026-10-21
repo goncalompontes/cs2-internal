@@ -80,10 +80,10 @@ enum class VmCompare : std::uint8_t {
 
 /// The cast kinds of `Cast` (the low byte of the `aux` of the instruction).
 enum class VmCast : std::uint8_t {
-  trunc,   ///< the low bits of the source.
-  bitcast, ///< the same bits, in a type of the same width.
-  zext,    ///< the source, zero-extended.
-  sext,    ///< the source, sign-extended.
+  trunc,    ///< the low bits of the source.
+  bitcast,  ///< the same bits, in a type of the same width.
+  zext,     ///< the source, zero-extended.
+  sext,     ///< the source, sign-extended.
 };
 
 /// The `nsw` flag: the operation may not overflow.
@@ -172,40 +172,40 @@ inline constexpr std::size_t k_frame_bytes = k_frame_cells * 8U;
 /// effort" path: a half-lowered function computes garbage, and in a manually
 /// mapped payload with no exception tables that kills the game.
 enum class VmRefusal : std::uint8_t {
-  eh_pad,               ///< the function has an EH pad, an `invoke`, a
-                        ///< `landingpad` or a `resume`: the interpreter cannot
-                        ///< model unwinding.
-  variadic_function,    ///< the function itself is variadic.
-  variadic_callee,      ///< it calls a variadic callee: the indirect call
-                        ///< cannot reproduce the variadic ABI.
-  indirect_call,        ///< it makes an indirect call: there is no relocatable
-                        ///< address for the pool.
-  indirect_parameter,   ///< a callee has a `byval` / `sret` / `inalloca` /
-                        ///< `preallocated` parameter: Windows x64 rejects these
-                        ///< in an indirect signature.
-  musttail,             ///< the tail-call contract does not survive the rewrite.
-  volatile_access,      ///< a volatile access: the ordering guarantees are not
-                        ///< modelled.
-  atomic_access,        ///< an atomic access: the ordering guarantees are not
-                        ///< modelled.
-  dynamic_memcpy,       ///< a `memcpy` / `memset` with a non-constant length:
-                        ///< it would lower to a CRT call.
-  unsupported_type,     ///< a float, a vector, an aggregate or an address
-                        ///< wider than 64 bits: this task handles integers of
-                        ///< at most 64 bits and pointers only.
-  address_taken,        ///< the address of the function is taken (`&F`): the
-                        ///< rewrite changes what the address means.
-  too_many_slots,       ///< the function needs more slots than the budget.
-  too_many_arguments,   ///< a call needs more arguments than the budget.
-  recursion,            ///< the function calls itself: the frame would multiply
-                        ///< by the recursion depth.
-  virtualized_callee,   ///< the function calls a function that is itself
-                        ///< selected at the `virtualized` level: the
-                        ///< interpreter would have to call into another
-                        ///< interpreter.
+  eh_pad,                   ///< the function has an EH pad, an `invoke`, a
+                            ///< `landingpad` or a `resume`: the interpreter cannot
+                            ///< model unwinding.
+  variadic_function,        ///< the function itself is variadic.
+  variadic_callee,          ///< it calls a variadic callee: the indirect call
+                            ///< cannot reproduce the variadic ABI.
+  indirect_call,            ///< it makes an indirect call: there is no relocatable
+                            ///< address for the pool.
+  indirect_parameter,       ///< a callee has a `byval` / `sret` / `inalloca` /
+                            ///< `preallocated` parameter: Windows x64 rejects these
+                            ///< in an indirect signature.
+  musttail,                 ///< the tail-call contract does not survive the rewrite.
+  volatile_access,          ///< a volatile access: the ordering guarantees are not
+                            ///< modelled.
+  atomic_access,            ///< an atomic access: the ordering guarantees are not
+                            ///< modelled.
+  dynamic_memcpy,           ///< a `memcpy` / `memset` with a non-constant length:
+                            ///< it would lower to a CRT call.
+  unsupported_type,         ///< a float, a vector, an aggregate or an address
+                            ///< wider than 64 bits: this task handles integers of
+                            ///< at most 64 bits and pointers only.
+  address_taken,            ///< the address of the function is taken (`&F`): the
+                            ///< rewrite changes what the address means.
+  too_many_slots,           ///< the function needs more slots than the budget.
+  too_many_arguments,       ///< a call needs more arguments than the budget.
+  recursion,                ///< the function calls itself: the frame would multiply
+                            ///< by the recursion depth.
+  virtualized_callee,       ///< the function calls a function that is itself
+                            ///< selected at the `virtualized` level: the
+                            ///< interpreter would have to call into another
+                            ///< interpreter.
   unsupported_instruction,  ///< the catch-all: an IR instruction the lowering
-                        ///< does not model. The lowering has a default branch
-                        ///< that refuses.
+                            ///< does not model. The lowering has a default branch
+                            ///< that refuses.
 };
 
 [[nodiscard]] auto to_string(VmRefusal reason) noexcept -> const char*;
@@ -214,7 +214,7 @@ enum class VmRefusal : std::uint8_t {
 struct VmFailure {
   VmRefusal reason{VmRefusal::unsupported_instruction};
   std::string detail;  ///< what the refusal is about ("the return type is a
-                        ///< struct", "the memcpy length is not constant", ...).
+                       ///< struct", "the memcpy length is not constant", ...).
 };
 
 // --- The bytecode -------------------------------------------------------------
@@ -253,9 +253,9 @@ struct VmInstruction {
 struct VmHeader {
   std::uint32_t magic{k_vm_magic};
   std::uint32_t version{k_vm_version};
-  std::uint32_t slot_count{0};        ///< the number of value slots.
-  std::uint32_t arg_slots{0};         ///< the size of the argument region.
-  std::uint32_t call_slots{0};        ///< the size of the call scratch.
+  std::uint32_t slot_count{0};  ///< the number of value slots.
+  std::uint32_t arg_slots{0};   ///< the size of the argument region.
+  std::uint32_t call_slots{0};  ///< the size of the call scratch.
   std::uint32_t instruction_count{0};
   std::uint32_t flags{0};
   std::uint32_t reserved{0};
@@ -267,8 +267,8 @@ struct VmHeader {
 /// fixups, so the entries are the real addresses at run time. The bytecode
 /// holds the *index* of an entry, never an address.
 struct VmPoolEntry {
-  std::string symbol;   ///< the name of the callee or of the global.
-  bool is_callee{true}; ///< true for the callee of a call site.
+  std::string symbol;    ///< the name of the callee or of the global.
+  bool is_callee{true};  ///< true for the callee of a call site.
   /// The constant the entry holds: the address of the callee, of the global
   /// or of the constant expression the global is reached through.
   ///
@@ -283,10 +283,10 @@ struct VmPoolEntry {
 /// the interpreter calls through a uniform signature (`u64 thunk(u64*
 /// scratch)`), and the thunk adapts the real callee to it.
 struct VmCallSite {
-  std::string callee;                     ///< the symbol of the callee.
+  std::string callee;                       ///< the symbol of the callee.
   std::vector<std::string> argument_types;  ///< the type of every argument.
-  std::string return_type;                ///< the type of the return value.
-  std::size_t pool_index{0};              ///< the entry of the pool.
+  std::string return_type;                  ///< the type of the return value.
+  std::size_t pool_index{0};                ///< the entry of the pool.
   std::size_t argument_count{0};
 };
 
@@ -297,21 +297,21 @@ struct VmFunction {
   std::string symbol;
   std::string qualified;
   bool virtualizable{false};
-  VmFailure failure{};         ///< the refusal, when the function is refused.
-  std::size_t slots{0};         ///< the number of value slots.
-  std::size_t frame_bytes{0};   ///< the size of the frame, in bytes.
-  std::size_t instructions{0};  ///< the number of bytecode instructions.
-  std::size_t calls{0};         ///< the number of call sites.
-  std::size_t bytecode_bytes{0};  ///< the size of the encoded container.
-  VmHeader header{};              ///< the header of the container.
-  std::vector<VmInstruction> code{};  ///< the instructions, in the clear.
-  std::vector<VmPoolEntry> pool{};     ///< the entries of the pool.
+  VmFailure failure{};                   ///< the refusal, when the function is refused.
+  std::size_t slots{0};                  ///< the number of value slots.
+  std::size_t frame_bytes{0};            ///< the size of the frame, in bytes.
+  std::size_t instructions{0};           ///< the number of bytecode instructions.
+  std::size_t calls{0};                  ///< the number of call sites.
+  std::size_t bytecode_bytes{0};         ///< the size of the encoded container.
+  VmHeader header{};                     ///< the header of the container.
+  std::vector<VmInstruction> code{};     ///< the instructions, in the clear.
+  std::vector<VmPoolEntry> pool{};       ///< the entries of the pool.
   std::vector<VmCallSite> call_sites{};  ///< the call sites.
   std::array<std::uint64_t, k_key_parts> key_parts{};  ///< the parts of the key.
-  std::uint64_t key{0};             ///< the key the container is encrypted with.
-  std::uint64_t perm_a{1};          ///< the multiplier of the permutation.
-  std::uint64_t perm_b{0};          ///< the offset of the permutation.
-  std::vector<std::uint8_t> blob{};  ///< the encoded container, encrypted.
+  std::uint64_t key{0};                                ///< the key the container is encrypted with.
+  std::uint64_t perm_a{1};                             ///< the multiplier of the permutation.
+  std::uint64_t perm_b{0};                             ///< the offset of the permutation.
+  std::vector<std::uint8_t> blob{};                    ///< the encoded container, encrypted.
 };
 
 /// What the analysis needs besides the function itself.
@@ -334,8 +334,8 @@ struct VmOptions {
 
 /// The canonical opcode of a byte of the bytecode: the inverse of the
 /// permutation.
-[[nodiscard]] auto canonical_opcode(std::uint8_t permuted, std::uint64_t a, std::uint64_t b) noexcept
-    -> VmOpcode;
+[[nodiscard]] auto canonical_opcode(std::uint8_t permuted, std::uint64_t a,
+                                    std::uint64_t b) noexcept -> VmOpcode;
 
 /// The permutation of the opcodes: the multiplier (odd, and coprime with the
 /// number of opcodes) and the offset, both from the module seed.
