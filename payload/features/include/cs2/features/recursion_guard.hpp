@@ -54,13 +54,24 @@
 //
 // ## The pool
 //
-// Eight slots for the camera update (which runs on one or two threads), plus
-// one reserve slot that is only reached when all eight are taken — so that
-// owner is still tracked and its recursion is still broken. When **every**
-// slot is held by *other* owners the guard **fails open** (the call is
-// allowed, and it is not tracked): refusing a call that is not a recursion
-// would drop a camera update — the worse failure. The cost of that window is
-// stated in `docs/re/thirdperson.md`.
+// The pool's size is **per instance**, because the two features that share
+// this guard need different answers:
+//
+//   * the **camera** update runs on one or two threads. Eight slots leave
+//     room for the others, and one more slot is kept in reserve for the case
+//     where they are all taken. When **every** slot is held by *other* owners
+//     the guard **fails open** (the call is allowed, and it is not tracked):
+//     refusing a call that is not a recursion would drop a camera update — the
+//     worse failure. The cost of that window is stated in
+//     `docs/re/thirdperson.md`.
+//   * the **draw path** holds its slot for the **whole draw** — the call into
+//     the original included, because that is the call the recursion happens
+//     inside — so its pool has to hold one slot per **concurrent render job**,
+//     not one per thread. See `DRAW_PATH_SLOT_COUNT` for the number and for
+//     the cost argument.
+//
+// The default is the camera's pool, so every caller that does not ask for
+// anything else keeps the behaviour it has today — the camera included.
 //
 // ## The policy is per instance, and the draw path's is the other way round
 //
@@ -87,9 +98,10 @@
 // A slot is leaked when a thread dies **inside** the guarded region (the
 // detour's `leave` never runs). The leaked slot is not reclaimed: the guard
 // is pure and has no way to ask whether a thread is still alive. The
-// consequence is bounded — the pool is nine slots deep, and a thread that
-// reuses a dead thread's id is refused (its camera update is dropped, not a
-// crash).
+// consequence is bounded — the pool is nine slots deep for the camera and
+// sixty-four for the draw path — and a thread that reuses a dead thread's id
+// is refused (its camera update is dropped, not a crash; its draw is
+// dropped, and counted).
 //
 // The header is **pure** — no Windows headers, no engine access — so the host
 // test drives the whole decision.
@@ -118,6 +130,29 @@ inline constexpr std::size_t RESERVE_SLOT_COUNT = 1;
 // How many slots the guard has in total.
 inline constexpr std::size_t TOTAL_SLOT_COUNT = SLOT_COUNT + RESERVE_SLOT_COUNT;
 
+// The **draw path's** pool.
+//
+// The chams' guard holds its slot for the **whole draw** — the call into the
+// original included, because that is the call the recursion happens inside —
+// so the pool has to hold one slot per **concurrent render job**, not one per
+// thread. The scene system's job count is **unmeasured** (the live run has
+// still not happened: `docs/re/chams.md` §10.7.1), so the pool is sized with
+// headroom over any plausible count — the tier0 thread pool has about as
+// many threads as the machine has hardware threads, and the scene system
+// splits the draw list across them.
+//
+// The cost of the headroom is the **scan**: the guard's first pass ("am I
+// already inside?") walks **every** slot, so the scan is O(pool) per draw.
+// A slot is one 64-bit word, so sixty-four slots are 512 bytes (eight cache
+// lines, resident in L1) and the scan is sixty-four loads — about ten
+// nanoseconds, or roughly twenty microseconds per frame at two thousand
+// primitives (a hundredth of a millisecond against a sixteen millisecond
+// frame).
+//
+// Sixty-four is **eight times** the camera's pool, so the camera's behaviour
+// and its cost are exactly what they were.
+inline constexpr std::size_t DRAW_PATH_SLOT_COUNT = 64;
+
 // How many times `leave` re-scans the slots when an exchange fails.
 //
 // A **strong** compare-exchange does not fail spuriously, and only the owner
@@ -141,9 +176,25 @@ class RecursionGuard {
   // The policy is **per instance**: the default is the camera's (fail open),
   // so every caller that does not ask for anything else keeps the behaviour
   // it has today.
-  explicit RecursionGuard(Policy policy = Policy::fail_open) noexcept : policy_(policy) {}
+  //
+  // The pool's size is per instance too: the default is the camera's pool
+  // (eight slots and a reserve), and the draw path asks for its own, which
+  // has to hold one slot per concurrent render job.
+  explicit RecursionGuard(Policy policy = Policy::fail_open,
+                           std::size_t slot_count = TOTAL_SLOT_COUNT) noexcept
+      : slot_count_(slot_count < MAX_SLOT_COUNT ? slot_count : MAX_SLOT_COUNT),
+        policy_(policy) {
+    if (slot_count_ == 0) {
+      slot_count_ = 1;
+    }
+  }
   RecursionGuard(const RecursionGuard&) = delete;
   RecursionGuard& operator=(const RecursionGuard&) = delete;
+
+  // How many slots this guard has.
+  [[nodiscard]] auto slot_count() const noexcept -> std::size_t {
+    return slot_count_;
+  }
 
   // Try to enter the guarded region as `owner`.
   //
@@ -153,15 +204,16 @@ class RecursionGuard {
   [[nodiscard]] auto try_enter(OwnerId owner) noexcept -> bool {
     // Pass one: am I already inside? Every slot is checked, so the answer
     // does not depend on the order the slots happen to be in.
-    for (const auto& slot : slots_) {
-      const std::uint64_t state = slot.state.load(std::memory_order_acquire);
+    for (std::size_t index = 0; index < slot_count_; ++index) {
+      const std::uint64_t state = slots_[index].state.load(std::memory_order_acquire);
       if (depth_of(state) > 0 && owner_of(state) == owner) {
         return false;
       }
     }
     // Pass two: claim a free slot. The exchange is the only way two threads
     // can take the same slot, so exactly one of them wins it.
-    for (auto& slot : slots_) {
+    for (std::size_t index = 0; index < slot_count_; ++index) {
+      Slot& slot = slots_[index];
       std::uint64_t state = slot.state.load(std::memory_order_acquire);
       if (depth_of(state) > 0) {
         continue;  // taken by another owner
@@ -189,14 +241,14 @@ class RecursionGuard {
   // Leave the guarded region. The owner that entered leaves exactly once.
   void leave(OwnerId owner) noexcept {
     for (std::size_t attempt = 0; attempt < LEAVE_ATTEMPTS; ++attempt) {
-      for (auto& slot : slots_) {
-        std::uint64_t state = slot.state.load(std::memory_order_acquire);
+      for (std::size_t index = 0; index < slot_count_; ++index) {
+        std::uint64_t state = slots_[index].state.load(std::memory_order_acquire);
         if (depth_of(state) == 0 || owner_of(state) != owner) {
           continue;
         }
         const std::uint64_t released = pack(owner, depth_of(state) - 1);
-        if (slot.state.compare_exchange_strong(state, released, std::memory_order_acq_rel,
-                                               std::memory_order_acquire)) {
+        if (slots_[index].state.compare_exchange_strong(state, released, std::memory_order_acq_rel,
+                                                         std::memory_order_acquire)) {
           return;
         }
         // The exchange failed: the slot changed under us. Only the owner
@@ -209,8 +261,8 @@ class RecursionGuard {
 
   // The depth `owner` is at: 0 when it is not inside, 1 when it is.
   [[nodiscard]] auto depth(OwnerId owner) const noexcept -> std::uint32_t {
-    for (const auto& slot : slots_) {
-      const std::uint64_t state = slot.state.load(std::memory_order_acquire);
+    for (std::size_t index = 0; index < slot_count_; ++index) {
+      const std::uint64_t state = slots_[index].state.load(std::memory_order_acquire);
       if (depth_of(state) > 0 && owner_of(state) == owner) {
         return depth_of(state);
       }
@@ -226,6 +278,11 @@ class RecursionGuard {
     std::atomic<std::uint64_t> state{0};
   };
 
+  // The largest pool a guard can be given: the draw path's. The array is
+  // fixed (no allocation, no vector), and a guard uses the first
+  // `slot_count_` of its slots.
+  static constexpr std::size_t MAX_SLOT_COUNT = DRAW_PATH_SLOT_COUNT;
+
   static constexpr auto pack(OwnerId owner, std::uint32_t depth) noexcept -> std::uint64_t {
     return (static_cast<std::uint64_t>(owner) << 32) | static_cast<std::uint64_t>(depth);
   }
@@ -238,9 +295,11 @@ class RecursionGuard {
     return static_cast<std::uint32_t>(state & 0xffffffffU);
   }
 
-  // The reserve slot is the last one: it is only reached when every other
-  // slot is taken.
-  std::array<Slot, TOTAL_SLOT_COUNT> slots_{};
+  // The slots. The last one is the reserve: it is only reached when every
+  // other slot is taken.
+  std::array<Slot, MAX_SLOT_COUNT> slots_{};
+  // How many of the slots this guard uses.
+  std::size_t slot_count_{TOTAL_SLOT_COUNT};
   // What the guard does when the pool is exhausted. It is fixed when the
   // guard is built: the policy is a property of the feature that owns the
   // guard, not of the moment.

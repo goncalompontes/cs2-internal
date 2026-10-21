@@ -631,6 +631,74 @@ void test_the_chams_fail_closed_and_the_camera_does_not(const std::filesystem::p
          "the camera's guard does not fail closed");
 }
 
+// --- The pool: the draw path's is sized for the render jobs ----------------
+//
+// The chams' guard holds its slot for the **whole draw** — the call into the
+// original included, because that is the call the recursion happens inside —
+// so the pool has to hold one slot per **concurrent render job**, not one per
+// thread. The scene system's job count is **unmeasured** (the live run has
+// still not happened), so the pool is sized with headroom: the draw path's
+// pool is eight times the camera's.
+//
+// The pool is **per instance**, so the camera keeps its pool — and its cost —
+// exactly as it was.
+//
+// The header is pure, so the pool's size is observable: a fail-closed guard
+// lets exactly `slot_count` owners in and refuses the next one. That is what
+// the old, fixed pool of nine did to the tenth render job: its draw was
+// refused, and the primitive was **not drawn at all**, every frame.
+void test_the_pool_holds_the_concurrent_jobs() {
+  // The camera's pool: the default, unchanged.
+  RecursionGuard camera;
+  expect(camera.slot_count() == cs2::features::guard::TOTAL_SLOT_COUNT,
+         "the default pool is the camera's");
+  RecursionGuard camera_closed{RecursionGuard::Policy::fail_closed};
+  expect(camera_closed.slot_count() == camera.slot_count(),
+         "the policy does not change the pool");
+  for (std::size_t owner = 1; owner <= camera_closed.slot_count(); ++owner) {
+    expect(camera_closed.try_enter(static_cast<OwnerId>(owner)),
+           "the camera's pool takes its owners");
+  }
+  expect(!camera_closed.try_enter(static_cast<OwnerId>(camera_closed.slot_count() + 1)),
+         "the camera's pool refuses the owner that does not fit");
+
+  // The draw path's pool: eight times the camera's, so a tenth concurrent
+  // render job — the case the old pool refused — is let in.
+  RecursionGuard draw{RecursionGuard::Policy::fail_closed,
+                       cs2::features::guard::DRAW_PATH_SLOT_COUNT};
+  expect(draw.slot_count() == cs2::features::guard::DRAW_PATH_SLOT_COUNT,
+         "the draw path's pool is the one that was asked for");
+  expect(draw.slot_count() > camera.slot_count(),
+         "the draw path's pool is bigger than the camera's");
+  for (std::size_t owner = 1; owner <= draw.slot_count(); ++owner) {
+    expect(draw.try_enter(static_cast<OwnerId>(owner)), "the draw pool takes its owners");
+  }
+  expect(!draw.try_enter(static_cast<OwnerId>(draw.slot_count() + 1)),
+         "the draw pool refuses the owner that does not fit");
+}
+
+// The chams' guard must be built with the draw path's pool, and the camera's
+// must not be: the camera's behaviour — and its cost — has to stay exactly as
+// it is.
+void test_the_chams_use_the_draw_pool(const std::filesystem::path& base) {
+  const std::string header =
+      strip_comments(read_file(base / "include" / "cs2" / "features" / "chams.hpp"));
+  const std::size_t at = header.find("draw_guard_{");
+  expect(at != std::string::npos, "the chams hold a draw guard");
+  if (at == std::string::npos) {
+    return;
+  }
+  const std::size_t pool = header.find("DRAW_PATH_SLOT_COUNT", at);
+  expect(pool != std::string::npos && pool - at < 200,
+         "the chams' guard is built with the draw path's pool");
+
+  const std::filesystem::path camera = base / "include" / "cs2" / "features" / "thirdperson.hpp";
+  const std::string camera_header = strip_comments(read_file(camera));
+  expect(!camera_header.empty(), "the camera's header is there");
+  expect(camera_header.find("DRAW_PATH_SLOT_COUNT") == std::string::npos,
+         "the camera's guard keeps the default pool");
+}
+
 // The refusal has to be **counted**: a refused draw is a dropped primitive,
 // and a drop that is not counted is a silent hole in the model.
 void test_the_refusal_is_counted(const std::filesystem::path& base) {
@@ -680,6 +748,8 @@ auto main(int argc, char** argv) -> int {
   test_the_switch_off_clears_the_refusal_latch(features);
   test_the_guard_is_held_across_the_trampoline_call(features);
   test_the_chams_fail_closed_and_the_camera_does_not(features);
+  test_the_pool_holds_the_concurrent_jobs();
+  test_the_chams_use_the_draw_pool(features);
   test_the_refusal_is_counted(features);
 
   if (failures != 0) {

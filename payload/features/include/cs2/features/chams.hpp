@@ -490,7 +490,14 @@ class Chams {
   // refusal drops one primitive. The camera's guard keeps the camera's
   // policy (fail open): the two guards are separate instances, so the
   // camera's behaviour does not change.
-  guard::RecursionGuard draw_guard_{guard::RecursionGuard::Policy::fail_closed};
+  //
+  // The pool is the **draw path's**: the slot is held for the whole draw
+  // (the call into the original included — that is the call the recursion
+  // happens inside), so the pool has to hold one slot per **concurrent
+  // render job**. The scene system's job count is unmeasured, so the pool
+  // is sized with headroom; the camera's pool is untouched.
+  guard::RecursionGuard draw_guard_{guard::RecursionGuard::Policy::fail_closed,
+                                    guard::DRAW_PATH_SLOT_COUNT};
   game::MaterialSystem materials_{};
   // The material system's handle for the chams material: the draw takes the
   // material, the material system's parameter setter takes the handle.

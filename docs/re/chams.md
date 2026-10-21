@@ -850,6 +850,50 @@ default is the camera's (`fail_open`), so the third-person camera's
 behaviour does not change: `camera_guard_{}` is built with the default and
 the chams' `draw_guard_` with `Policy::fail_closed`.
 
+### 10.4.1 The pool's size, and why it is per instance
+
+The policy was the easy half. The **pool** was the camera's: nine slots
+(eight and a reserve), which is right for a camera update that runs on one or
+two threads and wrong for the draw path.
+
+The chams' guard holds its slot for the **whole draw** — the call into the
+original included, because that is the call the recursion happens inside — so
+the pool has to hold one slot per **concurrent render job**, not one per
+thread. With the camera's nine slots, a **tenth** concurrent render job was
+refused, and a refusal on the draw path **drops the primitive**: the model
+was hole-ridden, every frame, where the old fail-open path dropped nothing.
+Visible (`refused=`) is not the same as harmless.
+
+So the pool's size is **per instance** now (`RecursionGuard`'s constructor),
+and the draw path asks for `DRAW_PATH_SLOT_COUNT` — **sixty-four** slots.
+
+**The job count is unmeasured.** The scene system splits the draw list into
+jobs on the tier0 thread pool and prints `"rendering in %i jobs"`, and
+nothing in the tree has ever measured it: the detour has still never run
+against the real draw (the live run needs a GPU and an interactive desktop,
+§10.7.1). Sixty-four is therefore chosen with **headroom**: the tier0 pool
+has about as many threads as the machine has hardware threads, so sixty-four
+is well above any plausible count, and it is **eight times** the camera's
+pool. The camera's pool — and the camera's cost — are exactly what they
+were.
+
+**The cost of the headroom** is the scan: the guard's first pass ("am I
+already inside?") walks **every** slot, so the scan is O(pool) per draw. A
+slot is one 64-bit word, so sixty-four slots are 512 bytes (eight cache
+lines, resident in L1) and the scan is sixty-four loads — about ten
+nanoseconds, or roughly twenty microseconds per frame at two thousand
+primitives (a hundredth of a millisecond against a sixteen millisecond
+frame). The desc cache saves two thousand engine reads per frame on the same
+path, so the scan is noise next to it.
+
+**The fail-open path is not back on the table.** The prologue is verified
+before the hook is installed (`hook_target`), so the recursion the fail-open
+path risked is already excluded for a **verified** target — but "the
+recursion is unlikely" is not "the recursion is broken", and the fail-open
+window is the one that ends in a stack overflow that takes the renderer
+with it. The refusal is the bounded cost; the pool is sized so the refusal
+does not happen.
+
 A refusal is now **counted** and reported: the refusal path returned before
 `on_draw`, so it moved no counter at all and a dropped primitive was
 invisible. The status line grew a field:
