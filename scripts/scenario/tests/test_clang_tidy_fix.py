@@ -94,6 +94,38 @@ class TestGatedFindings(unittest.TestCase):
         self.assertEqual(SWEEP_MODULE.gated_findings(["performance"], {}), [])
 
 
+class TestParseFindings(unittest.TestCase):
+    """What the sweep counts as a finding of a group."""
+
+    def test_a_check_finding_is_counted(self) -> None:
+        output = (
+            "payload/game/src/log.cpp:12:34: warning: parameter 'copy' is "
+            "copied but not used [performance-unnecessary-value-param]"
+        )
+        self.assertEqual(
+            SWEEP_MODULE.parse_findings(output),
+            Counter({"performance-unnecessary-value-param": 1}),
+        )
+
+    def test_a_compile_error_is_not_a_finding(self) -> None:
+        # A translation unit that does not compile is reported by the
+        # sweep's "failed on N translation unit(s)" path, not as a finding of
+        # the group that was running.
+        output = (
+            "C:/tmp/broken.cpp:2:23: error: use of undeclared identifier "
+            "'undefined_symbol' [clang-diagnostic-error]"
+        )
+        self.assertEqual(SWEEP_MODULE.parse_findings(output), Counter())
+
+    def test_a_compile_error_does_not_fail_the_gate(self) -> None:
+        output = (
+            "C:/tmp/broken.cpp:2:23: error: use of undeclared identifier "
+            "'undefined_symbol' [clang-diagnostic-error]"
+        )
+        findings = {"performance": SWEEP_MODULE.parse_findings(output)}
+        self.assertEqual(SWEEP_MODULE.gated_findings(["performance"], findings), [])
+
+
 class TestCommandLine(unittest.TestCase):
     """The command line: the gate can be inspected and replaced."""
 

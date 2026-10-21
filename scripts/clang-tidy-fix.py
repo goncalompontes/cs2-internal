@@ -224,6 +224,15 @@ NO_HEADER_FILTER = r"^$"  # matches nothing: diagnostics restricted to main file
 
 DIAG_RE = re.compile(r"\[([a-zA-Z0-9][a-zA-Z0-9._-]*)\]\s*$")
 
+# The compiler's own diagnostics are not findings of a check group. A
+# translation unit that does not compile is reported by the sweep's "failed on
+# N translation unit(s)" path (clang-tidy prints "Error while processing"), and
+# counting it as a finding of the group would make the gate say "performance
+# reported a finding" and send the reader hunting a style problem that does
+# not exist. (Compiler *warnings* need no rule: clang-tidy filters them out
+# with the check selection, so they never reach the counter.)
+NON_FINDING_CHECKS = frozenset({"clang-diagnostic-error"})
+
 
 def rel(path: Path) -> str:
     try:
@@ -335,7 +344,7 @@ def parse_findings(output: str) -> Counter[str]:
         if ": warning:" not in line and ": error:" not in line:
             continue
         match = DIAG_RE.search(line.rstrip())
-        if match:
+        if match and match.group(1) not in NON_FINDING_CHECKS:
             counts[match.group(1)] += 1
     return counts
 
