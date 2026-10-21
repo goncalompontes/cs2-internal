@@ -17,6 +17,7 @@ game for tests.
 | doing **static RE** | [`docs/re/README.md`](docs/re/README.md) — the REA + Ghidra playbook and the current RE map |
 | looking for the **current work** | [`docs/handoff.md`](docs/handoff.md), [`docs/control-harness.md`](docs/control-harness.md), [`docs/roadmap.md`](docs/roadmap.md) |
 | changing **C++ style** | [`docs/style-guide.md`](docs/style-guide.md) |
+| reading the **quality pass** | [`docs/quality-pass.md`](docs/quality-pass.md) — the RAII pass: the inventory, the commits and the backlog |
 
 ## Layout
 
@@ -25,7 +26,8 @@ game for tests.
   MCP server, C++ header generation.
 - `payload/` — C++23 (MSVC ABI): manual-map `loader`, `hooks`, `game` state
   introspection, `control` channel (named pipe) + input hooks, `features`
-  (overlay model publisher), `render` (UI-agnostic model), `tls`, `diag`.
+  (overlay model publisher), `render` (UI-agnostic model), `tls`, `diag`,
+  `core` (the shared RAII handle).
 - `injector/` — manual-map injector (`injector.exe`), no `LoadLibrary`.
 - `overlay/` — portable Vulkan implicit layer (Linux `.so` / Windows `.dll`).
 - `scripts/` — SDK generation, live calibration, the scenario runner,
