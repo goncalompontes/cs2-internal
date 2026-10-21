@@ -6,7 +6,10 @@
 #
 #   pip install -r requirements-dev.txt
 #
-# Pinned: a gate that changes its mind between runs is not a gate.
+# Pinned: a gate that changes its mind between runs is not a gate. The one
+# exception is the MCP SDK, which is a range on purpose: the test that
+# needs it skips itself when the package is absent, so its version is not
+# a gate.
 
 # The build system. Pinned like the rest: a build that changes its mind
 # between runs is not a build either. These are the versions this repository
