@@ -18,12 +18,16 @@ int g_closed = 0;
 
 // A fake handle: a positive value is live, zero is "nothing held".
 struct FakePolicy {
-  static bool is_valid(int handle) noexcept {
+  // The counter the releases are counted in. It travels with the policy, so
+  // a test can prove that a moved wrapper keeps its own closer.
+  int* counter = &g_closed;
+
+  bool is_valid(int handle) const noexcept {
     return handle > 0;
   }
-  static void close(int handle) noexcept {
+  void close(int handle) const noexcept {
     assert(handle > 0);
-    ++g_closed;
+    ++(*counter);
   }
 };
 
@@ -63,7 +67,7 @@ auto main() -> int {
     file.reset();
     assert(g_closed == 4);
     assert(!file.valid());
-    assert(file.get() ==  0);
+    assert(file.get() == 0);
   }
   assert(g_closed == 4);  // nothing left to release
 
@@ -98,6 +102,19 @@ auto main() -> int {
     assert(!file.valid());
   }
   assert(g_closed == 7);  // handle 6 released on the way out
+
+  // The closer travels with the handle: a wrapper built with an explicit
+  // policy keeps that policy across a move, and the release is counted in
+  // *its* counter.
+  int other_closed = 0;
+  {
+    FakeHandle file(8, FakePolicy{&other_closed});
+    FakeHandle moved(std::move(file));
+    assert(moved.get() == 8);
+    assert(other_closed == 0);
+  }
+  assert(other_closed == 1);
+  assert(g_closed == 7);  // the global counter was not touched
 
   std::puts("core-handle: ok");
   return 0;

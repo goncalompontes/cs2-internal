@@ -25,10 +25,10 @@ using KernelHandle = void*;
 struct KernelHandlePolicy {
   // `CreateFileA` reports failure with INVALID_HANDLE_VALUE and the other
   // creators with NULL, so neither is a handle.
-  static bool is_valid(KernelHandle handle) noexcept {
+  bool is_valid(KernelHandle handle) const noexcept {
     return handle != nullptr && handle != INVALID_HANDLE_VALUE;
   }
-  static void close(KernelHandle handle) noexcept {
+  void close(KernelHandle handle) const noexcept {
     CloseHandle(static_cast<HANDLE>(handle));
   }
 };

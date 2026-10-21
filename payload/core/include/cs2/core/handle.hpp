@@ -4,8 +4,10 @@
 // a function that acquires a handle cannot leak it on an early return.
 //
 // The wrapper is a template over the handle type and a *policy*: the policy
-// says how to recognise a live handle and how to release one. It is a type, so
-// the ownership is static and the wrapper adds no indirection at run time.
+// says how to recognise a live handle and how to release one. The policy is a
+// value, not a type, so a handle kind whose closer is resolved at run time
+// (the payload resolves kernel32's entry points by name) can carry the
+// resolved entry point with it.
 //
 // Why a template and not `std::unique_ptr`: its deleter is type-erased through
 // a virtual call, which is exactly what the policy parameter replaces, and it
@@ -16,18 +18,22 @@
 // ownership logic itself has a host test (payload/core/tests/test_handle.cpp):
 // the Windows-only sources that use it cannot be tested off-Windows.
 
+#include <utility>
+
 namespace cs2::core {
 
 // The policy must provide:
-//   static bool is_valid(Handle) noexcept;  // is this a live handle?
-//   static void close(Handle) noexcept;      // release a live handle
+//   bool is_valid(Handle) const noexcept;  // is this a live handle?
+//   void close(Handle) const noexcept;      // release a live handle
 template <typename Handle, typename Policy>
 class ScopedHandle {
  public:
   using value_type = Handle;
 
   ScopedHandle() noexcept = default;
-  explicit ScopedHandle(Handle handle) noexcept : handle_(handle) {}
+  explicit ScopedHandle(Handle handle) noexcept : handle_(handle), policy_(Policy{}) {}
+  ScopedHandle(Handle handle, Policy policy) noexcept
+      : handle_(handle), policy_(std::move(policy)) {}
   ~ScopedHandle() {
     reset();
   }
@@ -35,11 +41,13 @@ class ScopedHandle {
   ScopedHandle(const ScopedHandle&) = delete;
   ScopedHandle& operator=(const ScopedHandle&) = delete;
 
-  ScopedHandle(ScopedHandle&& other) noexcept : handle_(other.release()) {}
+  ScopedHandle(ScopedHandle&& other) noexcept
+      : handle_(other.release()), policy_(std::move(other.policy_)) {}
   ScopedHandle& operator=(ScopedHandle&& other) noexcept {
     if (this != &other) {
       reset();
       handle_ = other.release();
+      policy_ = std::move(other.policy_);
     }
     return *this;
   }
@@ -51,13 +59,13 @@ class ScopedHandle {
 
   // Whether the wrapper holds a live handle.
   [[nodiscard]] auto valid() const noexcept -> bool {
-    return Policy::is_valid(handle_);
+    return policy_.is_valid(handle_);
   }
 
   // Release the held handle (if it is live) and take `handle` in its place.
   void reset(Handle handle = Handle{}) noexcept {
-    if (Policy::is_valid(handle_)) {
-      Policy::close(handle_);
+    if (policy_.is_valid(handle_)) {
+      policy_.close(handle_);
     }
     handle_ = handle;
   }
@@ -72,6 +80,7 @@ class ScopedHandle {
 
  private:
   Handle handle_{};
+  Policy policy_{};
 };
 
 }  // namespace cs2::core
