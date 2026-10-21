@@ -782,16 +782,30 @@ auto Service::input_status() noexcept -> Json {
   // proof that the camera did **not** follow the fake ones), the re-based axes
   // and the `move_crc` gate.
   result.set("anti_aim", Json::boolean(input_.anti_aim()));
-  result.set("anti_aim_rebase", Json::boolean(input_.anti_aim_rebase_ok()));
+  result.set("anti_aim_move_rebase", Json::boolean(input_.anti_aim_move_rebase()));
   result.set("anti_aim_acted", Json::boolean(input_.anti_aim_acted()));
   result.set("anti_aim_reason", Json::number(static_cast<double>(input_.anti_aim_reason())));
   result.set("anti_aim_fake_yaw", Json::number(input_.anti_aim_fake_yaw()));
   result.set("anti_aim_fake_pitch", Json::number(input_.anti_aim_fake_pitch()));
   result.set("anti_aim_camera_yaw", Json::number(input_.anti_aim_camera_yaw()));
   result.set("anti_aim_camera_pitch", Json::number(input_.anti_aim_camera_pitch()));
+  // The **delivered** axes (a member of the engine's discrete set — what the
+  // server acts on) and what they cost: the direction error against the
+  // camera's own wish and the walk-speed factor.
   result.set("anti_aim_forward", Json::number(input_.anti_aim_forward()));
   result.set("anti_aim_left", Json::number(input_.anti_aim_left()));
+  result.set("anti_aim_direction_error", Json::number(input_.anti_aim_direction_error()));
+  result.set("anti_aim_wish_factor", Json::number(input_.anti_aim_wish_factor()));
+  result.set("anti_aim_saturated", Json::boolean(input_.anti_aim_saturated()));
   result.set("anti_aim_basis_cos", Json::number(input_.anti_aim_basis_cos()));
+  // The `move_crc` caveat: the payload does not recompute the command's CRC
+  // (`docs/re/angle-split.md` §5.4). It is reported, not gated: the server
+  // cannot reject a command whose CRC the client never writes, and this repo's
+  // own measurement shows the server honours a modified analog.
+  result.set("anti_aim_crc_caveat", Json::string("the command's move_crc is not "
+                                                 "recomputed (base + 0x30); the "
+                                                 "server is expected to ignore it "
+                                                 "(docs/re/angle-split.md §5.4)"));
   result.set("anti_aim_yaw_offset", Json::number(input_.anti_aim_yaw_offset()));
   result.set("anti_aim_pitch", Json::number(input_.anti_aim_pitch()));
   result.set("anti_aim_jitter", Json::number(input_.anti_aim_jitter()));
@@ -1083,27 +1097,21 @@ void Service::do_antiaim(const Json& args, Json& out) noexcept {
                               number("jitter", input_.anti_aim_jitter()),
                               static_cast<int>(number("side",
                                                      static_cast<float>(input_.anti_aim_side()))));
-  // The `move_crc` gate: the movement re-base changes the command's move
-  // values, and the command's CRC is never written by the client — the
-  // engine's CRC routine over the move values was not found
-  // (`docs/re/angle-split.md` §5.4). The gate is **closed** by default and the
-  // anti-aim writes nothing while it is closed: the fake angles without the
-  // re-base rotate the movement's wish basis and break the operator's walk.
-  // `rebase: true` opens it for a test build — the operator has to know that
-  // the server may reject the modified movement.
-  bool rebase = input_.anti_aim_rebase_ok();
-  if (const Json* arg = args.find("rebase"); arg != nullptr) {
+  // The movement re-base: **on by default**. Turning it off leaves the fake
+  // angles in place and the movement's wish basis follows them — a
+  // diagnostic, not a mode to play in. The `move_crc` caveat is reported in
+  // the status, not gated (`docs/re/angle-split.md` §5.4).
+  //
+  // The flag is symmetric: the anti-aim off means the re-base is off, and
+  // turning the anti-aim on restores the default.
+  bool rebase = true;
+  if (const Json* arg = args.find("move_rebase"); arg != nullptr) {
     rebase = arg->is_bool() ? arg->as_bool() : arg->as_number() != 0.0;
   }
-  if (rebase != input_.anti_aim_rebase_ok()) {
-    input_.set_anti_aim_rebase(rebase);
-    if (rebase) {
-      cs2::game::append_log(
-          "[cs2-payload] anti-aim: the move_crc gate was OPENED — the command's CRC is "
-          "not recomputed, so the server may reject the modified movement "
-          "(docs/re/angle-split.md §5.4)");
-    }
+  if (!on) {
+    rebase = false;
   }
+  input_.set_anti_aim_move_rebase(rebase);
   input_.set_anti_aim(on);
   set_ok(out, input_status());
 }

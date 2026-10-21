@@ -462,11 +462,12 @@ class InputStatus(TypedDict, total=False):
     strafe_writes: int
     strafe_raw_writes: int
     # The **anti-aim**: what it wrote (the fake yaw and pitch), the camera's
-    # own angles (the proof that the camera did not follow them), the re-based
-    # analog axes and the `move_crc` gate that holds the whole feature off
-    # until the command's CRC is settled (`docs/re/angle-split.md` §5.4).
+    # own angles (the proof that the camera did not follow them), the
+    # **delivered** analog axes (a member of the engine's discrete set — what
+    # the server acts on) with the direction error and the walk-speed factor
+    # they cost, and the `move_crc` caveat.
     anti_aim: bool
-    anti_aim_rebase: bool
+    anti_aim_move_rebase: bool
     anti_aim_acted: bool
     anti_aim_reason: int
     anti_aim_fake_yaw: float
@@ -475,6 +476,9 @@ class InputStatus(TypedDict, total=False):
     anti_aim_camera_pitch: float
     anti_aim_forward: float
     anti_aim_left: float
+    anti_aim_direction_error: float
+    anti_aim_wish_factor: float
+    anti_aim_saturated: bool
     anti_aim_basis_cos: float
     anti_aim_yaw_offset: float
     anti_aim_pitch: float
@@ -483,6 +487,7 @@ class InputStatus(TypedDict, total=False):
     anti_aim_writes: int
     anti_aim_rebase_applied: int
     anti_aim_rebase_skipped: int
+    anti_aim_crc_caveat: str
     # The auto-strafe's **outcome** (the speed gained over the last airtime) and
     # its **gate verdict** (did the engine apply the requested basis rotation?
     # `docs/re/strafing.md` §"The gate").

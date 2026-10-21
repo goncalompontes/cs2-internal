@@ -309,29 +309,39 @@ class Input {
   // command's angles are the movement's wish basis (`SetupMove` copies
   // `base->viewangles` into the `CMoveData`'s angles; `AirMove` builds
   // `wish = forward * forwardmove + left * leftmove` from them), so a fake yaw
-  // rotates the operator's walk. The re-base re-expresses the player's held
-  // intent in the anti-aim frame (`cs2/control/anti_aim.hpp`); its maths is
-  // pure and host-tested.
+  // rotates the operator's walk. The re-base re-expresses the command's
+  // **current** axes in the anti-aim frame (`cs2/control/anti_aim.hpp`); its
+  // maths is pure and host-tested.
   //
-  // **The gate.** `CBaseUserCmdPB::move_crc` (`base + 0x30`) is never written
-  // by the client and the engine's CRC routine over the move values was not
-  // found (`docs/re/angle-split.md` §5.4), so a command with a re-based analog
-  // may be rejected by the server. The re-base is therefore **off** until that
-  // is settled — and because half a feature is worse than no feature (the fake
-  // angles without the re-base rotate the walk basis and break the operator's
-  // movement), the **whole anti-aim** is gated: with the gate closed it
-  // computes its model for the diagnostics and writes nothing.
+  // **It composes.** The re-base takes the axes the command already carries —
+  // the engine's own input, the auto-strafe's wish, the ragebot's auto-stop —
+  // and re-expresses them, so those features keep working. It refuses to act
+  // only where a composition is impossible: the auto-strafe's **sub-tick basis
+  // rotation** (which rotates the same basis the anti-aim fakes) and the
+  // `look` command's own angles (the same field). The reason is reported.
+  //
+  // **The `move_crc` caveat.** The command's `move_crc` (`base + 0x30`) is
+  // never written by the client and the engine's CRC routine over the move
+  // values was not found (`docs/re/angle-split.md` §5.4). The payload does
+  // **not** recompute it — it is a caveat the operator is told about, not a
+  // gate: the server cannot reject a command whose CRC the client never
+  // writes, and this repo's own measurement shows the server honours a
+  // modified analog (`docs/re/strafing.md` §"the gate").
   void set_anti_aim(bool on) noexcept { anti_aim_enabled_.store(on); }
   /// Configure the anti-aim: the desync offset (degrees, applied to the
   /// camera's yaw), the fake pitch (degrees, clamped to the engine's range),
   /// the per-command jitter (degrees) and the side (`0` automatic, `+1` left,
   /// `-1` right).
   void set_anti_aim_config(float yaw_offset, float pitch, float jitter, int side) noexcept;
-  /// The `move_crc` gate: the movement re-base — and with it the anti-aim's
-  /// write — is off until the command's CRC is settled. **Off by default.**
-  void set_anti_aim_rebase(bool on) noexcept { anti_aim_rebase_ok_.store(on); }
+  /// The movement re-base: whether the re-based axes are written at all. It
+  /// is **on by default**; turning it off leaves the fake angles in place, and
+  /// the walk basis then follows the fake yaw (a diagnostic, not a mode to
+  /// play in).
+  void set_anti_aim_move_rebase(bool on) noexcept { anti_aim_move_rebase_.store(on); }
   [[nodiscard]] bool anti_aim() const noexcept { return anti_aim_enabled_.load(); }
-  [[nodiscard]] bool anti_aim_rebase_ok() const noexcept { return anti_aim_rebase_ok_.load(); }
+  [[nodiscard]] bool anti_aim_move_rebase() const noexcept {
+    return anti_aim_move_rebase_.load();
+  }
   [[nodiscard]] float anti_aim_yaw_offset() const noexcept { return anti_aim_yaw_offset_.load(); }
   [[nodiscard]] float anti_aim_pitch() const noexcept { return anti_aim_pitch_.load(); }
   [[nodiscard]] float anti_aim_jitter() const noexcept { return anti_aim_jitter_.load(); }
@@ -346,20 +356,37 @@ class Input {
   /// feature is off: they stay at their last value).
   [[nodiscard]] float anti_aim_camera_yaw() const noexcept { return anti_aim_camera_yaw_.load(); }
   [[nodiscard]] float anti_aim_camera_pitch() const noexcept { return anti_aim_camera_pitch_.load(); }
-  /// The re-based analog axes (the command's `forwardmove`/`leftmove`). They
-  /// are computed even while the `move_crc` gate is closed — they are what the
-  /// re-base *would* write; `anti_aim_rebase` says whether it did.
+  /// The **delivered** analog axes — the members of the engine's discrete set
+  /// (`{-1, 0, +1}`) the payload writes. These are the values the server acts
+  /// on: `sv_quantize_movement_input` rounds the analog it receives, so the
+  /// payload snaps first and the client predicts what the server does.
   [[nodiscard]] float anti_aim_forward() const noexcept { return anti_aim_forward_.load(); }
   [[nodiscard]] float anti_aim_left() const noexcept { return anti_aim_left_.load(); }
+  /// How far the delivered walk direction is off the camera's (degrees). Zero
+  /// for an offset that is a multiple of 45 degrees, at most 22.5 degrees for
+  /// a well-conditioned re-base — and **not** bounded when the re-base
+  /// saturates (see `anti_aim_saturated`).
+  [[nodiscard]] float anti_aim_direction_error() const noexcept {
+    return anti_aim_direction_error_.load();
+  }
+  /// The delivered wish's length against the camera's: the factor the
+  /// operator's walk speed is multiplied by. A steep fake pitch costs the
+  /// most (`cos(89°) = 0.017` — a 1.7 % walk).
+  [[nodiscard]] float anti_aim_wish_factor() const noexcept {
+    return anti_aim_wish_factor_.load();
+  }
+  /// The re-base saturated: the ideal axes did not fit in ±1, so the delivered
+  /// direction is a compromise and **not** the camera's.
+  [[nodiscard]] bool anti_aim_saturated() const noexcept { return anti_aim_saturated_.load(); }
   /// `cos` of the fake pitch: the factor the engine puts on the forward axis,
-  /// so the operator can see how far the walk's basis is tilted (a steep fake
-  /// pitch tilts the forward axis into the ground and the re-base saturates).
+  /// so the operator can see how far the walk's basis is tilted.
   [[nodiscard]] float anti_aim_basis_cos() const noexcept { return anti_aim_basis_cos_.load(); }
   /// Did the anti-aim write this tick?
   [[nodiscard]] bool anti_aim_acted() const noexcept { return anti_aim_acted_.load(); }
-  /// Why it did or did not: 0 off, 1 acted, 2 the `move_crc` gate is closed,
-  /// 3 the camera's angles could not be read, 4 the command's angles could not
-  /// be written.
+  /// Why it did or did not: 0 off, 1 acted, 2 the camera's angles could not be
+  /// read, 3 the command's angles could not be written, 4 the movement re-base
+  /// is off, 5 the auto-strafe's sub-tick basis rotation owns the movement,
+  /// 6 the `look` command owns the command's angles.
   [[nodiscard]] int anti_aim_reason() const noexcept { return anti_aim_reason_.load(); }
   /// The counters: the writes, the re-base's applications and the ticks the
   /// re-base was skipped on.
@@ -735,17 +762,22 @@ class Input {
   // the anti-aim share it.
   auto write_command_angles(std::uint8_t* base, float pitch, float yaw,
                             float roll) noexcept -> bool;
+  // True when the command's own `viewangles` already carry the given angles —
+  // the content-based guard that keeps the anti-aim's write to once per
+  // command (the hook can run more than once for the same command) without
+  // any state of its own.
+  [[nodiscard]] auto command_angles_are(std::uint8_t* base, float pitch,
+                                        float yaw) const noexcept -> bool;
+  // Write the command's analog axes: the command's own floats, the **raw**
+  // axes (`CCSGOInput + 0x270/0x274` — the slot-5 builder re-derives the
+  // command's floats from them, so a command-only write is overwritten) and
+  // the button bits (`SetupMove`'s sanitizer turns the held buttons into the
+  // same axes). Shared with the auto-strafe.
+  auto write_move_axes(std::uint8_t* base, void* cmd, float forward,
+                       float left) noexcept -> bool;
   // One tick of the anti-aim: read the camera's angles, compute the fake
-  // angles and the re-based axes, and — when the `move_crc` gate is open —
-  // write them into the command.
+  // angles and the re-based axes, and write them into the command.
   void anti_aim_tick(void* cmd, std::uint8_t* base) noexcept;
-  // Write the re-based analog axes: the command's own floats
-  // (`base + 0x58/+0x5c`) **and** the raw axes (`CCSGOInput + 0x270/0x274`) —
-  // the slot-5 builder re-derives the command's floats from the raw axes, so
-  // a command-only write is overwritten. The button bits are mirrored with
-  // them: `SetupMove`'s sanitizer turns the held buttons into the same axes.
-  void write_anti_aim_axes(std::uint8_t* base, void* cmd,
-                           const anti_aim::Axes& axes) noexcept;
   // One tick of the ragebot: write the render-thread solve as the silent sub-tick
   // view angles and (optionally) press attack.
   void rage_tick(std::uint8_t* cmd, const std::uint64_t* buttons) noexcept;
@@ -954,12 +986,12 @@ class Input {
   std::atomic<std::uint64_t> entry_writes_{0};
   std::atomic<std::uint64_t> step_writes_{0};
   std::atomic<std::uint64_t> command_angle_writes_{0};
-  // The anti-aim: the operator's request, its configuration, the `move_crc`
-  // gate and the diagnostics. The state is touched on the **game thread**
-  // only (the tick runs in the command path); the counters the control thread
-  // reads are atomic.
+  // The anti-aim: the operator's request, its configuration, the movement
+  // re-base's switch and the diagnostics. The state is touched on the **game
+  // thread** only (the tick runs in the command path); the counters the
+  // control thread reads are atomic.
   std::atomic<bool> anti_aim_enabled_{false};
-  std::atomic<bool> anti_aim_rebase_ok_{false};
+  std::atomic<bool> anti_aim_move_rebase_{true};
   std::atomic<float> anti_aim_yaw_offset_{0.0F};
   std::atomic<float> anti_aim_pitch_{0.0F};
   std::atomic<float> anti_aim_jitter_{0.0F};
@@ -967,17 +999,15 @@ class Input {
   // The jitter's seed: fixed for the payload's lifetime, so the fake yaw is
   // reproducible from the command's number alone.
   std::uint32_t anti_aim_seed_{0x5eed1234U};
-  // The command the anti-aim last wrote: the write happens **once per
-  // command** (the hook can run more than once for the same command). Game
-  // thread only.
-  std::uint32_t anti_aim_last_number_{0};
-  std::uintptr_t anti_aim_last_base_{0};
   std::atomic<float> anti_aim_fake_yaw_{0.0F};
   std::atomic<float> anti_aim_fake_pitch_{0.0F};
   std::atomic<float> anti_aim_camera_yaw_{0.0F};
   std::atomic<float> anti_aim_camera_pitch_{0.0F};
   std::atomic<float> anti_aim_forward_{0.0F};
   std::atomic<float> anti_aim_left_{0.0F};
+  std::atomic<float> anti_aim_direction_error_{0.0F};
+  std::atomic<float> anti_aim_wish_factor_{1.0F};
+  std::atomic<bool> anti_aim_saturated_{false};
   std::atomic<float> anti_aim_basis_cos_{1.0F};
   std::atomic<bool> anti_aim_acted_{false};
   std::atomic<int> anti_aim_reason_{0};

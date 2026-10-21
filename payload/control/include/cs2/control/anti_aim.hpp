@@ -119,18 +119,6 @@ struct Axes {
   float left{0.0F};
 };
 
-//: The player's held movement intent, expressed in the **camera** frame
-//! (`forward` is +1 for `W`, `left` is the engine's side axis, +1 for `A`).
-//!
-//! **Deprecated**: the re-base works on the *command's current axes* — what
-//! wrote them (the engine's own input, the auto-strafe's wish, the ragebot's
-//! auto-stop) — so that the anti-aim composes with them. This is the thin
-//! adapter the payload's old call site uses until it moves over.
-struct MoveIntent {
-  float forward{0.0F};
-  float left{0.0F};
-};
-
 //: The side the anti-aim puts the fake yaw on.
 enum class Side : std::int8_t {
   right = -1,
@@ -307,14 +295,6 @@ enum class Side : std::int8_t {
     axes.forward = -axes.forward;
   }
   return axes;
-}
-
-//: The re-base of a **held intent** — the thin adapter for the payload's old
-//! call site. The re-base itself works on the command's *current axes*, so the
-//! anti-aim composes with the other movement features.
-[[nodiscard]] inline auto rebase_axes(Angles camera, Angles anti_aim, MoveIntent intent) noexcept
-    -> Axes {
-  return rebase_axes(camera, anti_aim, Axes{intent.forward, intent.left});
 }
 
 //: The engine's **discrete analog set**: the nine `{-1, 0, +1}²` move states
