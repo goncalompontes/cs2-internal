@@ -84,10 +84,33 @@ number is **not** what appears in the bytecode — see §3.6.
   sign/zero-extended to 64 bits according to its type, and every operation
   truncates its result back to the operation's width (§3.3).
 - The frame layout is fixed and documented: `[0 .. slot_count)` are the value
-  slots, then the **argument stack** region (the values pushed for a call),
-  then the **call scratch** region (the arguments of the call in flight).
-  The interpreter of T20b reads the layout from the bytecode header, so the
-  layout is a **contract** — write it down in `vm.hpp` and in the README.
+  slots, then the **locals**, then the **argument stack** region (the values
+  pushed for a call), then the **call scratch** region (the arguments of the
+  call in flight). The interpreter of T20b reads the layout out of the
+  bytecode header, so the layout is a **contract** — write it down in
+  `vm.hpp` and in the README.
+
+> **UPDATED (2026-10-21, after the fix round).** The frame has **four**
+> regions, and the header carries a fourth size:
+>
+> ```
+> [0, slot_count)                            the value slots
+> [slot_count, slot_count + local_cells)     the locals
+> [slot_count + local_cells, + arg_slots)    the argument stack
+> [slot_count + local_cells + arg_slots, + call_slots)   the call scratch
+> ```
+>
+> The **locals** are the `alloca`s of the function. The parent spec (T20 §2.3)
+> says "`alloca` gets a byte offset into the frame arena", and the frame *is*
+> an arena: the locals are the cells **above the value slots**, and their byte
+> offset is carried by the `Alloca` opcode. The values and the locals together
+> must fit in the **256**-cell value region; a local that does not fit, whose
+> size is not constant, or that needs more than 8 bytes of alignment is
+> refused with the named reason `local_variable` (§4) — never the catch-all.
+>
+> The header's last word is `local_cells` (the number of cells the locals
+> take), not `reserved`.
+
 
 ### 3.3 The widths, and `nsw`/`nuw`
 
@@ -197,25 +220,46 @@ followed by the instruction stream.
 | `Move` | dst, src1 | dst = src1 (truncated to the width) |
 | `Add` `Sub` `Mul` `And` `Or` `Xor` | dst, src1, src2, width, flags | the arithmetic, at the width |
 | `SDiv` `UDiv` `SRem` `URem` | dst, src1, src2, width | the division, at the width |
-| `Shl` `LShr` `AShr` | dst, src1, src2, width, flags | the shift amount is masked to width-1 |
-| `Neg` `Not` | dst, src1 | |
+| `Shl` `LShr` `AShr` | dst, src1, src2, width, flags | the arithmetic, at the width; **the shift amount is masked to `width * 8 - 1`** (`width` is in **bytes**, so the mask is 7, 15, 31 or 63) |
+| `Neg` `Not` | dst, src1 | the negation; **no flags** (the `nsw`/`nuw` of the rewritten instruction do not apply) |
 | `Cmp` | dst, src1, src2, aux=the kind, width | dst = 1 if the comparison holds, else 0 |
-| `Cast` | dst, src1, aux=the kind, width | zext / sext / trunc / bitcast |
+| `Cast` | dst, src1, aux=the kind, width | zext / sext / trunc / bitcast. The `aux` carries the kind **and the source width** (a `zext`/`sext` needs the width of its source) |
 | `Load` | dst, src1(ptr), aux=the size in bytes | dst = *(iN*)src1 |
 | `Store` | src1(ptr), src2, aux=the size in bytes | *(iN*)src1 = src2 |
 | `Gep` | dst, src1, imm | dst = src1 + imm (a **signed** byte offset) |
 | `Br` | aux = the target instruction index | pc = the target |
 | `BrIf` | src1 (the condition), aux = the target | if src1 != 0, pc = the target |
 | `Arg` | src1 | push src1 onto the argument stack |
-| `Call` | dst = the result, imm = the pool index, aux = the argument count | pops the arguments, calls the pool entry |
+| `Pop` | dst | dst = the top of the argument stack, popped |
+| `Call` | dst = the result, imm = the pool index, aux = the argument count | the arguments are the **top** `aux` cells of the argument stack, **in the order they were pushed** (the first argument of the call is the first one pushed) |
+| `Alloca` | dst, imm | the byte offset of a local in the frame arena (the interpreter adds the frame's base) |
 | `Ret` | src1 | return src1 (the return slot) |
 | `MemCpy` | src1(dst), src2(src), imm = the length | copies a **constant** number of bytes |
 | `MemSet` | src1(ptr), src2(the byte), imm = the length | |
 
-The comparison kinds, the cast kinds and the memory sizes are enumerations in
-`vm.hpp`, each with one canonical number.
+> **UPDATED (2026-10-21, after the fix round).** Three opcodes are not in
+> the table above, and they are **necessary**:
+>
+> - **`Pop`** — the spec's §3.4 demands a **parallel** copy ("push every
+>   source, then pop every destination in reverse order"), and the argument
+>   stack is the only stack the frame has. Without a pop the copy would be
+>   sequential, which is the bug the spec forbids.
+> - **`Pool`** — the bytecode may hold **indices only** (§2), so the address
+>   of a global cannot be in the instruction stream. The pool — the same
+>   relocatable global the call sites use — holds the addresses, and the
+>   bytecode holds the index. The pool's entries are **pointers**, not
+>   function pointers: a call site and a data address share the array, and
+>   the opcode tells the interpreter which it is.
+> - **`Alloca`** — the locals (§3.2).
+>
+> The comparison kinds, the cast kinds and the memory sizes are enumerations
+> in `vm.hpp`, each with one canonical number.
 
-**A `switch` is lowered to a chain of `Cmp` + `BrIf`.** It is not refused.
+**A `switch` is lowered to a chain of `Cmp` + `BrIf`.** It is not refused —
+and note that a switch's **case values are not IR operands**, so they must be
+materialised explicitly: LLVM keeps them in a side table, not in the use
+list.
+
 
 ## 4. The eligibility gate — **fail closed**
 
@@ -243,6 +287,8 @@ The refusal reasons (one enum, one `to_string`, in `vm.hpp`):
 | `too_many_arguments` | a call needs more arguments than the budget (§6) |
 | `recursion` | the function can call itself: the frame would multiply by the recursion depth |
 | `virtualized_callee` | the function calls a function that is **itself** selected at the `virtualized` level: the interpreter would have to call into another interpreter |
+| `local_variable` | a local (`alloca`) that does not fit in the frame's value region, whose size is not constant, or that needs more than 8 bytes of alignment (§3.2) |
+| `vanished` | the function did not survive from the selection phase to this phase: the optimiser removed it. It is reported like T19's `vanished`, so the operator can tell "not selected" from "selected and deleted" |
 | `unsupported_instruction` | **the catch-all**: any IR instruction the lowering does not model. The lowering must have a default branch that refuses. |
 
 Two of these are **calls**, and the reasoning matters:
@@ -281,11 +327,22 @@ copy of the same rules), and extend it with the VM-specific ones.
 |---|---|---|
 | value slots per function | 256 | refuse (`too_many_slots`) |
 | call arguments | 64 | refuse (`too_many_arguments`) |
-| frame size | 256 slots × 8 bytes + the argument region (64 × 8) + the call scratch (64 × 8) = **2560 bytes** | fixed |
+| frame size | 256 cells of values **and locals** + 64 argument cells + 64 call cells = **384 cells = 3072 bytes** | fixed |
+
+> **CORRECTED (2026-10-21).** This table originally said 2560 bytes, which
+> was **the orchestrator's arithmetic error**: it listed three regions and
+> added up two of them. 256 + 64 + 64 = **384** cells = **3072** bytes. The
+> implementation is right and the number is consistent everywhere (the
+> header's `arg_slots`/`call_slots`, the report, the coverage, the README).
 
 The frame size is a **constant**: the rewritten function allocates exactly
 that, so the interpreter's frame is always the same shape and the slot
 indices are absolute. Report it.
+
+The **values and the locals share the 256-cell value region**: the values are
+`[0, slot_count)` and the locals are `[slot_count, slot_count + local_cells)`,
+and the two together must fit in 256 cells. The argument stack and the call
+scratch follow immediately (§3.2).
 
 ## 7. The report and the coverage
 
