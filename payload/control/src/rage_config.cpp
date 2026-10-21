@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "cs2/core/handle.hpp"
 #include "cs2/game/log.hpp"
 
 #if defined(_WIN32)
@@ -78,6 +79,22 @@ auto kernel_file_api() noexcept -> KernelFileApi {
   api.close_handle = reinterpret_cast<CloseHandleFn>(GetProcAddress(kernel32, "CloseHandle"));
   return api;
 }
+
+// The closer for the config file's handle: the `CloseHandle` that was resolved
+// from kernel32, so the file is released by exactly the entry point the rest
+// of this file uses.
+struct FilePolicy {
+  CloseHandleFn close_handle = nullptr;
+
+  bool is_valid(void* handle) const noexcept {
+    return handle != nullptr && handle != INVALID_HANDLE_VALUE;
+  }
+  void close(void* handle) const noexcept {
+    if (close_handle != nullptr) {
+      close_handle(static_cast<HANDLE>(handle));
+    }
+  }
+};
 #endif
 
 }  // namespace
@@ -117,15 +134,21 @@ auto rage_config_load(RageConfigStore& store) noexcept -> bool {
   constexpr unsigned long k_share_read = 0x1UL;
   constexpr unsigned long k_open_existing = 0x3UL;
   constexpr unsigned long k_file_attribute_normal = 0x80UL;
-  const HANDLE file = api.create_file(path, k_generic_read, k_share_read, nullptr, k_open_existing,
-                                      k_file_attribute_normal, nullptr);
-  if (file == nullptr || file == INVALID_HANDLE_VALUE) {
-    return false;
-  }
-  char buffer[k_max_file_bytes] = {};
   unsigned long read = 0;
-  const int ok = api.read_file(file, buffer, sizeof(buffer) - 1, &read, nullptr);
-  api.close_handle(file);
+  int ok = 0;
+  char buffer[k_max_file_bytes] = {};
+  {
+    // The handle is owned by the wrapper, so every path out of this block
+    // releases it -- including the early return above (which never got one).
+    core::ScopedHandle<void*, FilePolicy> file(
+        api.create_file(path, k_generic_read, k_share_read, nullptr, k_open_existing,
+                        k_file_attribute_normal, nullptr),
+        FilePolicy{api.close_handle});
+    if (!file.valid()) {
+      return false;
+    }
+    ok = api.read_file(static_cast<HANDLE>(file.get()), buffer, sizeof(buffer) - 1, &read, nullptr);
+  }  // the file is released here, before the buffer is parsed
   if (ok == 0) {
     return false;
   }
@@ -201,14 +224,21 @@ auto rage_config_save(const RageConfigStore& store) noexcept -> bool {
   constexpr unsigned long k_share_read = 0x1UL;
   constexpr unsigned long k_create_always = 0x2UL;
   constexpr unsigned long k_file_attribute_normal = 0x80UL;
-  const HANDLE file = api.create_file(path, k_generic_write, k_share_read, nullptr, k_create_always,
-                                      k_file_attribute_normal, nullptr);
-  if (file == nullptr || file == INVALID_HANDLE_VALUE) {
-    return false;
-  }
-  unsigned long written = 0;
-  const int ok = api.write_file(file, buffer, static_cast<unsigned long>(used), &written, nullptr);
-  api.close_handle(file);
+  // The handle is owned by the wrapper, so every path out of this block
+  // releases it.
+  int ok = 0;
+  {
+    core::ScopedHandle<void*, FilePolicy> file(
+        api.create_file(path, k_generic_write, k_share_read, nullptr, k_create_always,
+                        k_file_attribute_normal, nullptr),
+        FilePolicy{api.close_handle});
+    if (!file.valid()) {
+      return false;
+    }
+    unsigned long written = 0;
+    ok = api.write_file(static_cast<HANDLE>(file.get()), buffer, static_cast<unsigned long>(used),
+                        &written, nullptr);
+  }  // the file is released here, before the result is returned
   return ok != 0;
 #else
   (void)store;

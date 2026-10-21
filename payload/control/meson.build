@@ -31,12 +31,12 @@ control_lib = static_library('cs2_control',
     'src/trigger.cpp',
     'src/service.cpp',
   ),
-  include_directories : [control_inc, overlay_inc],
+  include_directories : [control_inc, overlay_inc, core_inc],
   dependencies : [game_dep, aim_dep, diag_dep, tls_dep, sdk_dep, hooks_dep],
 )
 
 control_dep = declare_dependency(
   link_with : control_lib,
-  include_directories : [control_inc, overlay_inc],
+  include_directories : [control_inc, overlay_inc, core_inc],
   dependencies : [game_dep, aim_dep, diag_dep, tls_dep, sdk_dep, hooks_dep],
 )
