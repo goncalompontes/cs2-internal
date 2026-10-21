@@ -39,6 +39,7 @@ from .protocol import (
     AimObjective,
     AimResult,
     AngleDict,
+    AnimfixResult,
     BhopResult,
     ButtonName,
     CONSOLE_BUTTONS,
@@ -468,6 +469,10 @@ class Control:
                 *, timeout: float | None = ...) -> StrafeResult: ...
 
     @overload
+    def request(self, cmd: Literal["animfix"], args: Mapping[str, Any] | None = ...,
+                *, timeout: float | None = ...) -> AnimfixResult: ...
+
+    @overload
     def request(self, cmd: Literal["aim"], args: Mapping[str, Any] | None = ...,
                 *, timeout: float | None = ...) -> AimResult: ...
 
@@ -752,6 +757,16 @@ class Control:
     def bhop(self, on: bool = True) -> BhopResult:
         """Enable the payload's auto-jump (force ``IN_JUMP`` while grounded)."""
         return self.request("bhop", {"on": bool(on)})
+
+    def animfix(self, on: bool = True) -> AnimfixResult:
+        """Toggle the payload's **local animfix** (``docs/re/animfix.md``).
+
+        With it on, the **server's** replicated AG2 graph inputs (the aim yaw
+        and pitch, the air height, the flashed amount) reach the graph instead
+        of the client's own prediction, so the local player's hitboxes match
+        what the server computes. It is off by default.
+        """
+        return self.request("animfix", {"on": bool(on)})
 
     def strafe(self, on: bool = True, *, wishspeed: float | None = None,
                subtick: int | None = None) -> StrafeResult:

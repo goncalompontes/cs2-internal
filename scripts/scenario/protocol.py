@@ -51,6 +51,7 @@ __all__ = [
     "AimObjective",
     "AimResult",
     "AngleDict",
+    "AnimfixResult",
     "BasisDict",
     "BhopResult",
     "ButtonName",
@@ -506,6 +507,18 @@ class InputStatus(TypedDict, total=False):
     entry_move: MoveSampleDict
     steps: int
     step_dump: list[StepProbeDict]
+    # The local animfix (`docs/re/animfix.md`): whether it is on, whether it
+    # acted, its counters, and the **server's** aim yaw against the **client's
+    # predicted** one - the divergence the animfix removes.
+    animfix: bool
+    animfix_ready: bool
+    animfix_acted: bool
+    animfix_captures: int
+    animfix_applies: int
+    animfix_skips: int
+    animfix_server_aim_yaw: float
+    animfix_predicted_aim_yaw: float
+    animfix_aim_yaw_delta: float
 
 
 class MoveSampleDict(TypedDict):
@@ -536,6 +549,9 @@ BhopResult = InputStatus
 
 #: ``strafe`` answers with the input-status block (``Service::do_strafe``).
 StrafeResult = InputStatus
+
+#: ``animfix`` answers with the input-status block (``Service::do_animfix``).
+AnimfixResult = InputStatus
 
 
 class LookResult(TypedDict):
