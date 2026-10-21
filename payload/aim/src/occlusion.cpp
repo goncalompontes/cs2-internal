@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cmath>
 
+// The exact ray/solid span arithmetic now lives in the shared header, so the
+// Monte-Carlo hit test reuses it instead of duplicating it
+// (`docs/orchestration/spec-t34-montecarlo.md` §2.3). The arithmetic is unchanged.
+#include "cs2/aim/ray_span.hpp"
+
 namespace cs2::aim {
 namespace {
 
@@ -43,97 +48,8 @@ using HalfPlane = ConvexClipEdge;
 }
 
 // The ray interval inside a sphere `center`,`radius` (exact; `direction` unit).
-[[nodiscard]] auto ray_sphere_span(const Vec3& eye, const Vec3& direction, const Vec3& center,
-                                   float radius) noexcept -> std::optional<RaySpan> {
-  const Vec3 oc = eye - center;
-  const float b = game::dot(oc, direction);
-  const float c = game::dot(oc, oc) - radius * radius;
-  const float disc = b * b - c;
-  if (disc < 0.0F) {
-    return std::nullopt;
-  }
-  const float s = std::sqrt(disc);
-  const float t_exit = -b + s;
-  if (t_exit < 0.0F) {
-    return std::nullopt;  // entirely behind the eye
-  }
-  return RaySpan{.entry = std::max(-b - s, 0.0F), .exit = t_exit};
-}
-
-// Where the ray is inside the *infinite* cylinder of `radius` about the axis through
-// `a` in unit direction `axis`, clipped to the segment's axial extent [0, length].
-[[nodiscard]] auto ray_cylinder_span(const Vec3& eye, const Vec3& direction, const Vec3& a,
-                                     const Vec3& axis, float length, float radius) noexcept
-    -> std::optional<RaySpan> {
-  const Vec3 oc = eye - a;
-  const float d_par = game::dot(direction, axis);
-  const float o_par = game::dot(oc, axis);
-  const Vec3 d_perp = direction - axis * d_par;
-  const Vec3 o_perp = oc - axis * o_par;
-  const float quad_a = game::dot(d_perp, d_perp);
-  const float quad_b = 2.0F * game::dot(o_perp, d_perp);
-  const float quad_c = game::dot(o_perp, o_perp) - radius * radius;
-  float t_enter = -1.0e30F;
-  float t_exit = 1.0e30F;
-  if (quad_a > k_epsilon) {
-    const float disc = quad_b * quad_b - 4.0F * quad_a * quad_c;
-    if (disc < 0.0F) {
-      return std::nullopt;
-    }
-    const float s = std::sqrt(disc);
-    t_enter = (-quad_b - s) / (2.0F * quad_a);
-    t_exit = (-quad_b + s) / (2.0F * quad_a);
-  } else if (quad_c > 0.0F) {
-    return std::nullopt;  // parallel to the axis and outside the radius
-  }
-  // Clip to the slab where the axial coordinate stays within the segment.
-  if (std::fabs(d_par) <= k_epsilon) {
-    if (o_par < 0.0F || o_par > length) {
-      return std::nullopt;
-    }
-  } else {
-    float s0 = (0.0F - o_par) / d_par;
-    float s1 = (length - o_par) / d_par;
-    if (s0 > s1) {
-      std::swap(s0, s1);
-    }
-    t_enter = std::max(t_enter, s0);
-    t_exit = std::min(t_exit, s1);
-  }
-  if (t_enter > t_exit) {
-    return std::nullopt;
-  }
-  return RaySpan{.entry = t_enter, .exit = t_exit};
-}
-
-// The ray interval inside a capsule (`a`-`b` thickened by `radius`). A capsule is the
-// union of the two cap spheres and the side cylinder, all convex sub-parts of one
-// convex solid, so the union of their intervals is the solid's single interval.
-[[nodiscard]] auto ray_capsule_span(const Vec3& eye, const Vec3& direction, const Vec3& a,
-                                    const Vec3& b, float radius) noexcept
-    -> std::optional<RaySpan> {
-  float entry = 1.0e30F;
-  float exit = -1.0e30F;
-  bool hit = false;
-  const auto consider = [&](const std::optional<RaySpan>& span) -> void {
-    if (span.has_value()) {
-      entry = std::min(entry, span->entry);
-      exit = std::max(exit, span->exit);
-      hit = true;
-    }
-  };
-  consider(ray_sphere_span(eye, direction, a, radius));
-  consider(ray_sphere_span(eye, direction, b, radius));
-  const Vec3 ab = b - a;
-  const float length = game::length(ab);
-  if (length > k_epsilon) {
-    consider(ray_cylinder_span(eye, direction, a, ab * (1.0F / length), length, radius));
-  }
-  if (!hit || exit < 0.0F) {
-    return std::nullopt;
-  }
-  return RaySpan{.entry = std::max(entry, 0.0F), .exit = exit};
-}
+// --- the span arithmetic lives in `cs2/aim/ray_span.hpp` (shared with the
+// Monte-Carlo hit test); it is used unchanged by the occluders below.
 
 // Möller–Trumbore ray/triangle intersection; the ray distance when it hits the
 // triangle at `t > 0`, else nullopt. Exact for a collision-mesh triangle.

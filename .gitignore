@@ -23,8 +23,10 @@ uv.lock
 # Rust
 target/
 
-# Local artifacts / captured dumps (never commit game binaries)
-artifacts/
+# Local artifacts / captured dumps (never commit game binaries). The saved cell set
+# the benchmark replays IS committed, so it is un-ignored explicitly.
+artifacts/*
+!artifacts/live-heatmap.json
 *.dump
 *.bin
 # RE scratch: derived string dumps are large and regenerable
