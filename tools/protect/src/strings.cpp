@@ -116,8 +116,8 @@ constexpr std::string_view k_salt_proof_text = "cs2.protect.salt.proof";
   llvm::SHA256 hasher;
   if (salt.has_value()) {
     const std::uint64_t value = *salt;
-    hasher.update(llvm::ArrayRef<std::uint8_t>(
-        reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)));
+    hasher.update(
+        llvm::ArrayRef<std::uint8_t>(reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)));
   }
   hasher.update(content);
   return llvm::toHex(hasher.final());
@@ -256,8 +256,8 @@ struct ExpressionOffset {
         if (instruction->getOperand(index) != &literal) {
           continue;
         }
-        sites.push_back(UseSite{instruction, index, false, 0, false, instruction->getFunction(),
-                                false});
+        sites.push_back(
+            UseSite{instruction, index, false, 0, false, instruction->getFunction(), false});
       }
       continue;
     }
@@ -353,8 +353,8 @@ struct ExpressionOffset {
 ///
 /// The VM's blob format and the string blob format must not meet: the two
 /// transforms write different things into the same module.
-[[nodiscard]] auto is_virtualized(const llvm::Function& function, const RecordedSelection& selection)
-    -> bool {
+[[nodiscard]] auto is_virtualized(const llvm::Function& function,
+                                  const RecordedSelection& selection) -> bool {
   for (const RecordedFunction& recorded : selection.functions) {
     if (recorded.symbol == function.getName().str() &&
         recorded.level == ProtectionLevel::virtualized) {
@@ -421,22 +421,18 @@ struct Decoder {
 
   Decoder decoder;
 
-  decoder.seed0 = new llvm::GlobalVariable(module, i64_type, /*isConstant=*/true,
-                                            llvm::GlobalValue::PrivateLinkage,
-                                            llvm::ConstantInt::get(i64_type, seed0_value),
-                                            k_seed0_name);
-  decoder.seed1 = new llvm::GlobalVariable(module, i64_type, /*isConstant=*/true,
-                                            llvm::GlobalValue::PrivateLinkage,
-                                            llvm::ConstantInt::get(i64_type, seed1_value),
-                                            k_seed1_name);
-  decoder.multiplier = new llvm::GlobalVariable(module, i64_type, /*isConstant=*/true,
-                                                 llvm::GlobalValue::PrivateLinkage,
-                                                 llvm::ConstantInt::get(i64_type, k_mix_multiplier),
-                                                 k_multiplier_name);
-  decoder.xor_constant = new llvm::GlobalVariable(module, i64_type, /*isConstant=*/true,
-                                                   llvm::GlobalValue::PrivateLinkage,
-                                                   llvm::ConstantInt::get(i64_type, k_mix_xor),
-                                                   k_xor_name);
+  decoder.seed0 = new llvm::GlobalVariable(
+      module, i64_type, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+      llvm::ConstantInt::get(i64_type, seed0_value), k_seed0_name);
+  decoder.seed1 = new llvm::GlobalVariable(
+      module, i64_type, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+      llvm::ConstantInt::get(i64_type, seed1_value), k_seed1_name);
+  decoder.multiplier = new llvm::GlobalVariable(
+      module, i64_type, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+      llvm::ConstantInt::get(i64_type, k_mix_multiplier), k_multiplier_name);
+  decoder.xor_constant = new llvm::GlobalVariable(
+      module, i64_type, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
+      llvm::ConstantInt::get(i64_type, k_mix_xor), k_xor_name);
   for (llvm::GlobalVariable* global :
        {decoder.seed0, decoder.seed1, decoder.multiplier, decoder.xor_constant}) {
     global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
@@ -447,15 +443,15 @@ struct Decoder {
   // -- loudly, and at link time, which is the right moment.
   decoder.instance_base = module.getGlobalVariable(k_instance_base_name);
   if (decoder.instance_base == nullptr) {
-    decoder.instance_base = new llvm::GlobalVariable(module, i64_type, /*isConstant=*/false,
-                                                      llvm::GlobalValue::ExternalLinkage, nullptr,
-                                                      k_instance_base_name);
+    decoder.instance_base =
+        new llvm::GlobalVariable(module, i64_type, /*isConstant=*/false,
+                                 llvm::GlobalValue::ExternalLinkage, nullptr, k_instance_base_name);
   }
 
   llvm::FunctionType* signature = llvm::FunctionType::get(
       llvm::Type::getVoidTy(context), {pointer_type, i32_type, i32_type, pointer_type}, false);
-  llvm::Function* function = llvm::Function::Create(signature, llvm::GlobalValue::InternalLinkage,
-                                                    k_decode_name, module);
+  llvm::Function* function =
+      llvm::Function::Create(signature, llvm::GlobalValue::InternalLinkage, k_decode_name, module);
   // The helper must not be inlined: an inlined helper would let the
   // optimiser see the blob as a constant and fold the plaintext into the
   // instruction stream.
@@ -500,14 +496,16 @@ struct Decoder {
       loop_builder.CreateLoad(i8_type, blob_address, /*isVolatile=*/true, "cipher");
   llvm::Value* position = loop_builder.CreateZExt(counter, i64_type, "position64");
   llvm::Value* stream_position = loop_builder.CreateAdd(stream_key, position, "stream_position");
-  llvm::Value* stream_product = loop_builder.CreateMul(stream_position, multiplier, "stream_product");
+  llvm::Value* stream_product =
+      loop_builder.CreateMul(stream_position, multiplier, "stream_product");
   llvm::Value* stream_xored = loop_builder.CreateXor(stream_product, xor_constant, "stream_xor");
   llvm::Value* stream_low = loop_builder.CreateShl(stream_xored, k_mix_rotate);
   llvm::Value* stream_high = loop_builder.CreateLShr(stream_xored, 64U - k_mix_rotate);
   llvm::Value* stream = loop_builder.CreateOr(stream_low, stream_high, "stream");
   llvm::Value* key_byte = loop_builder.CreateTrunc(loop_builder.CreateLShr(stream, 56), i8_type);
   llvm::Value* plain = loop_builder.CreateXor(cipher, key_byte, "plain");
-  llvm::Value* out_address = loop_builder.CreateGEP(i8_type, function->getArg(3), counter, "out_at");
+  llvm::Value* out_address =
+      loop_builder.CreateGEP(i8_type, function->getArg(3), counter, "out_at");
   loop_builder.CreateStore(plain, out_address);
   llvm::Value* next = loop_builder.CreateAdd(counter, llvm::ConstantInt::get(i32_type, 1), "next");
   llvm::Value* done = loop_builder.CreateICmpUGE(next, function->getArg(1), "done");
@@ -558,7 +556,8 @@ struct Decoder {
   }
 }
 
-[[nodiscard]] auto string_selected(const Policy& policy, std::string_view content) noexcept -> bool {
+[[nodiscard]] auto string_selected(const Policy& policy, std::string_view content) noexcept
+    -> bool {
   bool selected = false;
   for (const std::string& pattern : policy.strings) {
     if (glob_match(pattern, content)) {
@@ -577,7 +576,8 @@ struct Decoder {
   return true;
 }
 
-[[nodiscard]] auto string_content(const llvm::GlobalVariable& literal) -> std::optional<std::string> {
+[[nodiscard]] auto string_content(const llvm::GlobalVariable& literal)
+    -> std::optional<std::string> {
   const auto bytes = literal_bytes(literal);
   if (!bytes.has_value()) {
     return std::nullopt;
@@ -761,7 +761,8 @@ struct Decoder {
     // pointer arithmetic of the users does not change.
     llvm::ArrayType* blob_type = llvm::ArrayType::get(i8_type, size);
     llvm::Constant* blob_initializer = llvm::ConstantDataArray::getRaw(
-        llvm::StringRef(reinterpret_cast<const char*>(cipher.data()), cipher.size()), size, i8_type);
+        llvm::StringRef(reinterpret_cast<const char*>(cipher.data()), cipher.size()), size,
+        i8_type);
     llvm::GlobalVariable* blob = new llvm::GlobalVariable(
         module, blob_type, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage, blob_initializer,
         std::string(k_blob_prefix) + std::to_string(index));
@@ -790,7 +791,8 @@ struct Decoder {
       // The buffer: an `alloca` in the entry block of the function.
       llvm::BasicBlock& entry_block = function->getEntryBlock();
       llvm::IRBuilder<> entry_builder(&*entry_block.getFirstInsertionPt());
-      llvm::AllocaInst* buffer = entry_builder.CreateAlloca(blob_type, nullptr, "cs2.protect.buffer");
+      llvm::AllocaInst* buffer =
+          entry_builder.CreateAlloca(blob_type, nullptr, "cs2.protect.buffer");
       buffer->setAlignment(llvm::Align(1));
       llvm::Value* buffer_value = buffer;
 

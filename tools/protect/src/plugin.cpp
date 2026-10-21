@@ -244,8 +244,8 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     if (strings.salted) {
       salt = "build-seed sha256=" + cs2::protect::salt_proof(settings);
     }
-    if (const auto error = cs2::protect::write_coverage(settings, module, entries, functions, protect,
-                                                        covered, salt)) {
+    if (const auto error = cs2::protect::write_coverage(settings, module, entries, functions,
+                                                        protect, covered, salt)) {
       llvm::errs() << "[cs2-protect] " << *error << "\n";
       llvm::report_fatal_error("cs2-protect: the coverage could not be written",
                                /*gen_crash_diag=*/false);
