@@ -161,10 +161,36 @@ auto main() -> int {
       largest = std::max(largest, radius);
     }
     const double mean = total / static_cast<double>(k_samples);
-    expect(near(static_cast<float>(mean), 0.5F, 0.02F),
-           "the mean radius is c/2 — the law is uniform in radius");
+    // **The measured law, not the ideal one.** The repo's `UniformRandomStream`
+    // has a biased **first** output — the sampler uses it for `r1`, the spread
+    // magnitude, on *every* sample: over 200 000 MD5 seeds its mean is 0.486220
+    // (-21.3 sigma), while draws 2-8 are unbiased. The measured mean radius is
+    // therefore **0.485476**, not 0.5: the law is uniform in radius *as the repo's
+    // RNG draws it*, and the model's cone is ~3 % tighter than the ideal law
+    // (`docs/research/aim-objective-math.md` §11.1).
+    //
+    // The test pins the **measured** band, so it can no longer hide the bias (the
+    // old +/-0.02 window around 0.5 spent 73 % of its budget on the bias alone),
+    // and the `sqrt(r)` variant (a mean radius of 1/3) still fails it loudly. If
+    // the RNG's first draw is ever fixed, this band fails on purpose: the number
+    // and the published addendum have to be updated with it.
+    expect(mean > 0.480 && mean < 0.491,
+           "the mean radius is the measured one - the law is uniform in radius");
     expect(!near(static_cast<float>(mean), 2.0F / 3.0F, 0.05F),
            "the mean radius is not the area-uniform 2c/3");
+
+    // The bias itself, pinned: the first draw of a fresh stream is the low one.
+    {
+      double first_total = 0.0;
+      for (int index = 0; index < k_samples; ++index) {
+        const auto seed = cs2::aim::md5_pseudo_random(static_cast<std::uint32_t>(index));
+        cs2::aim::UniformRandomStream stream(seed);
+        first_total += stream.random_float(0.0F, 1.0F);
+      }
+      const double first_mean = first_total / static_cast<double>(k_samples);
+      expect(first_mean > 0.480 && first_mean < 0.491,
+             "the stream's first draw is the biased one (the measured 0.485476)");
+    }
     // The law is uniform in radius, so the rim is sampled: the largest radius over
     // many draws reaches the support (a Gaussian would put ~0.25 % of its mass
     // beyond it, and its rim would be a tail event).

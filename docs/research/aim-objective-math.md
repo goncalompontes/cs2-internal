@@ -738,31 +738,65 @@ evaluations) were measured.
 > [`docs/ragebot.md`](../ragebot.md) §13. **Nothing above changes** — this note
 > records what the implementation *sharpens*, with the numbers.
 
-1. **§3.1's variance, confirmed by the implementation.** The sampler draws the
-   engine's kernel (`r1, a1, r2, a2` per pellet) and the measured second moments
-   reproduce the derivation: one term (`S = 1`, `I = 0`) gives `E[r] = 0.486`
-   (theory `c/2`) and `rms(r) = 0.570` (theory `c/√3 = 0.577`), so the per-axis
-   variance is `c²/6` to within 1 %; two equal terms (`S = I = 1`) give
-   `rms(r) = 0.813`, so the per-axis variance is `0.33 c²` and the variance-matched
-   `σ = 0.575 c` — the derivation's `sqrt(S² + I²)/√6 = 0.577 c`. The `√6` claim of
-   §3.1/§0 therefore holds **for the repo's own kernel model**; the correction
-   itself is still blocked (the `sqrt(r)` question, the inaccuracy's units) and is
-   **not** applied anywhere.
+1. **§3.1's variance, measured — 2.7 % low, not "to within 1 %"** (corrected
+   2026-10-21; the review's M4). The sampler draws the engine's kernel
+   (`r1, a1, r2, a2` per pellet) and the measured second moments **nearly**
+   reproduce the derivation: one term (`S = 1`, `I = 0`) gives `E[r] = 0.486220`
+   (theory `c/2`) and `rms(r) = 0.569462` (theory `c/√3 = 0.577350`), so the
+   per-axis variance is `rms²/2 = 0.162144` against the derivation's
+   `c²/6 = 0.166667` — **2.7 % low**. Two equal terms (`S = I = 1`) give
+   `rms(r) = 0.812712`, so the per-axis variance is `0.330 c²` against `0.333 c²`
+   (0.9 % low) and the variance-matched `σ = 0.573 c` against the derivation's
+   `sqrt(S² + I²)/√6 = 0.577 c`. The `√6` claim of §3.1/§0 therefore holds **for
+   the repo's own kernel model, to within 3 %** — not to within 1 %; the
+   correction itself is still blocked (the `sqrt(r)` question, the inaccuracy's
+   units) and is **not** applied anywhere.
 
-2. **§3.1's radial law, measured.** The single term is **uniform in radius**
-   (`E[r] = c/2`, and the rim is reached: the largest radius over 200 000 draws is
-   0.99999 c), so §3.3's linear-radial row is the right limit and the
-   area-uniform `2c/3` is wrong. The **sum** of two terms is much more concentrated
-   than its support suggests: with `S = I = c` the support is `2c` but the measured
-   mean radius is only **0.72 c** and the largest sampled radius 1.99 c. A "half the
-   cone radius" target is therefore *easier* than the support-based estimate of §3.3
-   suggests, and the `sqrt(r)` variant would move the single term to `c/3` — the
-   difference the note calls "large" is exactly `c/2` against `c/3`.
+   **The gap is not noise — it is the repo RNG's *first* draw.** The sampler uses
+   the stream's **first** output for `r1` (the spread magnitude) on *every*
+   sample, and that first output is biased low: over 200 000 MD5 seeds
+   `E = 0.486220` (**−21.3 σ**, where σ = 1/√(12·200 000) = 0.000645), and over
+   200 000 *sequential* seeds `E = 0.484602` (−23.9 σ). Draws **2–8** of the same
+   streams are unbiased (|E − 0.5| ≤ 2.3 σ), so the defect is the stream's first
+   output, not the seed distribution. The repo's own radial-law test measures
+   **0.485476** over its 40 000 draws and used to pass only because its tolerance
+   was 0.02 — 73 % of that budget was the bias.
+
+   **What it means.** The *model* of the kernel is systematically **≈3 % tighter**
+   than the ideal uniform-in-radius law, so every hit chance the solver publishes
+   is slightly optimistic. Whether the **live engine** has the same bias depends
+   on whether its `CUniformRandomStream` is this implementation: the repo models
+   it as exactly this generator (`payload/aim/src/spread.cpp`), and `spread.hpp`
+   still says the RNG is "unvalidated against the live engine", so the honest
+   statement is *"the model is 2.7 % tighter than the ideal law; if the engine's
+   generator is this one, the engine's cone is too"*.
+
+   **The fix is deliberately out of scope for this task.** `UniformRandomStream`
+   and `pellet_offsets` must stay bit-identical (the spec §4: "the existing
+   `pellet_offsets` behaviour must not change"), and the first draw is a property
+   of the engine's own generator, not of this module: changing it would change the
+   offsets the *existing* solver computes. The bias is therefore **documented, not
+   fixed** — the host test now pins the *measured* law (a band around 0.4855)
+   instead of a ±0.02 window around 0.5, so it can no longer hide the bias, and
+   the `sqrt(r)` question is still caught loudly.
+
+2. **§3.1's radial law, measured.** The single term is **uniform in radius** (the
+   ideal `E[r] = c/2`; the repo's RNG measures **0.486220**, the deficit being the
+   first-draw bias of item 1, and the rim is reached: the largest radius over
+   200 000 draws is 0.99999 c), so §3.3's linear-radial row is the right limit and
+   the area-uniform `2c/3` is wrong. The **sum** of two terms is much more
+   concentrated than its support suggests: with `S = I = c` the support is `2c` but
+   the measured mean radius is only **0.720568 c** and the largest sampled radius
+   1.99 c. A "half the cone radius" target is therefore *easier* than the
+   support-based estimate of §3.3 suggests, and the `sqrt(r)` variant would move
+   the single term to `c/3` — the difference the note calls "large" is exactly
+   `c/2` against `c/3`.
 
 3. **§3.1's `sqrt(r)` question is now a test, not a comment.** The host test pins
-   the linear law (the mean radius `c/2` to ±0.02, and *not* the area-uniform
-   `2c/3`); reintroducing the `sqrt` fails it. The repo's RE stays the authority
-   (no `sqrt`).
+   the linear law — the mean radius in the **measured** band around 0.4855 (the
+   repo RNG's first-draw bias; the ideal is 0.5), and *not* the area-uniform
+   `2c/3`; reintroducing the `sqrt` fails it (the mean radius becomes `c/3`). The
+   repo's RE stays the authority (no `sqrt`).
 
 4. **§3.2's seed question has a structured answer.** The seed is a **parameter of
    the solver**, not an assumption: the `sequence` policy

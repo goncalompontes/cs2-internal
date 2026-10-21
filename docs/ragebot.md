@@ -878,6 +878,18 @@ a cone 2.4× tighter than the Gaussian's).
   the `cos/sin`, and the repo's RE is the authority, so there is none
   (`docs/research/aim-objective-math.md` §3.1). The host test pins the **linear**
   radial law, so a `sqrt` would fail it loudly.
+* **The RNG's first-draw bias.** The repo's `UniformRandomStream` has a biased
+  **first** output — the sampler uses it for `r1`, the spread magnitude, on every
+  sample: over 200 000 seeds its mean is 0.486220 (−21.3 σ), while draws 2–8 are
+  unbiased. The **model** of the kernel is therefore **≈3 % tighter** than the
+  ideal uniform-in-radius law (the per-axis variance is 2.7 % low, not "within
+  1 %"), so every hit chance the solver publishes is slightly optimistic. The
+  bias is **documented, not fixed**: `UniformRandomStream` and `pellet_offsets`
+  must stay bit-identical (the spec §4), and the first draw is a property of the
+  engine's own generator — changing it would change the existing solver's offsets.
+  The host test pins the *measured* law (a band around 0.485476) instead of a
+  ±0.02 window around 0.5, so it can no longer hide the bias. See
+  `docs/research/aim-objective-math.md` §11.1.
 * **The seed's truth.** Both policies are implemented; neither is declared the
   engine's. That needs RE.
 * **The `√6` σ correction.** Not applied — it is blocked on the `sqrt(r)` question
