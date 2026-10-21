@@ -41,6 +41,14 @@
 // parameter the correction writes. Those are the numbers the engine access
 // uses to read the server's values and to find the parameter, so a wrong
 // offset here would silently read the wrong field.
+//
+// The **codec seams** are pinned as well: the class has **two** decode paths
+// (the schema-table one and the network-var chainer one), the payload hooks
+// both, and the counters say which one the engine ran — that is the
+// difference between a diagnosis ("the codec never ran") and a symptom
+// ("nothing was captured"). The chainer twin's signature is pinned as text
+// (it carries wildcards) and its prologue as bytes, and the prologue must be
+// **relocation-free** like the other seams'.
 
 #include <array>
 #include <cassert>
@@ -675,6 +683,10 @@ auto signature_pattern(const std::string& source, const std::string& name) -> st
 }
 
 // The bytes of a dumper signature.
+//
+// A **wildcard** byte ("??") is read as 0: the caller compares only the
+// concrete head of the pattern (the prologue the hook copies), and a
+// signature that wildcards the prologue would not resolve the seam at all.
 auto signature_bytes(const std::string& source, const std::string& name)
     -> std::vector<unsigned char> {
   std::vector<unsigned char> bytes{};
@@ -684,7 +696,11 @@ auto signature_bytes(const std::string& source, const std::string& name)
     const std::size_t end = pattern.find(' ', i);
     const std::string byte = pattern.substr(i, end == std::string::npos ? end : end - i);
     if (!byte.empty()) {
-      bytes.push_back(static_cast<unsigned char>(std::stoul(byte, nullptr, 16)));
+      if (byte.find('?') != std::string::npos) {
+        bytes.push_back(0);
+      } else {
+        bytes.push_back(static_cast<unsigned char>(std::stoul(byte, nullptr, 16)));
+      }
     }
     if (end == std::string::npos) {
       break;
@@ -717,6 +733,105 @@ void test_the_pinned_prologues_are_the_dumpers_signatures(const std::string& roo
   assert(matches("animfix_anim_tick", k_anim_tick_pattern, sizeof(k_anim_tick_pattern)));
   assert(matches("animfix_graph_codec", k_codec_pattern, sizeof(k_codec_pattern)));
   assert(matches("animfix_param_setter", k_setter_pattern, sizeof(k_setter_pattern)));
+}
+
+// The **chainer twin** is not a codec: `0x8daab0` is the **schema
+// registration** of `CCS2PawnGraphController` (`docs/re/animfix.md` §9.4.2),
+// and the payload must not hook it — it runs once, at registration, and its
+// prologue is **not** shift-tolerant (it writes to `[rsp+0x18]`, which a
+// detour's call frame would move onto the engine's return address).
+//
+// The test pins that the payload hooks **one** codec: the dumper's registry
+// must not carry a second one.
+void test_only_the_codec_is_a_dumper_signature(const std::string& root) {
+  assert(!root.empty());
+  std::ifstream dumper(root + "/external/dumper/src/analysis.rs");
+  assert(dumper.good());
+  const std::string source((std::istreambuf_iterator<char>(dumper)),
+                           std::istreambuf_iterator<char>());
+  assert(source.find("\"animfix_graph_codec\"") != std::string::npos);
+  assert(source.find("\"animfix_graph_codec_chainer\"") == std::string::npos);
+  // And the payload asks for exactly one codec offset.
+  std::ifstream input(root + "/payload/control/src/input.cpp");
+  assert(input.good());
+  const std::string text((std::istreambuf_iterator<char>(input)),
+                         std::istreambuf_iterator<char>());
+  assert(text.find("find_offset(\"animfix_graph_codec\")") != std::string::npos);
+  assert(text.find("find_offset(\"animfix_graph_codec_chainer\")") == std::string::npos);
+}
+
+// The **codec's detour must take its counters before the call** to the
+// original, and must publish the decode **after** it.
+//
+// The inline hook's trampoline replays the function's prologue, and the
+// codec's prologue begins with `mov qword ptr [rsp+0x08], rbx` — the
+// caller's shadow slot. A detour that *calls* the trampoline has pushed a
+// return address of its own, so the prologue runs with the stack **eight
+// bytes lower**: the store lands on the detour's own frame. The detour's
+// state must therefore live in **registers** across the call — which is
+// what "the counters are taken before the call" buys (the compiler keeps
+// the arguments in callee-saved registers, and the codec's prologue writes
+// only to memory).
+//
+// The decode's **sequence** is published after the call, because a capture
+// that ran before the decode would take the *previous* snapshot's values.
+//
+// This is a source check, because the property is a property of the
+// **generated** code and the payload's binary is not built here.
+void test_the_codecs_counters_are_taken_before_the_call(const std::string& root) {
+  assert(!root.empty());
+  std::ifstream source(root + "/payload/control/src/input.cpp");
+  assert(source.good());
+  const std::string text((std::istreambuf_iterator<char>(source)),
+                         std::istreambuf_iterator<char>());
+  const std::size_t detour = text.find("void __fastcall Input::animfix_codec_detour");
+  assert(detour != std::string::npos);
+  const std::size_t end = text.find("\nvoid ", detour + 10);
+  const std::string body = text.substr(detour, end - detour);
+  const std::size_t counters = body.find("animfix_codec_call(dst)");
+  const std::size_t call = body.find("animfix_codec_hook_.original()");
+  assert(counters != std::string::npos);
+  assert(call != std::string::npos);
+  // The counters come **before** the original.
+  assert(counters < call);
+  // And the decode is published **after** it.
+  const std::size_t published = body.find("animfix_decode_seq_.fetch_add");
+  assert(published != std::string::npos);
+  assert(published > call);
+  // The capture is **not** in the codec's detour: it is the anim tick's job
+  // (the detour's call is a call, and the codec's prologue writes to the
+  // detour's frame).
+  assert(body.find("animfix_capture(") == std::string::npos);
+  const std::size_t tick = text.find("void __fastcall Input::animfix_anim_tick_detour");
+  assert(tick != std::string::npos);
+  const std::size_t tick_end = text.find("\nauto ", tick + 10);
+  const std::string tick_body = text.substr(tick, tick_end - tick);
+  assert(tick_body.find("animfix_capture()") != std::string::npos);
+}
+
+// The **shift** a call makes — and the tail call's avoidance of it.
+//
+// The property is a property of the **generated** code, and the payload's
+// binary is not built here, so the test pins the *shape* of the detour (the
+// call to the original is the last statement) and the *bytes* of the
+// prologue it has to survive (the first instruction of the codec's prologue
+// is a store into the caller's shadow slot — the one instruction that makes
+// the shift observable).
+//
+// The bytes are the live build's (sha256 659940c1...): `mov qword ptr
+// [rsp+0x08], rbx` is `48 89 5C 24 08`, and it is the **first** byte of the
+// codec's prologue — so the shift moves that store onto the detour's own
+// frame, and a detour that calls the trampoline overwrites its own state.
+void test_the_codecs_prologue_writes_the_shadow_slot() {
+  // The prologue's first instruction: a store into the caller's shadow slot.
+  assert(k_codec_pattern[0] == 0x48);
+  assert(k_codec_pattern[1] == 0x89);
+  assert(k_codec_pattern[2] == 0x5c);
+  assert(k_codec_pattern[3] == 0x24);
+  assert(k_codec_pattern[4] == 0x08);
+  // And the window the hook copies starts exactly there: the store is inside
+  // the copied prologue, so the trampoline replays it.
+  assert(k_codec_prologue_size >= 5);
 }
 
 // **The seam must be hookable by the repository's own relocator, at any
@@ -785,6 +900,47 @@ void test_the_seams_prologues_are_hookable() {
   assert(setter.installed);  // it fits here, where both live close together
   assert(setter.rewritten);
 }
+// --- the codec diagnosis ---------------------------------------------------
+
+// The **diagnosis**: the counters say which of the two hypotheses holds —
+// the hooked codec never runs (H1), or it runs but not for the local player
+// (H2).
+//
+// The failure this test exists for is a **silent** one: a diagnosis that
+// always says "the codec never ran" (or always "it ran for somebody else")
+// would leave the operator with a plausible sentence and no information —
+// and the feature would be "fixed" by hooking a codec that is not the
+// problem. So every case is pinned, including the one that says the codec
+// *did* run for the local player.
+void test_the_codec_counters_settle_the_hypothesis() {
+  // H1: not a single call — the hooked codec never runs.
+  const animfix::CodecCounters silent{};
+  assert(animfix::classify_codec(silent) == animfix::CodecDiagnosis::no_calls);
+  // H2: the codec runs, but every call is somebody else's.
+  const animfix::CodecCounters others{.calls = 12, .other_controller = 12};
+  assert(animfix::classify_codec(others) == animfix::CodecDiagnosis::not_local);
+  // H2: the comparison could not be made at all (the local controller could
+  // not be resolved) — the more precise of the two, and the one that says
+  // what to look at next.
+  const animfix::CodecCounters unresolved{.calls = 5, .unresolved = 5};
+  assert(animfix::classify_codec(unresolved) == animfix::CodecDiagnosis::unresolved);
+  // The codec ran for the local player: the capture is expected to happen.
+  const animfix::CodecCounters ours{.calls = 9, .other_controller = 8, .local_calls = 1};
+  assert(animfix::classify_codec(ours) == animfix::CodecDiagnosis::local);
+  // A local call wins over an unresolved one: the codec *did* run for us.
+  const animfix::CodecCounters mixed{.calls = 4, .unresolved = 1, .local_calls = 3};
+  assert(animfix::classify_codec(mixed) == animfix::CodecDiagnosis::local);
+  // The texts are what the operator reads: each case says something
+  // different, and none of them is empty.
+  assert(std::strcmp(animfix::codec_diagnosis_text(animfix::CodecDiagnosis::no_calls),
+                     "the hooked codec never ran") == 0);
+  assert(std::strcmp(animfix::codec_diagnosis_text(animfix::CodecDiagnosis::unresolved),
+                     "the local controller could not be resolved") == 0);
+  assert(std::strcmp(animfix::codec_diagnosis_text(animfix::CodecDiagnosis::not_local),
+                     "the codec ran, but never for the local controller") == 0);
+  assert(std::strcmp(animfix::codec_diagnosis_text(animfix::CodecDiagnosis::local),
+                     "the codec ran for the local controller") == 0);
+}
 
 // --- the evidence ---------------------------------------------------------
 
@@ -825,7 +981,11 @@ auto main(int argc, char** argv) -> int {
   test_the_capture_must_belong_to_the_live_controller();
   test_the_four_slots_must_be_distinct();
   test_the_pinned_prologues_are_the_dumpers_signatures(repository_root);
+  test_only_the_codec_is_a_dumper_signature(repository_root);
+  test_the_codecs_counters_are_taken_before_the_call(repository_root);
+  test_the_codecs_prologue_writes_the_shadow_slot();
   test_the_seams_prologues_are_hookable();
+  test_the_codec_counters_settle_the_hypothesis();
   test_the_aim_yaw_difference_is_signed_and_wrapped();
   std::puts("control-animfix: ok");
   return 0;

@@ -23,6 +23,11 @@ What it reports:
   their difference (``animfix_aim_yaw_delta``) is the **divergence** the fix
   removes.
 
+When the capture never happens, the scenario does **not** report a bare
+"never captured": the **codec counters** say which case it was — the hooked
+codec never ran (H1), it ran for somebody else (H2), or the local controller
+could not be resolved (H2).
+
 The player has to **turn** for the divergence to be visible: with a still
 camera the server's and the client's aim yaw agree, and the animfix has
 nothing to correct. The scenario therefore reports the divergence rather than
@@ -51,6 +56,36 @@ SAMPLE = 0.1
 #: different windows: the correction counter only moves while the animfix is
 #: on).
 MIN_DUTY_CYCLE = 0.9
+
+
+def diagnose_codec(calls: int, other_controller: int, not_local: int,
+                   local_calls: int) -> str:
+    """What the codec counters **prove**, in one line.
+
+    The animfix's capture is filtered by the local controller: the codec must
+    have run *for the local player*. The counters say which of the two
+    possible failures it is —
+
+    * no call at all ⇒ **H1**: the hooked codec never runs (not for the local
+      player and not for anybody else), so the local player's data comes from
+      another codec, and
+    * calls, but none of them the local player's ⇒ **H2**: the codec runs, but
+      not for the local player — or the comparison against the local
+      controller is wrong.
+
+    The same classification as the payload's (``cs2/control/animfix.hpp``'s
+    ``classify_codec``), so the scenario and the payload cannot disagree.
+    """
+    if calls <= 0:
+        return ("H1: the hooked codec never ran — the local player's graph "
+                "inputs are decoded by another codec")
+    if local_calls <= 0 and not_local > 0:
+        return ("H2: the local controller could not be resolved — the "
+                "comparison could not be made")
+    if local_calls <= 0:
+        return ("H2: the codec ran, but never for the local controller — it "
+                "decodes somebody else's graph inputs")
+    return "the codec ran for the local controller"
 
 
 def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
@@ -112,6 +147,18 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
     observed_skips = int(final.get("animfix_skips") or 0) - skips_before
     ready = bool(final.get("animfix_ready"))
     animfix_status = str(final.get("animfix_status") or "")
+
+    # The **codec counters**: what the hooked codecs did. They are the
+    # diagnosis of a capture that never happened — the difference between
+    # "the codec never ran" and "the codec ran, but not for the local
+    # player" — and the per-codec split says which of the class's two decode
+    # paths the engine used.
+    codec_calls = int(final.get("animfix_codec_calls") or 0)
+    codec_other_controller = int(final.get("animfix_codec_other_controller") or 0)
+    codec_not_local = int(final.get("animfix_codec_not_local") or 0)
+    codec_local_calls = int(final.get("animfix_codec_local_calls") or 0)
+    codec_diagnosis = diagnose_codec(codec_calls, codec_other_controller,
+                                     codec_not_local, codec_local_calls)
 
     # The **duty cycle**: the client anim ticks on which the correction won,
     # over the client anim ticks it could have won.
@@ -177,6 +224,12 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
         "snapshot_interval_ms": int(final.get("animfix_snapshot_interval_ms") or 0),
         # The values the engine's own guard refused. It should be zero.
         "rejected": int(final.get("animfix_rejected") or 0),
+        # The **codec counters** and the diagnosis they settle.
+        "codec_calls": codec_calls,
+        "codec_other_controller": codec_other_controller,
+        "codec_not_local": codec_not_local,
+        "codec_local_calls": codec_local_calls,
+        "codec_diagnosis": codec_diagnosis,
         "acted_samples": acted_samples,
         "data_valid": bool(final.get("animfix_data_valid")),
         "server_aim_yaw": final.get("animfix_server_aim_yaw"),
@@ -199,9 +252,16 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
         return result
 
     if observed_captures == 0:
+        # **A diagnosis, not a symptom.** The bare "never captured" error
+        # said what happened; this one says *why*, with the counters that
+        # prove it: the codec never ran (H1), it ran for somebody else
+        # (H2), or the local controller could not be resolved (H2).
         raise SessionError(
             "the animfix is on but the payload never captured the server's graph "
-            f"inputs (captures +{observed_captures}, applies +{observed_applies}): "
+            f"inputs (captures +{observed_captures}, applies +{observed_applies}); "
+            f"{codec_diagnosis} — codec calls {codec_calls}, "
+            f"other controller {codec_other_controller}, local controller "
+            f"unresolved {codec_not_local}, local calls {codec_local_calls}: "
             f"{result}"
         )
 

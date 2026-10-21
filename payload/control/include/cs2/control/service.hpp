@@ -463,6 +463,17 @@ class Service {
   // Attach (or drop) the snapshot reader depending on readiness.
   void refresh_reader(bool last_snapshot_valid) noexcept;
 
+  // Keep the local pawn **current** for the animfix's capture.
+  //
+  // The capture compares the codec's destination against the local player's
+  // `CCS2PawnGraphController`, and that pointer is reached through the local
+  // pawn (`pawn + 0x34f8`). The payload refreshes the local pawn on a
+  // **state** request; the animfix's own polling (`input`) must not leave it
+  // stale — a stale pawn is a comparison against a pawn that is no longer
+  // there, and the animfix would then refuse every capture for a reason
+  // that has nothing to do with the codec.
+  void refresh_local_pawn() noexcept;
+
   void* thread_ = nullptr;  // HANDLE
 #endif
   std::atomic<bool> running_{false};

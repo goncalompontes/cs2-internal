@@ -812,7 +812,8 @@ class Input {
   [[nodiscard]] bool animfix() const noexcept {
     return animfix_enabled_.load();
   }
-  // True when both hooks (the codec and the anim tick) are installed.
+  // True when all the hooks (the graph codec and the anim tick) are
+  // installed.
   [[nodiscard]] bool animfix_ready() const noexcept {
     return animfix_codec_hook_.installed() && animfix_anim_tick_hook_.installed();
   }
@@ -921,6 +922,43 @@ class Input {
   // divergence".
   [[nodiscard]] bool animfix_data_valid() const noexcept {
     return animfix_data_valid_.load();
+  }
+  // The **codec counters**: how many times the hooked codec ran, and what
+  // each call was. They are the diagnosis of a capture that never happened:
+  //
+  //   * `animfix_codec_calls` — every call of the hooked codec,
+  //   * `animfix_codec_other_controller` — the calls whose destination was
+  //     **not** the local controller (the codec ran for somebody else),
+  //   * `animfix_codec_not_local` — the calls at which the payload could
+  //     not resolve the local controller at all, so the comparison was
+  //     impossible, and
+  //   * `animfix_codec_local_calls` — the calls that **were** the local
+  //     player's.
+  //
+  // `animfix_codec_calls == 0` ⇒ the hooked codec never runs (H1);
+  // `animfix_codec_calls > 0` with no local call ⇒ it runs, but not for
+  // the local player (H2).
+  [[nodiscard]] std::uint64_t animfix_codec_calls() const noexcept {
+    return animfix_codec_calls_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_codec_other_controller() const noexcept {
+    return animfix_codec_other_controller_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_codec_not_local() const noexcept {
+    return animfix_codec_unresolved_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_codec_local_calls() const noexcept {
+    return animfix_codec_local_calls_.load();
+  }
+  // The diagnosis the counters settle: "the codec never ran" (H1) against
+  // "the codec ran, but not for the local controller" (H2).
+  [[nodiscard]] auto animfix_codec_diagnosis() const noexcept -> animfix::CodecDiagnosis {
+    return animfix::classify_codec(animfix::CodecCounters{
+        .calls = animfix_codec_calls_.load(std::memory_order_relaxed),
+        .other_controller = animfix_codec_other_controller_.load(std::memory_order_relaxed),
+        .unresolved = animfix_codec_unresolved_.load(std::memory_order_relaxed),
+        .local_calls = animfix_codec_local_calls_.load(std::memory_order_relaxed),
+    });
   }
   // The signed difference between the two, in degrees: the divergence.
   [[nodiscard]] float animfix_aim_yaw_delta() const noexcept;
@@ -1420,8 +1458,17 @@ class Input {
   static void __fastcall animfix_anim_tick_detour(void* self, int client_tick_flag) noexcept;
   // Install the two hooks (idempotent).
   void animfix_install() noexcept;
-  // Copy the server's values out of the local controller (the codec detour).
-  void animfix_capture(void* controller) noexcept;
+  // Copy the server's values out of the local controller (the anim tick,
+  // right after the codec has reported a decode).
+  void animfix_capture() noexcept;
+  // Count one codec call and decide what it was (the codec detour).
+  //
+  // The detour's own work happens **before** the original: the original is
+  // called as a **tail call**, so the trampoline replays the codec's
+  // prologue on the codec's own stack (see the detour's comment).
+  void animfix_codec_call(void* dst) noexcept;
+  // The counters the diagnosis is taken from.
+  [[nodiscard]] auto animfix_codec_counters() const noexcept -> animfix::CodecCounters;
   // Put the server's values into the graph's parameters (the anim tick
   // detour, before the graph is evaluated).
   void animfix_apply() noexcept;
@@ -1479,6 +1526,29 @@ class Input {
   std::atomic<bool> animfix_acted_{false};
   std::atomic<float> animfix_server_yaw_{0.0F};
   std::atomic<float> animfix_predicted_yaw_{0.0F};
+  // The **codec counters**: what the hooked codec did, call by call. They
+  // are the diagnosis (the capture never happened — *why*?), and they are
+  // cheap: a fetch_add per codec call, and the codec runs a few times a
+  // second per entity.
+  std::atomic<std::uint64_t> animfix_codec_calls_{0};
+  // The calls whose `dst` was **not** the local controller (the codec ran
+  // for somebody else).
+  std::atomic<std::uint64_t> animfix_codec_other_controller_{0};
+  // The calls at which the payload could not resolve the local controller
+  // at all, so the comparison was impossible.
+  std::atomic<std::uint64_t> animfix_codec_unresolved_{0};
+  // The calls that **were** the local player's.
+  std::atomic<std::uint64_t> animfix_codec_local_calls_{0};
+  // The **decodes** of the local player's graph inputs: a counter the anim
+  // tick compares against, and the time of the last one. The codec's detour
+  // cannot capture the values itself (its call to the original has to be a
+  // tail call), so it reports the decode and the anim tick does the
+  // capture.
+  std::atomic<std::uint64_t> animfix_decode_seq_{0};
+  std::atomic<std::uint64_t> animfix_decode_at_ms_{0};
+  // The decode the anim tick has already captured. Only the anim tick
+  // touches it (it runs on the game's main thread).
+  std::uint64_t animfix_captured_seq_{0};
 };
 
 }  // namespace cs2::control
