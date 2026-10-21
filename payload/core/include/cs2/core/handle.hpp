@@ -41,7 +41,8 @@ namespace cs2::core {
 //
 // THE POLICY IS ASKED ONLY WHEN A HANDLE IS TAKEN. From then on the wrapper
 // knows whether it owns what it holds, and it never asks the policy whether
-// the handle is live again.
+// the handle is live again. (`close` is asked when the wrapper releases what
+// it owns -- that is what the policy is for.)
 //
 // A MOVE COPIES THE POLICY. The policy is a *value*, so a moved-from wrapper
 // keeps a usable one, and there is therefore never a *moved-from* policy for
