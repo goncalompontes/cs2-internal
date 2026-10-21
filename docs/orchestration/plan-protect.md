@@ -103,6 +103,26 @@ The **image base** is still worth publishing: it is a runtime input to the
 decode, it keeps the optimiser from folding the decoder away, and it is the
 slot a future injector-delivered mask would use.
 
+**And the second measurement (from T21's review): the payload's own data
+model pins the feature keys.** `overlay/include/cs2/overlay/settings_table.hpp`
+holds `inline constexpr std::array<SettingInfo, 87> SETTING_TABLE = {{ {"box",…},
+{"health_bar",…}, …}}` — a **shared header** between the payload and the
+overlay, and a **global initializer**. So the strings the payload's feature
+list is made of **cannot leave the payload's image** by any in-place scheme:
+the address is baked into the table.
+
+Measured on a protected build: of the 54 literals the pass reports as
+"protected", **29 are still plaintext in the shipped DLL** — only 25 really
+left it. The reason is structural, and it is the same shape as the event
+names.
+
+So the honest statement of T21's value is: **the payload's own feature-key
+list is not protectable in place.** What T21 delivers is the machinery and
+25 literals; what the payload needs is a **data-model change** — the names
+arriving at run time (from the injector, or hashed and looked up in a table
+the payload builds at run time). That is **T21b**, and it is now the highest
+value string task, not an optional extra.
+
 ### 1.3 The measurement: the VM cannot protect the aim maths
 
 **T20a's gate says none of the six protected functions is virtualizable.**
