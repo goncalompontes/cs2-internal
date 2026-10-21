@@ -890,7 +890,7 @@ number never appears in the image.
 | `Move` | dst, src1 | dst = src1 (truncated to the width) |
 | `Add` `Sub` `Mul` `And` `Or` `Xor` | dst, src1, src2 | the arithmetic, at the width |
 | `SDiv` `UDiv` `SRem` `URem` | dst, src1, src2 | the division, at the width |
-| `Shl` `LShr` `AShr` | dst, src1, src2 | the shift amount is masked to width-1 |
+| `Shl` `LShr` `AShr` | dst, src1, src2 | the shift amount is masked to `width * 8 - 1` (the **width is in bytes**, so the mask is 7, 15, 31 or 63) |
 | `Neg` `Not` | dst, src1 | the negation and the complement, at the width |
 | `Cmp` | dst, src1, src2, aux | dst = 1 if the comparison holds, else 0 |
 | `Cast` | dst, src1, aux | zext / sext / trunc / bitcast |
@@ -901,7 +901,7 @@ number never appears in the image.
 | `BrIf` | src1, aux | if src1 != 0, pc = the instruction index in aux |
 | `Arg` | src1 | push src1 onto the argument stack |
 | `Pop` | dst | dst = the top of the argument stack, popped |
-| `Call` | dst, imm, aux | dst = the result, imm = the pool index, aux = the argument count |
+| `Call` | dst, imm, aux | dst = the result, imm = the pool index, aux = the argument count. The arguments are the **top** `aux` cells of the argument stack, and they are in the order of the call: the **first argument of the call is the first one pushed** |
 | `Ret` | src1 | return src1 |
 | `MemCpy` | src1, src2, imm | copies a **constant** number of bytes |
 | `MemSet` | src1, src2, imm | sets a **constant** number of bytes |
@@ -1066,6 +1066,21 @@ the **types of its arguments and of its return value**, so that the
 thunk can be emitted. A callee that returns a struct is refused, and a
 callee that returns nothing returns zero.
 
+**The order of the arguments is pinned by the contract.** The lowering
+pushes the arguments of the call onto the argument stack **in the order
+of the call**: the first argument of the call is the first one pushed.
+The interpreter copies the **top** `aux` cells of the argument stack into
+the scratch **in the order they were pushed** — so `scratch[0]` is the
+first argument of the call — and it pops them. The stack pops last in,
+first out, so an interpreter that popped the arguments and wrote them
+into the scratch in the order it popped them would hand the callee its
+arguments **reversed**: the contract says which way it is, because the
+two halves of the virtual machine are written by two different tasks.
+
+A call that returns an `i1` is **masked** by the lowering: the x64 ABI
+defines the low bit of the byte and leaves the other seven undefined, so
+the value of the `i1` is its low bit and nothing else.
+
 ### 14.7 The eligibility gate
 
 The gate fails **closed**: a function that cannot be lowered completely is
@@ -1097,10 +1112,18 @@ reported as `too_many_arguments`.
 | `recursion` | the function calls itself: the frame would multiply by the recursion depth |
 | `virtualized_callee` | the function calls a function that is itself selected at the `virtualized` level: the interpreter would have to call into another interpreter |
 | `unsupported_instruction` | the catch-all: an IR instruction the lowering does not model. The lowering has a default branch that refuses. |
+| `vanished` | the function did not survive to this phase: there is nothing to virtualize. The transform reports the same thing the same way. |
 
-The rules of the transform (§10.4) are **reused**, not written twice: the
-variadic callee, the indirect parameter, the `musttail` call and the
-indirect call are the same rules, and the same reasons.
+The rules of the transform (§10.4) are **reused**, not written twice:
+the variadic callee, the indirect parameter, the `musttail` call and the
+indirect call are the same rules, and the same reasons. The gate calls
+the transform's `skip_reason` (`src/transform.hpp`) and maps its reasons
+onto the virtual machine's, so the two phases cannot drift apart. The
+**order** is the transform's order — the variadic callee, the indirect
+parameter, the `musttail` call and the indirect call — and it is the
+one documented exception to the order of the table above: the table
+lists the indirect call before the indirect parameter, and the two
+phases have to agree.
 
 What the lowering models: the integer and pointer arithmetic, the
 comparisons, the conversions, the loads and the stores, the `getelementptr`

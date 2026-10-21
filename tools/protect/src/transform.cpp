@@ -67,13 +67,23 @@ void permute(std::vector<llvm::Function*>& callees, std::uint64_t seed) {
   return "<indirect>";
 }
 
+/// The metadata string of a node, or "" when the node is not a string.
+[[nodiscard]] auto md_string(const llvm::Metadata* metadata) -> std::string {
+  const auto* text = llvm::dyn_cast_or_null<llvm::MDString>(metadata);
+  if (text == nullptr) {
+    return {};
+  }
+  return text->getString().str();
+}
+
+}  // namespace
+
 /// Why a call is not rewritten, if it is not.
 ///
 /// The order of the rules is the order of the specification's table: the
 /// first rule that holds is the reason that is reported.
-[[nodiscard]] auto skip_reason(const llvm::CallBase& call) -> std::optional<CallSkipReason> {
+auto skip_reason(const llvm::CallBase& call) -> std::optional<CallSkipReason> {
   const llvm::Function* callee = call.getCalledFunction();
-
   if (callee != nullptr && callee->isVarArg()) {
     return CallSkipReason::variadic_callee;
   }
@@ -111,17 +121,6 @@ void permute(std::vector<llvm::Function*>& callees, std::uint64_t seed) {
   }
   return std::nullopt;
 }
-
-/// The metadata string of a node, or "" when the node is not a string.
-[[nodiscard]] auto md_string(const llvm::Metadata* metadata) -> std::string {
-  const auto* text = llvm::dyn_cast_or_null<llvm::MDString>(metadata);
-  if (text == nullptr) {
-    return {};
-  }
-  return text->getString().str();
-}
-
-}  // namespace
 
 [[nodiscard]] auto to_string(CallSkipReason reason) noexcept -> const char* {
   switch (reason) {

@@ -26,6 +26,10 @@
 // The widths, the flags and the meaning of the operands are documented in
 // vm.hpp: the header of the bytecode is the contract, and this file is the
 // list of the opcodes it holds.
+//
+// The `width` of an instruction is in **bytes** (1, 2, 4 or 8), so a shift
+// masks its amount to `width * 8 - 1` **bits** (7, 15, 31 or 63), and the
+// `i1` of the source IR lives in a byte.
 
 #ifndef CS2_VM_OPCODE
 #error "isa.def is an X-macro list: define CS2_VM_OPCODE(name, number, comment) first"
@@ -45,9 +49,9 @@ CS2_VM_OPCODE(SDiv, 8, "dst = src1 / src2, signed, at the width")
 CS2_VM_OPCODE(UDiv, 9, "dst = src1 / src2, unsigned, at the width")
 CS2_VM_OPCODE(SRem, 10, "dst = src1 % src2, signed, at the width")
 CS2_VM_OPCODE(URem, 11, "dst = src1 % src2, unsigned, at the width")
-CS2_VM_OPCODE(Shl, 12, "dst = src1 << src2, the amount masked to width-1")
-CS2_VM_OPCODE(LShr, 13, "dst = src1 >> src2, logical, the amount masked to width-1")
-CS2_VM_OPCODE(AShr, 14, "dst = src1 >> src2, arithmetic, the amount masked to width-1")
+CS2_VM_OPCODE(Shl, 12, "dst = src1 << src2, the amount masked to width*8-1")
+CS2_VM_OPCODE(LShr, 13, "dst = src1 >> src2, logical, the amount masked to width*8-1")
+CS2_VM_OPCODE(AShr, 14, "dst = src1 >> src2, arithmetic, the amount masked to width*8-1")
 CS2_VM_OPCODE(Neg, 15, "dst = -src1, at the width")
 CS2_VM_OPCODE(Not, 16, "dst = ~src1, at the width")
 CS2_VM_OPCODE(Cmp, 17, "dst = 1 if the comparison holds, else 0; aux = the kind")
@@ -59,7 +63,7 @@ CS2_VM_OPCODE(Br, 22, "pc = the instruction index in aux")
 CS2_VM_OPCODE(BrIf, 23, "if src1 != 0, pc = the instruction index in aux")
 CS2_VM_OPCODE(Arg, 24, "push src1 onto the argument stack")
 CS2_VM_OPCODE(Pop, 25, "dst = the top of the argument stack, popped")
-CS2_VM_OPCODE(Call, 26, "dst = the result; imm = the pool index; aux = the argument count")
+CS2_VM_OPCODE(Call, 26, "dst = the result; imm = the pool index; aux = the argument count; the arguments are the top aux cells of the argument stack, the first argument of the call first")
 CS2_VM_OPCODE(Ret, 27, "return src1")
 CS2_VM_OPCODE(MemCpy, 28, "copy imm bytes from src2 to src1")
 CS2_VM_OPCODE(MemSet, 29, "set imm bytes at src1 to the byte in src2")

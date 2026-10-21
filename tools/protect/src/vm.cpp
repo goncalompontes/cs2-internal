@@ -1,6 +1,7 @@
 #include "vm.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -19,6 +20,7 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include "selection.hpp"
+#include "transform.hpp"
 
 namespace cs2::protect {
 
@@ -113,18 +115,51 @@ namespace {
   return calls;
 }
 
-/// Whether the callee has a parameter that an indirect signature cannot
-/// carry: Windows x64 rejects `byval`, `sret`, `inalloca` and `preallocated`
-/// in an indirect call.
-[[nodiscard]] auto has_indirect_parameter(const llvm::Function& callee) -> bool {
-  for (const llvm::Argument& argument : callee.args()) {
-    if (argument.hasByValAttr() || argument.hasStructRetAttr() || argument.hasInAllocaAttr() ||
-        argument.hasPreallocatedAttr()) {
-      return true;
-    }
+/// The refusal of the virtual machine for a call that the transform's
+/// rules skip.
+///
+/// The rule that holds for a call is the transform's: the `byval`, `sret`,
+/// `inalloca` and `preallocated` parameters, the variadic callee, the
+/// `musttail` call and the indirect call are the same rules in the two
+/// phases, and the same reasons.
+[[nodiscard]] auto vm_failure(CallSkipReason reason, const llvm::CallBase& call)
+    -> std::optional<VmFailure> {
+  const auto* callee = call.getCalledFunction();
+  const std::string name = callee != nullptr ? callee->getName().str() : std::string();
+  switch (reason) {
+    case CallSkipReason::variadic_callee:
+      return VmFailure{VmRefusal::variadic_callee, "the callee '" + name + "' is variadic"};
+    case CallSkipReason::indirect_parameter:
+      return VmFailure{VmRefusal::indirect_parameter,
+                       "the callee '" + name +
+                           "' has a byval, sret, inalloca or preallocated parameter"};
+    case CallSkipReason::musttail:
+      return VmFailure{VmRefusal::musttail, "the call is a musttail call"};
+    case CallSkipReason::indirect_callee:
+      return VmFailure{VmRefusal::indirect_call, "the call goes through a pointer"};
+    case CallSkipReason::external_callee:
+    case CallSkipReason::intrinsic_callee:
+    case CallSkipReason::invoke:
+    case CallSkipReason::optnone_callee:
+      // The transform refuses these for its own reasons: the virtual
+      // machine calls an import through the pool, and the other three are
+      // refused elsewhere (an `invoke` is an EH edge, an intrinsic is
+      // lowered or refused by the lowering, and an `optnone` callee is
+      // an ordinary callee here).
+      break;
   }
-  return false;
+  return std::nullopt;
 }
+
+/// The rules of the calls that the virtual machine refuses, in the order
+/// of the transform's rules: the first rule that holds is the reason that
+/// is reported.
+constexpr std::array<CallSkipReason, 4> k_call_rules = {
+    CallSkipReason::variadic_callee,
+    CallSkipReason::indirect_parameter,
+    CallSkipReason::musttail,
+    CallSkipReason::indirect_callee,
+};
 
 /// Whether the address of the function is taken.
 ///
@@ -410,32 +445,22 @@ class Lowerer {
     }
 
     const std::vector<llvm::CallBase*> calls = calls_of(function_);
+    // The rules of the calls are the rules of the transform: they are
+    // reused, not written a second time. The order is the transform's
+    // order, so the two phases report the same reason for the same call.
+    std::vector<std::optional<CallSkipReason>> reasons;
+    reasons.reserve(calls.size());
     for (const llvm::CallBase* call : calls) {
-      const auto* callee = call->getCalledFunction();
-      if (callee == nullptr || callee->isIntrinsic()) {
-        continue;  // the indirect calls and the intrinsics are checked below
-      }
-      if (callee->isVarArg()) {
-        return VmFailure{VmRefusal::variadic_callee,
-                         "the callee '" + callee->getName().str() + "' is variadic"};
-      }
+      reasons.push_back(skip_reason(*call));
     }
-    for (const llvm::CallBase* call : calls) {
-      if (call->getCalledFunction() == nullptr) {
-        return VmFailure{VmRefusal::indirect_call, "the call goes through a pointer"};
-      }
-    }
-    for (const llvm::CallBase* call : calls) {
-      const auto* callee = call->getCalledFunction();
-      if (callee != nullptr && !callee->isIntrinsic() && has_indirect_parameter(*callee)) {
-        return VmFailure{VmRefusal::indirect_parameter,
-                         "the callee '" + callee->getName().str() +
-                             "' has a byval, sret, inalloca or preallocated parameter"};
-      }
-    }
-    for (const llvm::CallBase* call : calls) {
-      if (call->isMustTailCall()) {
-        return VmFailure{VmRefusal::musttail, "the call is a musttail call"};
+    for (const CallSkipReason rule : k_call_rules) {
+      for (std::size_t index = 0; index < calls.size(); ++index) {
+        if (!reasons[index].has_value() || *reasons[index] != rule) {
+          continue;
+        }
+        if (auto failure = vm_failure(rule, *calls[index])) {
+          return failure;
+        }
       }
     }
 
@@ -1222,8 +1247,10 @@ class Lowerer {
         return std::nullopt;
       }
       default:
+        // A conversion to or from a float is a *type* the virtual machine
+        // does not model, not an instruction it does not model.
         return VmFailure{
-            VmRefusal::unsupported_instruction,
+            VmRefusal::unsupported_type,
             "the conversion '" + std::string(cast.getOpcodeName()) + "' is not modelled"};
     }
   }
@@ -1851,6 +1878,8 @@ auto to_string(VmRefusal reason) noexcept -> const char* {
       return "virtualized_callee";
     case VmRefusal::unsupported_instruction:
       return "unsupported_instruction";
+    case VmRefusal::vanished:
+      return "vanished";
     default:
       return "unknown";
   }
@@ -1949,7 +1978,19 @@ auto analyze_module(llvm::Module& module, const Config& config,
   for (const std::string& symbol : symbols) {
     llvm::Function* function = module.getFunction(symbol);
     if (function == nullptr) {
-      continue;  // the function did not survive to this phase
+      // The function did not survive to this phase. It gets a verdict, so
+      // that the operator can tell "not selected" from "selected and
+      // deleted by the optimiser": the transform reports the same thing
+      // the same way.
+      VmFunction vanished;
+      vanished.symbol = symbol;
+      vanished.qualified = qualified_name(symbol);
+      vanished.virtualizable = false;
+      vanished.failure =
+          VmFailure{VmRefusal::vanished, "the function did not survive to this phase"};
+      vanished.frame_bytes = k_frame_bytes;
+      result.push_back(std::move(vanished));
+      continue;
     }
     result.push_back(analyze_function(*function, options));
   }

@@ -186,7 +186,7 @@ class SelectPass : public llvm::PassInfoMixin<SelectPass> {
 };
 
 /// The symbols of the recorded functions, and the ones that are selected at
-/// the irtualized level.
+/// the virtualized level.
 ///
 /// The second list is what the analysis refuses a call to: a virtualized
 /// function that calls another virtualized function would make the
@@ -203,6 +203,7 @@ class SelectPass : public llvm::PassInfoMixin<SelectPass> {
   }
   return {symbols, virtualized};
 }
+
 /// The phase that rewrites the calls of the selected functions.
 class TransformPass : public llvm::PassInfoMixin<TransformPass> {
  public:
@@ -271,8 +272,6 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
   }
 };
 
-/// The symbols of the recorded functions, and the ones that are selected at
-/// the `virtualized` level.
 /// The phase that analyses the selected functions for the virtualizer.
 ///
 /// The analysis is **read-only**: it decides whether a function could be

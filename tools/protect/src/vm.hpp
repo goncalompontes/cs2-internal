@@ -206,6 +206,9 @@ enum class VmRefusal : std::uint8_t {
   unsupported_instruction,  ///< the catch-all: an IR instruction the lowering
                             ///< does not model. The lowering has a default branch
                             ///< that refuses.
+  vanished,                 ///< the function did not survive to this phase:
+                            ///< there is nothing to virtualize. The transform
+                            ///< reports the same thing the same way.
 };
 
 [[nodiscard]] auto to_string(VmRefusal reason) noexcept -> const char*;

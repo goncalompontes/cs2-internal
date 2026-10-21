@@ -658,7 +658,7 @@ void test_vm_virtualizable() {
   builder.CreateRet(sum);
 
   const auto result = analyze(*function);
-  check(result.virtualizable, "the function is virtualizable");
+  check_accepted(*function, "the function with an addition is virtualizable");
   check(result.failure.detail.empty(), "a virtualizable function has no refusal");
   // The slots: the argument, the result of the addition and the constant.
   check(result.slots == 3, "the function uses three slots");
@@ -692,12 +692,17 @@ void test_vm_virtualizable() {
 
   // The opcodes are permuted: the canonical number of an opcode is not the
   // byte in the container.
-  const auto [perm_a, perm_b] = cs2::protect::opcode_permutation(0x5EED5EED5EED5EEDULL);
-  check(perm_a % 2 == 1, "the multiplier of the permutation is odd");
-  check(cs2::protect::canonical_opcode(
-            cs2::protect::permuted_opcode(cs2::protect::VmOpcode::Add, perm_a, perm_b), perm_a,
-            perm_b) == cs2::protect::VmOpcode::Add,
-        "the permutation is invertible");
+  //
+  // The multiplier is odd **and** coprime with the number of the opcodes,
+  // for every seed: the contract says so, and one seed is not a proof.
+  for (std::uint64_t seed = 0; seed < 500; ++seed) {
+    const auto [perm_a, perm_b] = cs2::protect::opcode_permutation(seed);
+    check(perm_a % 2 == 1, "the multiplier of the permutation is odd");
+    check(cs2::protect::canonical_opcode(
+              cs2::protect::permuted_opcode(cs2::protect::VmOpcode::Add, perm_a, perm_b), perm_a,
+              perm_b) == cs2::protect::VmOpcode::Add,
+          "the permutation is invertible");
+  }
 }
 
 /// The virtualizer's front end: the parallel copy of a swapping back-edge.
@@ -719,8 +724,6 @@ void test_vm_parallel_copy() {
   auto* second = builder.CreatePHI(llvm::Type::getInt32Ty(context), 2, "second");
   first->addIncoming(builder.getInt32(0), entry);
   second->addIncoming(builder.getInt32(1), entry);
-  llvm::Value* sum = builder.CreateAdd(first, second);
-  llvm::Value* difference = builder.CreateSub(sum, second);
   // The back edge swaps the two values: a sequential copy would break it.
   first->addIncoming(second, loop);
   second->addIncoming(first, loop);

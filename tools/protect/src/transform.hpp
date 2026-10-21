@@ -20,6 +20,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -29,6 +30,7 @@
 #include "selection.hpp"
 
 namespace llvm {
+class CallBase;
 class Module;
 }  // namespace llvm
 
@@ -55,6 +57,16 @@ enum class CallSkipReason : std::uint8_t {
 };
 
 [[nodiscard]] auto to_string(CallSkipReason reason) noexcept -> const char*;
+
+/// Why a call is not rewritten, if it is not.
+///
+/// The order of the rules is the order of the specification's table: the
+/// first rule that holds is the reason that is reported.
+///
+/// The rules are **exported**, because the gate of the virtualizer has to
+/// reach the same verdict for the same call: a rule that is written twice
+/// drifts, and the two copies report different reasons for one call.
+[[nodiscard]] auto skip_reason(const llvm::CallBase& call) -> std::optional<CallSkipReason>;
 
 /// One selected function, as the early phase recorded it.
 struct RecordedFunction {

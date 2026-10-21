@@ -7,6 +7,7 @@
 #include <system_error>
 #include <utility>
 
+#include "cipher.hpp"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/SHA256.h"
@@ -299,6 +300,12 @@ void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& 
                      const Config& config) {
   const std::string module_id = module.getSourceFileName();
   const std::string_view tag = module_tag(module_id);
+
+  // The seed of the module: the key of the container and the opcode
+  // permutation come from it, so the operator needs it next to the
+  // verdicts.
+  llvm::errs() << "[cs2-protect] " << tag << ": vm seed="
+               << module_seed(config, module_id) << "\n";
 
   for (const VmFunction& function : functions) {
     llvm::errs() << "[cs2-protect] " << tag << ": vm " << function.symbol;
