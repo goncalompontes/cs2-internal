@@ -467,17 +467,17 @@ def scan_literals(runs: list[bytes], by_length: dict[int, set[str]], seed: int |
             for offset in range(size - length + 1):
                 piece = run[offset:offset + length]
                 if forms.salted:
-                    digest = sha256(salt + piece).digest()
-                    if digest in wanted:
-                        name = digest.hex().upper()
+                    raw = sha256(salt + piece).digest()
+                    if raw in wanted:
+                        name = raw.hex().upper()
                         if offset == 0 and size == length:
                             whole.add(name)
                         else:
                             part.add(name)
                 if forms.plain:
-                    digest = sha256(piece).digest()
-                    if digest in wanted:
-                        name = digest.hex().upper()
+                    raw = sha256(piece).digest()
+                    if raw in wanted:
+                        name = raw.hex().upper()
                         if offset == 0 and size == length:
                             whole.add(name)
                         else:
@@ -603,7 +603,7 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
         check(
             False,
             f"the protected image still holds the plaintext of a protected string "
-            f"(sha256 {digest[:12]}): the protection did nothing",
+            f"(digest {digest[:12]}): the protection did nothing",
         )
 
     print(f"check_payload: {len(absent)} of the {len(everywhere)} protected strings are absent "
@@ -621,12 +621,12 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
         for digest in sorted(survivors):
             if digest in refused:
                 print(
-                    f"check_payload:   sha256 {digest[:12]}: refused in another module: that "
+                    f"check_payload:   digest {digest[:12]}: refused in another module: that "
                     "module's copy of the literal survives the link"
                 )
                 continue
             print(
-                f"check_payload:   sha256 {digest[:12]}: the bytes are the tail of another "
+                f"check_payload:   digest {digest[:12]}: the bytes are the tail of another "
                 "string of the image: the pass cannot remove another string's bytes"
             )
 
@@ -645,7 +645,7 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
             check(
                 False,
                 f"the unprotected image does not hold the plaintext of {len(missing)} protected "
-                f"strings (sha256 {sorted(missing)[0][:12]}): the check would be vacuous",
+                f"strings (digest {sorted(missing)[0][:12]}): the check would be vacuous",
             )
         print(f"check_payload: the unprotected image holds the plaintext of all the "
               f"{len(everywhere)} protected strings")

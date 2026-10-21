@@ -711,6 +711,12 @@ python tools/protect/check_payload.py --protected build-payload-protect/payload.
   image, so that the comparison cannot pass vacuously, and so that the
   verdict does not depend on the layout of the image.
 
+The scan is the **expensive** part of the check: it hashes every substring
+of the image at the length of every wanted literal, so it costs about half
+a minute on the payload image (2.4 MB, 17 lengths). That is the price of
+a predicate that cannot be fooled by the shape of the image, and the check
+is part of every protected build.
+
 The last check is the one the specification asks for ("the pass rewrites
 calls, so a mistake shows up as a wrong call target, not as a crash. The
 test must catch that"): a count does not catch a dispatch that reaches the
