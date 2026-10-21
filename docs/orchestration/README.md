@@ -1,9 +1,10 @@
 # The orchestration plugin
 
-The plugin that runs a task through **implement → adversarial review → fix →
-merge**, with a git worktree per agent. This file is the **index**: what the
-plugin is, where it lives, what its eight tools do, and where the details
-are. The details live in the plugin's own repository - see
+The plugin that runs a task through
+**plan → verify → review → fix → merge**, with a git worktree per agent.
+The review is adversarial by construction. This file is the **index**: what
+the plugin is, where it lives, what its eight tools do, and where the
+details are. The details live in the plugin's own repository - see
 [The plugin's own documentation](#the-plugins-own-documentation) at the end.
 
 ## Where it lives
@@ -13,15 +14,25 @@ are. The details live in the plugin's own repository - see
 | the source repository | `C:\Users\gpmpo\orchestration-plugin` |
 | the installed plugin | `C:\Users\gpmpo\.config\opencode\plugins\orchestration.ts` |
 | the installed implementation | `C:\Users\gpmpo\.config\opencode\orchestration\` |
-| the configuration | `C:\Users\gpmpo\.config\opencode\orchestration.json` |
-| the two configured projects | `C:\Users\gpmpo\orchestration-plugin\config\orchestration.json` |
+| the configuration **the plugin reads** | `C:\Users\gpmpo\.config\opencode\orchestration.json` |
+| the source of that configuration | `C:\Users\gpmpo\orchestration-plugin\config\orchestration.json` - the two projects on this machine, `cs2` and `rea`, are described in it |
+
+The last two rows are two different files, and the difference matters: the
+plugin reads the **installed**
+`C:\Users\gpmpo\.config\opencode\orchestration.json`. The plugin repository's
+`config\orchestration.json` is only the **source** of it -
+`node scripts/install.mjs --config` copies it there. Editing the source alone
+changes nothing until the install runs again.
 
 The installed copy is a **build of the source repository**, not the source
-itself: `node scripts/install.mjs` copies `src\` to `<config>\orchestration\`
-(where the loader does not find it) and `plugin\orchestration.ts` to
+itself: `node scripts/install.mjs` copies `orchestration\` to
+`<config>\orchestration\` and `plugins\orchestration.ts` to
 `<config>\plugins\orchestration.ts`; `--config` installs the project
-configuration as well. **Edit the source repository, install, and the change is
-live.**
+configuration as well. The layout is the same in the repository and in the
+installed copy - the entry point in `plugins\`, the implementation in
+`orchestration\` - so the entry point's relative import resolves in both, and
+the installer refuses to install a layout that would not.
+**Edit the source repository, install, and the change is live.**
 
 It is plain user configuration - no core patch and no SDK import - so an
 OpenCode update does not break it, and it is discovered automatically from the
@@ -45,7 +56,7 @@ runtime as `tools.orchestrate.*`.
 | `fix({task? \| branch?, findings?, report?, project?})` | takes the review's findings back to the implementer's worktree and returns the **fixer's prompt** |
 | `merge({branch, message?, task?, skip?, allow_unreviewed?, project?})` | merges the task branch into the integration branch - but only after the verify loop passes on the **merged tree** |
 | `status({project?})` | the task board: ahead, behind, dirty, merged, reviewed, disk usage |
-| `size({project?})` | what makes the worktrees big, and what to do about it |
+| `size({project?, task?})` | what makes the worktrees big, and what to do about it; one task, or all of them |
 | `cleanup({task?, merged_only?, apply?, prune_branches?, remove_builds?, project?})` | removes the worktrees that are done with - safely (see [the junction guard](#the-junction-hazard-and-the-guard)) |
 
 ## The project configuration
@@ -54,7 +65,8 @@ A project is described by a configuration file:
 
 1. `~/.config/opencode/orchestration.json` - the global configuration,
 2. `<repository>/.orchestration.json` (or `.orchestration.jsonc`, or
-   `.opencode/orchestration.json`) - the repository's own, which **wins**.
+   `.opencode/orchestration.json`, or `.opencode/orchestration.jsonc`) - the
+   repository's own, which **wins**.
 
 A repository with **no configuration at all is inferred** from what it
 contains: its stack, its build system, its test command, its integration
@@ -81,6 +93,17 @@ The three Windows targets need the MSVC environment, so they run inside
 getting it wrong - is in the plugin's `docs\configuration.md` §"The Windows
 quoting rule".
 
+The loop runs in the **task's worktree**, and a worktree is only as good as
+its inputs. The `calibration\` dumps are gitignored and the SDK generation
+reads them: without them the generation writes **empty** SDK headers and the
+payload builds against an empty SDK - a green build against nothing. The
+plugin's configuration lists `calibration` as a shared asset, next to the
+vendored Vulkan headers, but this repository tracks
+`calibration/.gitignore` and `calibration/README.md`, so the directory is
+already in every worktree and the seed leaves a directory that is already
+there alone instead of linking it. **Check that the worktree's `calibration\`
+is the shared copy before trusting a green build.**
+
 **The merge verifies before it commits.** It does not commit first and verify
 afterwards: the merge is staged with `--no-ff --no-commit`, the verify loop
 runs against the **merged tree**, and only a tree that passes is committed. A
@@ -100,7 +123,7 @@ project configuration:
 | `build_root` | the build directories live **outside** the worktree, in `<build_root>/<task>/<name>` |
 | `deps` | the dependency tree is installed **once**, keyed by the hash of the lockfile, and linked |
 | `assets` | a vendored or generated tree is shared through a **junction** instead of being copied |
-| `env` | a tool cache (`.mypy_cache`, the cargo target directory) is pointed at a shared directory |
+| `env` | a tool cache is pointed at another directory: the mypy cache is **shared**, the cargo target directory is **per task** (`{build_root}/{task}/cargo`), because cargo locks it |
 | `sparse` | a large tracked checkout becomes a cone-mode sparse checkout |
 
 The measured numbers for this project:
@@ -113,13 +136,35 @@ The measured numbers for this project:
 | `external/Vulkan-Headers` - the vendored headers, copied per worktree | 45 MB |
 | `.mypy_cache` - the same cache in every worktree | 43 MB |
 | **the worktree, in total** | **374 MB** |
-| **the tracked sources** | **8 MB** |
+| of which the tracked sources | 8 MB |
 
-So the worktree was **374 MB and is now 8 MB**: the build output and the cargo
-target directory live in the build root, the mypy cache is shared, and **the
-vendored Vulkan headers are shared through a junction instead of being
-copied** - zero bytes in the worktree. The whole story is in the plugin's
-`docs\worktree-size.md`.
+The tracked sources are **part of** the 374 MB, not in addition to it: they
+are the only part that has to be there. The other 366 MB is per-worktree
+duplication of things that are identical in every worktree.
+
+What the levers do with it:
+
+- the **build output** lives in the build root, outside the worktree,
+- the **vendored Vulkan headers** are shared through a junction instead of
+  being copied - zero bytes in the worktree,
+- the **mypy cache** is shared,
+- the **cargo target directory** lives in the build root, per task.
+
+So a worktree built **with the project's environment** holds about **8 MB**.
+
+A worktree built **without** it does not: a build that skips the environment
+puts the cargo target directory (117 MB) and the mypy cache (43 MB) straight
+back into the worktree, and it is **170 MB** again. The environment is written
+into the worktree when it is seeded - `<worktree>/.orchestration/env.ps1` and
+`<worktree>/.orchestration/env.cmd` - and the implementer's and the fixer's
+prompts tell the agent to take it before building:
+
+```powershell
+. <worktree>/.orchestration/env.ps1
+```
+
+The whole story is in the plugin's `docs\worktree-size.md`, which tells it the
+same way.
 
 ## The junction hazard, and the guard
 
@@ -141,8 +186,9 @@ So the plugin:
 4. never removes a worktree with `--force` before that scan.
 
 `orchestrate.cleanup` is the tool that removes worktrees, and it unlinks
-before it removes. `test/links.test.ts` in the plugin's repository is the test
-that holds the line: it creates a junction, unlinks it, and asserts that the
+before it removes. A cleanup that only **reports** - `apply` not set - changes
+nothing. `test/links.test.ts` in the plugin's repository is the test that
+holds the line: it creates a junction, unlinks it, and asserts that the
 target's content is still there.
 
 ## The plugin's own documentation
@@ -164,3 +210,8 @@ The details live in the plugin's repository, not here:
 | `docs/orchestration/review-prompt-template.md` | the prompt the reviewer is given |
 | `docs/orchestration/spec-*.md` | the written specification of a task - the same text goes to the implementer and the reviewer |
 
+**Every task's spec is committed**, this one included. The spec is the
+contract the implementer works to and the reviewer checks against, so it
+belongs to the repository and not to a scratch directory:
+`spec-t21-quality-pass.md` and the rest are committed, and
+`spec-t22-plugin-docs.md` follows the same convention.
