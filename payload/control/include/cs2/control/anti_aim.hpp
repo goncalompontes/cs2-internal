@@ -320,8 +320,9 @@ struct Delivery {
   //! operator's walk speed is multiplied by. Below 1 the walk is slower than it
   //! would be without the anti-aim (a steep fake pitch costs the most).
   float wish_factor{1.0F};
-  //! The ideal axes did not fit in ±1: the delivery is a compromise and the
-  //! direction is **not** preserved.
+  //! The ideal axes did not fit in ±1: the delivery is a compromise — the
+  //! direction may be off (\direction_error_deg\ says by how much) and the walk
+  //! speed is what \wish_factor\ says.
   bool saturated{false};
 };
 

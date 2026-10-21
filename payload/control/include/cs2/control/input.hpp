@@ -375,8 +375,9 @@ class Input {
   [[nodiscard]] float anti_aim_wish_factor() const noexcept {
     return anti_aim_wish_factor_.load();
   }
-  /// The re-base saturated: the ideal axes did not fit in ±1, so the delivered
-  /// direction is a compromise and **not** the camera's.
+  /// The re-base saturated: the ideal axes did not fit in ±1, so the delivery
+  /// is a compromise — the direction may be off (see nti_aim_direction_error)
+  /// and the walk speed is what nti_aim_wish_factor says.
   [[nodiscard]] bool anti_aim_saturated() const noexcept { return anti_aim_saturated_.load(); }
   /// `cos` of the fake pitch: the factor the engine puts on the forward axis,
   /// so the operator can see how far the walk's basis is tilted.
