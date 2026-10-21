@@ -24,6 +24,7 @@
 #include <string_view>
 #include <vector>
 
+#include "cipher.hpp"
 #include "config.hpp"
 #include "selection.hpp"
 
@@ -32,12 +33,6 @@ class Module;
 }  // namespace llvm
 
 namespace cs2::protect {
-
-/// The number of constants the key is split into.
-///
-/// The key is split so that it does not appear as a single constant in the
-/// image (the specification's design A).
-inline constexpr std::size_t k_key_parts = 3;
 
 /// Why a call was not rewritten.
 enum class CallSkipReason : std::uint8_t {
