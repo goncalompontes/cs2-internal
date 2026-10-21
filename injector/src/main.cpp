@@ -206,22 +206,26 @@ auto peb_module_base(HANDLE process, const char* name) -> std::optional<std::uin
 void dump_target_modules(HANDLE process) {
   const DWORD pid = GetProcessId(process);
   std::printf("injector: --- toolhelp ---\n");
-  const cs2::core::ScopedKernelHandle snapshot(
-      CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid));
-  if (!snapshot.valid()) {
-    std::printf("  snapshot FAILED (err %lu)\n", GetLastError());
-  } else {
-    MODULEENTRY32 entry{};
-    entry.dwSize = sizeof(entry);
-    if (Module32First(static_cast<HANDLE>(snapshot.get()), &entry) != 0) {
-      int count = 0;
-      do {
-        std::printf("  %-32s 0x%llx\n", entry.szModule,
-                    static_cast<unsigned long long>(
-                        reinterpret_cast<std::uintptr_t>(entry.modBaseAddr)));
-      } while ((Module32Next(static_cast<HANDLE>(snapshot.get()), &entry) != 0) && ++count < 80);
+  {
+    // The snapshot is released at the end of this block -- the same point it
+    // was released at before the wrapper took it over.
+    const cs2::core::ScopedKernelHandle snapshot(
+        CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid));
+    if (!snapshot.valid()) {
+      std::printf("  snapshot FAILED (err %lu)\n", GetLastError());
     } else {
-      std::printf("  Module32First FAILED (err %lu)\n", GetLastError());
+      MODULEENTRY32 entry{};
+      entry.dwSize = sizeof(entry);
+      if (Module32First(static_cast<HANDLE>(snapshot.get()), &entry) != 0) {
+        int count = 0;
+        do {
+          std::printf("  %-32s 0x%llx\n", entry.szModule,
+                      static_cast<unsigned long long>(
+                          reinterpret_cast<std::uintptr_t>(entry.modBaseAddr)));
+        } while ((Module32Next(static_cast<HANDLE>(snapshot.get()), &entry) != 0) && ++count < 80);
+      } else {
+        std::printf("  Module32First FAILED (err %lu)\n", GetLastError());
+      }
     }
   }
   std::printf("injector: --- peb ---\n");
@@ -885,16 +889,18 @@ auto main(int argc, char** argv) -> int {
     return 1;
   }
 
-  const cs2::core::ScopedKernelHandle thread(
-      CreateRemoteThread(process, nullptr, 0,
-                         reinterpret_cast<LPTHREAD_START_ROUTINE>(stub_mem), nullptr, 0, nullptr));
-  if (!thread.valid()) {
-    std::printf("injector: CreateRemoteThread failed: %lu\n", GetLastError());
-    return 1;
-  }
-  WaitForSingleObject(static_cast<HANDLE>(thread.get()), 15000);
   DWORD exit_code = 0;
-  GetExitCodeThread(static_cast<HANDLE>(thread.get()), &exit_code);
+  {
+    const cs2::core::ScopedKernelHandle thread(
+        CreateRemoteThread(process, nullptr, 0,
+                           reinterpret_cast<LPTHREAD_START_ROUTINE>(stub_mem), nullptr, 0, nullptr));
+    if (!thread.valid()) {
+      std::printf("injector: CreateRemoteThread failed: %lu\n", GetLastError());
+      return 1;
+    }
+    WaitForSingleObject(static_cast<HANDLE>(thread.get()), 15000);
+    GetExitCodeThread(static_cast<HANDLE>(thread.get()), &exit_code);
+  }  // the thread handle is released here, as before
   std::printf("injector: entry returned %lu\n", exit_code);
   return 0;
 }
