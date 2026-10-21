@@ -706,6 +706,12 @@ two candidates the existing solver's `field_candidates` builds — capped by a
 **documented budget** (`CandidateBudget`: 16 cells, 64 candidates), never a
 function of the field's size.
 
+> `field_candidates` is file-static in `payload/aim/src/field.cpp`, a file this task
+> does not own, so the candidate set is rebuilt from the same two primitives it
+> uses (`chebyshev_center`, `polygon_centroid`, both exposed by
+> `cs2/aim/geometry.hpp`) rather than by calling it. The candidate **kinds** are
+> the same; the budget is the module's own.
+
 The selection is the community's **lexicographic** rule
 (`docs/research/aim-objective-math.md` §2):
 
