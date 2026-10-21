@@ -18,16 +18,21 @@ Read `docs/handoff-wave2.md` and then work through it.
 - a **written spec** per task, in `docs/orchestration/spec-<task>.md` — the
   implementer *and* the reviewer read the same one;
 - **one git worktree per agent** (`C:\Users\gpmpo\cs2-wt\<name>`), never a
-  shared tree; the vendored `external/Vulkan-Headers` is **copied** in (never a
-  junction — a removable worktree with a junction inside it follows the link and
-  deletes the target);
+  shared tree; the vendored `external/Vulkan-Headers` is **shared** through a
+  junction (a removable worktree with a junction inside it follows the link and
+  deletes the target — the plugin unlinks it before it removes a worktree);
 - an **implementer** sub-agent, then an **adversarial reviewer** sub-agent
   (hostile by construction — its brief is `docs/orchestration/reviewer-role.md`),
   then a **fix** round, then a **merge** with the full verify loop;
-- the mechanics of that loop are now a **plugin**: `tools.orchestrate.plan`,
-  `tools.orchestrate.review` and `tools.orchestrate.merge` (namespace
-  `orchestrate`, in the Code Mode `execute` runtime) create the worktree, seed it,
-  assemble the implementer's and the reviewer's prompts, and merge + verify.
+- the mechanics of that loop are now a **plugin**: the loop is
+  **plan → verify → review → fix → merge**, and the plugin's eight tools
+  (`tools.orchestrate.*`, namespace `orchestrate`, in the Code Mode `execute`
+  runtime) create the worktree, seed it, run the verify loop in it, assemble the
+  implementer's, the reviewer's and the fixer's prompts, and merge only a tree
+  that passes. Its source is its own repository
+  (`C:\Users\gpmpo\orchestration-plugin`); the installed copy is a **copy** of
+  it, and `node scripts/install.mjs` is what makes an edit live. The index of
+  the tools is [`docs/orchestration/README.md`](docs/orchestration/README.md).
 
 **Do this first, before anything else:** the movement question is **settled**
 (2026-10-20). The auto-strafe's silent encoding is the only one that gains

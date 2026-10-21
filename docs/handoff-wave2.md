@@ -18,42 +18,80 @@
 | What | Where |
 |---|---|
 | The repo | `C:\Users\gpmpo\cs2-internal`, branch `feat/occlusion-penetration` |
-| The task worktrees | `C:\Users\gpmpo\cs2-wt\<name>` — one per agent, each on its own branch, each with its own `build/` |
+| The task worktrees | `C:\Users\gpmpo\cs2-wt\<name>` — one per agent, each on its own branch; the build directories live **outside** the worktree, in `C:\Users\gpmpo\cs2-build\<task>\`, so a worktree holds about **8 MB** of sources |
 | The neverlose artifacts | `C:\Users\gpmpo\nea\rea-work\` — the decompilation, the Ghidra project (`gproj3`), and the reconstructed PE (`neverlose_seeded3.exe`, sha `21efa969…`) |
 | The Linux box (the neverlose reversal) | `ssh pontes@100.104.244.127` (Tailscale SSH — it asks for a **one-time browser check** the first time) |
 | The game | Steam, `F:\SteamLibrary\…\Counter-Strike Global Offensive` |
 | The OpenCode config | `C:\Users\gpmpo\.config\opencode\opencode.jsonc` — the `rea` and `cs2` MCP servers |
-| The orchestration plugin | `C:\Users\gpmpo\.config\opencode\plugins\orchestration.ts` (this session's addition) |
+| The orchestration plugin | its own repository `C:\Users\gpmpo\orchestration-plugin` (this session's addition) — the **installed copy** is `C:\Users\gpmpo\.config\opencode\plugins\orchestration.ts` plus `C:\Users\gpmpo\.config\opencode\orchestration\`, and `node scripts/install.mjs` is what makes an edit live |
 | The task specs (all of them) | `docs/orchestration/` in the repo — **not** the temp dir, which is wiped between sessions |
 
 ## 2. The orchestration playbook (this is the part to copy)
 
 The wave ran **task → implementer sub-agent → adversarial reviewer sub-agent →
 fix round → merge**, in **git worktrees** (never in a shared tree), with a
-**written spec** both agents read. The plugin now does the mechanical parts.
+**written spec** both agents read. The plugin now does the mechanical parts,
+and it runs one more step than the wave did by hand: the **verify loop in the
+task's own worktree**, before the review.
 
 ### 2.1 The loop
 
 ```
-1. WRITE THE SPEC            docs/orchestration/spec-<task>.md
-2. orchestrate_plan         -> worktree + the implementer's prompt
-3. IMPLEMENT                 a `general` sub-agent, in its own worktree
-4. orchestrate_review       -> the review worktree + the reviewer's prompt
-5. REVIEW                   a `general` sub-agent, hostile, reads the SAME spec
-6. FIX                      a `general` sub-agent, in the implementer's worktree
-7. orchestrate_merge        -> merge + the whole verify loop
+WRITE THE SPEC               docs/orchestration/spec-<task>.md
+
+1. orchestrate_plan         -> the worktree + the implementer's prompt
+   IMPLEMENT                 a `general` sub-agent, in that worktree
+2. orchestrate_verify       -> the verify loop, in that worktree
+3. orchestrate_review       -> the review worktree + the reviewer's prompt
+   REVIEW                   a `general` sub-agent, hostile, reads the SAME spec
+4. orchestrate_fix          -> the findings, back to the implementer's worktree
+   FIX                      a `general` sub-agent, in that worktree
+5. orchestrate_merge        -> merge + the whole verify loop, before the commit
 ```
 
-The plugin's tools (namespace `orchestrate`, callable from `execute`):
+The plugin's eight tools (namespace `orchestrate`, callable from `execute`).
+The signatures are the ones the tool's schema accepts — a call with a
+parameter the schema does not know is **rejected**:
 
-- `orchestrate.plan({name, spec, base?})` — creates `cs2-wt\<name>` on
-  `feat/<name>` off the integration tip, copies the vendored Vulkan headers in,
-  writes the spec into the worktree, and returns the **implementer's prompt**.
-- `orchestrate.review({commit, spec_file?, focus?})` — points the shared `cs2-wt\rev`
-  worktree at the commit and returns the **reviewer's prompt**.
-- `orchestrate.merge({branch, message?, skip_tests?})` — merges into
-  `feat/occlusion-penetration` and runs the full verify loop; on a conflict it
-  reports and stops rather than committing something broken.
+- `orchestrate.plan({name, spec | spec_file, base?, project?, sparse?, no_seed?})`
+  — creates `cs2-wt\<name>` on `feat/<name>` off the integration tip, seeds it
+  (the shared trees linked, the build directories **outside** the worktree),
+  writes the spec into it, and returns the **implementer's prompt**.
+- `orchestrate.verify({task, groups?, skip?, project?})` — runs the project's
+  verify loop **in the task's own worktree** (`task: "integration"` verifies the
+  integration tree). The task is named on purpose: a call without one would
+  verify the integration tree, which is a green that says nothing about the
+  work in the worktree.
+- `orchestrate.review({commit, task?, base?, spec_file?, focus?, shared?, project?})`
+  — points a **per-task** review worktree (`cs2-wt\rev-<task>`, so two reviews
+  can run at once) at the commit and returns the **reviewer's prompt**. The
+  report goes to a fixed path, so the verdict can be read back before the
+  merge.
+- `orchestrate.fix({task? | branch?, findings?, report?, project?})` — takes the
+  findings of the review back to the **implementer's own worktree** and returns
+  the **fixer's prompt**. Without `findings`, the findings are read from the
+  task's latest review report. One of `task` / `branch` is needed.
+- `orchestrate.merge({branch, message?, task?, skip?, allow_unreviewed?, project?})`
+  — merges into `feat/occlusion-penetration`. The parameter is **`skip`**, not
+  `skip_tests`. The merge is staged with `--no-ff --no-commit`: the **whole
+  verify loop runs against the merged tree first**, and only a tree that passes
+  is committed. A conflict or a red verify loop aborts the merge and leaves the
+  integration tree exactly as it was. A branch that was **never reviewed**, or
+  one whose review said **DO NOT SHIP**, is refused unless
+  `allow_unreviewed: true` is passed.
+- `orchestrate.status({project?})` — the task board: every worktree, its
+  branch, how far it is ahead and behind, whether it is dirty, merged or
+  reviewed, and its disk usage.
+- `orchestrate.size({project?, task?})` — what makes the worktrees big and what
+  to do about it; one task, or all of them.
+- `orchestrate.cleanup({task?, merged_only?, apply?, prune_branches?, remove_builds?, force?, project?})`
+  — removes the worktrees that are done with: the shared links are unlinked
+  first, so nothing can follow a junction into a shared tree. Without
+  `apply: true` it only reports, and a worktree with uncommitted changes to a
+  tracked file is skipped unless `force: true` is passed.
+
+The index of the tools, and the whole story of the worktree size, is
+[`docs/orchestration/README.md`](orchestration/README.md).
 
 ### 2.2 Why a **written spec** matters
 
@@ -102,9 +140,12 @@ the game's code), and the chams hook's **target address was wrong** (see §5).
 
 1. **A junction inside a removable worktree.** `git worktree remove --force`
    *follows* a directory junction and **deleted the contents of the target**.
-   The vendored `external/Vulkan-Headers` was destroyed that way. **Copy the
-   headers into each worktree; never junction or symlink them.** The plugin does
-   the copy.
+   The vendored `external/Vulkan-Headers` was destroyed that way. The rule is
+   unchanged: a junction inside a worktree is only safe if something unlinks it
+   before the worktree goes. The plugin now **shares** the headers through a
+   junction — zero bytes per worktree — and unlinks it before it removes the
+   worktree (`orchestrate.cleanup`); a `git worktree remove --force` by hand is
+   still the thing that destroys the shared tree.
 2. **Two clang-tidy checks emit code that does not compile** — and the sweep
    *verified* each group, so they were caught before being committed:
    `readability-convert-member-functions-to-static` emits `static [[nodiscard]]`
@@ -363,6 +404,8 @@ verify loop between them). Two checks are excluded with a documented reason
 ```powershell
 # the build (the host build needs no vcvars; the Windows targets do)
 meson compile -C build ; meson test -C build
+# in a TASK worktree the build directories are OUTSIDE it, in
+# C:\Users\gpmpo\cs2-build\<task>\ (build, build-payload, build-overlay, build-injector)
 $vc='C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat'
 cmd /c "call `"$vc`" >nul 2>&1 && set CC=clang-cl && set CXX=clang-cl && meson compile -C build-payload"
 # ... and the same for build-overlay / build-injector
@@ -392,9 +435,11 @@ the bots hold still), joins a team and adds the bots.
 - The integration branch is **`feat/occlusion-penetration`**, and it is **clean**.
 - **27 merged task branches** and **15 worktrees** are still on disk under
   `cs2-wt\`. They are all merged; prune them with
-  `git worktree remove <path>` (and `git branch -d <branch>`) when you want the
-  space back. **Do not `worktree remove --force` one that still has a junction
-  inside it** — see §4.1.
+  `orchestrate.cleanup({merged_only: true, apply: true, prune_branches: true,
+  remove_builds: true})` when you want the space back — it unlinks the shared
+  links before it removes a worktree. **`git worktree remove --force` by hand
+  destroys the shared tree** if the worktree still has a junction inside it —
+  see §4.1.
 - The host suite is **42/42**, the Python suite **387**, mypy **0 errors**.
 - The payload, the overlay and the injector all build.
 

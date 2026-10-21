@@ -24,7 +24,7 @@ plugin reads the **installed**
 `node scripts/install.mjs --config` copies it there. Editing the source alone
 changes nothing until the install runs again.
 
-The installed copy is a **build of the source repository**, not the source
+The installed copy is a **copy of the source repository**, not the source
 itself: `node scripts/install.mjs` copies `orchestration\` to
 `<config>\orchestration\` and `plugins\orchestration.ts` to
 `<config>\plugins\orchestration.ts`; `--config` installs the project
@@ -51,13 +51,13 @@ runtime as `tools.orchestrate.*`.
 | tool | what it does |
 |---|---|
 | `plan({name, spec \| spec_file, base?, project?, sparse?, no_seed?})` | creates the task's worktree on `<prefix><name>` off the integration tip, seeds it (shared assets, shared dependencies, build directories **outside** the worktree), writes the spec into it, and returns the **implementer's prompt** |
-| `verify({task?, groups?, skip?, project?})` | runs the project's verify loop in a worktree - what the implementer and the fixer use to check their own work before anyone reviews it |
+| `verify({task, groups?, skip?, project?})` | runs the project's verify loop in a worktree - what the implementer and the fixer use to check their own work before anyone reviews it. The task is named on purpose: a call without one would verify the integration tree, which is a green that says nothing about the work |
 | `review({commit, task?, base?, spec_file?, focus?, shared?, project?})` | points a review worktree at the commit and returns the **reviewer's prompt** (hostile by construction); the report is written to a fixed path, so the verdict can be read back before the merge |
 | `fix({task? \| branch?, findings?, report?, project?})` | takes the review's findings back to the implementer's worktree and returns the **fixer's prompt** |
 | `merge({branch, message?, task?, skip?, allow_unreviewed?, project?})` | merges the task branch into the integration branch - but only after the verify loop passes on the **merged tree** |
 | `status({project?})` | the task board: ahead, behind, dirty, merged, reviewed, disk usage |
 | `size({project?, task?})` | what makes the worktrees big, and what to do about it; one task, or all of them |
-| `cleanup({task?, merged_only?, apply?, prune_branches?, remove_builds?, project?})` | removes the worktrees that are done with - safely (see [the junction guard](#the-junction-hazard-and-the-guard)) |
+| `cleanup({task?, merged_only?, apply?, prune_branches?, remove_builds?, force?, project?})` | removes the worktrees that are done with - safely (see [the junction guard](#the-junction-hazard-and-the-guard)) |
 
 ## The project configuration
 
@@ -187,7 +187,9 @@ So the plugin:
 
 `orchestrate.cleanup` is the tool that removes worktrees, and it unlinks
 before it removes. A cleanup that only **reports** - `apply` not set - changes
-nothing. `test/links.test.ts` in the plugin's repository is the test that
+nothing. A worktree with uncommitted changes to a **tracked** file is skipped
+unless `force: true` is passed: the cleanup refuses to throw work away.
+`test/links.test.ts` in the plugin's repository is the test that
 holds the line: it creates a junction, unlinks it, and asserts that the
 target's content is still there.
 
