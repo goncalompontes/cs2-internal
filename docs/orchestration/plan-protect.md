@@ -214,14 +214,18 @@ T18-T19 are done. **T20a is done; T20b and T20c are deferred** — the gate
 measured the eligible set and it is **empty** for the payload's real code
 (§1.3), so the interpreter would protect nothing.
 
-**T21 is the next task** and **T23a** follows it. The **order changed** in
-2026-10-21 after the survey (§1.1): **T21 is now the highest-value task**,
-and T20 is deliberately scoped down. T21 and T23 are independent of the VM and
-can be interleaved with it.
+**T21 is done** and the string line is closed (§1.2). **T23a** and **T24**
+are in flight; **T23b** (the `sret` edges) and **T22** (the integrity check)
+are specced. The **order changed** in 2026-10-21 after the survey (§1.1):
+**T21 is now the highest-value task**, and T20 is deliberately scoped down.
+T21 and T23 are independent of the VM and can be interleaved with it.
 
 **T21b is the task that would deliver what T21 could not**: the strings are
 encrypted in place, so the image still decrypts itself (§1.2). Getting them
-**out of the image** is what makes a dumped file useless.
+**out of the image** is what makes a dumped file useless — but the feature
+names are *displayed*, so they must exist in a shipped image. **Dropped**, and
+the reasoning is in §1.2.
+
 
 ## 3. The verified toolchain facts (all measured on this machine)
 
