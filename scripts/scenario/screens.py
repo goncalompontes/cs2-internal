@@ -1383,3 +1383,46 @@ class Machine:
         """``ensure(Screen.LIVE)`` with the movement liveness gate on by default."""
         kwargs.setdefault("verify_movable", True)
         return self.ensure(Screen.LIVE, **kwargs)
+
+    def ensure_team(self, team: int = T, *, timeout: float = 30.0) -> bool:
+        """Get the local player onto a team — as early as the screen allows.
+
+        The **only** way into a team is this machine's own ``join_team``
+        transition (``TEAM_SELECT``/``SPECTATOR`` → ``FREEZE``, the
+        ``jointeam <2|3>`` edge), so a caller that needs a team *early* — the
+        bot match joins before its convars — uses this instead of writing its
+        own ``jointeam`` line: the team choice stays in one place.
+
+        A casual/offline server **auto-assigns** the team when the round
+        spawns, so the player often has one already; that is not a failure and
+        the caller can say so (the bot match's ``team_joined``).
+
+        Returns ``True`` when this call's ``jointeam`` put the player on a team
+        and ``False`` when the player already had one. Raises
+        :class:`SessionError` when no team can be given.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            state = self.observe()
+            if state.team in (T, CT):
+                return False  # the team was already there — the server assigned it
+            if state.screen in (Screen.TEAM_SELECT, Screen.SPECTATOR):
+                break
+            if time.monotonic() >= deadline:
+                raise SessionError(
+                    f"cannot join a team from the {state.screen} screen "
+                    f"({state.summary()}) — a team can only be joined from the "
+                    "team-select or the spectator screen")
+            time.sleep(0.5)
+        self._note("join_team", state, f"jointeam {team}")
+        if not self._do_join_team(team):
+            raise SessionError(
+                f"the {state.screen} screen refused the team join "
+                f"({state.summary()})")
+        remaining = max(1.0, deadline - time.monotonic())
+        if not self._wait_until(lambda observed: observed.team in (T, CT), remaining):
+            current = self.state.screen if self.state else Screen.NOT_READY
+            raise SessionError(
+                f"the local player did not join a team within {remaining:.0f}s "
+                f"(at {current})")
+        return True
