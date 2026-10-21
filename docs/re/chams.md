@@ -923,8 +923,14 @@ arrives after the feature is gone (`g_active == nullptr`) is dropped too, but
 there is no object left to count it on, so it is not in the numbers. The
 window is tiny — the hook is un-patched before `g_active` is cleared.
 
-`seen == chams + skip` holds by construction: a dropped draw never reaches
-the decision, so it is not in `seen` at all.
+A dropped draw never reaches the decision, so it is not in `seen` at all.
+
+`seen == chams + skip` holds at every **instant**: the draw's counter is
+moved **before** the call into the original, exactly like the skip paths'
+counters, so a reader that catches a draw in flight does not see the
+relation broken. (A reader that reads the three counters one after another
+can still see a torn combination — the counters are not read as one
+snapshot — but the relation holds at every point in time.)
 
 The line has to fit the overlay's 192-byte HUD buffer, and the counters are
 what the operator reads, so the **state** is the field that gives room: when

@@ -557,7 +557,11 @@ class Chams {
   std::atomic<hook_target::Status> reported_status_{hook_target::Status::idle};
   // The counters: every draw that reached the decision, the draws re-drawn
   // with the chams' material and the draws forwarded untouched. `seen ==
-  // drawn + skipped` always.
+  // drawn + skipped` holds at **every** instant — the draw's counter is
+  // moved before the call into the original, exactly like the skip paths' —
+  // so a reader that catches a draw in flight does not see the relation
+  // broken. (A reader that reads the three counters one after another can
+  // still see a torn combination: the counters are not read as one snapshot.)
   //
   // They are **not** reset: the reset was three separate stores on the
   // payload's thread while the render threads were incrementing the same

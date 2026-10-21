@@ -585,9 +585,14 @@ void Chams::on_draw(void* desc, void* render_context, void* mesh_primitive, cons
   // touched, and there is nothing to restore afterwards. (A draw that returns
   // without restoring a *global* material would chams the whole world; this
   // design cannot do that, because the material is never made global.)
+  //
+  // The counter is moved **before** the call, exactly like the skip paths'
+  // counters: that is what makes `seen == drawn + skipped` hold at *every*
+  // observation and not only between two draws. A reader that caught the
+  // draw in flight used to see seen=1, drawn=0, skipped=0.
+  drawn_.fetch_add(1, std::memory_order_relaxed);
   original(desc, render_context, mesh_primitive, reinterpret_cast<const void*>(override_material),
            material_mode, draw_values, deferred, stats, layer);
-  drawn_.fetch_add(1, std::memory_order_relaxed);
 }
 
 auto Chams::install() noexcept -> bool {
