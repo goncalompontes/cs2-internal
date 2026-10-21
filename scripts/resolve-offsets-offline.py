@@ -603,8 +603,46 @@ def compare_offsets(
     return differences
 
 
+def registry_steam_roots() -> list[Path]:
+    """The Steam installations the **registry** names.
+
+    Steam can live anywhere (``D:\\Steam``), and the registry is where it
+    records where it lives - the two standard paths are only defaults.  The
+    module is imported at run time: it is Windows-only, and the script has
+    to work (and skip this) on a host that has no such registry.
+    """
+    try:
+        winreg = importlib.import_module("winreg")
+    except ImportError:
+        return []
+    roots: list[Path] = []
+    keys = (
+        (r"Software\Valve\Steam", "SteamPath"),
+        (r"Software\Valve\Steam", "SteamExe"),
+        (r"Software\Wow6432Node\Valve\Steam", "InstallPath"),
+    )
+    for key_name, value_name in keys:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_name) as key:
+                value, _kind = winreg.QueryValueEx(key, value_name)
+        except OSError:
+            continue
+        if not isinstance(value, str) or not value:
+            continue
+        path = Path(value)
+        root = path.parent if path.is_file() else path
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
 def steam_roots(env: Mapping[str, str]) -> list[Path]:
-    """The Steam installations to look in."""
+    """The Steam installations to look in.
+
+    ``%STEAM%`` first (the operator's own answer), then the two standard
+    install paths, then the installations the **registry** names - Steam is
+    not always installed in one of the two.
+    """
     roots: list[Path] = []
     candidates: list[str] = []
     override = env.get(ENV_STEAM)
@@ -618,6 +656,9 @@ def steam_roots(env: Mapping[str, str]) -> list[Path]:
             roots.append(path.parent)
         elif path.is_dir():
             roots.append(path)
+    for root in registry_steam_roots():
+        if root not in roots:
+            roots.append(root)
     return roots
 
 
@@ -683,8 +724,9 @@ def build_parser() -> argparse.ArgumentParser:
             "\n"
             "The game directory defaults to the Steam install discovered through\n"
             "libraryfolders.vdf (the Steam library path is not fixed - the game lives\n"
-            "in F:\\SteamLibrary\\... on some machines).  CS2_GAME_DIR overrides it;\n"
-            "--game-dir overrides that.\n"
+            "in F:\\SteamLibrary\\... on some machines).  The installation itself is\n"
+            "found through %STEAM%, the two standard paths and the registry.\n"
+            "CS2_GAME_DIR overrides the search; --game-dir overrides that.\n"
             "\n"
             "With --check nothing is written: the resolution is compared with the\n"
             "existing dump and the exit code says whether they differ.\n"

@@ -631,6 +631,44 @@ class TestMain(unittest.TestCase):
         self.assertIn("could not be run", output)
 
 
+class TestSteamDiscovery(unittest.TestCase):
+    """The Steam installation and its library folders are found."""
+
+    def test_the_registry_names_the_installation(self) -> None:
+        roots = RESOLVER.registry_steam_roots()
+        if not roots:
+            self.skipTest("this host's registry names no Steam installation")
+        for root in roots:
+            self.assertTrue(root.is_dir(), f"{root} is a directory")
+
+    def test_the_override_is_the_first_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            roots = RESOLVER.steam_roots({RESOLVER.ENV_STEAM: directory})
+            self.assertEqual(pathlib.Path(directory), roots[0])
+
+    def test_the_library_folders_are_read(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "steamapps").mkdir()
+            (root / "steamapps" / "libraryfolders.vdf").write_text(
+                '{\n  "libraryfolders"\n  {\n    "0"\n    {\n'
+                '      "path" "F:\\\\SteamLibrary"\n    }\n  }\n}\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                [pathlib.Path("F:\\SteamLibrary")],
+                RESOLVER.steam_library_paths(root),
+            )
+
+    def test_the_environment_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            game = pathlib.Path(directory)
+            (game / "game" / "bin" / "win64").mkdir(parents=True)
+            (game / "game" / "bin" / "win64" / "engine2.dll").write_bytes(b"")
+            found = RESOLVER.discover_game_dir({RESOLVER.ENV_GAME_DIR: str(game)})
+            self.assertEqual(game, found)
+
+
 class TestFlag(unittest.TestCase):
     """The dumper's ``--list-signature-modules`` flag."""
 
