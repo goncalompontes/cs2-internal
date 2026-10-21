@@ -43,10 +43,13 @@ Everything in T20 §1 and §4 applies. In particular:
   relative offsets only** — never an absolute address. A pointer value that
   the *program* computes is a runtime value and may travel in a slot; a
   pointer value that the *pass* bakes in may not.
-- The bytecode is a **`private constant` global** with no dynamic initialiser
-  (a global constructor is fatal for a manually mapped payload).
-- The pass must not introduce **TLS** (the mapper resolves TLS with a pattern
-  scan and fails the whole injection when it does not find it).
+- The bytecode is a **`private constant`** global with no dynamic initialiser
+  (in a manual map **nothing** is initialised by the loader — the CRT startup
+  never runs — so a global with a dynamic initialiser would be silently zero
+  in the mapped image).
+- The pass must not introduce **TLS**. The injector allocates **one** TLS
+  block for the whole image and sets it on the **entry thread only**, so a
+  `thread_local` read from another thread would read the wrong block.
 - The pass must not introduce **new imports**.
 - The pass runs at **`registerOptimizerLastEPCallback`** and must define
   **`isRequired() { return true; }`**.

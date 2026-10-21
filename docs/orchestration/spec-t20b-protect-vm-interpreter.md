@@ -31,12 +31,23 @@ about *behaviour* and not about shape.
 ## 2. The ground rules (unchanged, from T20 §1)
 
 - The interpreter is **emitted as LLVM IR**, not linked in as C++: the payload
-  is manually mapped and has no CRT, no global constructors and no unwind
-  tables it cannot justify.
+  is manually mapped, and **nothing in the image is ever initialised by the
+  loader** — the map is done by the injector, the CRT startup never runs.
+  So the image may only contain what is correct **as it is on disk**.
 - **No CRT calls**: no `memcpy`, `memset`, `malloc`, `free` — the copies are
-  explicit load/store loops written in IR.
+  explicit load/store loops written in IR. (The payload is built `/MD` today,
+  so the CRT *is* in the import table; the rule stands because the emitted
+  code must not depend on a CRT that the manual map does not initialise, and
+  because the import table must not change.)
 - **No RTTI, no exceptions**, no `new`, no containers, no function-local
-  statics, no `atexit`, **no TLS**, no global with a non-constant initialiser.
+  statics, no `atexit`, **no TLS**, no global with a non-constant initialiser
+  (such a global would be **silently zero** in the mapped image: the CRT's
+  initialiser tables are never run).
+- **No TLS**: the injector allocates **one** TLS block for the whole image and
+  sets it on the **entry thread only**. A `thread_local` read from another
+  thread would read the wrong block. The payload already has three
+  `thread_local` variables and a 4 KB `.tls` section; the interpreter must
+  not add a fourth.
 - **No absolute address** is baked into the bytecode or into a cipher: the
   bytecode holds indices, the pool holds relocatable pointers.
 - The **import table** of the protected payload must be **identical** to the
@@ -309,8 +320,15 @@ pass for the wrong reason (T19's review made this point).
 - The protected payload must have the **same exports** and the **same import
   table** as the unprotected one.
 - It must keep a valid `.reloc` with DIR64 entries and a valid
-  `.pdata`/`.xdata`.
-- The section list must have **no new `.CRT$XCU`** (no global constructor).
+  `.pdata`/`.xdata`. (Note: the injector only **warns** when it cannot
+  register the unwind table — `injector/src/main.cpp` — so this is a
+  robustness requirement, not a fatal one. It is still a requirement: a
+  coherent `.pdata`/`.xdata` is what a real loader expects.)
+- **The module the pass emits must contain no global with a non-constant
+  initialiser.** This is an **IR-level** check (in the plugin's own tests),
+  not a section check: the linker folds the CRT's `.CRT$XCU` into `.rdata`,
+  so the built image has no `.CRT$XCU` section to look for — the current
+  image has none, and a global constructor would not show up there.
 - `llvm-objdump -d` must show that the virtualized function's **original
   instruction bytes are gone**: the function is now a short prologue, a call
   to the interpreter and an epilogue. `tools/protect/check_payload.py` should
@@ -368,8 +386,8 @@ step.
    untouched, and that a swapping-PHI fixture was lowered with the parallel
    copy.
 4. The import table and the exports of the protected payload are
-   **unchanged**; the section list has no new `.CRT$XCU`; the `.reloc` and
-   the `.pdata`/`.xdata` are valid.
+   **unchanged**; the emitted module has **no global with a non-constant
+   initialiser**; the `.reloc` and the `.pdata`/`.xdata` are valid.
 5. `meson test -C build` is green, and the plugin's CTest suite is green.
 6. The report states, per virtualized function: the slots, the frame bytes,
    the bytecode bytes, the instruction count and the number of calls.
