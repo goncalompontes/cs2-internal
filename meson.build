@@ -393,6 +393,25 @@ features_esp_geometry_test = executable('features_esp_geometry_test',
 )
 test('features-esp-geometry', features_esp_geometry_test)
 
+# The third-person camera's re-entrancy guard (`cs2/features/recursion_guard.hpp`).
+# The guard is what keeps the camera hook from killing the game: the detour
+# runs on the game's own camera thread, in a manually mapped image where a
+# `thread_local` resolves against a TLS block that was never installed — the
+# read faults inside the payload (see `docs/re/thirdperson.md`). The guard is
+# a pure header, so the host test drives it directly; the test also reads the
+# repository's own sources and fails when a `thread_local` comes back.
+features_thirdperson_guard_test = executable('features_thirdperson_guard_test',
+  files(
+    'payload/features/tests/test_thirdperson_guard.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/features/include'),
+  ],
+)
+test('features-thirdperson-guard', features_thirdperson_guard_test,
+  args : [meson.current_source_dir()],
+)
+
 # The material system's parameter-name hash and the chams' "is this entity one
 # of ours" decision. Both are pure (no engine, no Windows), so they are built
 # natively here and regression-tested: the hash is keyed by the engine's own
