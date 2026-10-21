@@ -47,7 +47,7 @@
 # image's LLVM ever changes in a way that matters, the fix is to pin it (the
 # way clang-tidy is pinned) or to move the payload build into a container.
 #
-# THE RUNNER IMAGE THIS WORKFLOW WAS WRITTEN AGAINST (windows-2025):
+# THE RUNNER IMAGE THIS WORKFLOW RUNS ON (windows-2025, **pinned**):
 #   * Windows Server 2025
 #   * LLVM 20.1.8 -- the compiler (clang-cl). The *style gate* does not use
 #     it: it runs the pinned clang-tidy 22.1.8 (requirements-dev.txt).
@@ -57,6 +57,15 @@
 #   * Python 3.12.10 -- the image's; the workflow uses setup-python's 3.11
 #   * Ninja 1.13.2 -- the image's; the workflow installs the pinned 1.13.0
 #   * no meson -- the workflow installs the pinned 1.11.2
+#
+# The label is `windows-2025` and not `windows-latest`: `windows-latest` is a
+# moving label, and the facts above were **observed on windows-2025**. The
+# file's own rule -- "a gate that changes its mind between runs is not a
+# gate" (requirements-dev.txt:9) -- applies to the runner as much as it
+# applies to the tools, and the compiler is the one thing the workflow
+# deliberately leaves unpinned. The image is refreshed inside the label, so a
+# tool version can still drift; when it does, this block is re-read and
+# updated with it.
 
 name: ci
 
@@ -68,7 +77,10 @@ on:
 jobs:
   build:
     name: build and test
-    runs-on: windows-latest
+    # The label is pinned, not `windows-latest`: the header above records the
+    # facts of the windows-2025 image, and a floating label would turn them
+    # into fiction without failing anything.
+    runs-on: windows-2025
     # The whole verify loop takes a few minutes. The cap keeps a hung step
     # from holding the runner (and says in the log that it was the cap).
     timeout-minutes: 45
