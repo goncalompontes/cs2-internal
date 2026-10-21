@@ -36,6 +36,7 @@ import time
 from typing import Any
 
 from .. import awaiting
+from ..protocol import InputStatus
 from ..session import Game, SessionError
 
 WATCH = 6.0     # how long to observe the animfix doing its thing
@@ -59,24 +60,27 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
 
     # The feature is off by default; the scenario switches it on (the one
     # write it does) so the operator can see what it does — and off again
-    # when it is done, so the round is left as it was found. The switch-off
-    # is in a `finally`: a pipe hiccup inside the watch loop must not leave
-    # the animfix on for the rest of the round.
-    game.animfix(True)
-
-    status = game.input()
-    if not status.get("animfix"):
-        game.animfix(False)
-        raise SessionError("the payload did not accept the animfix command")
-
-    captures_before = int(status.get("animfix_captures") or 0)
-    applies_before = int(status.get("animfix_applies") or 0)
-    skips_before = int(status.get("animfix_skips") or 0)
+    # when it is done, so the round is left as it was found.
+    #
+    # **The switch-on is inside the `try` as well**: a failure on the first
+    # read (a pipe hiccup) must not leave the animfix on for the rest of the
+    # round either.
     deltas: list[float] = []
     acted_samples = 0
-    final = status
+    captures_before = 0
+    applies_before = 0
+    skips_before = 0
+    final: InputStatus = {}
 
     try:
+        game.animfix(True)
+        status = game.input()
+        if not status.get("animfix"):
+            raise SessionError("the payload did not accept the animfix command")
+        captures_before = int(status.get("animfix_captures") or 0)
+        applies_before = int(status.get("animfix_applies") or 0)
+        skips_before = int(status.get("animfix_skips") or 0)
+        final = status
         deadline = time.monotonic() + watch
         while time.monotonic() < deadline:
             live = game.input()

@@ -237,6 +237,31 @@ class TestAnimfixScenario(unittest.TestCase):
             animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
         self.assertEqual(game.writes[-1], ("animfix", False))
 
+    def test_a_failure_on_the_first_read_still_switches_the_feature_off(self) -> None:
+        """The switch-on is inside the `try`: the first read may fail too."""
+        block = {
+            "animfix": True,
+            "animfix_ready": True,
+            "animfix_status": "ok",
+            "animfix_acted": True,
+            "animfix_captures": 5,
+            "animfix_applies": 20,
+            "animfix_skips": 0,
+            "animfix_data_valid": True,
+            "animfix_server_aim_yaw": 10.0,
+            "animfix_predicted_aim_yaw": 7.0,
+            "animfix_aim_yaw_delta": 3.0,
+        }
+        game = FakeGame(block)
+
+        def explode(via: Any = None) -> InputStatus:
+            raise RuntimeError("the pipe hiccuped on the first read")
+
+        game.input = explode  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
+        self.assertEqual(game.writes, [("animfix", True), ("animfix", False)])
+
     def test_hooks_that_did_not_resolve_are_reported_not_failed(self) -> None:
         """No signatures in this build: the scenario says so instead of failing."""
         block = {
