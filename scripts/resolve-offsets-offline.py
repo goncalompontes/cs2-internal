@@ -27,6 +27,12 @@ This script makes that path first class:
   silently stops matching is the whole point of the exercise: the feature
   that needs it is dead until somebody looks.
 
+**A dump that lost a signature is not a dump.**  A signature that did not
+resolve means an offset the payload cannot use, so the write is **refused**
+(exit code 1, the previous dump untouched) unless the operator says
+``--allow-unresolved`` on purpose.  The same rule holds for a module that
+failed and for a resolution that does not cover the module's signatures.
+
 What it does **not** do: ``interfaces.json``, ``schema.json`` and
 ``schema_system.json`` come from the **live** process (its ``CreateInterface``
 registry and its schema system), so they still need
@@ -73,6 +79,13 @@ ENV_STEAM = "STEAM"
 
 #: The dumper's "this signature did not match" line (on stderr).
 UNRESOLVED_RE = re.compile(r"^\s*unresolved:\s*(\S+)\s*$")
+
+#: The dumper's "the module I looked the signatures up under" line (stderr).
+MODULE_RE = re.compile(r"^\s*module:\s*(\S+)\s*$")
+
+#: The dumper's "how many signatures the registry holds for that module"
+#: line (on stderr).
+SIGNATURE_COUNT_RE = re.compile(r"^\s*signatures:\s*(\d+)\s*$")
 
 #: The prefix every line of this script's report carries.
 PREFIX = "resolve-offsets-offline:"
@@ -195,6 +208,21 @@ def parse_json_array(text: str) -> list[object]:
     raise OfflineError("the dumper did not answer with a JSON array")
 
 
+def parse_json_object(text: str) -> dict[str, object]:
+    """The JSON object in the dumper's output."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith("{"):
+            continue
+        try:
+            value: object = json.loads("\n".join(lines[index:]))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise OfflineError("the dumper did not answer with a JSON object")
+
+
 def dumper_modules(dumper: Path, runner: Runner = _run) -> list[str]:
     """The modules that have curated signatures, as the **dumper** reports them.
 
@@ -215,6 +243,32 @@ def dumper_modules(dumper: Path, runner: Runner = _run) -> list[str]:
             raise OfflineError("the dumper did not answer with a JSON array of module names")
         modules.append(value)
     return modules
+
+
+def dumper_signature_counts(dumper: Path, runner: Runner = _run) -> dict[str, int]:
+    """How many curated signatures the registry holds, per module.
+
+    The count is the **cross-check** against a resolution: a module that
+    resolved fewer signatures than the registry holds for it was not really
+    scanned (a wrong file, a module name that does not match), and that has
+    to be loud rather than a dump full of plausible-looking wrong RVAs.
+
+    A dumper that does not know the flag (an older binary) answers with
+    nothing: the cross-check is then skipped, and the caller says so.
+    """
+    completed = runner([str(dumper), "--list-signature-counts"])
+    if completed.returncode != 0:
+        return {}
+    try:
+        values = parse_json_object(completed.stdout)
+    except OfflineError:
+        return {}
+    counts: dict[str, int] = {}
+    for module, value in values.items():
+        if not isinstance(value, int):
+            raise OfflineError("the dumper answered with a malformed signature count")
+        counts[module] = value
+    return counts
 
 
 def module_search_dirs(game_dir: Path) -> list[Path]:
@@ -241,6 +295,28 @@ def parse_unresolved(stderr: str) -> list[str]:
     return names
 
 
+def parse_dumper_report(stderr: str) -> tuple[str | None, int | None]:
+    """What the dumper said about the module it resolved.
+
+    The dumper names the module it looked the signatures up under and how
+    many signatures the registry holds for it.  Both are cross-checks: a
+    dumper that resolved a *different* module (an older binary that takes
+    the name from the path) would otherwise answer with nothing at all and
+    say so quietly.
+    """
+    module: str | None = None
+    count: int | None = None
+    for line in stderr.splitlines():
+        match = MODULE_RE.match(line)
+        if match is not None:
+            module = match.group(1)
+            continue
+        match = SIGNATURE_COUNT_RE.match(line)
+        if match is not None:
+            count = int(match.group(1))
+    return module, count
+
+
 def parse_offset_entries(text: str, module: str) -> list[OffsetEntry]:
     """The resolved offsets of one module, in the dump's shape."""
     values = parse_json_array(text)
@@ -263,7 +339,14 @@ def resolve_module(
     path: Path,
     runner: Runner = _run,
 ) -> ModuleResolution:
-    """Resolve one module's curated signatures from its file on disk."""
+    """Resolve one module's curated signatures from its file on disk.
+
+    The result is only accepted when it **adds up**: the dumper must have
+    looked the signatures up under the module that was asked for, and it
+    must have reported every one of them (resolved or not).  A module that
+    resolved *nothing* is a failure, not an empty success - that is the
+    silent case where the dump would carry offsets from the wrong file.
+    """
     completed = runner(
         [
             str(dumper),
@@ -283,12 +366,37 @@ def resolve_module(
             [],
             error=completed.stderr.strip() or f"the dumper exited with {completed.returncode}",
         )
-    return ModuleResolution(
-        module,
-        path,
-        parse_offset_entries(completed.stdout, module),
-        parse_unresolved(completed.stderr),
-    )
+    offsets = parse_offset_entries(completed.stdout, module)
+    unresolved = parse_unresolved(completed.stderr)
+    reported, count = parse_dumper_report(completed.stderr)
+    if reported is not None and reported.casefold() != module.casefold():
+        return ModuleResolution(
+            module,
+            path,
+            [],
+            [],
+            error=f"the dumper resolved {reported}, not {module}",
+        )
+    if not offsets and not unresolved:
+        return ModuleResolution(
+            module,
+            path,
+            [],
+            [],
+            error="the dumper resolved nothing - the module's name does not match its file",
+        )
+    if count is not None and count != len(offsets) + len(unresolved):
+        return ModuleResolution(
+            module,
+            path,
+            [],
+            [],
+            error=(
+                f"the dumper scanned {len(offsets) + len(unresolved)} of "
+                f"{count} signature(s)"
+            ),
+        )
+    return ModuleResolution(module, path, offsets, unresolved)
 
 
 def resolve_all(
@@ -314,9 +422,10 @@ def resolve_all(
 def merge_offsets(resolutions: Sequence[ModuleResolution]) -> list[OffsetEntry]:
     """Every module's entries, in one list - the dump's shape.
 
-    A module whose resolution came back **empty** contributes no entry, but
-    it is not dropped: it stays in the report (see :func:`format_report`), so
-    "this module resolved nothing" is visible rather than silent.
+    **Every** module contributes its entries: a module whose resolution came
+    back empty contributes none, but it is not dropped - it stays in the
+    report (see :func:`format_report`), so "this module resolved nothing"
+    is visible rather than silent.
     """
     merged: list[OffsetEntry] = []
     for resolution in resolutions:
@@ -337,6 +446,52 @@ def format_report(resolutions: Sequence[ModuleResolution]) -> list[str]:
     return lines
 
 
+def coverage_problems(
+    resolutions: Sequence[ModuleResolution],
+    counts: Mapping[str, int],
+) -> list[str]:
+    """The modules whose resolution did not cover the module's signatures.
+
+    The registry's count is the yardstick: a module that reported fewer
+    signatures than the registry holds for it was not really scanned, and
+    the offsets it produced cannot be trusted.
+    """
+    problems: list[str] = []
+    for resolution in resolutions:
+        if resolution.error is not None:
+            continue
+        expected = counts.get(resolution.module)
+        if expected is None:
+            continue
+        covered = len(resolution.offsets) + len(resolution.unresolved)
+        if covered != expected:
+            problems.append(
+                f"{resolution.module}: {covered} of {expected} signature(s) were scanned"
+            )
+    return problems
+
+
+def sweep_temporaries(path: Path) -> None:
+    """The temporary files a killed run left behind.
+
+    ``write_offsets`` removes its own temporary file when it fails, but a
+    power loss between the temporary file and the replace leaves one in the
+    calibration directory.  The next run sweeps them: they are not a dump.
+    """
+    prefix = path.name + "."
+    try:
+        candidates = list(path.parent.iterdir())
+    except OSError:
+        return
+    for candidate in candidates:
+        if not candidate.name.startswith(prefix) or not candidate.name.endswith(".tmp"):
+            continue
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
+
+
 def write_offsets(path: Path, offsets: Sequence[OffsetEntry]) -> None:
     """Write the dump **atomically**: a temporary file, then a replace.
 
@@ -345,6 +500,7 @@ def write_offsets(path: Path, offsets: Sequence[OffsetEntry]) -> None:
     leaves the previous dump exactly as it was.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+    sweep_temporaries(path)
     text = json.dumps(list(offsets), indent=2)
     handle, temporary_name = tempfile.mkstemp(
         dir=str(path.parent),
@@ -388,25 +544,57 @@ def read_offsets(path: Path) -> list[OffsetEntry]:
     return entries
 
 
+def _index_entries(entries: Sequence[OffsetEntry]) -> tuple[dict[str, OffsetEntry], list[str]]:
+    """The entries by name, and the names that appear twice.
+
+    A duplicate name is **not** silently dropped: the payload looks an offset
+    up by name, so two entries with one name are a defect the comparison has
+    to name.
+    """
+    index: dict[str, OffsetEntry] = {}
+    duplicates: list[str] = []
+    for entry in entries:
+        name = entry["name"]
+        if name in index:
+            duplicates.append(name)
+            continue
+        index[name] = entry
+    return index, duplicates
+
+
 def compare_offsets(
     existing: Sequence[OffsetEntry],
     resolved: Sequence[OffsetEntry],
 ) -> list[str]:
-    """The differences between the shipped dump and the offline resolution."""
-    shipped = {entry["name"]: entry for entry in existing}
-    fresh = {entry["name"]: entry for entry in resolved}
+    """The differences between the shipped dump and the offline resolution.
+
+    Every field of an entry counts: the name, the module, the RVA **and**
+    the source.  A duplicate name on either side is named too - it is not
+    silently dropped from the comparison.
+    """
+    shipped, shipped_duplicates = _index_entries(existing)
+    fresh, fresh_duplicates = _index_entries(resolved)
     differences: list[str] = []
+    for name in shipped_duplicates:
+        differences.append(f"duplicate: {name} (in the existing dump)")
+    for name in fresh_duplicates:
+        differences.append(f"duplicate: {name} (in the offline resolution)")
     for name, entry in fresh.items():
         other = shipped.get(name)
         if other is None:
             differences.append(
                 f"added: {name} (module {entry['module']}, rva 0x{entry['rva']:x})"
             )
-        elif other["rva"] != entry["rva"] or other["module"] != entry["module"]:
-            differences.append(
-                f"changed: {name}: rva 0x{other['rva']:x} -> 0x{entry['rva']:x} "
-                f"(module {other['module']} -> {entry['module']})"
-            )
+            continue
+        changes: list[str] = []
+        if other["rva"] != entry["rva"]:
+            changes.append(f"rva 0x{other['rva']:x} -> 0x{entry['rva']:x}")
+        if other["module"] != entry["module"]:
+            changes.append(f"module {other['module']} -> {entry['module']}")
+        if other["source"] != entry["source"]:
+            changes.append(f"source {other['source']} -> {entry['source']}")
+        if changes:
+            differences.append(f"changed: {name}: " + ", ".join(changes))
     for name, entry in shipped.items():
         if name not in fresh:
             differences.append(
@@ -499,7 +687,11 @@ def build_parser() -> argparse.ArgumentParser:
             "--game-dir overrides that.\n"
             "\n"
             "With --check nothing is written: the resolution is compared with the\n"
-            "existing dump and the exit code says whether they differ."
+            "existing dump and the exit code says whether they differ.\n"
+            "\n"
+            "A signature that did not resolve is an offset the payload cannot use, so\n"
+            "the dump is **not** written (the previous one stays) and the exit code\n"
+            "is 1.  --allow-unresolved writes the degraded dump anyway, on purpose.\n"
         ),
     )
     parser.add_argument(
@@ -518,6 +710,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="compare with the existing dump and write nothing; non-zero when they differ",
     )
     parser.add_argument(
+        "--allow-unresolved",
+        action="store_true",
+        help=(
+            "write the dump even when a signature did not resolve "
+            "(the dump is degraded: the payload cannot use the missing offsets)"
+        ),
+    )
+    parser.add_argument(
         "--dumper",
         default=None,
         help="the dumper binary (default: where cargo put it)",
@@ -525,9 +725,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Resolve the offsets; return the exit code."""
+def main(argv: list[str] | None = None, runner: Runner | None = None) -> int:
+    """Resolve the offsets; return the exit code.
+
+    The runner is a parameter so the tests can drive the whole CLI without
+    the dumper and without the game.
+    """
     args = build_parser().parse_args(argv)
+    active: Runner = _run if runner is None else runner
 
     game_dir = Path(args.game_dir) if args.game_dir else discover_game_dir()
     if game_dir is None:
@@ -542,23 +747,41 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         dumper = Path(args.dumper) if args.dumper else build_dumper()
-        modules = dumper_modules(dumper)
-        resolutions = resolve_all(dumper, game_dir, modules)
+        if not dumper.is_file():
+            raise OfflineError(f"the dumper is not there: {dumper}")
+        modules = dumper_modules(dumper, active)
+        counts = dumper_signature_counts(dumper, active)
+        resolutions = resolve_all(dumper, game_dir, modules, active)
     except OfflineError as error:
         print(f"{PREFIX} {error}", file=sys.stderr)
         return 1
     except subprocess.CalledProcessError as error:
         print(f"{PREFIX} the dumper could not be built: {error}", file=sys.stderr)
         return 1
+    except OSError as error:
+        print(f"{PREFIX} the dumper could not be run: {error}", file=sys.stderr)
+        return 1
 
     print(f"{PREFIX} game: {game_dir}", file=sys.stderr)
     print(f"{PREFIX} dumper: {dumper}", file=sys.stderr)
     for line in format_report(resolutions):
         print(f"{PREFIX} {line}", file=sys.stderr)
+    print(
+        f"{PREFIX} {', '.join(LIVE_ONLY_DUMPS)} are untouched - they still need the "
+        "live calibration (scripts/calibrate-live.py) and a running game",
+        file=sys.stderr,
+    )
+    if not counts:
+        print(
+            f"{PREFIX} the dumper does not report the signature counts; "
+            "the coverage cross-check is skipped",
+            file=sys.stderr,
+        )
 
     resolved = merge_offsets(resolutions)
     unresolved = [name for resolution in resolutions for name in resolution.unresolved]
     failed = [resolution for resolution in resolutions if resolution.error is not None]
+    problems = coverage_problems(resolutions, counts)
 
     if args.check:
         if not dump_path.is_file():
@@ -577,9 +800,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"{PREFIX} no difference: {dump_path} matches the offline resolution "
               f"({len(resolved)} offset(s))", file=sys.stderr)
-        if unresolved or failed:
+        if unresolved or failed or problems:
             # The dump matches, but a signature did not resolve - that is
             # still a defect: it is an offset the payload cannot use.
+            for problem in problems:
+                print(f"{PREFIX}   {problem}", file=sys.stderr)
             return 1
         return 0
 
@@ -589,17 +814,50 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    if problems:
+        print(
+            f"{PREFIX} the resolution does not cover every signature; "
+            "nothing was written",
+            file=sys.stderr,
+        )
+        for problem in problems:
+            print(f"{PREFIX}   {problem}", file=sys.stderr)
+        return 1
+    if unresolved and not args.allow_unresolved:
+        print(
+            f"{PREFIX} {len(unresolved)} signature(s) did not resolve; nothing was "
+            "written - a dump without them is a dump the payload cannot use "
+            "(--allow-unresolved writes it anyway)",
+            file=sys.stderr,
+        )
+        return 1
+
+    previous: list[OffsetEntry] = []
+    if dump_path.is_file():
+        try:
+            previous = read_offsets(dump_path)
+        except OfflineError:
+            previous = []
+    changes = compare_offsets(previous, resolved) if previous else []
+    if changes:
+        print(f"{PREFIX} the dump changes:", file=sys.stderr)
+        for change in changes:
+            print(f"{PREFIX}   {change}", file=sys.stderr)
+
     try:
         write_offsets(dump_path, resolved)
     except OSError as error:
         print(f"{PREFIX} the dump could not be written: {error}", file=sys.stderr)
         return 1
-    print(f"{PREFIX} wrote {len(resolved)} offset(s) to {dump_path}", file=sys.stderr)
-    print(
-        f"{PREFIX} {', '.join(LIVE_ONLY_DUMPS)} are untouched - they still need the "
-        "live calibration (scripts/calibrate-live.py) and a running game",
-        file=sys.stderr,
-    )
+    if unresolved:
+        print(
+            f"{PREFIX} wrote {len(resolved)} offset(s) to {dump_path} - DEGRADED: "
+            f"{len(unresolved)} signature(s) did not resolve "
+            f"({', '.join(unresolved)}); the payload cannot use those offsets",
+            file=sys.stderr,
+        )
+    else:
+        print(f"{PREFIX} wrote {len(resolved)} offset(s) to {dump_path}", file=sys.stderr)
     return 0
 
 
