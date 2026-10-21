@@ -125,6 +125,8 @@ def load_gen_sdk() -> ModuleType:
     instead of being copied: one convention, not three.
     """
     path = ROOT / "scripts" / "gen-sdk.py"
+    if not path.is_file():
+        raise OfflineError(f"the SDK generator is missing: {path}")
     spec = importlib.util.spec_from_file_location("gen_sdk", path)
     if spec is None or spec.loader is None:
         raise OfflineError(f"the SDK generator cannot be loaded: {path}")
@@ -152,16 +154,21 @@ def build_dumper(root: Path = ROOT) -> Path:
     if binary is not None:
         return binary
     print(f"{PREFIX} building cs2-dumper (release)", file=sys.stderr)
-    subprocess.run(
-        [
-            "cargo",
-            "build",
-            "--release",
-            "--manifest-path",
-            str(root / "external" / "dumper" / "Cargo.toml"),
-        ],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            [
+                "cargo",
+                "build",
+                "--release",
+                "--manifest-path",
+                str(root / "external" / "dumper" / "Cargo.toml"),
+            ],
+            check=True,
+        )
+    except OSError as error:
+        raise OfflineError(f"cargo could not be run: {error}") from error
+    except subprocess.CalledProcessError as error:
+        raise OfflineError(f"the dumper could not be built: {error}") from error
     binary = find_dumper(root)
     if binary is None:
         raise OfflineError("the dumper is not where cargo puts it")
