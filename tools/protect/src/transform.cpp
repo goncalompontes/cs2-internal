@@ -318,9 +318,13 @@ auto transform_module(llvm::Module& module, const Config& config,
   const std::uint64_t seed = module_seed(config, module.getSourceFileName());
   permute(callees, seed ^ 0x5045524D55544142ULL);
 
+  // The mixer: per build, like the key. Its multiplier and its xor constant
+  // go into the globals below, and its rotation is the one the decode emits.
+  const Mixer mixer = mixer_for(seed);
+
   // The key: three constants, mixed at the call site.
   const std::array<std::uint64_t, k_key_parts> parts = key_parts(seed);
-  const std::uint64_t key = mix64(parts[0] ^ parts[1] ^ parts[2]);
+  const std::uint64_t key = mixer.mix64(parts[0] ^ parts[1] ^ parts[2]);
 
   // The table and the descriptor.
   llvm::ArrayType* table_type = llvm::ArrayType::get(pointer_type, callees.size());
@@ -366,14 +370,15 @@ auto transform_module(llvm::Module& module, const Config& config,
   // instruction stream: the X86 backend of this LLVM mis-materialises a
   // 64-bit immediate in this shape (see k_multiplier_name). A global is
   // written by the object writer, so the value that reaches the image is the
-  // value the pass encrypted the descriptor with.
+  // value the pass encrypted the descriptor with. Their **values** are per
+  // build: the mixer's, not a constant of the protection.
   llvm::GlobalVariable* multiplier = new llvm::GlobalVariable(
       module, i64_type, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
-      llvm::ConstantInt::get(i64_type, k_mix_multiplier), k_multiplier_name);
+      llvm::ConstantInt::get(i64_type, mixer.multiplier), k_multiplier_name);
   multiplier->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   llvm::GlobalVariable* xor_constant = new llvm::GlobalVariable(
       module, i64_type, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
-      llvm::ConstantInt::get(i64_type, k_mix_xor), k_xor_name);
+      llvm::ConstantInt::get(i64_type, mixer.xor_constant), k_xor_name);
   xor_constant->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
 
   // The rewrite. The decode is inline arithmetic: a call to a shared helper
@@ -406,8 +411,8 @@ auto transform_module(llvm::Module& module, const Config& config,
     mixed = builder.CreateMul(mixed, factor);
     llvm::Value* constant = builder.CreateLoad(i64_type, xor_constant, /*isVolatile=*/true);
     mixed = builder.CreateXor(mixed, constant);
-    llvm::Value* low = builder.CreateShl(mixed, k_mix_rotate);
-    llvm::Value* high = builder.CreateLShr(mixed, 64U - k_mix_rotate);
+    llvm::Value* low = builder.CreateShl(mixed, mixer.rotate);
+    llvm::Value* high = builder.CreateLShr(mixed, 64U - mixer.rotate);
     mixed = builder.CreateOr(low, high);
 
     llvm::Value* slot_address = builder.CreateInBoundsGEP(
@@ -438,8 +443,9 @@ auto transform_module(llvm::Module& module, const Config& config,
   result.table_size = callees.size();
   result.descriptor_size = sites.size();
   result.key_parts = parts;
-  result.mix_multiplier = k_mix_multiplier;
-  result.mix_xor = k_mix_xor;
+  result.mix_multiplier = mixer.multiplier;
+  result.mix_xor = mixer.xor_constant;
+  result.mix_rotate = mixer.rotate;
   return result;
 }
 

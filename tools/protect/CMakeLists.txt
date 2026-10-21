@@ -24,6 +24,7 @@ add_library(Cs2Protect SHARED
   src/report.cpp
   src/strings.cpp
   src/transform.cpp
+  src/layout.cpp
   src/cipher.cpp
   src/vm_gate.cpp
   src/vm_lower.cpp
@@ -131,6 +132,7 @@ add_executable(cs2-protect-tests
   src/report.cpp
   src/strings.cpp
   src/transform.cpp
+  src/layout.cpp
   src/cipher.cpp
   src/vm_gate.cpp
   src/vm_lower.cpp
@@ -158,6 +160,7 @@ add_executable(cs2-protect-vm-values-test
   src/report.cpp
   src/strings.cpp
   src/transform.cpp
+  src/layout.cpp
   src/cipher.cpp
   src/vm_gate.cpp
   src/vm_lower.cpp

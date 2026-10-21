@@ -437,6 +437,18 @@ auto parse_policy_text(std::string_view text) -> std::expected<Policy, ConfigErr
   return *policy;
 }
 
+auto build_seed(const Config& config) noexcept -> std::optional<std::uint64_t> {
+  // The environment wins over the policy: the environment is what the
+  // release process sets, and the policy is what the tree carries.
+  if (config.seed.has_value()) {
+    return config.seed;
+  }
+  if (config.policy.has_value() && config.policy->seed.has_value()) {
+    return config.policy->seed;
+  }
+  return std::nullopt;
+}
+
 auto load_config() -> std::expected<Config, ConfigError> {
   Config config;
 
@@ -457,35 +469,45 @@ auto load_config() -> std::expected<Config, ConfigError> {
   }
 
   const char* policy_path = std::getenv("CS2_PROTECT_CONFIG");
-  if (policy_path == nullptr || *policy_path == '\0') {
-    return config;
-  }
-  const std::string policy_file = std::string(trim(policy_path));
-  if (policy_file.empty()) {
-    return config;
+  if (policy_path != nullptr && *policy_path != '\0') {
+    const std::string policy_file = std::string(trim(policy_path));
+    if (!policy_file.empty()) {
+      const std::ifstream file(policy_file, std::ios::binary);
+      if (!file) {
+        return std::unexpected(ConfigError{
+            std::string("CS2_PROTECT_CONFIG: cannot open the policy file '") + policy_file + "'"});
+      }
+      std::ostringstream buffer;
+      buffer << file.rdbuf();
+      const std::string text = buffer.str();
+
+      llvm::SHA256 hasher;
+      hasher.update(text);
+      config.policy_digest = llvm::toHex(hasher.final());
+      config.policy_path = policy_file;
+      config.coverage_dir = default_coverage_dir(policy_file);
+
+      auto policy = parse_policy_text(text);
+      if (!policy) {
+        return std::unexpected(
+            ConfigError{"CS2_PROTECT_CONFIG: " + policy_file + ": " + policy.error().message});
+      }
+      config.policy = std::move(*policy);
+    }
   }
 
-  const std::ifstream file(policy_file, std::ios::binary);
-  if (!file) {
+  // The seed is mandatory. The fallback -- the module id hashed with FNV-1a
+  // -- is a **constant of the payload**: two builds without a seed are byte
+  // for byte the same file, and a release that ships it ships a signature.
+  // The failure has to be loud: a build that looks protected and is not is
+  // the failure mode this project exists to avoid.
+  if (!build_seed(config).has_value()) {
     return std::unexpected(ConfigError{
-        std::string("CS2_PROTECT_CONFIG: cannot open the policy file '") + policy_file + "'"});
+        "the protection needs a build seed: set CS2_PROTECT_SEED to a 64-bit hexadecimal "
+        "value, or put a \"seed\" in the policy file. Without one the plugin falls back to a "
+        "constant of the payload (an FNV-1a over the module id), and every build without a "
+        "seed ships the same file."});
   }
-  std::ostringstream buffer;
-  buffer << file.rdbuf();
-  const std::string text = buffer.str();
-
-  llvm::SHA256 hasher;
-  hasher.update(text);
-  config.policy_digest = llvm::toHex(hasher.final());
-  config.policy_path = policy_file;
-  config.coverage_dir = default_coverage_dir(policy_file);
-
-  auto policy = parse_policy_text(text);
-  if (!policy) {
-    return std::unexpected(
-        ConfigError{"CS2_PROTECT_CONFIG: " + policy_file + ": " + policy.error().message});
-  }
-  config.policy = std::move(*policy);
   return config;
 }
 

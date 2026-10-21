@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "layout.hpp"
 #include "selection.hpp"
 #include "strings.hpp"
 #include "transform.hpp"
@@ -68,6 +69,25 @@ struct CoverageProtect {
   std::uint64_t mix_multiplier{0};
   /// The xor constant of the mixer, as the call site uses it.
   std::uint64_t mix_xor{0};
+  /// The rotation of the mixer, as the call site uses it.
+  ///
+  /// It is the one value of the mixer that is in the instruction stream
+  /// (`rolq $imm8`), and the payload check asserts that the image's
+  /// instruction stream uses the rotation the coverage names.
+  unsigned mix_rotate{0};
+};
+
+/// What the layout permutation did to the module.
+///
+/// The section is **new**: a coverage file of an older build has none, and a
+/// reader that does not know it still reads the file.
+struct CoverageLayout {
+  /// The number of the definitions of the module.
+  std::size_t functions{0};
+  /// The number of the definitions that moved.
+  std::size_t moved{0};
+  /// The seed the permutation came from.
+  std::uint64_t seed{0};
 };
 
 /// What the virtualizer's analysis decided about one function.
@@ -118,6 +138,12 @@ void write_report(const llvm::Module& module, const SelectionResult& result, con
 /// CS2_PROTECT_VERBOSE=1 it names every skipped call.
 void write_transform_report(const llvm::Module& module, const TransformResult& result,
                             const Config& config);
+
+/// Prints the report of the layout permutation of one module to stderr.
+///
+/// The permutation is what makes the `.text` of two builds with two seeds
+/// differ, so the report names how many functions moved.
+void write_layout_report(const llvm::Module& module, const LayoutResult& result);
 
 /// Prints the report of the virtualizer's analysis to stderr.
 ///
@@ -184,14 +210,16 @@ void write_string_report(const llvm::Module& module, const StringResult& result,
 /// of the `str` lines and of the `strings_salt` line, which names the salt
 /// of the digests of the literals ("" when there is none): the salt itself
 /// is **not** in the file, so that the file cannot be brute forced back into
-/// the strings.
+/// the strings. The `layout` line is new in the same way: it names the
+/// permutation of the module's function list.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
                                   const std::vector<CoverageEntry>& entries,
                                   const std::vector<CoverageFunction>& functions,
                                   const CoverageProtect& protect,
                                   std::span<const CoverageVm> vm = {},
                                   const std::vector<CoverageString>& strings = {},
-                                  std::string_view strings_salt = {}) -> std::optional<std::string>;
+                                  std::string_view strings_salt = {},
+                                  const CoverageLayout& layout = {}) -> std::optional<std::string>;
 
 /// Writes the machine-readable coverage of one module from a selection.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,

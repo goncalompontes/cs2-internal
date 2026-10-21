@@ -69,18 +69,23 @@ void write_le(std::vector<std::uint8_t>& buffer, std::size_t offset, T value) {
 /// mixer of the key and of the position, and the byte is one of its eight.
 /// The interpreter decrypts on fetch, so the blob stays read-only and the
 /// interpreter is re-entrant.
-[[nodiscard]] auto keystream_byte(std::uint64_t key, std::size_t position) noexcept
-    -> std::uint8_t {
+///
+/// The mixer is the **per-build** one (see `cipher.hpp`): the interpreter
+/// has to use the same multiplier, the same xor constant and the same
+/// rotation as the encoder did, and the value the encoder encrypted with is
+/// the value the interpreter reads out of the image.
+[[nodiscard]] auto keystream_byte(const Mixer& mixer, std::uint64_t key,
+                                  std::size_t position) noexcept -> std::uint8_t {
   const std::uint64_t word = position / 8U;
-  const std::uint64_t mixed = mix64(key + word * k_mix_multiplier);
+  const std::uint64_t mixed = mixer.mix64(key + word * mixer.multiplier);
   return static_cast<std::uint8_t>((mixed >> (8U * (position % 8U))) & 0xFFU);
 }
 
 /// The container of a lowered function: the header, the instructions and the
 /// encryption.
 [[nodiscard]] auto encode(const std::vector<VmInstruction>& code, const VmHeader& header,
-                          std::uint64_t key, std::uint64_t perm_a, std::uint64_t perm_b)
-    -> std::vector<std::uint8_t> {
+                          const Mixer& mixer, std::uint64_t key, std::uint64_t perm_a,
+                          std::uint64_t perm_b) -> std::vector<std::uint8_t> {
   std::vector<std::uint8_t> buffer(k_header_bytes + code.size() * k_instruction_bytes, 0);
 
   write_le<std::uint32_t>(buffer, 0, header.magic);
@@ -110,7 +115,7 @@ void write_le(std::vector<std::uint8_t>& buffer, std::size_t offset, T value) {
   // The encryption: the whole container, the header included, so that an
   // analyst reads nothing but noise.
   for (std::size_t index = 0; index < buffer.size(); ++index) {
-    buffer[index] ^= keystream_byte(key, index);
+    buffer[index] ^= keystream_byte(mixer, key, index);
   }
   return buffer;
 }
@@ -165,7 +170,10 @@ auto analyze_function(llvm::Function& function, const VmOptions& options) -> VmF
   result.perm_a = perm_a;
   result.perm_b = perm_b;
   result.key_parts = key_parts(options.seed);
-  result.key = mix64(result.key_parts[0] ^ result.key_parts[1] ^ result.key_parts[2]);
+  // The mixer of the build: the same one the call encryption uses, derived
+  // from the same module seed. The interpreter has to decrypt with it.
+  const Mixer mixer = mixer_for(options.seed);
+  result.key = mixer.mix64(result.key_parts[0] ^ result.key_parts[1] ^ result.key_parts[2]);
 
   const auto lowered = detail::lower(function, options);
   if (!lowered.has_value()) {
@@ -194,7 +202,7 @@ auto analyze_function(llvm::Function& function, const VmOptions& options) -> VmF
   result.header.flags = k_vm_flag_encrypted | k_vm_flag_permuted;
   result.header.local_cells = static_cast<std::uint32_t>(result.local_cells);
 
-  result.blob = encode(result.code, result.header, result.key, perm_a, perm_b);
+  result.blob = encode(result.code, result.header, mixer, result.key, perm_a, perm_b);
   result.bytecode_bytes = result.blob.size();
   return result;
 }

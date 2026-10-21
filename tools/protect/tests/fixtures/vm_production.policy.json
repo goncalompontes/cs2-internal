@@ -1,5 +1,6 @@
 {
   "protect": [
     "vm_leaf"
-  ]
+  ],
+  "seed": "0x0BADC0DEDEADBEEF"
 }
