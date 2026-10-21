@@ -180,7 +180,13 @@ auto ray_hitbox(const Vec3& eye, const Vec3& direction, const Hitbox& hitbox) no
 }
 
 auto evaluate_sample(const MonteCarloInput& input, const Vec2& aim, std::int32_t seed) noexcept
-    -> Sample {
+    -> std::expected<Sample, MonteCarloError> {
+  // The refusal comes **first**: an unmodelled weapon's pattern must never be
+  // silently replaced by the standard one (the spec §2.2). A `Sample` for a
+  // shotgun would be a number computed from the wrong pattern.
+  if (!pattern_supported(input.weapon)) {
+    return std::unexpected(MonteCarloError::unsupported_pattern);
+  }
   Sample sample{};
   std::array<Vec2, MAX_PELLETS> offsets{};
   const int pellets = draw_pellet_offsets(seed, input.kernel, std::span<Vec2>{offsets});
@@ -233,6 +239,12 @@ auto evaluate_sample(const MonteCarloInput& input, const Vec2& aim, std::int32_t
 
 auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
     -> std::expected<HitChance, MonteCarloError> {
+  // The refusal comes **first**: this is the entry point the next task will call
+  // (it is the cheap one), so it must not be the one that silently scores a
+  // shotgun with the standard pattern (the spec §2.2).
+  if (!pattern_supported(input.weapon)) {
+    return std::unexpected(MonteCarloError::unsupported_pattern);
+  }
   if (input.hitboxes.empty()) {
     return std::unexpected(MonteCarloError::no_hitboxes);
   }
@@ -251,17 +263,20 @@ auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
   bool have_nearest = false;
   for (int index = 0; index < input.samples; ++index) {
     const std::int32_t seed = sample_seed(input.seed, aim, index, input.samples);
-    const Sample sample = evaluate_sample(input, aim, seed);
-    if (!sample.hit) {
+    const auto sample = evaluate_sample(input, aim, seed);
+    if (!sample.has_value()) {
+      return std::unexpected(sample.error());
+    }
+    if (!sample->hit) {
       continue;
     }
     ++chance.hits;
-    damage_total += sample.damage;
-    if (!have_nearest || sample.distance < nearest) {
+    damage_total += sample->damage;
+    if (!have_nearest || sample->distance < nearest) {
       have_nearest = true;
-      nearest = sample.distance;
-      chance.target = sample.target;
-      chance.hitgroup = sample.hitgroup;
+      nearest = sample->distance;
+      chance.target = sample->target;
+      chance.hitgroup = sample->hitgroup;
     }
   }
   chance.probability = static_cast<float>(chance.hits) / static_cast<float>(input.samples);

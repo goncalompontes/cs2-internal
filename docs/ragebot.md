@@ -660,6 +660,21 @@ the standard pattern: the shotgun's pattern table (`FUN_1807cd1b0`) and the nege
 `r -> 1 - r^(2^k)`. `WeaponProfile` carries the weapon *type* only, so the
 machineguns are refused with the negev (`pattern_supported`).
 
+> **Every entry point that can produce a number refuses them** — `spread_kernel`,
+> `evaluate_sample`, `evaluate_hit_chance` and `solve_montecarlo` all return
+> `MonteCarloError::unsupported_pattern`. The first version of this module guarded
+> only `spread_kernel` and `solve_montecarlo`, and `evaluate_hit_chance` — the
+> cheap, natural entry point — happily scored a Nova with the **standard** pattern
+> (the review's M1). `evaluate_sample` therefore returns an
+> `std::expected<Sample, MonteCarloError>`: a sample for an unmodelled weapon is an
+> error, not a number.
+
+**The revolver's pattern is the caller's to state.** `WeaponProfile` carries the
+weapon *type* only, and a revolver is type 3 like every rifle, so the module cannot
+infer its `r -> 1 - r²` transform. `spread_kernel`'s pattern argument therefore has
+**no default**: the caller states it. A default would have dropped the transform
+without a word — the silent fallback the refusal exists to prevent.
+
 ### 13.3 The hit test
 
 Every sample's pellet becomes a ray from the eye; the ray is intersected with

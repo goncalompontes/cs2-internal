@@ -93,12 +93,24 @@ inline constexpr int HITGROUP_GENERIC = 10;
 // negev: both are refused rather than silently given the standard pattern. A caller
 // that knows its weapon uses the standard pattern clears the type (or passes -1) and
 // takes the responsibility.
+//
+// **Every entry point that can produce a number checks this** — `spread_kernel`,
+// `evaluate_sample`, `evaluate_hit_chance` and `solve_montecarlo` all refuse an
+// unmodelled weapon with `MonteCarloError::unsupported_pattern`. There is no path
+// through the module on which a shotgun is silently scored with the standard
+// pattern (`docs/orchestration/spec-t34-montecarlo.md` §2.2).
 [[nodiscard]] auto pattern_supported(const WeaponProfile& weapon) noexcept -> bool;
 
 // The kernel of a weapon: its spread and its effective inaccuracy. Fails for the
 // weapons whose pellet pattern is not modelled (`pattern_supported`).
+//
+// **The pattern is a required argument — there is no silent default.** `WeaponProfile`
+// carries the weapon *type* only, so the module cannot tell a revolver from a
+// rifle (both are type 3): the caller states the weapon's pattern, and the
+// revolver's `1 - r²` is applied only if the caller says so. A default would have
+// dropped it without a word.
 [[nodiscard]] auto spread_kernel(const WeaponProfile& weapon, int pellets,
-                                 SpreadPattern pattern = SpreadPattern::standard) noexcept
+                                 SpreadPattern pattern) noexcept
     -> std::expected<SpreadKernel, MonteCarloError>;
 
 // The engine's `K` pellet offsets for `seed` — the same draw `pellet_offsets` makes,
@@ -246,14 +258,25 @@ struct CandidateBudget {
 };
 
 // Draw and test **one** sample: the engine's offsets for `seed` and the outcome.
+//
+// **The refusal is here too.** A sample for a weapon whose pellet pattern is not
+// modelled is an **error**, not a `Sample`: the standard pattern must never be
+// silently substituted for a shotgun's (`docs/orchestration/spec-t34-montecarlo.md`
+// §2.2). The error channel is what makes that guarantee checkable — a caller that
+// ignores the error still has no number.
 [[nodiscard]] auto evaluate_sample(const MonteCarloInput& input, const Vec2& aim,
-                                   std::int32_t seed) noexcept -> Sample;
+                                   std::int32_t seed) noexcept
+    -> std::expected<Sample, MonteCarloError>;
 
 // Evaluate one candidate aim: `N` samples, each scored against the hitboxes.
 //
 // `probability = hits / N`. `expected_damage` is the mean damage over **all** the
 // samples (a miss contributes 0). A multi-pellet sample hits when **any** of its
 // pellets hits — the union, not the sum (`docs/research/aim-objective-math.md` §6).
+//
+// **An unmodelled weapon's pattern is refused** (`MonteCarloError::unsupported_pattern`),
+// exactly as `evaluate_sample` refuses it: this entry point is the cheap, natural
+// one for the next task to call, so it must not be the one that leaks a number.
 [[nodiscard]] auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
     -> std::expected<HitChance, MonteCarloError>;
 

@@ -348,7 +348,7 @@ auto main() -> int {
       const auto sample = cs2::aim::evaluate_sample(input, candidates[i], 12345);
       const auto end = std::chrono::steady_clock::now();
       durations.push_back(milliseconds(start, end));
-      sink += sample.hit ? 1.0 : 0.0;
+      sink += sample.has_value() && sample->hit ? 1.0 : 0.0;
     }
     const Stats stats = summarize(std::move(durations));
     std::printf(

@@ -425,7 +425,7 @@ auto main() -> int {
     cs2::aim::WeaponProfile shotgun;
     shotgun.weapon_type = cs2::aim::WEAPON_TYPE_SHOTGUN;
     expect(!cs2::aim::pattern_supported(shotgun), "the shotgun's pattern table is not modelled");
-    expect(!cs2::aim::spread_kernel(shotgun, 8).has_value(),
+    expect(!cs2::aim::spread_kernel(shotgun, 8, cs2::aim::SpreadPattern::standard).has_value(),
            "the shotgun is refused instead of using the standard pattern");
     cs2::aim::WeaponProfile machinegun;
     machinegun.weapon_type = cs2::aim::WEAPON_TYPE_MACHINEGUN;
@@ -433,7 +433,44 @@ auto main() -> int {
     cs2::aim::WeaponProfile rifle;
     rifle.weapon_type = 3;
     expect(cs2::aim::pattern_supported(rifle), "a rifle's pattern is modelled");
-    expect(cs2::aim::spread_kernel(rifle, 1).has_value(), "a rifle's kernel is built");
+    expect(cs2::aim::spread_kernel(rifle, 1, cs2::aim::SpreadPattern::standard).has_value(),
+           "a rifle's kernel is built");
+
+    // **Every** entry point that can produce a number refuses the unmodelled
+    // weapons — not only the ones that build a kernel (the review's M1: the
+    // cheap entry point was the one that leaked the standard pattern).
+    Hitbox box;
+    box.is_capsule = true;
+    box.capsule = sphere(Vec3{.x = 100.0F, .y = 0.0F, .z = 0.0F}, 2.0F);
+    box.multiplier = 1.0F;
+    box.target = 1;
+    const std::vector<Hitbox> hitboxes{box};
+    MonteCarloInput input;
+    input.hitboxes = hitboxes;
+    input.weapon = shotgun;
+    input.weapon.damage = 35.0F;
+    input.weapon.range_modifier = 1.0F;
+    input.kernel = SpreadKernel{.spread = 0.05F, .inaccuracy = 0.0F, .pellets = 8};
+    input.samples = 16;
+    const auto chance = cs2::aim::evaluate_hit_chance(input, Vec2{});
+    expect(!chance.has_value(), "evaluate_hit_chance refuses the shotgun");
+    expect(!chance.has_value() && chance.error() == cs2::aim::MonteCarloError::unsupported_pattern,
+           "the refusal names the unmodelled pattern");
+    const auto sample = cs2::aim::evaluate_sample(input, Vec2{}, 1234);
+    expect(!sample.has_value(), "evaluate_sample refuses the shotgun");
+    expect(!sample.has_value() && sample.error() == cs2::aim::MonteCarloError::unsupported_pattern,
+           "the sample's refusal names the unmodelled pattern");
+    const std::vector<cs2::aim::Cell> cells{cell_at(Vec2{}, 1.0F)};
+    const auto choice = cs2::aim::solve_montecarlo(input, cells);
+    expect(!choice.has_value(), "the search refuses the shotgun");
+
+    // The same input with a modelled weapon evaluates (the guard is the weapon's,
+    // not the input's).
+    input.weapon = rifle;
+    expect(cs2::aim::evaluate_hit_chance(input, Vec2{}).has_value(),
+           "the modelled weapon still evaluates");
+    expect(cs2::aim::evaluate_sample(input, Vec2{}, 1234).has_value(),
+           "the modelled weapon still draws its samples");
   }
 
   if (failures == 0) {
