@@ -351,10 +351,20 @@ auto to_string(InlineError error) noexcept -> const char* {
   return "unknown";
 }
 
-InlineHook::~InlineHook() { uninstall(); }
+InlineHook::~InlineHook() {
+  uninstall();
+  // The retired trampolines are released here, and only here: their pages
+  // have to stay mapped for as long as any detour could still hold the
+  // pointer, and the hook's own destruction is the point where no detour can
+  // (the feature is being torn down).
+  for (const Retired& retired : retired_) {
+    free_executable(retired.address, retired.size);
+  }
+  retired_.clear();
+}
 
 auto InlineHook::install(void* target, void* detour) noexcept -> std::optional<InlineError> {
-  if (installed_ || target == nullptr || detour == nullptr) {
+  if (installed_.load(std::memory_order_acquire) || target == nullptr || detour == nullptr) {
     return InlineError::unsupported_instruction;
   }
   auto* code = static_cast<unsigned char*>(target);
@@ -414,23 +424,45 @@ auto InlineHook::install(void* target, void* detour) noexcept -> std::optional<I
   // silently lost). The trampoline is complete at this point, so publishing it
   // early is safe; `installed_` still comes after the patch, so the hook cannot
   // be uninstalled while it is being written.
+  //
+  // The publication is a **release** store: the trampoline's bytes are in
+  // place before the pointer that finds them is visible, and the reader
+  // (the game's render threads) reads it with an **acquire** load.
   target_ = target;
-  trampoline_ = trampoline;
   trampoline_size_ = trampoline_size;
   patched_size_ = total;
+  trampoline_.store(trampoline, std::memory_order_release);
   std::memcpy(code, patch, total);
-  installed_ = true;
+  installed_.store(true, std::memory_order_release);
   return std::nullopt;
 }
 
 void InlineHook::uninstall() noexcept {
-  if (!installed_) {
+  if (!installed_.load(std::memory_order_acquire)) {
     return;
   }
+  // The teardown order, and the reason for it:
+  //
+  //   1. `installed_` is cleared (release): no new caller proceeds on the
+  //      word that says the hook is in place.
+  //   2. `trampoline_` is set to `nullptr` (release): the null is
+  //      **published before** the trampoline's memory is released, so a
+  //      detour that enters from here on finds `original() == nullptr` and
+  //      drops the call instead of calling a trampoline that is going away.
+  //   3. the target is un-patched: no new detour enters at all.
+  //   4. the trampoline is **retired**, not freed: a detour that was already
+  //      inside when the uninstall happened may still hold the pointer and
+  //      call it, and the pages it runs on have to stay mapped until the
+  //      hook is destroyed. The old order freed the trampoline **before** it
+  //      nulled the pointer, which is a use-after-free on freed executable
+  //      memory.
+  installed_.store(false, std::memory_order_release);
+  // The exchange publishes the null **and** hands the pointer over: the
+  // trampoline's pages stay mapped (see below), so the pointer is only kept,
+  // not released.
+  void* const trampoline = trampoline_.exchange(nullptr, std::memory_order_release);
   std::memcpy(target_, saved_, patched_size_);
-  free_executable(trampoline_, trampoline_size_);
-  trampoline_ = nullptr;
-  installed_ = false;
+  retired_.push_back(Retired{trampoline, trampoline_size_});
 }
 
 }  // namespace cs2::hooks

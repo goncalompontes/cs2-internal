@@ -30,7 +30,13 @@ namespace {
 // pointer is written by the payload's thread when the hook is installed and
 // cleared when it is uninstalled, so a detour that runs sees either the
 // instance or nothing.
-Chams* g_active = nullptr;
+//
+// It is **atomic**: the scene system's render threads read it (two of them
+// can be inside the detour at once), and the payload's thread writes it. The
+// release store publishes the instance before the pointer is visible, so a
+// reader that sees the instance also sees everything the payload published
+// with it.
+std::atomic<Chams*> g_active{nullptr};
 
 // `CAnimatableSceneObjectDesc::DrawPrimitive`:
 //
@@ -183,10 +189,14 @@ inline constexpr std::uintptr_t k_render_component_view_models = 0x50;
 void __fastcall draw_primitive_detour(void* desc, void* render_context, void* mesh_primitive,
                                       const void* material, const void* material_mode,
                                       void* draw_values, bool deferred, void* stats, void* layer) {
-  Chams* active = g_active;
+  Chams* active = g_active.load(std::memory_order_acquire);
   if (active == nullptr || active->original() == nullptr) {
     // The hook is being torn down: there is no trampoline to call, so the
-    // draw is dropped for this frame rather than crashing the renderer.
+    // draw is dropped for this frame rather than crashing the renderer. The
+    // drop is **counted**: a dropped draw is otherwise invisible.
+    if (active != nullptr) {
+      active->count_refusal();
+    }
     return;
   }
   // The re-entrancy guard.
@@ -222,7 +232,14 @@ void __fastcall draw_primitive_detour(void* desc, void* render_context, void* me
   guard::Scope scope(active->draw_guard(), current_owner());
   if (!scope.entered()) {
     // The trampoline came back here: this is the recursion, and it is broken
-    // here rather than a thousand frames later.
+    // here rather than a thousand frames later. It can also be the pool
+    // being exhausted: the chams' guard **fails closed**, so the draw is
+    // refused (one primitive is dropped) rather than let in untracked (a
+    // recursion that is not broken runs until the stack overflows).
+    //
+    // Either way the refusal is **counted** and reported: it is a drop, and
+    // a drop that is not counted is a silent hole in the model.
+    active->count_refusal();
     return;
   }
   active->on_draw(desc, render_context, mesh_primitive, material, material_mode, draw_values,
@@ -235,8 +252,8 @@ Chams::~Chams() {
   if (hook_.installed()) {
     hook_.uninstall();
   }
-  if (g_active == this) {
-    g_active = nullptr;
+  if (g_active.load(std::memory_order_acquire) == this) {
+    g_active.store(nullptr, std::memory_order_release);
   }
 }
 
@@ -283,8 +300,8 @@ void Chams::configure(const Config::Visuals& visuals) noexcept {
     (void)install();
   } else if (hook_.installed()) {
     hook_.uninstall();
-    if (g_active == this) {
-      g_active = nullptr;
+    if (g_active.load(std::memory_order_acquire) == this) {
+      g_active.store(nullptr, std::memory_order_release);
     }
   }
   if (!visuals.chams) {
@@ -303,11 +320,13 @@ void Chams::configure(const Config::Visuals& visuals) noexcept {
                           std::memory_order_relaxed);
     hook_status_.store(hook_target::Status::idle, std::memory_order_relaxed);
     reported_status_.store(hook_target::Status::idle, std::memory_order_relaxed);
-    // The counters belong to the session that is over: a re-enable shows the
-    // new hook's own numbers, not the previous session's.
-    seen_.store(0, std::memory_order_relaxed);
-    drawn_.store(0, std::memory_order_relaxed);
-    skipped_.store(0, std::memory_order_relaxed);
+    // The counters are **not** reset. The reset was three separate stores on
+    // the payload's thread while the scene system's render threads were
+    // incrementing the same counters, so a `seen` that landed between two of
+    // the stores left `seen == drawn + skipped` broken (an off-by-one that
+    // never healed) for the width of the reset window. The operator reads
+    // the difference between two `[state]` lines instead
+    // (`docs/known-issues.md` §11.1).
   }
 }
 
@@ -318,9 +337,10 @@ void Chams::update(const game::Snapshot& snapshot) noexcept {
     (void)install();
   }
 
-  // A new frame: the render thread drops its desc cache, so a desc address
-  // the engine recycles cannot carry a stale entity into this frame.
-  frame_stamp_.fetch_add(1, std::memory_order_relaxed);
+  // A new frame: the desc cache's entries of the older generations become
+  // misses, so a desc address the engine recycles cannot carry a stale
+  // entity into this frame.
+  desc_cache_.advance();
 
   // The local player: the entity the "is local" test compares against, and
   // the team the "only enemies" test uses.
@@ -398,16 +418,21 @@ void Chams::update(const game::Snapshot& snapshot) noexcept {
 void Chams::on_draw(void* desc, void* render_context, void* mesh_primitive, const void* material,
                     const void* material_mode, void* draw_values, bool deferred, void* stats,
                     void* layer) noexcept {
-  // Every draw that reaches the feature is **seen**: the counter answers "how
-  // many draws did the hook see", and `seen == drawn + skipped` always.
-  seen_.fetch_add(1, std::memory_order_relaxed);
   auto* original = reinterpret_cast<DrawPrimitiveFn>(hook_.original());
   if (original == nullptr) {
     // The hook is being torn down: there is no trampoline to call, so the
-    // draw is dropped for this frame rather than crashing the renderer.
-    skipped_.fetch_add(1, std::memory_order_relaxed);
+    // draw is dropped for this frame rather than crashing the renderer. The
+    // drop is counted as a **refusal**, not as a skip: the draw was not
+    // forwarded, and `skipped` means "forwarded untouched".
+    count_refusal();
     return;
   }
+  // Every draw that reaches the feature's decision is **seen**: the counter
+  // answers "how many draws did the hook decide about", and
+  // `seen == drawn + skipped` always. A draw that was **dropped** (the
+  // guard refused it, or the hook was torn down) never reaches the decision,
+  // so it is counted as a refusal instead.
+  seen_.fetch_add(1, std::memory_order_relaxed);
   // The cheapest way out: with the feature off the draw is forwarded
   // untouched, without touching the engine at all.
   if (!enabled_.load(std::memory_order_relaxed)) {
@@ -434,33 +459,31 @@ void Chams::on_draw(void* desc, void* render_context, void* mesh_primitive, cons
   // 2.3 ms at 2000), paid for every primitive in the scene and not only for
   // the players'.
   //
-  // The cache is dropped when the payload's per-frame step publishes a new
-  // frame stamp, so a desc address the engine recycles cannot carry a stale
-  // entity into the next frame.
-  const std::uint64_t stamp = frame_stamp_.load(std::memory_order_relaxed);
-  if (stamp != desc_cache_stamp_) {
-    desc_cache_stamp_ = stamp;
-    for (DescEntry& entry : desc_cache_) {
-      entry.desc.store(0, std::memory_order_relaxed);
-    }
-  }
+  // The cache is **safe for two writers**: the scene system renders the draw
+  // list in jobs, so two threads can be here at once, and the old protocol
+  // (three atomics, the desc published last) could leave a reader with
+  // **desc A and entity B** — the chams decided on the wrong player. The
+  // cache is a per-slot seqlock now, and every entry carries the generation
+  // it was filled for, so the invalidation is part of the protocol.
   const auto desc_address = reinterpret_cast<std::uintptr_t>(desc);
-  const auto slot = static_cast<std::size_t>((desc_address >> 4) &
-                                             static_cast<std::uintptr_t>(k_desc_cache_size - 1));
-  DescEntry& entry = desc_cache_[slot];
   std::uintptr_t entity = 0;
   bool view_model = false;
-  if (entry.desc.load(std::memory_order_acquire) == desc_address) {
-    entity = static_cast<std::uintptr_t>(entry.entity.load(std::memory_order_relaxed));
-    view_model = entry.view_model.load(std::memory_order_relaxed) != 0;
+  const auto cached = desc_cache_.lookup(desc_address);
+  if (cached.has_value()) {
+    entity = cached->entity;
+    view_model = cached->view_model;
   } else {
+    // The generation is read **before** the engine reads, so the published
+    // entry cannot claim a generation the entity was not resolved in: a
+    // frame that moved on while the entity was being read leaves an entry
+    // of the older generation, which the reader rejects.
+    const std::uint64_t stamp = desc_cache_.stamp();
     entity = entity_of(desc);
     view_model = entity != 0 && is_viewmodel(entity);
-    // The desc is published last: a reader that sees it sees the entity and
-    // the flag that go with it.
-    entry.entity.store(entity, std::memory_order_relaxed);
-    entry.view_model.store(view_model ? 1 : 0, std::memory_order_relaxed);
-    entry.desc.store(desc_address, std::memory_order_release);
+    // The publish can lose the slot to the other writer (the slot is
+    // claimed, so only one writer is inside it at a time). The values above
+    // are used either way: the entry is simply not cached.
+    (void)desc_cache_.publish(desc_address, stamp, entity, view_model);
   }
   if (entity == 0) {
     skipped_.fetch_add(1, std::memory_order_relaxed);
@@ -625,11 +648,11 @@ auto Chams::install() noexcept -> bool {
   // Every check above passed: the address is the one the measurement was
   // taken on, and the bytes there are the ones the measurement saw.
   const auto target = scene.base + static_cast<std::uintptr_t>(offset->rva);
-  g_active = this;
+  g_active.store(this, std::memory_order_release);
   const auto error = hook_.install(reinterpret_cast<void*>(target),
                                    reinterpret_cast<void*>(&draw_primitive_detour));
   if (error.has_value()) {
-    g_active = nullptr;
+    g_active.store(nullptr, std::memory_order_release);
     install_failed_.store(true, std::memory_order_relaxed);
     report(hook_target::Status::refused,
            std::string("[cs2-features] chams: the draw hook failed: ") + hooks::to_string(*error));
@@ -735,9 +758,10 @@ auto Chams::status_line(char* out, std::size_t size) const noexcept -> bool {
   // with a precision (`%.*s`) instead of being copied into a temporary.
   const std::string_view state = hook_target::describe(hook_status());
   const int written = std::snprintf(
-      out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu", static_cast<int>(state.size()),
-      state.data(), static_cast<unsigned long long>(seen()),
-      static_cast<unsigned long long>(drawn()), static_cast<unsigned long long>(skipped()));
+      out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu refused=%llu",
+      static_cast<int>(state.size()), state.data(), static_cast<unsigned long long>(seen()),
+      static_cast<unsigned long long>(drawn()), static_cast<unsigned long long>(skipped()),
+      static_cast<unsigned long long>(refused()));
   // `snprintf` returns the length the line would have had: a length that does
   // not fit means the line was truncated, and the caller is better off
   // knowing than showing half a status.

@@ -62,6 +62,26 @@
 // would drop a camera update — the worse failure. The cost of that window is
 // stated in `docs/re/thirdperson.md`.
 //
+// ## The policy is per instance, and the draw path's is the other way round
+//
+// The fail-open rationale above is the **camera's**: a refusal would drop a
+// camera update, so the camera fails open. The **draw path** has the
+// arithmetic the other way round, and the guard's state is already per
+// instance (the chams hold `draw_guard_`, the camera holds `camera_guard_`),
+// so the policy can differ without either feature changing.
+//
+// Under fail-open the calling thread is **not recorded in any slot**. So when
+// the trampoline comes back on that thread, the first pass does not find it —
+// the recursion is **not broken**, and it runs until the stack overflows
+// (0xc00000fd) and takes the renderer with it. A refusal, on the other hand,
+// drops **one primitive**: the cost of a refusal is bounded and visible, and
+// the cost of a fail-open recursion is the renderer.
+//
+// So the policy is a **constructor argument** with the camera's value as the
+// default: `RecursionGuard guard;` fails open (the camera's behaviour, and
+// the behaviour every existing caller has), and the chams' guard is built
+// with `Policy::fail_closed`.
+//
 // ## The limits
 //
 // A slot is leaked when a thread dies **inside** the guarded region (the
@@ -107,7 +127,21 @@ inline constexpr std::size_t LEAVE_ATTEMPTS = 4;
 
 class RecursionGuard {
  public:
-  RecursionGuard() = default;
+  // What the guard does when every slot is held by another owner.
+  enum class Policy : std::uint8_t {
+    // Let the call in, untracked. The camera's policy: refusing would drop
+    // a camera update on a thread that is not recursing.
+    fail_open,
+    // Refuse the call. The draw path's policy: a refusal drops one
+    // primitive, while an untracked recursion runs until the stack
+    // overflows and takes the renderer with it.
+    fail_closed,
+  };
+
+  // The policy is **per instance**: the default is the camera's (fail open),
+  // so every caller that does not ask for anything else keeps the behaviour
+  // it has today.
+  explicit RecursionGuard(Policy policy = Policy::fail_open) noexcept : policy_(policy) {}
   RecursionGuard(const RecursionGuard&) = delete;
   RecursionGuard& operator=(const RecursionGuard&) = delete;
 
@@ -142,8 +176,13 @@ class RecursionGuard {
       // be our own slot — the owner token is unique per thread and the first
       // pass has just checked every slot — so the next one is tried.
     }
-    // Every slot is taken by another owner: **fail open**. Refusing here
-    // would drop a camera update on a thread that is not recursing.
+    // Every slot is taken by another owner. The policy decides what happens:
+    // the camera lets the call in (refusing it would drop a camera update),
+    // the draw path refuses it (an untracked recursion is not broken, and it
+    // runs until the stack overflows).
+    if (policy_ == Policy::fail_closed) {
+      return false;
+    }
     return true;
   }
 
@@ -202,6 +241,10 @@ class RecursionGuard {
   // The reserve slot is the last one: it is only reached when every other
   // slot is taken.
   std::array<Slot, TOTAL_SLOT_COUNT> slots_{};
+  // What the guard does when the pool is exhausted. It is fixed when the
+  // guard is built: the policy is a property of the feature that owns the
+  // guard, not of the moment.
+  Policy policy_{Policy::fail_open};
 };
 
 }  // namespace cs2::features::guard
