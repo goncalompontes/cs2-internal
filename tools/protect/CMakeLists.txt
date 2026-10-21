@@ -179,7 +179,9 @@ add_test(NAME protect-vm-values-test COMMAND cs2-protect-vm-values-test)
 #     the calls that must be skipped are untouched);
 #   * protect-diff-test builds the same fixture twice -- once with the pass
 #     and once without -- runs both and compares their output and their exit
-#     code.
+#     code. The fixture has two translation units: the cross-TU callee lives
+#     in the second one, and the pass routes the call to it through the
+#     caller's own table;
 #
 # The tests need the SDK's `opt` and `clang-cl`, so they use the paths the
 # LLVM package hands down.
@@ -199,6 +201,7 @@ add_test(NAME protect-diff-test
           --objdump ${LLVM_TOOLS_BINARY_DIR}/llvm-objdump.exe
           --plugin $<TARGET_FILE:Cs2Protect>
           --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diff_fixture.cpp
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diff_helper.cpp
           --policy ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diff.policy.json
           --work ${CMAKE_CURRENT_BINARY_DIR}/diff-test)
 

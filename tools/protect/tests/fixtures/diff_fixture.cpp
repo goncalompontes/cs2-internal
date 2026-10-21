@@ -57,9 +57,17 @@ extern "C" void cs2_fixture_may_throw() {
   cs2_fixture_counter += 6;
 }
 
+// The callee of another translation unit: the pass routes it through the
+// caller's own table, as a relocatable pointer to the symbol. The
+// declaration is all this file has: the definition lives in
+// diff_helper.cpp.
+extern "C" __attribute__((noinline)) int cs2_fixture_helper(int value) noexcept;
+
 // The selected function. The pass rewrites the calls to cs2_fixture_add and
-// cs2_fixture_mul (both are defined in this file) and leaves the variadic,
-// the sret, the musttail and the invoke alone.
+// cs2_fixture_mul (both are defined in this file) and the call to
+// cs2_fixture_helper (which is defined in another translation unit, and the
+// policy's `cross_module` list names it). It leaves the variadic, the
+// sret, the musttail and the invoke alone.
 extern "C" __attribute__((noinline)) int cs2_fixture_caller(int seed) {
   int total = seed;
   try {
@@ -74,6 +82,7 @@ extern "C" __attribute__((noinline)) int cs2_fixture_caller(int seed) {
   const Big big = cs2_fixture_big(total);
   total = cs2_fixture_variadic(total, 1, 2, 3);
   total += static_cast<int>(big.a + big.b + big.c);
+  total = cs2_fixture_helper(total);
   [[clang::musttail]] return cs2_fixture_tail(total);
 }
 

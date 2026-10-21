@@ -104,14 +104,20 @@ def run(command: list[str], environment: dict[str, str], vcvars: Path | None) ->
 
 def compile_fixture(
     clang_cl: Path,
-    source: Path,
+    sources: list[Path],
     output: Path,
     plugin: Path | None,
     policy: Path,
     coverage: Path,
     vcvars: Path | None,
+    compile_only: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Builds the fixture, with the pass or without it."""
+    """Builds the fixture, with the pass or without it.
+
+    Several sources are compiled into one program: the cross-TU callee of
+    the fixture lives in another translation unit, and the pass has to route
+    the call to it.
+    """
     environment = dict(os.environ)
     environment["CS2_PROTECT_CONFIG"] = str(policy)
     environment["CS2_PROTECT_COVERAGE"] = str(coverage)
@@ -126,9 +132,13 @@ def compile_fixture(
         "/EHsc",
         "/GR-",
         "/MT",
-        f"/Fe{output}",
-        str(source),
     ]
+    if compile_only:
+        command.append("/c")
+        command.append(f"/Fo{output}")
+    else:
+        command.append(f"/Fe{output}")
+    command.extend(str(source) for source in sources)
     if plugin is not None:
         command.append(f"/clang:-fpass-plugin={plugin}")
     return run(command, environment, vcvars)
@@ -165,12 +175,35 @@ def check_constants(binary: Path) -> None:
             )
 
 
+def check_relocation(objdump: Path, text: str) -> None:
+    """The table entry of a cross-TU callee is a *relocatable* pointer.
+
+    The entry is the symbol itself, not a copy of its address: the object
+    file carries an ADDR64 relocation against the external symbol, the
+    linker resolves it, and the mapper applies the DIR64 fixup. An entry
+    that held an address would bake the image base into the image.
+    """
+    if "IMAGE_REL_AMD64_ADDR64" not in text:
+        raise Failure(
+            "the object file has no ADDR64 relocation: the table entry of the cross-TU "
+            "callee is not a relocatable pointer"
+        )
+    if "cs2_fixture_helper" not in text:
+        raise Failure(
+            "the relocation does not name the cross-TU callee: the table entry does not "
+            "point at the external symbol"
+        )
+    # The relocation is in the read-only data: that is where the table is.
+    if ".rdata" not in text:
+        raise Failure("the relocation is not in the read-only data of the object file")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--clang-cl", type=Path, required=True)
     parser.add_argument("--objdump", type=Path, required=True)
     parser.add_argument("--plugin", type=Path, required=True)
-    parser.add_argument("--fixture", type=Path, required=True)
+    parser.add_argument("--fixture", type=Path, nargs="+", required=True)
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--work", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -213,7 +246,6 @@ def check_result(args: argparse.Namespace) -> None:
         built.returncode == 0,
         f"the protected build failed:\n{built.stdout}\n{built.stderr}",
     )
-
     # The pass has to have done something: the report says how many calls it
     # rewrote, and the two binaries have to differ.
     check(
@@ -221,16 +253,44 @@ def check_result(args: argparse.Namespace) -> None:
         f"the pass did not report a rewrite:\n{built.stderr}",
     )
     rewritten = 0
+    cross = 0
     for line in built.stderr.splitlines():
         if "rewritten=" in line:
             for part in line.split():
                 if part.startswith("rewritten="):
                     rewritten = max(rewritten, int(part.split("=", 1)[1]))
+                elif part.startswith("cross_module="):
+                    cross = max(cross, int(part.split("=", 1)[1]))
     check(rewritten > 0, "the pass rewrote no call at all")
+    check(
+        cross > 0,
+        "the pass rewrote no cross-TU call: the declaration the policy names was not routed",
+    )
     check(
         plain.read_bytes() != protected.read_bytes(),
         "the protected binary is identical to the unprotected one: the pass did nothing",
     )
+
+    # The table entry of the cross-TU callee is a *relocatable* pointer: the
+    # object file carries an ADDR64 relocation against the external symbol,
+    # and the image base is never baked into anything.
+    obj = work / "caller.obj"
+    built = compile_fixture(
+        args.clang_cl, [args.fixture[0]], obj, args.plugin, args.policy,
+        work / "coverage-object", vcvars, compile_only=True
+    )
+    check(
+        built.returncode == 0,
+        f"the object build failed:\n{built.stdout}\n{built.stderr}",
+    )
+    relocations = subprocess.run(
+        [str(args.objdump), "-r", str(obj)], capture_output=True, text=True
+    )
+    check(
+        relocations.returncode == 0,
+        f"the relocations could not be read:\n{relocations.stderr}",
+    )
+    check_relocation(args.objdump, relocations.stdout)
 
     # The dispatch has to be in the *machine code*. The key is a compile-time
     # key, so the whole dispatch is a compile-time constant: a compiler that
