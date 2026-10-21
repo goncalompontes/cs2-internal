@@ -1,9 +1,18 @@
 # The protection pass — `Cs2Protect.dll`
 
-An LLVM **pass plugin**: the payload build loads it with
-`-fpass-plugin=`, and it selects the functions that a later task (T19:
-call encryption, T20: virtualization) will protect. This task is the
-plumbing only — the pass **selects and reports**, it changes no code.
+An LLVM **pass plugin**: the payload build loads it with `-fpass-plugin=`,
+and it protects the functions a policy names.
+
+* the **selection** phase (the pipeline start) picks the functions, marks them
+  `noinline` so that they survive to the late point, and reports them;
+* the **transform** phase (the optimizer last) rewrites the calls of a
+  selected function into **indirect dispatches through an encrypted
+  descriptor**, so that the static call graph is no longer readable from the
+  binary.
+
+The `virtualized` level (moving a body into an interpreter) is **reserved
+for T20**: a policy that asks for it fails the build, because a build that
+looks protected and is not is the failure mode this project exists to avoid.
 
 ```
 tools/protect/
@@ -185,7 +194,8 @@ leaves one) is trimmed on both sides.
 * The optional `module` scope names the source file the entry belongs to.
 * The optional `level` is `call` (T19 encrypts the call sites) or
   `virtualized` (T20 moves the body into an interpreter). The default is
-  `call`.
+  `call`. **`virtualized` is not implemented yet**: an entry that asks for
+  it fails the build (§10.5).
 * `deny` wins over every selection source.
 * An unknown key is an error, not a warning: a typo in a policy file must
   not be ignored silently.
@@ -265,29 +275,52 @@ no inlining) — which is what makes it usable as a selection source.
 
 ## 7. The report
 
-The pass prints one line per selected function to stderr:
+The selection phase prints one line per selected function to stderr:
 
 ```
-[cs2-protect] solver.cpp: protect ?solve@aim@cs2@@YA?AUSolveResult@12@… (cs2::aim::solve) source=policy level=call seed=0xa40bc6e8b04f1c9a note=noinline-missing
+[cs2-protect] solver.cpp: protect ?solve@aim@cs2@@YA?AUSolveResult@12@… (cs2::aim::solve) source=policy level=call seed=0xa40bc6e8b04f1c9a noinline=added
 ```
 
 * `source` — `annotation` or `policy`.
 * `level` — `call` or `virtualized`.
 * `seed` — the effective seed of the function.
-* `note=noinline-missing` — the function is not `noinline`, so the transform
-  has to add it (otherwise the body could be inlined away and the
-  protection would be lost).
+* `noinline=added` — the pass added the `noinline` attribute, so that the
+  function survives to the late point. The marking **changes the generated
+  code**, so the report has to name it: the difference between the protected
+  and the unprotected build is attributable to the selected functions (and to
+  their callers, which no longer inline them) and to the new globals.
+* `level-not-implemented` — the entry asks for a level that this task does
+  not implement (T20). The build fails for it.
+
+The transform phase prints what it did:
+
+```
+[cs2-protect] solver.cpp: transform ?solve@aim@cs2@@YA?AUSolveResult@12@… (cs2::aim::solve) rewritten=7 skipped=88 indirect_parameter=9 external_callee=77 invoke=2
+[cs2-protect] solver.cpp: transform table=7 descriptor=11
+```
+
+* `rewritten` — the calls that became indirect dispatches.
+* `skipped` — the calls that were left alone, **per reason**:
+  `variadic_callee`, `indirect_parameter`, `musttail`, `external_callee`,
+  `optnone_callee`, `invoke`, `indirect_callee`.
+* `table` and `descriptor` — the size of the two globals the module gained.
+
+A selected function that did not survive to the late point is reported as
+`vanished`, and a level that is not implemented is reported as
+`level=virtualized not-implemented`.
 
 With `CS2_PROTECT_VERBOSE=1` the pass also prints every function it
 skipped and why (`not_annotated`, `denied`, `optnone`, `always_inline`,
-`declaration`, `intrinsic`), the state of every policy entry (`matched`,
-`blocked`, `unmatched`), and a summary line per module.
+`declaration`, `intrinsic`), every skipped **call** of the transform (with
+its callee), the state of every policy entry (`matched`, `blocked`,
+`unimplemented`, `vanished`, `unmatched`), and a summary line per module.
 
 ## 8. What the pass does **not** do
 
-* It changes **no code**. The pass returns `PreservedAnalyses::all()`, so
-  the protected payload is the unprotected payload. The transforms are T19
-  and T20.
+* It does not **virtualize** anything. The `virtualized` level is T20; a
+  policy that asks for it fails the build (see §10).
+* It does not touch the calls of a function that is not selected, and it
+  does not touch a call it cannot rewrite (§10).
 * It runs from `-O1` up. At `-O0` the driver uses its O0 pipeline, which
   does not invoke the pipeline-start extension point, so the pass does not
   run at all.
@@ -313,31 +346,183 @@ are left alone, so a rebuild that compiles nothing still finds its
 evidence. The pruning runs after the build, so it cannot race with a
 compile that is writing its coverage.
 
+The state of an entry is one of:
+
+| state | meaning |
+|---|---|
+| `matched` | the entry named a function that is protected |
+| `unmatched` | the entry named no function in this module |
+| `blocked:<reason>` | the entry named a function that cannot be protected |
+| `unimplemented:<level>` | the entry named a function whose level is not implemented yet |
+| `vanished` | the entry named a selected function that did not survive to the transform phase |
+
+The worst state wins, so that a failure is never masked by a match in
+another module.
+
 A source that is compiled into **two targets of the same build** would write
 the same file. The coverage of a module does not depend on the target (the
 policy's `module` scope names the *source* file), so the content is the
 same; the plugin writes the whole file in one go, so two such compiles
 cannot interleave their writes.
 
-## 10. For the next task
+## 10. The transform: the call encryption
 
-The rewriting pass (T19: call encryption, T20: virtualization) **must not**
-run at the pipeline start:
+### 10.1 The two phases
 
-* it has to run at `registerOptimizerLastEPCallback` — the optimiser's
-  `SimplifyIndirectCalls` would rewrite an encrypted indirect call back
-  into a direct one, and `IndirectBr`, `MergeICmps` and friends would
-  happily undo the rest of the transform;
-* an **early** point has to mark the selected functions `noinline`,
-  otherwise the inliner removes the body before the late point can rewrite
-  it (the report already says `note=noinline-missing` for a function that
-  is not `noinline`);
-* the module flag `cs2.protect.done` makes the pass safe to run twice: the
-  pipeline-start extension point fires in the LTO pre-link phase as well,
-  so a module can reach the pass twice, and a rewritten body must not be
-  rewritten again.
+The transform needs fully optimised IR, and the selection has to happen
+before the optimiser runs, so the pass has **two** extension points:
 
-## 11. Verified facts (do not re-derive them)
+| phase | extension point | module flag | job |
+|---|---|---|---|
+| selection | `registerPipelineStartEPCallback` | `cs2.protect.selected` | select the functions, mark them `noinline`, record the selection |
+| transform | `registerOptimizerLastEPCallback` | `cs2.protect.transformed` | rewrite the calls |
+
+The flags are **per phase**: one flag would make the late phase bail out,
+because the early phase would have set it. They are module flags with the
+`Warning` behaviour, so an LTO merge of two modules that both carry them is
+quiet, and the pre-link phase does not transform a module twice.
+
+The transform has to run at the optimizer last: the optimiser's
+`SimplifyIndirectCalls` would rewrite the encrypted indirect call straight
+back into a direct one, and the inliner would have eaten the selected
+function before a late point could rewrite it.
+
+The two phases hand over through the module's metadata
+(`!cs2.protect.functions` and `!cs2.protect.entries`): the early phase
+records the selection, the late phase reads it back. That record is also how
+the late phase notices a selected function that **did not survive** the
+optimiser (it is reported, and the whole-build check fails for it).
+
+The pass is also reachable **by name**, so that `opt` can run it over a
+fixture:
+
+```
+opt.exe -load-pass-plugin=Cs2Protect.dll -passes=cs2-protect -S fixture.ll
+```
+
+### 10.2 The table, the descriptor and the key
+
+For every module that has at least one rewritten call, the pass adds two
+globals:
+
+```
+@cs2.protect.table = private unnamed_addr constant [N x ptr] [ptr @callee_0, …]
+@cs2.protect.desc  = private unnamed_addr constant [M x i64] [i64 <cipher>, …]
+@cs2.protect.key0 = private unnamed_addr constant i64 <part>
+@cs2.protect.key1 = private unnamed_addr constant i64 <part>
+@cs2.protect.key2 = private unnamed_addr constant i64 <part>
+```
+
+* the **table** holds the real pointers. The linker emits the DIR64 fixups
+  for them and the mapper applies them, so the entries are right at run time.
+  The order is **permuted per build** (a build-seeded permutation), so the
+  index in the descriptor is not a predictable table position and the table
+  does not have the same shape in two builds.
+* the **descriptor** holds the *encrypted* index of every rewritten call
+  site: `index ^ key`. It holds plain integers only — a relocatable value
+  inside the cipher would be corrupted by the fixups of the mapper.
+* the **key** is split into three constants in three globals, and the
+  call site mixes them at run time (the mixer is inline IR, a few
+  `xor`/`mul`/`rol` on `i64`; there is no call to a shared helper, because
+  that would add a stack frame to every call site).
+
+The call site becomes:
+
+```
+  %i = <the inline decode>                       ; the index
+  %p = getelementptr inbounds ptr, ptr @cs2.protect.table, i64 %i
+  %f = load ptr, ptr %p
+  %r = call <the original function type> %f(<the original arguments>)
+```
+
+The **function type is unchanged**: the call still has the callee's
+parameter types, its return type, its calling convention and its
+`AttributeList`. The ABI is preserved by construction — the call becomes an
+*indirect* call with the same signature.
+
+**What the key buys, and what it does not.** A scanner that greps for a
+64-bit constant does not find the key: it has to reconstruct it from three
+constants and a mixer. It does **not** buy security against an analyst
+who recognises the mixer — that one recovers the key in minutes. This is
+obfuscation, not cryptography.
+
+### 10.3 The volatile barrier (and why it is load-bearing)
+
+The key is a **compile-time** key, so the whole dispatch is a compile-time
+constant: the index is a constant, the load from the table folds to the
+callee's address, and the indirect call becomes a **direct** one again.
+
+That is not theoretical. Without a barrier, the optimiser folds the
+dispatch away in most of the payload's modules: the protected image then
+behaves exactly like the unprotected one, and the protection is void — the
+exact failure mode this project exists to avoid.
+
+So the decode reads the key and the descriptor with **volatile** loads. A
+volatile load is the cheapest barrier that keeps the image read-only (a
+writable table would be patched at run time). The `ir_test.py` test asserts
+that the four volatile loads are still there, and `check_payload.py`
+asserts that the number of the encrypted dispatches in the image is the
+number of the calls the pass reports having rewritten.
+
+### 10.4 The skip rules
+
+A call is **not** rewritten when any of these holds, and every skip is
+reported (with its reason):
+
+| skip | why |
+|---|---|
+| `variadic_callee` | the indirect call cannot reproduce the variadic ABI |
+| `indirect_parameter` | the callee has a `byval` / `sret` / `inalloca` / `preallocated` parameter: Windows x64 rejects these in an indirect signature |
+| `musttail` | a tail call cannot become an indirect call without breaking the contract |
+| `external_callee` | the callee is not defined in this module: it is an import, and it is in the import table anyway (hiding the imports is a different technique) |
+| `invoke` | the pass does not model the EH edges yet |
+| `optnone_callee` | rewriting it would defeat the `optnone` intent |
+| `indirect_callee` | the call already goes through a pointer: there is nothing to hide |
+
+A call is either **fully** rewritten or **fully** untouched. Never half.
+
+### 10.5 The level gate
+
+The policy carries a level per entry: `call` (this task) or `virtualized`
+(T20). A `virtualized` entry names a function that this task does **not**
+transform, so:
+
+* the function is selected (the selection is the same), but the pass reports
+  it as *not implemented*;
+* the entry is **not** counted as protected, and the whole-build check
+  **fails** for it (a module-scoped entry fails the compile right away).
+
+`policy.example.json` therefore asks for the `call` level; the `virtualized`
+level is reserved for T20.
+
+## 11. The payload-level checks
+
+`check_payload.py` checks the image that the transform produced:
+
+```
+python tools/protect/check_payload.py --protected build-payload-protect/payload.dll \
+    --unprotected build-payload/payload.dll --objdump <llvm-objdump.exe> \
+    --coverage <the coverage directory> --policy <the policy file>
+```
+
+* the **exports** and the **imports** are the same as the unprotected ones;
+* the `.reloc` section is there, with DIR64 entries (the mapper applies
+  them);
+* the exception directory (`.pdata`) is there and well formed (the mapper
+  registers the unwind table and treats its absence as fatal);
+* the number of the **encrypted dispatches** is the number of the calls the
+  pass reports having rewritten (read from the coverage files), and it is
+  zero in the unprotected image.
+
+`compare_builds.py --attribute` attributes the difference between the two
+images. A byte-for-byte comparison cannot work any more: the transform
+makes the image bigger, so every function after the first one moves. The
+attribution is therefore per function: the functions whose *size* changed
+are the ones the transform touched (the selected ones, and their callers,
+which no longer inline them), and the sections that grew are the ones that
+hold the new globals.
+
+## 12. Verified facts (do not re-derive them)
 
 | Fact | Why it matters |
 |---|---|
@@ -349,12 +534,14 @@ run at the pipeline start:
 | A plugin's `cl::opt` is not reachable via `-mllvm` | the configuration travels through the environment |
 | The release LLVM is built without RTTI and with the static CRT | the plugin is compiled `/GR- /MT`; clang-cl rejects `-fno-rtti` and `-fms-runtime-lib=static` ("unknown argument ignored in clang-cl") |
 | `registerPipelineStartEPCallback` runs during a normal `-O2` compile | a pass that is only registered through `registerPipelineParsingCallback` never runs unless the pipeline is requested by name, and the "protected" build is then byte-identical to the baseline |
+| `registerOptimizerLastEPCallback` runs *before* the module inliner and the other late module passes | the transform has to run after the optimiser (the `SimplifyIndirectCalls` would undo it) and before the code generator |
+| a compile-time key makes the whole dispatch a compile-time constant | the optimiser folds the index, the load from the table and the indirect call back into a direct call: without the volatile barrier the protection is void (see §10.3) |
 | `__attribute__((annotate("x")))` lands in `llvm.global.annotations`, keyed by the mangled symbol | the annotation selection source |
 | `-O0` adds `optnone` to every function, and a pass skips `optnone` functions | the `optnone` skip reason |
 | The SDK's `llvm::json::parse` **recurses** | the policy file's nesting depth has to be bounded *before* the text reaches it |
 | The SDK's `llvm::json::parse` keeps the **first** of two equal keys, Python's `json` keeps the **last** | a duplicated key is an error on both sides |
 
-## 12. Known limits of the build wiring
+## 13. Known limits of the build wiring
 
 * **Meson 1.11 dropped `depend_files` and `build_depends` for build
   targets.** The payload therefore uses `link_depends` (the modern

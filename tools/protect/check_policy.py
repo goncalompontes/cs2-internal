@@ -42,6 +42,24 @@ POLICY_KEYS = ("protect", "deny", "seed")
 #: The keys a `protect` entry object may carry.
 ENTRY_KEYS = ("symbol", "module", "level")
 
+#: The priority of the states a policy entry can be in.
+#:
+#: The worst state wins, so that a failure is never masked by a match in
+#: another module: an entry whose selected function did not survive to the
+#: transform phase failed in that module, whatever it did in another one.
+STATE_PRIORITY = {
+    "unmatched": 0,
+    "blocked": 1,
+    "matched": 2,
+    "unimplemented": 3,
+    "vanished": 4,
+}
+
+
+def state_priority(state: str) -> int:
+    """The priority of the state of a policy entry."""
+    return STATE_PRIORITY.get(state.split(":", 1)[0], 0)
+
 
 def no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     """The JSON object hook that rejects a duplicated key.
@@ -124,9 +142,10 @@ def read_coverage(coverage_dir: Path, digest: str) -> tuple[dict[str, str], bool
     """The state of every policy entry, over every coverage file of this policy.
 
     The state of an entry is "matched" (it named a function that is
-    protected), "blocked" (it named a function that cannot be protected) or
-    "unmatched" (it named nothing in that module). A blocked entry is not a
-    matched one: it protects nothing.
+    protected), "blocked" (it named a function that cannot be protected),
+    "unimplemented" (it named a function whose protection level is not
+    implemented yet), "vanished" (the selected function did not survive to the
+    transform phase) or "unmatched" (it named nothing in that module).
 
     The second value says whether any coverage file belongs to this policy at
     all: when none does, the coverage is stale (the policy changed after the
@@ -145,9 +164,9 @@ def read_coverage(coverage_dir: Path, digest: str) -> tuple[dict[str, str], bool
                 policy_digest = value.strip().upper()
             elif key == "entry":
                 state, _, rest = value.partition(" ")
-                if state == "blocked":
+                if state in ("blocked", "unimplemented"):
                     reason, _, pattern = rest.partition(" ")
-                    entries[pattern.strip()] = f"blocked:{reason.strip()}"
+                    entries[pattern.strip()] = f"{state}:{reason.strip()}"
                 else:
                     entries[rest.strip()] = state.strip()
         if policy_digest != digest:
@@ -155,12 +174,8 @@ def read_coverage(coverage_dir: Path, digest: str) -> tuple[dict[str, str], bool
             continue
         current = True
         for pattern, state in entries.items():
-            if state == "matched":
-                states[pattern] = "matched"
-            elif state.startswith("blocked:") and states.get(pattern) != "matched":
+            if pattern not in states or state_priority(state) > state_priority(states[pattern]):
                 states[pattern] = state
-            elif pattern not in states:
-                states[pattern] = "unmatched"
     return states, current
 
 
@@ -270,11 +285,48 @@ def main(argv: list[str]) -> int:
         for pattern, state in states.items()
         if state.startswith("blocked:")
     }
+    unimplemented = {
+        pattern: state.split(":", 1)[1]
+        for pattern, state in states.items()
+        if state.startswith("unimplemented:")
+    }
+    vanished = {pattern for pattern, state in states.items() if state.startswith("vanished")}
     failed = False
+
+    # A selected function that did not survive to the transform phase: the
+    # protection would be silently lost, so the build has to fail.
+    if vanished:
+        noun = "entry" if len(vanished) == 1 else "entries"
+        print(
+            f"check_policy: {policy_path}: {len(vanished)} policy {noun} named a selected "
+            "function that did not survive to the transform phase:",
+            file=sys.stderr,
+        )
+        for pattern in sorted(vanished):
+            print(f"  {pattern}", file=sys.stderr)
+        failed = True
+
+    # A level that is not implemented yet: the entry protects nothing, and a
+    # build that looks protected and is not is the failure mode this project
+    # exists to avoid.
+    if unimplemented:
+        noun = "entry" if len(unimplemented) == 1 else "entries"
+        print(
+            f"check_policy: {policy_path}: {len(unimplemented)} policy {noun} named a function "
+            "whose protection level is not implemented:",
+            file=sys.stderr,
+        )
+        for pattern, level in sorted(unimplemented.items()):
+            print(f"  {pattern} ({level})", file=sys.stderr)
+        failed = True
 
     # An entry that named a function that cannot be protected protects
     # nothing: the build has to fail, and it has to say why.
-    blocked_only = [pattern for pattern in patterns if pattern not in matched and pattern in blocked]
+    blocked_only = [
+        pattern
+        for pattern in patterns
+        if pattern not in matched and pattern in blocked and pattern not in vanished
+    ]
     if blocked_only:
         noun = "entry" if len(blocked_only) == 1 else "entries"
         print(
@@ -286,7 +338,14 @@ def main(argv: list[str]) -> int:
             print(f"  {pattern} ({blocked[pattern]})", file=sys.stderr)
         failed = True
 
-    unmatched = [pattern for pattern in patterns if pattern not in matched and pattern not in blocked]
+    unmatched = [
+        pattern
+        for pattern in patterns
+        if pattern not in matched
+        and pattern not in blocked
+        and pattern not in vanished
+        and pattern not in unimplemented
+    ]
     if unmatched:
         noun = "entry" if len(unmatched) == 1 else "entries"
         print(

@@ -1,23 +1,37 @@
-// The protection pass: the plugin entry point and the pass itself.
+// The protection pass: the plugin entry point and the two passes.
 //
-// The pass runs at the *start* of the optimisation pipeline of every
-// translation unit (registerPipelineStartEPCallback), so it is part of a
-// normal -O2 compile. A pass that is only registered through
-// registerPipelineParsingCallback would never run unless the pipeline was
-// requested by name, and the "protected" build would then be byte-identical
-// to the baseline -- the easiest way to ship a no-op protection.
+// The pass runs in two phases, because the transform needs fully optimised
+// IR and the selection needs to happen before the optimiser runs:
 //
-// This task only *selects* and *reports*; the transforms (call encryption,
-// virtualization) are T19 and T20.
+//   * the *selection* phase runs at the pipeline start
+//     (registerPipelineStartEPCallback). It selects the functions, marks
+//     them `noinline` so that they survive to the late point, and records
+//     the selection in the module's metadata. The module flag
+//     `cs2.protect.selected` makes a second run a no-op.
 //
-// The *rewriting* pass of T19 cannot run here: it needs
-// registerOptimizerLastEPCallback, because the optimiser would undo an
-// encrypted indirect call (SimplifyIndirectCalls) and would inline a
-// selected function away before a late point could rewrite it. See the
-// "For the next task" section of tools/protect/README.md.
+//   * the *transform* phase runs at the optimizer last
+//     (registerOptimizerLastEPCallback). It rewrites the calls of the
+//     selected functions into indirect dispatches through an encrypted
+//     descriptor. It has to run there: the optimiser's
+//     `SimplifyIndirectCalls` would rewrite the encrypted indirect call
+//     straight back into a direct one, and the inliner would have eaten the
+//     selected function before a late point could rewrite it. The module
+//     flag `cs2.protect.transformed` makes a second run a no-op.
+//
+// The two flags are per phase on purpose: one flag would make the late
+// phase bail out, because the early phase would have set it.
+//
+// A pass that is only registered through registerPipelineParsingCallback
+// would never run unless the pipeline was requested by name, and the
+// "protected" build would then be byte-identical to the baseline -- the
+// easiest way to ship a no-op protection. The parsing callback exists as
+// well, under the name `cs2-protect`, so that `opt` can run the pass over a
+// fixture (see tools/protect/README.md).
 
 #include <string>
+#include <string_view>
 
+#include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
@@ -29,18 +43,42 @@
 #include "config.hpp"
 #include "report.hpp"
 #include "selection.hpp"
+#include "transform.hpp"
 
 namespace {
 
-/// The module flag that marks a module the pass already ran on.
+/// The module flag that marks a module the selection phase already ran on.
 ///
 /// The pipeline-start extension point fires in the LTO pre-link phase as
 /// well as in the ordinary compile, so a module can reach the pass twice.
-/// The flag makes the second run a no-op: without it, T19 would rewrite the
-/// module twice.
-constexpr std::string_view k_done_flag = "cs2.protect.done";
+/// The flag makes the second run a no-op: without it, the module would be
+/// selected twice.
+constexpr std::string_view k_selected_flag = "cs2.protect.selected";
 
-class ProtectPass : public llvm::PassInfoMixin<ProtectPass> {
+/// The module flag that marks a module the transform phase already ran on.
+///
+/// The flag is per phase, because the selection phase sets its own flag: one
+/// flag would make the late phase always bail out, and the build would
+/// produce an unprotected payload that *looks* protected.
+constexpr std::string_view k_transformed_flag = "cs2.protect.transformed";
+
+/// Reads the configuration, or fails the compile.
+///
+/// The configuration is read once per phase: it is the environment that the
+/// compiler process hands down to the plugin, and it cannot change between
+/// the two phases of one compilation.
+[[nodiscard]] auto configuration() -> cs2::protect::Config {
+  const auto loaded = cs2::protect::load_config();
+  if (!loaded) {
+    llvm::errs() << "[cs2-protect] " << loaded.error().message << "\n";
+    llvm::report_fatal_error("cs2-protect: the configuration is invalid",
+                             /*gen_crash_diag=*/false);
+  }
+  return *loaded;
+}
+
+/// The phase that selects the functions and marks them `noinline`.
+class SelectPass : public llvm::PassInfoMixin<SelectPass> {
  public:
   /// The pass must run even when the optimisation pipeline would drop it:
   /// a build that "protects" nothing has to say so.
@@ -49,24 +87,18 @@ class ProtectPass : public llvm::PassInfoMixin<ProtectPass> {
   }
 
   llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
-    if (module.getModuleFlag(k_done_flag) != nullptr) {
+    if (module.getModuleFlag(k_selected_flag) != nullptr) {
       return llvm::PreservedAnalyses::all();
     }
     // The flag is metadata: the backend ignores it, so it does not reach
     // the object file. The "Warning" behaviour is the gentle one: two
     // modules that both carry the flag agree on its value, so merging them
     // (an LTO build) is quiet.
-    module.setModuleFlag(llvm::Module::Warning, k_done_flag, 1);
+    module.setModuleFlag(llvm::Module::Warning, k_selected_flag, 1);
 
-    const auto config = cs2::protect::load_config();
-    if (!config) {
-      llvm::errs() << "[cs2-protect] " << config.error().message << "\n";
-      llvm::report_fatal_error("cs2-protect: the configuration is invalid",
-                               /*gen_crash_diag=*/false);
-    }
-    const cs2::protect::Config& settings = *config;
+    const cs2::protect::Config settings = configuration();
 
-    const auto result = cs2::protect::select_functions(module, settings);
+    cs2::protect::SelectionResult result = cs2::protect::select_functions(module, settings);
 
     // A policy entry that is scoped to this module and matched nothing is a
     // typo: the compile must fail instead of protecting nothing. An entry
@@ -77,8 +109,14 @@ class ProtectPass : public llvm::PassInfoMixin<ProtectPass> {
     // `alwaysinline` function, a declaration, a denied function) is the
     // same failure with a different cause: the entry protects nothing, and
     // the operator has to know why.
+    //
+    // An entry that asks for a level that is not implemented yet (the
+    // `virtualized` level of T20) is the same failure again: this task does
+    // not transform the function, so the entry protects nothing, and a build
+    // that looks protected and is not is the failure mode this project
+    // exists to avoid.
     for (const cs2::protect::PolicyMatch& match : result.policy_matches) {
-      if (match.module.empty() || !match.applicable || match.matched) {
+      if (match.module.empty() || !match.applicable) {
         continue;
       }
       if (match.blocked) {
@@ -89,11 +127,40 @@ class ProtectPass : public llvm::PassInfoMixin<ProtectPass> {
             "cs2-protect: a policy entry matched a function that cannot be protected",
             /*gen_crash_diag=*/false);
       }
-      llvm::errs() << "[cs2-protect] " << module.getSourceFileName() << ": the policy entry '"
-                   << match.pattern << "' matched no function in this module\n";
-      llvm::report_fatal_error("cs2-protect: a policy entry matched no function",
-                               /*gen_crash_diag=*/false);
+      if (match.unimplemented) {
+        llvm::errs() << "[cs2-protect] " << module.getSourceFileName() << ": the policy entry '"
+                     << match.pattern << "' matched a function whose level '"
+                     << cs2::protect::to_string(match.level) << "' is not implemented yet (T20)\n";
+        llvm::report_fatal_error(
+            "cs2-protect: a policy entry matched a function whose level is not implemented",
+            /*gen_crash_diag=*/false);
+      }
+      if (!match.matched) {
+        llvm::errs() << "[cs2-protect] " << module.getSourceFileName() << ": the policy entry '"
+                     << match.pattern << "' matched no function in this module\n";
+        llvm::report_fatal_error("cs2-protect: a policy entry matched no function",
+                                 /*gen_crash_diag=*/false);
+      }
     }
+
+    // The selected functions are marked `noinline`: the inliner runs between
+    // the two phases, and a selected function that was inlined into its
+    // callers would be gone before the transform phase could rewrite it.
+    // The marking changes the generated code, so the report names it.
+    for (cs2::protect::Selection& selection : result.selected) {
+      if (!selection.may_inline) {
+        continue;  // the function is `noinline` already
+      }
+      llvm::Function* function = module.getFunction(selection.symbol);
+      if (function == nullptr) {
+        continue;
+      }
+      function->addFnAttr(llvm::Attribute::NoInline);
+      selection.marked_noinline = true;
+    }
+
+    // The hand-off to the transform phase.
+    cs2::protect::record_selection(module, result);
 
     cs2::protect::write_report(module, result, settings);
 
@@ -103,9 +170,61 @@ class ProtectPass : public llvm::PassInfoMixin<ProtectPass> {
                                /*gen_crash_diag=*/false);
     }
 
-    // The pass only reports; it changes no code, so everything is preserved.
-    // (The module flag is metadata: it does not reach the object file.)
-    return llvm::PreservedAnalyses::all();
+    // The pass changes the attributes of the selected functions, so the
+    // analyses are not preserved. (The module flag is metadata: it does not
+    // reach the object file.)
+    return llvm::PreservedAnalyses::none();
+  }
+};
+
+/// The phase that rewrites the calls of the selected functions.
+class TransformPass : public llvm::PassInfoMixin<TransformPass> {
+ public:
+  /// The pass must run even when the optimisation pipeline would drop it:
+  /// a build that "protects" nothing has to say so.
+  static bool isRequired() {
+    return true;
+  }
+
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
+    if (module.getModuleFlag(k_transformed_flag) != nullptr) {
+      return llvm::PreservedAnalyses::all();
+    }
+    module.setModuleFlag(llvm::Module::Warning, k_transformed_flag, 1);
+
+    const cs2::protect::Config settings = configuration();
+
+    const cs2::protect::RecordedSelection selection = cs2::protect::read_selection(module);
+    if (selection.functions.empty()) {
+      // The selection phase did not run, or it selected nothing: there is
+      // nothing to rewrite.
+      return llvm::PreservedAnalyses::all();
+    }
+
+    const cs2::protect::TransformResult result =
+        cs2::protect::transform_module(module, settings, selection);
+
+    cs2::protect::write_transform_report(module, result, settings);
+
+    // The coverage: the final state of every policy entry. An entry whose
+    // selected function did not survive to this phase is recorded as
+    // vanished, and the whole-build check fails for it.
+    const auto entries =
+        cs2::protect::coverage_entries(selection, module.getSourceFileName(), result.vanished);
+    std::vector<cs2::protect::CoverageFunction> functions;
+    functions.reserve(result.functions.size());
+    for (const cs2::protect::FunctionTransform& transform : result.functions) {
+      functions.push_back(cs2::protect::CoverageFunction{transform.symbol, transform.rewritten,
+                                                          transform.skipped.size()});
+    }
+    if (const auto error = cs2::protect::write_coverage(settings, module, entries, functions)) {
+      llvm::errs() << "[cs2-protect] " << *error << "\n";
+      llvm::report_fatal_error("cs2-protect: the coverage could not be written",
+                               /*gen_crash_diag=*/false);
+    }
+
+    // The pass changes the code, so the analyses are not preserved.
+    return llvm::PreservedAnalyses::none();
   }
 };
 
@@ -119,16 +238,33 @@ class ProtectPass : public llvm::PassInfoMixin<ProtectPass> {
 #define CS2_PROTECT_EXPORT __attribute__((visibility("default")))
 #endif
 
-// The SDK header declares the entry point without `dllexport`, which makes
-// the redeclaration warn.
+// The SDK header declares the entry point without `dllexport`, which makes the
+// redeclaration warn.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdll-attribute-on-redeclaration"
 extern "C" CS2_PROTECT_EXPORT ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
   return {LLVM_PLUGIN_API_VERSION, "Cs2Protect", LLVM_VERSION_STRING,
           [](llvm::PassBuilder& builder) {
+            // The early phase: the selection, at the start of the pipeline.
             builder.registerPipelineStartEPCallback(
                 [](llvm::ModulePassManager& manager, llvm::OptimizationLevel) {
-                  manager.addPass(ProtectPass());
+                  manager.addPass(SelectPass());
+                });
+            // The late phase: the rewrite, after the optimiser.
+            builder.registerOptimizerLastEPCallback(
+                [](llvm::ModulePassManager& manager, llvm::OptimizationLevel,
+                   llvm::ThinOrFullLTOPhase) { manager.addPass(TransformPass()); });
+            // The named pipeline, so that `opt` can run the pass over a
+            // fixture: `opt -load-pass-plugin=Cs2Protect.dll -passes=cs2-protect`.
+            builder.registerPipelineParsingCallback(
+                [](llvm::StringRef name, llvm::ModulePassManager& manager,
+                   llvm::ArrayRef<llvm::PassBuilder::PipelineElement>) {
+                  if (name != "cs2-protect") {
+                    return false;
+                  }
+                  manager.addPass(SelectPass());
+                  manager.addPass(TransformPass());
+                  return true;
                 });
           }};
 }

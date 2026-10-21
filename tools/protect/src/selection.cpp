@@ -375,7 +375,7 @@ constexpr std::array<std::string_view, 3> k_access_labels = {
 /// say so. An entry that protected a function in this module keeps its
 /// "matched" state -- it did protect something.
 void block_entry(PolicyMatch& match, SkipReason reason) {
-  if (match.matched) {
+  if (match.matched || match.unimplemented) {
     return;
   }
   match.blocked = true;
@@ -385,6 +385,22 @@ void block_entry(PolicyMatch& match, SkipReason reason) {
 /// Records that a policy entry named a function that the pass protects.
 void match_entry(PolicyMatch& match) {
   match.matched = true;
+  match.blocked = false;
+  match.unimplemented = false;
+  match.blocked_reason = std::nullopt;
+}
+
+/// Records that a policy entry named a function whose level is not
+/// implemented yet.
+///
+/// The function *is* selected, but this task does not transform it, so the
+/// entry protects nothing -- the build has to say so, exactly as it says so
+/// for a function that cannot be protected.
+void unimplement_entry(PolicyMatch& match) {
+  if (match.matched) {
+    return;
+  }
+  match.unimplemented = true;
   match.blocked = false;
   match.blocked_reason = std::nullopt;
 }
@@ -399,6 +415,7 @@ auto select_functions(const llvm::Module& module, const Config& config) -> Selec
       PolicyMatch match;
       match.pattern = entry.pattern;
       match.module = entry.module;
+      match.level = entry.level;
       match.applicable = module_applies(entry.module, module_id);
       result.policy_matches.push_back(match);
     }
@@ -456,9 +473,14 @@ auto select_functions(const llvm::Module& module, const Config& config) -> Selec
     if (annotated.find(symbol) != annotated.end()) {
       selected = true;
       source = SelectionSource::annotation;
-    } else if (!named.empty() && config.policy.has_value()) {
+    }
+    if (!named.empty() && config.policy.has_value()) {
+      // A policy entry names the function *and* says at which level it is
+      // protected, so the entry's level wins over the default one.
       selected = true;
-      source = SelectionSource::policy;
+      if (source != SelectionSource::annotation) {
+        source = SelectionSource::policy;
+      }
       level = config.policy.value().protect[named.front()].level;
     }
     if (!selected) {
@@ -493,7 +515,14 @@ auto select_functions(const llvm::Module& module, const Config& config) -> Selec
     }
     result.selected.push_back(std::move(entry));
     for (const std::size_t index : named) {
-      match_entry(result.policy_matches[index]);
+      // The entry is only "matched" when this task transforms the function:
+      // an entry that asks for a level that is not implemented yet protects
+      // nothing, and the build has to say so.
+      if (config.policy.value().protect[index].level == ProtectionLevel::call) {
+        match_entry(result.policy_matches[index]);
+      } else {
+        unimplement_entry(result.policy_matches[index]);
+      }
     }
   }
 
