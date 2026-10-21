@@ -858,6 +858,24 @@ auto Service::input_status() noexcept -> Json {
   result.set("animfix_captures", Json::number(static_cast<double>(input_.animfix_captures())));
   result.set("animfix_applies", Json::number(static_cast<double>(input_.animfix_applies())));
   result.set("animfix_skips", Json::number(static_cast<double>(input_.animfix_skips())));
+  // The refusals, by reason: "the codec has not run yet" must be
+  // distinguishable from "every capture aged out" (a stalled connection or a
+  // server whose snapshot rate the bound does not cover) and from "the
+  // capture was already used" (the normal case).
+  result.set("animfix_skip_no_capture",
+             Json::number(static_cast<double>(input_.animfix_skip_no_capture())));
+  result.set("animfix_skip_stale",
+             Json::number(static_cast<double>(input_.animfix_skip_stale())));
+  result.set("animfix_skip_applied",
+             Json::number(static_cast<double>(input_.animfix_skip_applied())));
+  result.set("animfix_skip_controller",
+             Json::number(static_cast<double>(input_.animfix_skip_controller())));
+  // The server's snapshot rate: the staleness bound is measured against it.
+  result.set("animfix_snapshot_interval_ms",
+             Json::number(static_cast<double>(input_.animfix_snapshot_interval_ms())));
+  // The values the engine's own guard refused (a NaN, an infinity, a value
+  // outside the engine's range). It should be zero.
+  result.set("animfix_rejected", Json::number(static_cast<double>(input_.animfix_rejected())));
   result.set("animfix_data_valid", Json::boolean(input_.animfix_data_valid()));
   if (input_.animfix_data_valid()) {
     result.set("animfix_server_aim_yaw", Json::number(input_.animfix_server_aim_yaw()));

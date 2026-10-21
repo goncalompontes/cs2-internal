@@ -655,6 +655,28 @@ class Input {
   [[nodiscard]] std::uint64_t animfix_skips() const noexcept {
     return animfix_skips_.load();
   }
+  // The refusals, broken down by reason — so the operator can tell "the
+  // codec has not run yet" from "every capture aged out" (a stalled
+  // connection) and from "the capture was already used" (the
+  // specification's once-per-capture rule, which is the normal case).
+  [[nodiscard]] std::uint64_t animfix_skip_no_capture() const noexcept {
+    return animfix_skip_no_capture_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_skip_stale() const noexcept {
+    return animfix_skip_stale_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_skip_applied() const noexcept {
+    return animfix_skip_applied_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_skip_controller() const noexcept {
+    return animfix_skip_controller_.load();
+  }
+  // The observed **snapshot interval** (the server's rate), in milliseconds:
+  // the staleness bound is measured against it, so this is what tells the
+  // operator how old the server's values are allowed to be.
+  [[nodiscard]] std::uint64_t animfix_snapshot_interval_ms() const noexcept {
+    return animfix_snapshot_interval_.load();
+  }
   // How many captured values the **engine's own guard** refused (a NaN, an
   // infinity, or a value outside the engine's range). The captured values are
   // network-controlled, so this is the count of "the server sent something
@@ -1117,6 +1139,8 @@ class Input {
   // Put the server's values into the graph's parameters (the anim tick
   // detour, before the graph is evaluated).
   void animfix_apply() noexcept;
+  // Count one refusal, by its reason.
+  void count_animfix_refusal(animfix::Refusal refusal) noexcept;
   // The local player's `CCS2PawnGraphController*` (0 when it is not known).
   [[nodiscard]] auto animfix_controller() const noexcept -> std::uintptr_t;
   // The status string (why the animfix is not ready, or "ok").
@@ -1125,6 +1149,7 @@ class Input {
   cs2::hooks::InlineHook animfix_anim_tick_hook_{};
   mutable std::mutex animfix_mutex_{};
   animfix::Capture animfix_capture_{};
+  animfix::SnapshotClock animfix_clock_{};
   std::array<animfix::Target, animfix::k_tracked_slot_count> animfix_targets_{};
   std::string animfix_status_{"the animfix has not been installed yet"};
   std::atomic<bool> animfix_enabled_{false};
@@ -1134,6 +1159,11 @@ class Input {
   std::atomic<std::uint64_t> animfix_applies_{0};
   std::atomic<std::uint64_t> animfix_skips_{0};
   std::atomic<std::uint64_t> animfix_rejected_{0};
+  std::atomic<std::uint64_t> animfix_skip_no_capture_{0};
+  std::atomic<std::uint64_t> animfix_skip_stale_{0};
+  std::atomic<std::uint64_t> animfix_skip_applied_{0};
+  std::atomic<std::uint64_t> animfix_skip_controller_{0};
+  std::atomic<std::uint64_t> animfix_snapshot_interval_{0};
   std::atomic<bool> animfix_acted_{false};
   std::atomic<float> animfix_server_yaw_{0.0F};
   std::atomic<float> animfix_predicted_yaw_{0.0F};

@@ -548,6 +548,12 @@ class InputStatus(TypedDict, total=False):
     animfix_captures: int
     animfix_applies: int
     animfix_skips: int
+    animfix_skip_no_capture: int
+    animfix_skip_stale: int
+    animfix_skip_applied: int
+    animfix_skip_controller: int
+    animfix_snapshot_interval_ms: int
+    animfix_rejected: int
     animfix_data_valid: bool
     animfix_server_aim_yaw: float | None
     animfix_predicted_aim_yaw: float | None

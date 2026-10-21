@@ -191,23 +191,66 @@ inline constexpr double k_engine_value_limit = 2.1474836e9;
   return std::fabs(static_cast<double>(value)) < k_engine_value_limit;
 }
 
+// --- the staleness bound ----------------------------------------------------
+
+// The shortest snapshot interval the animfix assumes.
+//
+// The bound is **not** the client's frame rate: what goes stale is the
+// *server's* value, and how old it can be is the server's **snapshot
+// interval** — the time between two decodes. A server that sends its
+// snapshots at 30 Hz delivers values that are up to 33 ms old, and refusing
+// them because the client draws at 60 Hz would make the animfix inert on
+// every server but the default one.
+//
+// The floor covers the interval between a decode and the anim tick that
+// consumes it (the correction lands a few milliseconds after the decode).
+inline constexpr std::uint64_t k_min_snapshot_interval_ms = 8;
+
+// The animfix's estimate of the server's snapshot interval: an exponential
+// moving average of the time between two decodes.
+//
+// The average (rather than the last interval) is what keeps a **stall** from
+// loosening the bound: a stalled connection produces no new decodes at all, so
+// the average stays at the server's normal rate and the capture ages out
+// against it.
+struct SnapshotClock {
+  std::uint64_t last_ms{0};
+  std::uint64_t average_ms{0};
+  bool seen{false};
+};
+
+// A decode happened at `now_ms`: fold the interval since the previous one
+// into the average.
+inline void observe_decode(SnapshotClock& clock, std::uint64_t now_ms) noexcept {
+  if (clock.seen && now_ms > clock.last_ms) {
+    const std::uint64_t interval = now_ms - clock.last_ms;
+    clock.average_ms = clock.average_ms == 0 ? interval : (clock.average_ms * 3 + interval) / 4;
+  }
+  clock.last_ms = now_ms;
+  clock.seen = true;
+}
+
+// The staleness bound: the observed snapshot interval, with the floor.
+[[nodiscard]] inline auto snapshot_bound_ms(const SnapshotClock& clock) noexcept -> std::uint64_t {
+  return clock.average_ms > k_min_snapshot_interval_ms ? clock.average_ms
+                                                       : k_min_snapshot_interval_ms;
+}
+
 // --- the validity rule ----------------------------------------------------
 
 // How old a capture may be before it is refused, in milliseconds on the
 // caller's monotonic clock.
 //
-// **One client frame** (16 ms at 60 Hz) — and, just as much, **one of the
-// server's 64 Hz ticks** (15.6 ms): the capture must describe the server's
-// animation of the tick that is being drawn. A capture that is older has
-// aged out (a stalled connection, a dead player, a paused game) and the
-// server's value then describes a pose it has left behind — writing it over
-// the client's fresh prediction would move the local hitboxes *backwards*,
-// which is worse than not fixing them at all.
+// The bound is the **observed snapshot interval** (`snapshot_bound_ms`): the
+// server's value is as old as the time its snapshots take to arrive, and a
+// capture older than that has been superseded by a snapshot that did not
+// arrive - the connection stalled. Writing it over the client's fresh
+// prediction would then move the local hitboxes *backwards*, which is worse
+// than not fixing them at all.
 //
 // The bound is on the **age of the data**, not on the time since the
 // receipt: a decode re-stamps the capture, so the age is measured from the
 // decode that produced the values.
-inline constexpr std::uint64_t k_max_capture_age_ms = 16;
 
 // The captured state: the server's values for the tracked slots, the
 // generation they were captured at, the generation each slot was last
@@ -259,52 +302,77 @@ inline void store(Capture& capture, std::uintptr_t controller,
   return capture.valid && capture.controller != 0 && capture.controller == controller;
 }
 
-// True when the capture is **fresh**: it exists and it has not aged out.
-// (Whether it was already re-applied for a given slot is a separate
-// question — see `may_reapply`.)
-[[nodiscard]] inline auto capture_is_fresh(const Capture& capture, std::uint64_t now_ms) noexcept
-    -> bool {
-  return capture.valid && (now_ms - capture.captured_at_ms) <= k_max_capture_age_ms;
-}
+// Why a re-apply was refused. The operator has to be able to tell "the
+// codec has not run yet" from "every capture aged out" (a stalled
+// connection) and from "the capture was already used" (the specification's
+// once-per-capture rule) — otherwise a feature that refuses everything
+// looks like a feature that is merely idle.
+enum class Refusal : std::size_t {
+  none = 0,         // the re-apply is allowed
+  no_capture,       // the codec has not run yet
+  stale,            // the capture aged out (the snapshots stopped)
+  already_applied,  // this capture was already re-applied for this slot
+  controller,       // the live controller is not the one the capture came from
+  not_tracked,      // the slot is not one of the animfix's own
+};
 
-// May the captured value for `slot` be re-applied now?
+// The decision for one slot.
+struct Decision {
+  bool reapply = false;
+  Refusal refusal = Refusal::none;
+};
+
+// May the captured value for `slot` be re-applied now, and if not, why not?
 //
-// Three conditions, all required:
+// Four conditions, all required:
 //   * there is a capture at all (the codec has run at least once),
-//   * the capture is **not stale** (it is younger than
-//     `k_max_capture_age_ms`), and
+//   * the capture belongs to the **live** controller (the pawn has not
+//     respawned since it was decoded),
+//   * the capture is **not stale** (it is younger than the observed snapshot
+//     interval), and
 //   * the capture has **not been re-applied for this slot yet**.
 //
 // The last one is the specification's rule: *"a captured value may only be
 // re-applied if it was captured **this** frame"*. A capture corrects a slot
 // at most once; only a newer decode (a newer generation) can correct it
 // again. That is what keeps a capture from being written over the client's
-// fresh prediction again and again, and it is why the bound above can be
-// tight: the correction lands in the same tick as the decode.
-[[nodiscard]] inline auto may_reapply(const Capture& capture, Slot slot,
-                                      std::uint64_t now_ms) noexcept -> bool {
+// fresh prediction again and again.
+[[nodiscard]] inline auto decide(const Capture& capture, Slot slot, std::uint64_t now_ms,
+                                 std::uint64_t max_age_ms, std::uintptr_t controller) noexcept
+    -> Decision {
+  Decision decision{};
   if (!capture.valid) {
-    return false;
+    decision.refusal = Refusal::no_capture;
+    return decision;
+  }
+  if (capture.controller != controller) {
+    decision.refusal = Refusal::controller;
+    return decision;
+  }
+  if ((now_ms - capture.captured_at_ms) > max_age_ms) {
+    decision.refusal = Refusal::stale;
+    return decision;
   }
   const std::size_t position = slot_position(slot);
   if (position >= k_tracked_slot_count) {
-    return false;
+    decision.refusal = Refusal::not_tracked;
+    return decision;
   }
   if (capture.applied[position] >= capture.generation) {
-    return false;  // this capture was already re-applied for this slot
+    decision.refusal = Refusal::already_applied;
+    return decision;
   }
-  return (now_ms - capture.captured_at_ms) <= k_max_capture_age_ms;
+  decision.reapply = true;
+  return decision;
 }
 
-// Take the captured value for `slot` if the validity rule allows it. The
-// slot is marked as re-applied, so the same capture is never used twice.
-[[nodiscard]] inline auto take(Capture& capture, Slot slot, std::uint64_t now_ms) noexcept
-    -> std::optional<float> {
-  if (!may_reapply(capture, slot, now_ms)) {
-    return std::nullopt;
+// Mark the slot as re-applied: the capture is now consumed for it.
+inline void mark_applied(Capture& capture, Slot slot) noexcept {
+  const std::size_t position = slot_position(slot);
+  if (position >= k_tracked_slot_count) {
+    return;
   }
-  capture.applied[slot_position(slot)] = capture.generation;
-  return capture.values[slot_position(slot)];
+  capture.applied[position] = capture.generation;
 }
 
 // --- the evidence ---------------------------------------------------------

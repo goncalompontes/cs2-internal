@@ -10,18 +10,22 @@
 // The failure this test exists for is the one that would make the animfix
 // **worse** than no animfix at all: a **stale** capture — one that is older
 // than the client's fresh prediction — written over that prediction. The
-// validity rule is what prevents it, so the rule is pinned here, in both of
+// validity rule is what prevents it, so the rule is pinned here, in all of
 // its clauses:
 //
 //   * a capture is **consumed once per slot** ("captured *this* frame"): the
 //     animfix corrects a slot at most once per capture, so a value that has
 //     already been written over the fresh prediction is never written again;
 //   * a capture that has **aged out** is refused outright — and the bound is
-//     pinned against a **literal**, not against the constant, so raising the
-//     constant cannot make the suite pass.
+//     the **observed snapshot interval** (the server's rate), pinned against
+//     literals, so it cannot be loosened without the test noticing.
 //
-// The engine's layout is pinned too: the slot offsets, the stride, the four
-// slots the server replicates as floats, and the shape of the graph
+// The refusal **reasons** are pinned too: the operator has to be able to
+// tell "the codec has not run yet" from "every capture aged out" and from
+// "the capture was already used".
+//
+// The engine's layout is pinned as well: the slot offsets, the stride, the
+// four slots the server replicates as floats, and the shape of the graph
 // parameter the correction writes. Those are the numbers the engine access
 // uses to read the server's values and to find the parameter, so a wrong
 // offset here would silently read the wrong field.
@@ -42,18 +46,15 @@ namespace {
 
 namespace animfix = cs2::control::animfix;
 
-// A detour that is never called: the seam test only installs and removes the
-// hook.
-auto probe_detour(void*) -> void {}
-
 constexpr float k_epsilon = 0.001F;
 
-// The client frame the capture must not be older than (one 60 Hz frame, and
-// just as much one of the server's 64 Hz ticks). The literal is the point:
-// the test must not derive the ages it checks from the constant.
-constexpr std::uint64_t k_one_frame_ms = 16;
-// An age that is plainly past the frame: the capture must be refused.
-constexpr std::uint64_t k_two_frames_ms = 31;
+// The staleness bound the tests use: a 64 Hz server's snapshot interval.
+constexpr std::uint64_t k_interval_ms = 16;
+// An age that is plainly past the interval: the capture must be refused.
+constexpr std::uint64_t k_two_intervals_ms = 2 * k_interval_ms;
+
+// The controller the captures below belong to.
+constexpr std::uintptr_t k_controller = 0x1000;
 
 auto nearly(float value, float expected) -> bool {
   return std::fabs(value - expected) <= k_epsilon;
@@ -62,6 +63,13 @@ auto nearly(float value, float expected) -> bool {
 // The server's values for the four tracked slots.
 auto server_values(float aim_yaw) -> std::array<float, animfix::k_tracked_slot_count> {
   return {12.5F, 0.25F, -3.0F, aim_yaw};
+}
+
+// A capture of the server's values at `now_ms`, for the controller above.
+auto captured_at(std::uint64_t now_ms, float aim_yaw = 42.0F) -> animfix::Capture {
+  animfix::Capture capture{};
+  animfix::store(capture, k_controller, server_values(aim_yaw), now_ms);
+  return capture;
 }
 
 // --- the engine's layout ------------------------------------------------------
@@ -90,126 +98,6 @@ void test_the_parameter_layout_is_the_engines() {
   assert(animfix::k_node_array_offset == 0x10);
   assert(animfix::k_parameter_stride == 8);
   assert(animfix::k_parameter_value_offset == 0x18);
-}
-
-// --- the validity rule --------------------------------------------------------
-
-// Nothing is re-applied before the first capture: the animfix has nothing of
-// the server's to offer yet.
-void test_nothing_is_reapplied_before_the_first_capture() {
-  animfix::Capture capture{};
-  assert(!animfix::may_reapply(capture, animfix::Slot::aim_yaw, 1000));
-  assert(!animfix::take(capture, animfix::Slot::aim_yaw, 1000).has_value());
-}
-
-// A fresh capture is re-applied — once.
-void test_a_fresh_capture_is_reapplied() {
-  animfix::Capture capture{};
-  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
-  const auto value = animfix::take(capture, animfix::Slot::aim_yaw, 1000);
-  assert(value.has_value());
-  assert(nearly(*value, 42.0F));
-}
-
-// **The specification's rule**: a capture is consumed once per slot. The
-// second re-apply of the same capture is refused, so a value that has already
-// been written over the client's fresh prediction is never written again —
-// the animfix cannot make the pose worse than the prediction by repeating
-// itself.
-void test_a_capture_is_consumed_once_per_slot() {
-  animfix::Capture capture{};
-  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
-  assert(animfix::take(capture, animfix::Slot::aim_yaw, 1000).has_value());
-  // The same capture, again: refused.
-  assert(!animfix::take(capture, animfix::Slot::aim_yaw, 1000).has_value());
-  // The consumption is **per slot**: the other slots of the same capture are
-  // still pending.
-  assert(animfix::take(capture, animfix::Slot::aim_pitch, 1000).has_value());
-  assert(animfix::take(capture, animfix::Slot::flashed, 1000).has_value());
-  assert(animfix::take(capture, animfix::Slot::air_height, 1000).has_value());
-  // And now every slot of that capture is consumed.
-  assert(!animfix::take(capture, animfix::Slot::aim_pitch, 1000).has_value());
-}
-
-// A **new** capture re-opens the slots: the server sent a new value, so the
-// animfix may correct the slot again.
-void test_a_new_capture_reopens_the_slots() {
-  animfix::Capture capture{};
-  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
-  assert(animfix::take(capture, animfix::Slot::aim_yaw, 1000).has_value());
-  animfix::store(capture, 0x1000, server_values(43.0F), 1016);
-  const auto value = animfix::take(capture, animfix::Slot::aim_yaw, 1016);
-  assert(value.has_value());
-  assert(nearly(*value, 43.0F));
-}
-
-// A capture that has **aged out** is refused, even though it was never
-// re-applied. This is the stalled-connection case: the server's value is
-// older than the client's own prediction, so writing it would make the pose
-// worse, not better.
-//
-// The ages are **literals** (a frame and two frames), not the constant: a
-// test that derives its ages from the bound cannot fail when the bound is
-// raised.
-void test_an_aged_out_capture_is_refused() {
-  animfix::Capture capture{};
-  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
-  // One frame later: still fresh.
-  assert(animfix::may_reapply(capture, animfix::Slot::aim_yaw, 1000 + k_one_frame_ms));
-  // Two frames later: aged out.
-  assert(!animfix::may_reapply(capture, animfix::Slot::aim_yaw, 1000 + k_two_frames_ms));
-  assert(!animfix::take(capture, animfix::Slot::aim_yaw, 1000 + k_two_frames_ms).has_value());
-}
-
-// The bound is **one client frame** — and just as much one of the server's
-// 64 Hz ticks. A looser bound would let a capture that is older than the
-// prediction be written over it.
-void test_the_bound_is_one_frame() {
-  assert(animfix::k_max_capture_age_ms <= k_one_frame_ms);
-  assert(animfix::k_max_capture_age_ms > 0);
-}
-
-// A capture that aged out and is then **refreshed** by a new one works
-// again: the animfix recovers as soon as the connection does.
-void test_a_refreshed_capture_works_again() {
-  animfix::Capture capture{};
-  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
-  const std::uint64_t too_late = 1000 + k_two_frames_ms;
-  assert(!animfix::take(capture, animfix::Slot::aim_yaw, too_late).has_value());
-  animfix::store(capture, 0x1000, server_values(44.0F), too_late);
-  const auto value = animfix::take(capture, animfix::Slot::aim_yaw, too_late);
-  assert(value.has_value());
-  assert(nearly(*value, 44.0F));
-}
-
-// The capture is a **copy**: the values the animfix hands back are the ones
-// the server sent, not the ones the slots hold afterwards. (The engine side
-// copies them out of the controller; here the point is that the capture
-// keeps its own copy.)
-void test_the_capture_keeps_its_own_copy() {
-  animfix::Capture capture{};
-  std::array<float, animfix::k_tracked_slot_count> values = server_values(42.0F);
-  animfix::store(capture, 0x1000, values, 1000);
-  values[animfix::slot_position(animfix::Slot::aim_yaw)] = 999.0F;
-  const auto value = animfix::take(capture, animfix::Slot::aim_yaw, 1000);
-  assert(value.has_value());
-  assert(nearly(*value, 42.0F));
-}
-
-// The freshness of the capture is a question of its own: it is fresh while
-// it has not aged out, whether or not it was already re-applied.
-void test_the_freshness_of_a_capture() {
-  animfix::Capture capture{};
-  assert(!animfix::capture_is_fresh(capture, 1000));  // no capture at all
-  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
-  assert(animfix::capture_is_fresh(capture, 1000));
-  assert(animfix::capture_is_fresh(capture, 1000 + k_one_frame_ms));
-  assert(!animfix::capture_is_fresh(capture, 1000 + k_two_frames_ms));
-  // A consumed capture is still fresh — it is simply no longer usable for
-  // that slot.
-  assert(animfix::take(capture, animfix::Slot::aim_yaw, 1000).has_value());
-  assert(animfix::capture_is_fresh(capture, 1000));
-  assert(!animfix::may_reapply(capture, animfix::Slot::aim_yaw, 1000));
 }
 
 // --- the engine's own guard --------------------------------------------------
@@ -247,6 +135,142 @@ void test_the_engines_own_guard_is_reproduced() {
   assert(animfix::value_is_writable(-largest));
 }
 
+// --- the staleness bound ----------------------------------------------------
+
+// The bound is the **observed snapshot interval** — the server's rate — not
+// the client's frame rate: the server's value is as old as the time its
+// snapshots take to arrive. A server that sends at 30 Hz delivers values
+// that are up to 33 ms old, and refusing them because the client draws at
+// 60 Hz would make the animfix inert everywhere but on the default rate.
+void test_the_bound_is_the_observed_snapshot_interval() {
+  animfix::SnapshotClock clock{};
+  // Before the first decode there is no interval: the floor applies.
+  assert(animfix::snapshot_bound_ms(clock) == animfix::k_min_snapshot_interval_ms);
+  // A 64 Hz server: the interval is ~16 ms.
+  animfix::observe_decode(clock, 1000);
+  assert(animfix::snapshot_bound_ms(clock) == animfix::k_min_snapshot_interval_ms);
+  animfix::observe_decode(clock, 1016);
+  assert(animfix::snapshot_bound_ms(clock) == 16);
+  // A 30 Hz server: the interval is ~33 ms, and the bound follows it.
+  animfix::SnapshotClock slow{};
+  animfix::observe_decode(slow, 1000);
+  animfix::observe_decode(slow, 1033);
+  assert(animfix::snapshot_bound_ms(slow) == 33);
+  // A **stall** must not loosen the bound: a stalled connection produces no
+  // new decodes at all, so the average stays at the server's normal rate and
+  // the capture ages out against it. (A single late snapshot does move the
+  // average - the server really did take that long - but a stall is the
+  // absence of snapshots, and that is what must not widen the window.)
+  const std::uint64_t bound_before = animfix::snapshot_bound_ms(clock);
+  // ... time passes, no decode ...
+  assert(animfix::snapshot_bound_ms(clock) == bound_before);
+  // And the capture ages out against it.
+  const animfix::Capture stalled = captured_at(1000);
+  assert(!animfix::decide(stalled, animfix::Slot::aim_yaw, 1000 + bound_before + 1, bound_before,
+                          k_controller)
+              .reapply);
+}
+
+// --- the validity rule --------------------------------------------------------
+
+// Nothing is re-applied before the first capture: the animfix has nothing of
+// the server's to offer yet.
+void test_nothing_is_reapplied_before_the_first_capture() {
+  const animfix::Capture capture{};
+  const animfix::Decision decision =
+      animfix::decide(capture, animfix::Slot::aim_yaw, 1000, k_interval_ms, k_controller);
+  assert(!decision.reapply);
+  assert(decision.refusal == animfix::Refusal::no_capture);
+}
+
+// A fresh capture is re-applied.
+void test_a_fresh_capture_is_reapplied() {
+  animfix::Capture capture = captured_at(1000);
+  const animfix::Decision decision =
+      animfix::decide(capture, animfix::Slot::aim_yaw, 1000, k_interval_ms, k_controller);
+  assert(decision.reapply);
+  assert(decision.refusal == animfix::Refusal::none);
+}
+
+// A capture that has **aged out** is refused, even though it was never
+// re-applied. This is the stalled-connection case: the server's value is
+// older than the client's own prediction, so writing it would make the pose
+// worse, not better.
+//
+// The ages are **literals** (an interval and two), not the constant: a test
+// that derives its ages from the bound cannot fail when the bound is
+// changed.
+void test_an_aged_out_capture_is_refused() {
+  const animfix::Capture capture = captured_at(1000);
+  // One interval later: still fresh.
+  assert(animfix::decide(capture, animfix::Slot::aim_yaw, 1000 + k_interval_ms, k_interval_ms,
+                         k_controller)
+             .reapply);
+  // Two intervals later: aged out.
+  const animfix::Decision late = animfix::decide(
+      capture, animfix::Slot::aim_yaw, 1000 + k_two_intervals_ms, k_interval_ms, k_controller);
+  assert(!late.reapply);
+  assert(late.refusal == animfix::Refusal::stale);
+}
+
+// The refusal reasons are distinguishable: the operator has to be able to
+// tell "the codec has not run yet" from "every capture aged out" and from
+// "the capture was already used".
+void test_the_refusal_reasons_are_distinguishable() {
+  animfix::Capture capture = captured_at(1000);
+  // A capture for another controller (the pawn respawned).
+  const animfix::Decision other =
+      animfix::decide(capture, animfix::Slot::aim_yaw, 1000, k_interval_ms, 0x2000);
+  assert(!other.reapply);
+  assert(other.refusal == animfix::Refusal::controller);
+  // A capture that aged out.
+  const animfix::Decision aged = animfix::decide(
+      capture, animfix::Slot::aim_yaw, 1000 + k_two_intervals_ms, k_interval_ms, k_controller);
+  assert(!aged.reapply);
+  assert(aged.refusal == animfix::Refusal::stale);
+  // A capture that was already re-applied for this slot.
+  animfix::mark_applied(capture, animfix::Slot::aim_yaw);
+  const animfix::Decision used =
+      animfix::decide(capture, animfix::Slot::aim_yaw, 1000, k_interval_ms, k_controller);
+  assert(!used.reapply);
+  assert(used.refusal == animfix::Refusal::already_applied);
+  // The other slot of the same capture is still pending.
+  assert(animfix::decide(capture, animfix::Slot::aim_pitch, 1000, k_interval_ms, k_controller)
+             .reapply);
+}
+
+// The specification's rule: a capture corrects a slot **at most once**, and
+// only a newer decode (a newer generation) can correct it again.
+void test_a_capture_is_consumed_once_per_slot() {
+  animfix::Capture capture = captured_at(1000);
+  assert(
+      animfix::decide(capture, animfix::Slot::aim_yaw, 1000, k_interval_ms, k_controller).reapply);
+  animfix::mark_applied(capture, animfix::Slot::aim_yaw);
+  // The same capture, again: refused.
+  assert(
+      !animfix::decide(capture, animfix::Slot::aim_yaw, 1000, k_interval_ms, k_controller).reapply);
+  // The consumption is **per slot**: the other slots of the same capture are
+  // still pending.
+  assert(animfix::decide(capture, animfix::Slot::aim_pitch, 1000, k_interval_ms, k_controller)
+             .reapply);
+  // A **new** capture re-opens the slots.
+  animfix::store(capture, k_controller, server_values(43.0F), 1016);
+  assert(
+      animfix::decide(capture, animfix::Slot::aim_yaw, 1016, k_interval_ms, k_controller).reapply);
+}
+
+// The capture is a **copy**: the values the animfix hands back are the ones
+// the server sent, not the ones the slots hold afterwards. (The engine side
+// copies them out of the controller; here the point is that the capture
+// keeps its own copy.)
+void test_the_capture_keeps_its_own_copy() {
+  animfix::Capture capture{};
+  std::array<float, animfix::k_tracked_slot_count> values = server_values(42.0F);
+  animfix::store(capture, k_controller, values, 1000);
+  values[animfix::slot_position(animfix::Slot::aim_yaw)] = 999.0F;
+  assert(nearly(capture.values[animfix::slot_position(animfix::Slot::aim_yaw)], 42.0F));
+}
+
 // --- the controller the capture belongs to -----------------------------------
 
 // The write goes to the graph parameters of the **live** controller. A local
@@ -258,10 +282,10 @@ void test_the_engines_own_guard_is_reproduced() {
 void test_the_capture_must_belong_to_the_live_controller() {
   animfix::Capture capture{};
   // No capture: it belongs to nothing.
-  assert(!animfix::capture_matches_controller(capture, 0x1000));
-  animfix::store(capture, 0x1000, server_values(42.0F), 1000);
+  assert(!animfix::capture_matches_controller(capture, k_controller));
+  animfix::store(capture, k_controller, server_values(42.0F), 1000);
   // The controller the capture came from: it matches.
-  assert(animfix::capture_matches_controller(capture, 0x1000));
+  assert(animfix::capture_matches_controller(capture, k_controller));
   // A different controller (the pawn respawned): it does not.
   assert(!animfix::capture_matches_controller(capture, 0x2000));
   // The live controller is not known (0): it does not.
@@ -315,6 +339,10 @@ void test_the_four_slots_must_be_distinct() {
 
 // --- the seam's prologue ----------------------------------------------------
 
+// A detour that is never called: the seam test only installs and removes the
+// hook.
+auto probe_detour(void*) -> void {}
+
 // **The seam must be hookable by the repository's own relocator, at any
 // address distance.** The animfix's first cut hooked the AG2 parameter
 // setter, whose prologue ends in a RIP-relative load: the relocator rewrites
@@ -352,7 +380,6 @@ void test_the_seams_prologues_are_hookable() {
     bool installed = false;
     bool rewritten = false;
   };
-  // A detour that never runs: the hook is only installed and removed.
   const auto detour = reinterpret_cast<void*>(&probe_detour);
   const auto probe = [detour](const unsigned char* prologue, std::size_t size) -> Outcome {
     constexpr std::size_t k_buffer = 64;
@@ -393,7 +420,7 @@ void test_the_seams_prologues_are_hookable() {
   assert(setter.rewritten);
 }
 
-// --- the evidence -------------------------------------------------------------
+// --- the evidence ---------------------------------------------------------
 
 // The operator's evidence: the signed difference between the server's aim
 // yaw and the client's predicted one, in degrees.
@@ -410,16 +437,14 @@ void test_the_aim_yaw_difference_is_signed_and_wrapped() {
 auto main() -> int {
   test_the_slot_layout_is_the_engines();
   test_the_parameter_layout_is_the_engines();
+  test_the_engines_own_guard_is_reproduced();
+  test_the_bound_is_the_observed_snapshot_interval();
   test_nothing_is_reapplied_before_the_first_capture();
   test_a_fresh_capture_is_reapplied();
-  test_a_capture_is_consumed_once_per_slot();
-  test_a_new_capture_reopens_the_slots();
   test_an_aged_out_capture_is_refused();
-  test_the_bound_is_one_frame();
-  test_the_freshness_of_a_capture();
-  test_a_refreshed_capture_works_again();
+  test_the_refusal_reasons_are_distinguishable();
+  test_a_capture_is_consumed_once_per_slot();
   test_the_capture_keeps_its_own_copy();
-  test_the_engines_own_guard_is_reproduced();
   test_the_capture_must_belong_to_the_live_controller();
   test_only_the_animfixs_own_slots_are_recognised();
   test_the_four_slots_must_be_distinct();

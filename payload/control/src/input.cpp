@@ -1578,13 +1578,18 @@ void Input::animfix_capture(void* controller) noexcept {
     animfix_targets_valid_.store(false);
     return;
   }
+  const std::uint64_t now = animfix_now_ms();
   {
     const std::lock_guard<std::mutex> lock(animfix_mutex_);
     animfix_targets_ = targets;
-    animfix::store(animfix_capture_, local, values, animfix_now_ms());
+    animfix::store(animfix_capture_, local, values, now);
+    // The server's snapshot rate: the animfix's staleness bound is measured
+    // against it (see `animfix::snapshot_bound_ms`).
+    animfix::observe_decode(animfix_clock_, now);
   }
   animfix_targets_valid_.store(true);
   animfix_captures_.fetch_add(1);
+  animfix_snapshot_interval_.store(animfix_clock_.average_ms);
   animfix_server_yaw_.store(values[animfix::slot_position(animfix::Slot::aim_yaw)]);
 }
 
@@ -1608,44 +1613,45 @@ void Input::animfix_apply() noexcept {
   // freed memory — a corruption, which is worse than a fault.
   const std::uintptr_t controller = animfix_controller();
   const std::uint64_t now = animfix_now_ms();
-  {
-    const std::lock_guard<std::mutex> lock(animfix_mutex_);
-    if (!animfix::capture_matches_controller(animfix_capture_, controller)) {
-      // No capture, a capture for another controller, or one that aged out:
-      // nothing may be written over the client's fresh prediction. Counted
-      // once per anim tick.
-      animfix_skips_.fetch_add(1);
-      return;
-    }
-    if (!animfix::capture_is_fresh(animfix_capture_, now)) {
-      animfix_skips_.fetch_add(1);
-      return;
-    }
-  }
   std::array<animfix::Target, animfix::k_tracked_slot_count> targets{};
+  std::uint64_t bound = 0;
   {
     const std::lock_guard<std::mutex> lock(animfix_mutex_);
     targets = animfix_targets_;
+    bound = animfix::snapshot_bound_ms(animfix_clock_);
   }
+  bool corrected = false;
   for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
     const animfix::Slot slot = animfix::k_tracked_slots[i];
+    float server = 0.0F;
+    {
+      const std::lock_guard<std::mutex> lock(animfix_mutex_);
+      const animfix::Decision decision =
+          animfix::decide(animfix_capture_, slot, now, bound, controller);
+      if (!decision.reapply) {
+        count_animfix_refusal(decision.refusal);
+        continue;
+      }
+      animfix::mark_applied(animfix_capture_, slot);
+      server = animfix_capture_.values[animfix::slot_position(slot)];
+    }
     // The graph parameter's address: node -> the parameter array -> the
     // parameter object -> the value.
     std::uintptr_t array = 0;
     if (!cs2::game::read(targets[i].node + animfix::k_node_array_offset, array) || array == 0) {
-      return;
+      continue;
     }
     std::uintptr_t object = 0;
     const std::uint64_t element =
         array + static_cast<std::uint64_t>(targets[i].index) * animfix::k_parameter_stride;
     if (!cs2::game::read(element, object) || object == 0) {
-      return;
+      continue;
     }
     const std::uintptr_t value_address = object + animfix::k_parameter_value_offset;
     // The client's own prediction — the value that is in the graph now.
     float current = 0.0F;
     if (!cs2::game::read(value_address, current)) {
-      return;
+      continue;
     }
     if (slot == animfix::Slot::aim_yaw) {
       animfix_predicted_yaw_.store(current);
@@ -1653,15 +1659,6 @@ void Input::animfix_apply() noexcept {
       // and the client's predicted one (the value the graph held). Until
       // then the status says "no data" rather than "no divergence".
       animfix_data_valid_.store(true);
-    }
-    float server = 0.0F;
-    {
-      const std::lock_guard<std::mutex> lock(animfix_mutex_);
-      const auto captured = animfix::take(animfix_capture_, slot, now);
-      if (!captured.has_value()) {
-        continue;  // already re-applied for this slot
-      }
-      server = *captured;
     }
     // The engine's own guard: a graph parameter must never hold a NaN, an
     // infinity or a value outside the engine's range. The captured value is
@@ -1675,7 +1672,34 @@ void Input::animfix_apply() noexcept {
       continue;
     }
     animfix_applies_.fetch_add(1);
-    animfix_acted_.store(true);
+    corrected = true;
+  }
+  if (!corrected) {
+    // Nothing was corrected in this anim tick: count it, with the reason of
+    // the first refusal, so the operator can tell "the codec has not run
+    // yet" from "every capture aged out".
+    animfix_skips_.fetch_add(1);
+  }
+  animfix_acted_.store(corrected);
+}
+
+void Input::count_animfix_refusal(animfix::Refusal refusal) noexcept {
+  switch (refusal) {
+    case animfix::Refusal::no_capture:
+      animfix_skip_no_capture_.fetch_add(1);
+      break;
+    case animfix::Refusal::stale:
+      animfix_skip_stale_.fetch_add(1);
+      break;
+    case animfix::Refusal::already_applied:
+      animfix_skip_applied_.fetch_add(1);
+      break;
+    case animfix::Refusal::controller:
+      animfix_skip_controller_.fetch_add(1);
+      break;
+    case animfix::Refusal::not_tracked:
+    case animfix::Refusal::none:
+      break;
   }
 }
 

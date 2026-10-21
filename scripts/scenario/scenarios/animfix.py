@@ -101,6 +101,18 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
         "captures_during_window": observed_captures,
         "applies_during_window": observed_applies,
         "skips_during_window": observed_skips,
+        # The refusals, by reason — so "the codec has not run yet" is
+        # distinguishable from "every capture aged out" (a stalled
+        # connection) and from "the capture was already used".
+        "skips_no_capture": int(status.get("animfix_skip_no_capture") or 0),
+        "skips_stale": int(status.get("animfix_skip_stale") or 0),
+        "skips_applied": int(status.get("animfix_skip_applied") or 0),
+        "skips_controller": int(status.get("animfix_skip_controller") or 0),
+        # The server's snapshot rate: the staleness bound is measured
+        # against it, so this is how old the server's values may be.
+        "snapshot_interval_ms": int(status.get("animfix_snapshot_interval_ms") or 0),
+        # The values the engine's own guard refused. It should be zero.
+        "rejected": int(status.get("animfix_rejected") or 0),
         "acted_samples": acted_samples,
         "data_valid": bool(status.get("animfix_data_valid")),
         "server_aim_yaw": status.get("animfix_server_aim_yaw"),
@@ -132,7 +144,10 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
     if observed_applies == 0:
         raise SessionError(
             "the animfix captured the server's values but never corrected the "
-            f"graph (applies +{observed_applies}, skips +{observed_skips}): {result}"
+            f"graph (applies +{observed_applies}, skips +{observed_skips}, "
+            f"no capture {result['skips_no_capture']}, aged out "
+            f"{result['skips_stale']}, already used {result['skips_applied']}, "
+            f"controller changed {result['skips_controller']}): {result}"
         )
 
     rate = observed_applies / watch if watch > 0 else float(observed_applies)
