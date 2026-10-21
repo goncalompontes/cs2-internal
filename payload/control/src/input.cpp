@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -30,6 +31,21 @@ constexpr std::size_t k_max_vtable_slots = 96;
 
 // The one Input the payload owns, for the static hook detour.
 Input* g_active = nullptr;
+
+// The animfix's two detours need a call-through target that survives the
+// `Input` (the same pattern as `g_active` above: the detour is a plain
+// function pointer the engine holds, so it cannot be a member).
+void* g_animfix_codec_original = nullptr;
+void* g_animfix_setter_original = nullptr;
+
+// The animfix's clock: a monotonic millisecond counter. The capture's age
+// is measured with it (`cs2/control/animfix.hpp`'s validity rule).
+[[nodiscard]] auto animfix_now_ms() noexcept -> std::uint64_t {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
 
 auto flags_offset() noexcept -> std::uint32_t {
 #if defined(CS2_CONTROL_HAVE_CLIENT_SCHEMA)
@@ -1218,6 +1234,178 @@ void __fastcall Input::create_move_input_detour(void* self, int slot, char activ
   input->write_raw_angles();
 }
 
+// --- the local animfix (`docs/re/animfix.md`) -----------------------------
+//
+// The engine's ground truth (measured on the live `client.dll`, 2026-10-21;
+// the measurement is appended to `docs/re/animfix.md` as "§9 The ordering
+// measurement"):
+//
+//   * the per-class netvar **codec** decodes the **server's** replicated AG2
+//     graph inputs into the local controller's slots. Its first argument is
+//     the destination controller; the decoded value lands at the **slot
+//     base** (`+0x470` air height, `+0x4b8` flashed, `+0x4d0` aim pitch,
+//     `+0x4e8` aim yaw — the four **float** slots it decodes);
+//   * the **client's prediction** (`ReflectPawnState` → `ReflectAim` /
+//     `ReflectMove`) pushes the *client's* values into the AG2 graph through
+//     the parameter **setter**, for exactly those four float slots. It never
+//     writes the replicated value in the slot, so **the server's value never
+//     reaches the graph** — the prediction is the only writer.
+//
+// The animfix therefore hooks the **setter** and hands it the server's value
+// for the local player's four float slots. That seam needs **no ordering
+// assumption**: the correction lands exactly where the prediction writes, so
+// it does not matter whether the snapshot decode runs before or after the
+// prediction inside one frame. The codec hook only *captures* the server's
+// values (a copy — the slots are rewritten every frame).
+//
+// The enum/bool slots the codec also decodes (`m_moveType`, `m_flinchHead`,
+// …) are **not** covered: the prediction pushes those into the graph with
+// direct stores, which no available seam intercepts. The **anim state**
+// divergence (the client's own move state and turn angle) stays open too —
+// see the report.
+
+void __fastcall Input::animfix_codec_detour(void* dst, void* src, void* schema) noexcept {
+  // The original runs **first**: the codec writes the server's values into
+  // the slots, and the capture copies them out afterwards.
+  if (g_animfix_codec_original != nullptr) {
+    reinterpret_cast<animfix_codec_fn>(g_animfix_codec_original)(dst, src, schema);
+  }
+  Input* input = g_active;
+  if (input == nullptr || !input->animfix_enabled_.load()) {
+    return;
+  }
+  input->animfix_capture(dst);
+}
+
+void __fastcall Input::animfix_setter_detour(void* node, std::int16_t index,
+                                             const float* value) noexcept {
+  float substituted = value != nullptr ? *value : 0.0F;
+  Input* input = g_active;
+  if (input != nullptr && input->animfix_enabled_.load()) {
+    input->animfix_substitute(node, index, substituted);
+  }
+  if (g_animfix_setter_original != nullptr) {
+    reinterpret_cast<animfix_setter_fn>(g_animfix_setter_original)(node, index, &substituted);
+  }
+}
+
+auto Input::animfix_controller() const noexcept -> std::uintptr_t {
+  // `C_CSPlayerPawn::m_AnimationState` (the `CCS2PawnGraphController*`) is
+  // at `+0x34f8` (`docs/re/animfix.md` §7 step 1: `ReflectPawnState` is
+  // called with `*(pawn + 0x34f8)`).
+  constexpr std::size_t k_controller_offset = 0x34f8;
+  const std::uintptr_t pawn = local_pawn_.load();
+  if (pawn == 0) {
+    return 0;
+  }
+  std::uintptr_t controller = 0;
+  if (!cs2::game::read(pawn + k_controller_offset, controller)) {
+    return 0;
+  }
+  return controller;
+}
+
+void Input::animfix_capture(void* controller) noexcept {
+  const std::uintptr_t local = animfix_controller();
+  if (local == 0 || controller != reinterpret_cast<void*>(local)) {
+    return;  // another entity's controller
+  }
+  std::array<float, animfix::k_tracked_slot_count> values{};
+  std::array<animfix::Target, animfix::k_tracked_slot_count> targets{};
+  for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
+    const animfix::Slot slot = animfix::k_tracked_slots[i];
+    const std::size_t offset = animfix::slot_offset(slot);
+    if (!cs2::game::read(local + offset, values[i])) {
+      return;
+    }
+    std::uintptr_t node = 0;
+    if (!cs2::game::read(local + offset + animfix::slot_node_offset(slot), node)) {
+      return;
+    }
+    std::int16_t index = 0;
+    if (!cs2::game::read(local + offset + animfix::slot_index_offset(slot), index)) {
+      return;
+    }
+    targets[i] = animfix::Target{node, index};
+  }
+  {
+    const std::lock_guard<std::mutex> lock(animfix_mutex_);
+    animfix_targets_ = targets;
+    animfix::store(animfix_capture_, values, animfix_now_ms());
+  }
+  animfix_captures_.fetch_add(1);
+  // "Acted" is relative to the last capture: the animfix has not corrected
+  // the graph since the server's newest values arrived.
+  animfix_acted_.store(false);
+  animfix_server_yaw_.store(values[animfix::slot_position(animfix::Slot::aim_yaw)]);
+}
+
+auto Input::animfix_substitute(void* node, std::int16_t index, float& value) noexcept -> bool {
+  const std::uintptr_t target = reinterpret_cast<std::uintptr_t>(node);
+  const std::lock_guard<std::mutex> lock(animfix_mutex_);
+  const auto slot = animfix::find_slot(animfix_targets_, target, index);
+  if (!slot.has_value()) {
+    return false;  // not one of our slots
+  }
+  if (*slot == animfix::Slot::aim_yaw) {
+    // The client's own prediction — the value the animfix replaces. It is
+    // recorded even when the re-apply is refused: the divergence is the
+    // operator's evidence.
+    animfix_predicted_yaw_.store(value);
+  }
+  const auto captured = animfix::take(animfix_capture_, *slot, animfix_now_ms());
+  if (!captured.has_value()) {
+    animfix_skips_.fetch_add(1);
+    return false;
+  }
+  value = *captured;
+  animfix_applies_.fetch_add(1);
+  animfix_acted_.store(true);
+  return true;
+}
+
+auto Input::animfix_aim_yaw_delta() const noexcept -> float {
+  return animfix::aim_yaw_difference(animfix_server_yaw_.load(), animfix_predicted_yaw_.load());
+}
+
+void Input::animfix_install() noexcept {
+  if (animfix_codec_hook_.installed() && animfix_setter_hook_.installed()) {
+    return;
+  }
+  if (client_base_ == 0) {
+    return;
+  }
+  const OffsetInfo* codec = find_offset("animfix_graph_codec");
+  const OffsetInfo* setter = find_offset("animfix_param_setter");
+  if (codec == nullptr || setter == nullptr || codec->module != "client.dll" ||
+      setter->module != "client.dll") {
+    return;
+  }
+  if (!animfix_setter_hook_.installed()) {
+    const auto error = animfix_setter_hook_.install(
+        reinterpret_cast<void*>(client_base_ + setter->rva),
+        reinterpret_cast<void*>(&Input::animfix_setter_detour));
+    if (error.has_value()) {
+      cs2::game::append_log("[cs2-payload] animfix: the parameter setter is not hookable: " +
+                             std::string(cs2::hooks::to_string(*error)));
+      return;
+    }
+    g_animfix_setter_original = animfix_setter_hook_.original();
+  }
+  if (!animfix_codec_hook_.installed()) {
+    const auto error = animfix_codec_hook_.install(
+        reinterpret_cast<void*>(client_base_ + codec->rva),
+        reinterpret_cast<void*>(&Input::animfix_codec_detour));
+    if (error.has_value()) {
+      cs2::game::append_log("[cs2-payload] animfix: the graph codec is not hookable: " +
+                             std::string(cs2::hooks::to_string(*error)));
+      return;
+    }
+    g_animfix_codec_original = animfix_codec_hook_.original();
+  }
+  cs2::game::append_log("[cs2-payload] animfix: the graph codec and the parameter setter are hooked");
+}
+
 auto Input::current_cmd() noexcept -> void* {
   if (client_base_ == 0 || tick_ == nullptr || array_ == nullptr || sequence_ == nullptr) {
     return nullptr;
@@ -2138,6 +2326,8 @@ void Input::refresh() noexcept {
   }
   g_active = this;
   installed_ = true;
+  // The local animfix's two hooks (the graph codec and the parameter setter).
+  animfix_install();
   cs2::game::append_log("[cs2-payload] input: CCSGOInput::CreateMove hooked (slot " +
                         std::to_string(index) + ")");
 }

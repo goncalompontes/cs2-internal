@@ -288,6 +288,8 @@ auto Service::handle(const std::string& line, std::string& response) noexcept ->
     do_bhop(arguments, out);
   } else if (command == "strafe") {
     do_strafe(arguments, out);
+  } else if (command == "animfix") {
+    do_animfix(arguments, out);
   } else if (command == "aim") {
     do_aim(arguments, out);
   } else if (command == "rage") {
@@ -804,6 +806,18 @@ auto Service::input_status() noexcept -> Json {
   result.set("bhop_holding_ticks", Json::number(static_cast<double>(input_.bhop_holding_ticks())));
   result.set("bhop_air_ticks", Json::number(static_cast<double>(input_.bhop_air_ticks())));
   result.set("input_local_pawn", Json::number(static_cast<double>(input_.local_pawn())));
+  // The local animfix (`docs/re/animfix.md`): what it did, and the evidence
+  // that it does something — the **server's** aim yaw against the **client's
+  // predicted** one. The difference is the divergence the animfix removes.
+  result.set("animfix", Json::boolean(input_.animfix()));
+  result.set("animfix_ready", Json::boolean(input_.animfix_ready()));
+  result.set("animfix_acted", Json::boolean(input_.animfix_acted()));
+  result.set("animfix_captures", Json::number(static_cast<double>(input_.animfix_captures())));
+  result.set("animfix_applies", Json::number(static_cast<double>(input_.animfix_applies())));
+  result.set("animfix_skips", Json::number(static_cast<double>(input_.animfix_skips())));
+  result.set("animfix_server_aim_yaw", Json::number(input_.animfix_server_aim_yaw()));
+  result.set("animfix_predicted_aim_yaw", Json::number(input_.animfix_predicted_aim_yaw()));
+  result.set("animfix_aim_yaw_delta", Json::number(input_.animfix_aim_yaw_delta()));
   result.set("predict_ready", Json::boolean(input_.predict_ready()));
   result.set("predict_runs", Json::number(static_cast<double>(input_.predict_runs())));
   result.set("predicted_landing_tick",
@@ -1036,6 +1050,20 @@ void Service::do_strafe(const Json& args, Json& out) noexcept {
         static_cast<int>(number("subtick", static_cast<float>(input_.strafe_subticks()))));
   }
   input_.set_strafe(on);
+  set_ok(out, input_status());
+}
+
+// The local animfix (`docs/re/animfix.md`): `animfix {"on": true}` makes the
+// **server's** animation win for the local player. It is off by default; the
+// status block reports what it did (the captures, the re-applies, the skips
+// and the aim-yaw divergence).
+void Service::do_animfix(const Json& args, Json& out) noexcept {
+  input_.refresh();
+  bool on = true;
+  if (const Json* arg = args.find("on"); arg != nullptr && arg->is_bool()) {
+    on = arg->as_bool();
+  }
+  input_.set_animfix(on);
   set_ok(out, input_status());
 }
 

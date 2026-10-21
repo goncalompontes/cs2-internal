@@ -290,6 +290,20 @@ control_input_test = executable('control_input_test',
 )
 test('control-input', control_input_test)
 
+# The **local animfix**'s decision logic (which graph-input slots the animfix
+# owns and the validity rule that stops a stale capture from being written
+# over a fresh prediction) - a pure header, so the test compiles it alone.
+# `docs/re/animfix.md` §9.
+control_animfix_test = executable('control_animfix_test',
+  files(
+    'payload/control/tests/test_control_animfix.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+  ],
+)
+test('control-animfix', control_animfix_test)
+
 # The settings **sink** (the payload's entry point) must hand the features the
 # clamped configuration: it used to read the wire fields directly, so a control
 # client's `settings set` could put an out-of-range value into the engine's

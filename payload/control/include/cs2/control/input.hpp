@@ -23,11 +23,15 @@
 // live-validated `console` path is unaffected.
 
 #include <atomic>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 
+#include "cs2/control/animfix.hpp"
 #include "cs2/control/strafe_geometry.hpp"
+#include "cs2/hooks/inline.hpp"
 
 namespace cs2::control {
 
@@ -491,6 +495,53 @@ class Input {
   [[nodiscard]] std::uint64_t rage_shots() const noexcept { return rage_shots_.load(); }
   [[nodiscard]] std::uint64_t rage_stops() const noexcept { return rage_stops_.load(); }
 
+  // --- the local animfix (`docs/re/animfix.md`) ---------------------------
+  //
+  // The **local animfix** makes the **server's** animation win for the local
+  // player: the server replicates the AG2 graph inputs of
+  // `CCS2PawnGraphController`, the client's own prediction rewrites the very
+  // same slots, and the prediction is the only writer — so the server's
+  // values never reach the graph. The animfix captures the server's values
+  // at the netvar codec and hands them to the graph instead of the client's
+  // prediction, for the **four float slots** the server replicates
+  // (`m_flAirHeightAboveGround`, `m_flFlashedAmount`, `m_flAimPitchAngle`,
+  // `m_flAimYawAngle`).
+  //
+  // **Off by default** and driven by the control channel's `animfix`
+  // command. The counters are the operator's evidence: how many captures
+  // (the server's values received), how many re-applies (the graph writes
+  // corrected), how many skips (a re-apply that was refused because the
+  // capture was not fresh), and the **aim yaw** — the server's value against
+  // the client's predicted one — which is the divergence the animfix removes.
+  void set_animfix(bool on) noexcept { animfix_enabled_.store(on); }
+  [[nodiscard]] bool animfix() const noexcept { return animfix_enabled_.load(); }
+  // True when both hooks (the codec and the parameter setter) are installed.
+  [[nodiscard]] bool animfix_ready() const noexcept {
+    return animfix_codec_hook_.installed() && animfix_setter_hook_.installed();
+  }
+  [[nodiscard]] std::uint64_t animfix_captures() const noexcept {
+    return animfix_captures_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_applies() const noexcept {
+    return animfix_applies_.load();
+  }
+  [[nodiscard]] std::uint64_t animfix_skips() const noexcept {
+    return animfix_skips_.load();
+  }
+  // True when the animfix corrected the graph since the last capture (i.e.
+  // it acted in the current tick).
+  [[nodiscard]] bool animfix_acted() const noexcept { return animfix_acted_.load(); }
+  // The server's aim yaw (the last value the codec delivered) and the
+  // client's predicted one (the last value the prediction wanted to write).
+  [[nodiscard]] float animfix_server_aim_yaw() const noexcept {
+    return animfix_server_yaw_.load();
+  }
+  [[nodiscard]] float animfix_predicted_aim_yaw() const noexcept {
+    return animfix_predicted_yaw_.load();
+  }
+  // The signed difference between the two, in degrees: the divergence.
+  [[nodiscard]] float animfix_aim_yaw_delta() const noexcept;
+
   // --- record-based bunnyhop (UC 771389) ---------------------------------
   // Read-only post-hook state (`docs/re/research-bhop.md`). `bhop_landed_tick` /
   // `bhop_landed_frac` are the engine's own `m_ModernJump` landing record (its
@@ -854,6 +905,40 @@ class Input {
   std::atomic<float> step_left_[k_probe_steps]{};
   std::atomic<std::uint64_t> step_button_[k_probe_steps]{};
   std::atomic<bool> step_pressed_[k_probe_steps]{};
+
+  // --- the local animfix --------------------------------------------------
+  //
+  // The decision logic lives in the pure header (`cs2/control/animfix.hpp`);
+  // this is only the engine access. The state below is touched on the
+  // **game's main thread** (the snapshot decode and the prediction both run
+  // there), and the counters the control thread reads are atomic.
+  using animfix_codec_fn = void (*)(void* dst, void* src, void* schema);
+  using animfix_setter_fn = void (*)(void* node, std::int16_t index, const float* value);
+  static void __fastcall animfix_codec_detour(void* dst, void* src, void* schema) noexcept;
+  static void __fastcall animfix_setter_detour(void* node, std::int16_t index,
+                                                const float* value) noexcept;
+  // Install the two hooks (idempotent).
+  void animfix_install() noexcept;
+  // Copy the server's values out of the local controller (the codec detour).
+  void animfix_capture(void* controller) noexcept;
+  // Hand the server's value to the setter instead of the client's (the setter
+  // detour). False when the write is not one of ours, or when the capture is
+  // not fresh enough to be re-applied.
+  auto animfix_substitute(void* node, std::int16_t index, float& value) noexcept -> bool;
+  // The local player's `CCS2PawnGraphController*` (0 when it is not known).
+  [[nodiscard]] auto animfix_controller() const noexcept -> std::uintptr_t;
+  cs2::hooks::InlineHook animfix_codec_hook_{};
+  cs2::hooks::InlineHook animfix_setter_hook_{};
+  std::mutex animfix_mutex_{};
+  animfix::Capture animfix_capture_{};
+  std::array<animfix::Target, animfix::k_tracked_slot_count> animfix_targets_{};
+  std::atomic<bool> animfix_enabled_{false};
+  std::atomic<std::uint64_t> animfix_captures_{0};
+  std::atomic<std::uint64_t> animfix_applies_{0};
+  std::atomic<std::uint64_t> animfix_skips_{0};
+  std::atomic<bool> animfix_acted_{false};
+  std::atomic<float> animfix_server_yaw_{0.0F};
+  std::atomic<float> animfix_predicted_yaw_{0.0F};
 };
 
 }  // namespace cs2::control

@@ -204,6 +204,34 @@ pub fn known_signatures() -> Vec<Signature> {
             Some(1),
             Some(5),
         ),
+        // ---- the local animfix (`docs/re/animfix.md`) ---------------------
+        // The per-class netvar **codec** of `CCS2PawnGraphController`: it
+        // decodes the **server's** replicated AG2 graph inputs into the
+        // controller's slots (the destination is its first argument). Its
+        // 14-byte prologue is *not* unique in the module, so the pattern
+        // carries the two instructions that follow it (`lea rbp, [rsp-0x610]`
+        // and `sub rsp, 0x710`), which are. RVA on 659940c1: `0x8d9740`.
+        sig(
+            "client.dll",
+            "animfix_graph_codec",
+            "48 89 5C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 8D AC 24 F0 F9 FF FF 48 81 EC 10 07 00 00",
+            None,
+            None,
+        ),
+        // The AG2 **parameter setter** — the one place a graph parameter's
+        // value is written (`*(float *)(*(longlong *)(node + 0x10) + index * 8
+        // + 0x18) = value`). The client's prediction pushes the local player's
+        // values through it, so it is where the animfix hands the **server's**
+        // value over instead. The pattern is unique; the RIP-relative
+        // displacement is relocated by the inline hook. RVA on 659940c1:
+        // `0x8492a0`.
+        sig(
+            "client.dll",
+            "animfix_param_setter",
+            "F3 41 0F 10 08 4C 8B C9 F3 0F 10 05 A0 0F 3C 01",
+            None,
+            None,
+        ),
         // ---- occlusion / physics query (docs/re/occlusion.md) -------------
         // `CGamePhysicsQueryInterface` singleton — `*(client_base + 0x2227058)`.
         // Anchor on a load in the query's own call path (a `MOV RCX, [singleton]`
