@@ -44,13 +44,14 @@ hook fires; the offsets refresh offline reproduces the dump exactly.
 
 ---
 
-## 3. The animfix's estimator — fixed on a branch, not yet merged
+## 3. The animfix's estimator — a fix round exists, but it is **not merged**
 
 | # | severity | finding | where | fix |
 |---|---|---|---|---|
-| **A1** | **blocker** | The sub-floor filter let a **single late sample** become the whole estimate, so the staleness bound inflated to **250 ms** and a **245 ms old** server value was written over the client's fresh prediction (the pre-fix code refused the same capture after 7 ms). The "the median discards the outliers — in both directions" claim in `docs/re/animfix.md` §10.1 was **false**. | `payload/control/include/cs2/control/animfix.hpp` | **`feat/t20b-animfix-estimator`** (in review) |
-| **A2** | major | The sample window was **sticky** (`count` doubled as the ring index and was capped at the window size, so only slot 0 ever changed): the estimate never followed the server's rate, and the animfix went inert when the rate changed (duty cycle 99.8 % → 62.6 % at 20 Hz). It also made the round's "burst" scenario unreachable in the live payload. | `animfix.hpp` (`observe_decode`) | **`feat/t20b-animfix-estimator`** (in review) |
-| **A3** | major | `docs/re/animfix.md` §10.1 stated the **opposite** of the code in three sentences. The file is append-only: the fix appends a dated §11 that corrects it. | `docs/re/animfix.md` | **`feat/t20b-animfix-estimator`** (in review) |
+| **A1** | **blocker** | The sub-floor filter let a **single late sample** become the whole estimate, so the staleness bound inflated to **250 ms** and a **245 ms old** server value was written over the client's fresh prediction (the pre-fix code refused the same capture after 7 ms). The "the median discards the outliers — in both directions" claim in `docs/re/animfix.md` §10.1 was **false**. | `payload/control/include/cs2/control/animfix.hpp` | **`feat/t20b-animfix-estimator`** — the fix round closed the *specific* trigger (7 ms again ✓) but its re-review returned **DO NOT SHIP** with a **residual of the same class** (see A1a), so the branch is **not merged** |
+| **A1a** | **blocker (residual)** | The trust rule is **relative to the window's fill** (`2 * filtered >= count`), so while the window holds one or two intervals a **single late interval is still trusted**: the estimate becomes that interval and the bound inflates to 200/250 ms. Measured end to end: the animfix is switched on during a hitch and writes a **245 ms old** capture. The exposure is **once per payload's lifetime** (the clock is only fed while the animfix is on and is never reset) and it is **unreachable today** because the animfix captures nothing at all (see L1). | `animfix.hpp:309-312` | **not fixed — deferred**; see the decision in §10 |
+| **A2** | major | The sample window was **sticky** (`count` doubled as the ring index and was capped at the window size, so only slot 0 ever changed): the estimate never followed the server's rate, and the animfix went inert when the rate changed (duty cycle 99.8 % → 62.6 % at 20 Hz). It also made the round's "burst" scenario unreachable in the live payload. | `animfix.hpp` (`observe_decode`) | **`feat/t20b-animfix-estimator`** — **fixed** (the window slides ✓, the estimate follows 64 → 10 Hz ✓); not merged with the branch |
+| **A3** | major | `docs/re/animfix.md` §10.1 stated the **opposite** of the code in three sentences. The file is append-only: the fix appends a dated §11 that corrects it. | `docs/re/animfix.md` | **`feat/t20b-animfix-estimator`** — §11 corrects §10.1 ✓, but §11 itself carries **two new false sentences** of the same class ("it is never an inflated one", "the 245 ms old capture is gone") — measured false by the re-review. Not merged with the branch |
 | **A4** | minor | The duty cycle was computed from counters with **mismatched windows** (the denominator counted every tick since the payload started) → the scenario reported 0.0 % for a feature that was working perfectly. | `scripts/scenario/scenarios/animfix.py` | **merged** (`14a64e1`) |
 | **A5** | minor | The install path **logged a line on every tick** when the calibration dump was stale (~500 MB/day). | `payload/control/src/input.cpp` | **merged** (`14a64e1`) |
 | **A6** | minor | The scenario's fallback to an older payload's counter was **silent** (two different denominators, no marker). | `animfix.py` | **`feat/t20b-animfix-estimator`** (in review) |
@@ -135,3 +136,38 @@ the tables labelled their column "the tip" when the tip had moved; one line was
 * **New work:** pick the findings that block a feature the operator wants, and
   write the task's specification into `docs/orchestration/` as the other tasks
   did.
+
+---
+
+## 10. Decisions taken by the orchestrator while the work moved on
+
+**2026-10-21 — the animfix's trust rule: the *fixed* minimum wins.** The
+re-review of the estimator fix found that the specification's two requirements
+conflict: "the six §9.6 duty cycles stay identical to the digit" and "a
+single late sample must never become the estimate". The fix round resolved it
+in favour of the numbers (a rule relative to the window's fill). **The
+decision: the validity rule wins** — the numbers move. The cost is measured:
+with a **fixed** minimum of four samples at or above the floor, the "perfect"
+duty cycle goes from **99.7717 % to 99.4292 %** (−0.34 %) and the fill's
+oldest capture written stays at **7 ms** instead of 245 ms. A quarter of a
+percent of a duty cycle is a rounding error; a quarter of a second of stale
+pose is a correctness violation, and it is the one the animfix exists to
+prevent. The branch's §11 must then say so, and the two sentences the
+re-review falsified must be corrected.
+
+**2026-10-21 — the third-person camera stays off until T27 is merged.** The
+merged tree still carries the camera detour's `thread_local`; the camera's
+hook is the **live** crash. T27's fix round exists (two-pass guard, 3000
+rounds with 0 failures) and is in review; until it lands, the camera must
+not be switched on.
+
+**2026-10-21 — the bot match (T31) was merged without an adversarial
+review**, because the operator stopped the agent budget to move on to new
+features. It carries 12 unit tests (8 of them red against the pre-fix code),
+a live run, and an orchestrator read of the diff. It is the only merge in the
+tree without a review, and it is recorded here so that nobody assumes
+otherwise.
+
+**2026-10-21 — the protection workstream and `cpp-modernization` are out of
+scope** (see §8); the findings in the tree that belong to them stay as they
+are.
