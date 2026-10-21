@@ -74,8 +74,8 @@ constexpr std::string_view k_blob_prefix = "cs2.protect.strblob.";
 /// The stream is a per-byte mix: the ciphertext is not the plaintext under
 /// any single build-time constant, and the bytes of two strings do not
 /// cancel each other.
-[[nodiscard]] auto stream_byte(const Mixer& mixer, std::uint64_t key,
-                               std::size_t position) noexcept -> std::uint8_t {
+[[nodiscard]] auto stream_byte(const Mixer& mixer, std::uint64_t key, std::size_t position) noexcept
+    -> std::uint8_t {
   const std::uint64_t mixed = mixer.mix64(key + static_cast<std::uint64_t>(position));
   return static_cast<std::uint8_t>((mixed >> 56U) & 0xFFU);
 }

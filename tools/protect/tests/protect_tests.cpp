@@ -155,8 +155,7 @@ void test_mandatory_seed() {
     const std::string& message = without.error().message;
     check(message.find("CS2_PROTECT_SEED") != std::string::npos,
           "the message names the environment variable");
-    check(message.find("\"seed\"") != std::string::npos,
-          "the message names the policy's seed");
+    check(message.find("\"seed\"") != std::string::npos, "the message names the policy's seed");
   }
 
   // A policy that carries a seed: the configuration is accepted.
@@ -208,8 +207,7 @@ void test_per_build_mixer() {
   const cs2::protect::Mixer first = cs2::protect::mixer_for(0x1111111111111111ULL);
   const cs2::protect::Mixer second = cs2::protect::mixer_for(0x2222222222222222ULL);
   check(first.multiplier != second.multiplier, "two seeds give two different multipliers");
-  check(first.xor_constant != second.xor_constant,
-        "two seeds give two different xor constants");
+  check(first.xor_constant != second.xor_constant, "two seeds give two different xor constants");
   check(first.rotate != second.rotate, "two seeds give two different rotations");
   check(cs2::protect::mixer_for(0x5EED5EED5EED5EEDULL).multiplier ==
             cs2::protect::mixer_for(0x5EED5EED5EED5EEDULL).multiplier,
@@ -385,8 +383,7 @@ void test_coverage() {
 /// even when the shape of the rewritten IR is right.
 [[nodiscard]] auto mixer_of(const cs2::protect::Config& config, const llvm::Module& module)
     -> cs2::protect::Mixer {
-  return cs2::protect::mixer_for(
-      cs2::protect::module_seed(config, module.getSourceFileName()));
+  return cs2::protect::mixer_for(cs2::protect::module_seed(config, module.getSourceFileName()));
 }
 
 /// A module with a caller that calls a target, and the four calls that the
