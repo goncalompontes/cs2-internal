@@ -29,12 +29,19 @@ They cost build time and buy code size.
 
 Techniques that pay, in order:
 
-1. **Runtime-derived keys** for strings/constants — the only thing that makes a
-   dumped image useless on its own.
+1. **Getting the data out of the image** — not "encrypting it in place". A
+   value that is **baked into the image cannot be protected by a
+   runtime-derived key**: the value that encrypted it must be computable at
+   build time, so a per-injection key makes the decode produce garbage
+   (T21 found this the hard way — see the correction in §1.2). What actually
+   works is the data **not being in the file**: delivered by the injector, or
+   read from the host process at run time.
 2. **Call-target indirection** — the static call graph is not in the file.
+   T19 does it for same-module callees; **T23a** does it for the 26 cross-TU
+   edges that carry the aim graph.
 3. **Virtualization** — the original machine code is not in the file. Expensive
    (5-50x slowdown, stack blow-up, ABI risk), so it is for a *small* set of
-   high-value functions only.
+   high-value functions only. **T20a measured the set: it is empty** (§1.3).
 4. **Post-link integrity checks** — anti-tamper, not anti-reversing.
 
 The plan is sequenced so the cheap, high-value items land first.
@@ -54,23 +61,87 @@ plan:
   (`injector/src/main.cpp`), so the payload's **own mapped image base** arrives
   in `hinst` — a value that is not in the file, costs no import and no TLS,
   and is relocation-safe. The payload currently discards it
-  (`payload/src/payload_main.cpp`).
+  (`payload/src/payload_main.cpp`). **(Corrected — see §1.2.)**
 - **T20 (the virtualization) is the lowest-payoff-per-effort item left.** The
   2024-2026 literature has industrialised the attack: a trace plus symbolic
   execution devirtualizes a commercial VM in an afternoon. It still buys
   against an **offline** analyst, so it is worth doing — but scoped hard
   (one function, integers and pointers, one proven differential test), and it
-  must not absorb the remaining budget.
+  must not absorb the remaining budget. **(Measured — see §1.3.)**
 - **T19's cross-translation-unit hole is the cheapest real payoff** and was
   not in this plan: 295 of the 332 call sites of the selected functions stay
   direct, and they are the ones that carry the aim call graph. Proposed as
-  **T23**.
+  **T23**. **(Measured — the hole is 26 edges, not 295: §1.4.)**
 - **The shipped DLL is a signature.** The file on disk is the artefact an
   anti-cheat hashes, and today every build is identical except for a table
   permutation: the build seed exists but is optional. Proposed as **T24**.
 - **T22 (integrity) is anti-tamper, not anti-reversing**, and it is worth
   designing jointly with T21: a runtime-derived key that is *verified* needs
   the same post-link binding machinery.
+
+### 1.2 The correction: a baked ciphertext cannot have a runtime key
+
+**T21's implementer found this, and it is worth more than the task
+itself.** The plan ranked "runtime-derived keys" first with the claim that
+they are "the only thing that makes a dumped image useless on its own". That
+claim is **false for data that is baked into the image**.
+
+The ciphertext is written into the image at **build** time. The value that
+produced it must therefore be computable at **build** time. A per-injection
+value — the image base, a nonce — cannot key it: mixing it into the key
+makes the decode produce **garbage**, not plaintext.
+
+So the honest options are:
+
+| option | what it gives |
+|---|---|
+| **encrypt in place with a build key** (what T21 does) | the strings are not plaintext and not greppable; an analyst who reads the decoder (which is in the image) recovers them. **Weak but real.** |
+| **the data is not in the file** — the injector delivers it | the shipped DLL has no strings at all. **Strong**, and it costs a cross-project interface. |
+| **the data is read from the host** — the game's own resources | the shipped DLL has no strings at all. **Strong**, and it costs a feature (the event table becomes a run-time read). |
+
+The **image base** is still worth publishing: it is a runtime input to the
+decode, it keeps the optimiser from folding the decoder away, and it is the
+slot a future injector-delivered mask would use.
+
+### 1.3 The measurement: the VM cannot protect the aim maths
+
+**T20a's gate says none of the six protected functions is virtualizable.**
+Four are refused `eh_pad` (they have an EH edge) and two are refused
+`unsupported_type` (they return a `float`). The aim maths is a **float
+pipeline with exception edges**, and this machine handles integers and
+pointers only.
+
+Over the whole `payload/aim` module the gate admits 1878 of 2490 functions —
+but what it admits is the small integer helpers (`RecordRing::newest`, the
+`std::span` accessors), not anything an analyst would care about.
+
+**Consequence: T20b and T20c are deferred.** The interpreter is the
+expensive half of the VM (the IR surgery, the thunks, the per-build opcode
+polymorphism) and it would protect **nothing** in the payload. T20a is merged
+anyway: it changes no image, it is the precondition for any future VM work,
+and it is the artefact that says *the VM cannot help here*. That is a
+valuable negative result.
+
+### 1.4 The measurement: the cross-TU hole is 26 edges, not 295
+
+Of the 332 call sites of the six protected functions, 37 are rewritten
+(same-TU only) and 295 are skipped — but 179 of those are **intrinsics** and
+59 are **CRT calls**. The hole that matters is **26 cross-TU call sites to 24
+distinct payload functions**: the aim graph. Of those, 14 are ordinary calls
+and 12 are `sret` edges.
+
+The **unity build** does not work (it does not compile today: six
+redefinition errors) and the **LTO** route would make the transform not run
+at all (the pre-link phase sets the module flag, so the link phase skips it).
+**The virtualization does not close it either** — the VM's per-call-site
+thunks call the real callees directly, so the edges stay direct.
+
+So the plan is **T23a**: a cross-TU table in the caller's own module, with the
+callee as a **relocatable pointer to the external symbol**, and the payload's
+own `cross_module` list naming the callees (at the IR level an import and an
+internal declaration are the same thing, so the pass cannot tell them apart
+by looking at the module — the operator declares, the payload check proves).
+
 
 
 ## 2. The task sequence
