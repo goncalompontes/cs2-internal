@@ -25,29 +25,55 @@ namespace cs2::core {
 // The policy must provide:
 //   [[nodiscard]] bool is_valid(Handle) const noexcept;  // is this a live handle?
 //   void close(Handle) const noexcept;                    // release a live handle
+//
+// THE POLICY IS ASKED ONLY WHEN A HANDLE IS TAKEN. From then on the wrapper
+// knows whether it owns what it holds, and it never asks the policy again.
+// That is what makes the wrapper safe with a policy that cannot survive a
+// move: the destructor of a moved-from wrapper must not call a moved-from
+// policy, and a policy that carries a `std::function` closer throws
+// (`std::bad_function_call`) when it is called empty -- out of a `noexcept`
+// destructor, that is `std::terminate`.
+//
+// THE EMPTY VALUE IS RESERVED. `Handle{}` is the wrapper's "holds nothing",
+// and the wrapper never owns it and never releases it. A handle kind whose
+// zero value is live (a POSIX file descriptor, where 0 is stdin) must either
+// be wrapped in a type whose empty value is distinct, or be given a policy
+// whose `is_valid(Handle{})` is false. The wrapper enforces the reservation
+// itself, so a policy that breaks the rule leaks the handle instead of
+// closing something that is live.
+//
+// `Handle` must be comparable with `==` (the wrapper compares a handle with
+// the empty value), and `Policy` must be default-constructible: the
+// single-argument constructor uses the policy's default, and that default
+// must be able to release a handle.
 template <typename Handle, typename Policy>
 class ScopedHandle {
  public:
   using value_type = Handle;
 
   ScopedHandle() noexcept = default;
-  explicit ScopedHandle(Handle handle) noexcept : handle_(handle), policy_(Policy{}) {}
+  explicit ScopedHandle(Handle handle) noexcept : handle_(handle), policy_(Policy{}) {
+    adopt();
+  }
   ScopedHandle(Handle handle, Policy policy) noexcept
-      : handle_(handle), policy_(std::move(policy)) {}
+      : handle_(handle), policy_(std::move(policy)) {
+    adopt();
+  }
   ~ScopedHandle() {
-    reset();
+    release_owned();
   }
 
   ScopedHandle(const ScopedHandle&) = delete;
   ScopedHandle& operator=(const ScopedHandle&) = delete;
 
-  ScopedHandle(ScopedHandle&& other) noexcept
-      : handle_(other.release()), policy_(std::move(other.policy_)) {}
+  ScopedHandle(ScopedHandle&& other) noexcept : policy_(std::move(other.policy_)) {
+    take_from(other);
+  }
   ScopedHandle& operator=(ScopedHandle&& other) noexcept {
     if (this != &other) {
       reset();
-      handle_ = other.release();
       policy_ = std::move(other.policy_);
+      take_from(other);
     }
     return *this;
   }
@@ -59,15 +85,18 @@ class ScopedHandle {
 
   // Whether the wrapper holds a live handle.
   [[nodiscard]] auto valid() const noexcept -> bool {
-    return policy_.is_valid(handle_);
+    return owns_;
   }
 
-  // Release the held handle (if it is live) and take `handle` in its place.
+  // Release the held handle (if the wrapper owns it) and take `handle` in its
+  // place. Passing the handle the wrapper already holds is a no-op rather
+  // than a double release.
   void reset(Handle handle = Handle{}) noexcept {
-    if (policy_.is_valid(handle_)) {
+    if (owns_ && handle != handle_) {
       policy_.close(handle_);
     }
     handle_ = handle;
+    adopt();
   }
 
   // Give up ownership without releasing the handle: the caller becomes
@@ -75,12 +104,39 @@ class ScopedHandle {
   [[nodiscard]] auto release() noexcept -> Handle {
     const Handle held = handle_;
     handle_ = Handle{};
+    owns_ = false;
     return held;
   }
 
  private:
   Handle handle_{};
   Policy policy_{};
+  // Whether the wrapper owns `handle_` and has to release it. The wrapper
+  // tracks this itself instead of asking the policy again: a moved-from
+  // policy must never be called.
+  bool owns_ = false;
+
+  // Take ownership of the held handle if it is a live one. The empty value
+  // is never owned (see the policy contract above).
+  auto adopt() noexcept -> void {
+    owns_ = (handle_ != Handle{}) && policy_.is_valid(handle_);
+  }
+
+  // Release the held handle, if the wrapper owns it.
+  auto release_owned() noexcept -> void {
+    if (owns_) {
+      policy_.close(handle_);
+    }
+  }
+
+  // Take the handle -- and the ownership of it -- from `other`, which keeps
+  // neither. `other`'s policy is not touched.
+  auto take_from(ScopedHandle& other) noexcept -> void {
+    handle_ = other.handle_;
+    owns_ = other.owns_;
+    other.handle_ = Handle{};
+    other.owns_ = false;
+  }
 };
 
 }  // namespace cs2::core

@@ -4,9 +4,18 @@
 // off-Windows: a fake policy counts the releases, and the test proves that
 // every path releases exactly once -- the scope exit, `reset`, the move, the
 // move-assignment and the hand-off (`release`).
+//
+// Two rules need a policy that is not a plain old data type, and they are
+// proven with one:
+//   * a *moved-from* policy must never be called (a policy that carries a
+//     `std::function` closer is empty after the move, and calling it throws);
+//   * the *empty value* is reserved: a handle kind whose zero value is live
+//     (a POSIX file descriptor, where 0 is stdin) must not be closed by the
+//     wrapper, and a handle must not be released twice.
 
 #include <cassert>
 #include <cstdio>
+#include <functional>
 #include <utility>
 
 #include "cs2/core/handle.hpp"
@@ -28,9 +37,44 @@ struct FakePolicy {
   void close(int handle) const noexcept {
     assert(handle > 0);
     ++(*counter);
-  }};
+  }
+};
 
 using FakeHandle = cs2::core::ScopedHandle<int, FakePolicy>;
+
+// A policy that cannot survive a move: both of its members are
+// `std::function`s, so a moved-from policy is *empty* and calling it throws
+// `std::bad_function_call`. The wrapper's destructor is `noexcept`, so such a
+// call would end the process.
+struct FunctionPolicy {
+  std::function<void(int)> close_fn;
+  std::function<bool(int)> valid_fn;
+
+  [[nodiscard]] bool is_valid(int handle) const noexcept {
+    return valid_fn(handle);
+  }
+  void close(int handle) const noexcept {
+    close_fn(handle);
+  }
+};
+
+using FunctionHandle = cs2::core::ScopedHandle<int, FunctionPolicy>;
+
+// A handle kind whose zero value is live: a POSIX file descriptor, where 0 is
+// stdin. The policy says so; the wrapper reserves the empty value anyway.
+struct ZeroIsLivePolicy {
+  int* closed = nullptr;
+
+  [[nodiscard]] bool is_valid(int handle) const noexcept {
+    return handle >= 0;
+  }
+  void close(int handle) const noexcept {
+    assert(handle >= 0);
+    ++(*closed);
+  }
+};
+
+using ZeroIsLiveHandle = cs2::core::ScopedHandle<int, ZeroIsLivePolicy>;
 
 }  // namespace
 
@@ -114,6 +158,45 @@ auto main() -> int {
   }
   assert(other_closed == 1);
   assert(g_closed == 7);  // the global counter was not touched
+
+  // A moved-from policy must never be called. The policy here is empty after
+  // the move, so a call would throw `std::bad_function_call` out of the
+  // wrapper's `noexcept` destructor (and out of `valid()`), and the test
+  // would end the process instead of failing an assertion.
+  int function_closed = 0;
+  {
+    FunctionHandle file(3, FunctionPolicy{[&function_closed](int) { ++function_closed; },
+                                         [](int handle) { return handle > 0; }});
+    const FunctionHandle moved(std::move(file));
+    assert(moved.valid());
+    assert(moved.get() == 3);
+    // The moved-from wrapper holds nothing, and it does not ask its
+    // (moved-from) policy about it.
+    assert(!file.valid());
+    assert(file.get() == 0);
+  }  // the moved-from wrapper is destroyed here: it must not call the policy
+  assert(function_closed == 1);  // the moved-to wrapper released it, once
+
+  // The empty value is reserved: the wrapper never owns it, so a policy that
+  // says the zero value is live does not get it closed (stdin!).
+  int zero_closed = 0;
+  {
+    // (`stdin` is a macro in <cstdio>, so the handle is called `descriptor`.)
+    const ZeroIsLiveHandle descriptor(0, ZeroIsLivePolicy{&zero_closed});
+    assert(descriptor.get() == 0);
+    assert(!descriptor.valid());
+  }
+  assert(zero_closed == 0);
+
+  // A handle is released exactly once, even when `reset` is given the handle
+  // the wrapper already holds.
+  {
+    ZeroIsLiveHandle file(5, ZeroIsLivePolicy{&zero_closed});
+    file.reset(5);
+    assert(file.valid());
+    assert(zero_closed == 0);
+  }
+  assert(zero_closed == 1);
 
   std::puts("core-handle: ok");
   return 0;
