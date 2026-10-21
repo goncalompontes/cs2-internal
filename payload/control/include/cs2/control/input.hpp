@@ -1296,6 +1296,9 @@ class Input {
   void* set_prediction_command_ = nullptr;    // vtable slot 43
   void* reset_prediction_command_ = nullptr;  // vtable slot 44
   std::atomic<std::uint64_t> predict_runs_{0};
+  // The snapshot of the movement services could not be read (logged once): the
+  // prediction is off, and the log says so instead of failing silently.
+  std::atomic<bool> predict_snapshot_failed_{false};
   std::atomic<int> predicted_tick_{0};
   std::atomic<float> predicted_frac_{0.0F};
   std::atomic<int> predicted_delta_{0};

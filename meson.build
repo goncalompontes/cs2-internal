@@ -323,6 +323,26 @@ control_input_test = executable('control_input_test',
 )
 test('control-input', control_input_test)
 
+# The prediction's **copy** of the engine's movement services
+# (`cs2/control/prediction_copy.hpp`). The payload is manually mapped, so the
+# game's threads have no TLS block for the image: a `thread_local` copy
+# resolved against a block that was never installed, the fault-safe reader
+# answered "false", and the prediction was silently off
+# (`docs/re/prediction.md` §"the TLS defect"). The copy is the caller's
+# buffer now. The test drives it against a fake engine object and reads the
+# repository's own sources: the module must not carry a `thread_local`.
+control_prediction_test = executable('control_prediction_test',
+  files(
+    'payload/control/tests/test_control_prediction.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+  ],
+)
+test('control-prediction', control_prediction_test,
+  args : [meson.current_source_dir()],
+)
+
 # The **local animfix**'s decision logic (which graph-input slots the animfix
 # owns and the validity rule that stops a stale capture from being written
 # over a fresh prediction) - a pure header, so the test compiles it alone.
