@@ -1080,6 +1080,42 @@ arrive).
   values *before* the pose is computed — so a bone write would be a second,
   riskier copy of the same fix.
 
+### 9.6 The animfix's validity rule (and why it is not the bone seam)
+
+The implementation (`payload/control/include/cs2/control/animfix.hpp`) captures
+the server's values at the codec and re-applies them **at the setter** — the
+place the prediction writes. The rule that decides whether a captured value
+may be re-applied is the **freshness** rule:
+
+> A captured value may be re-applied only while the capture is **fresh**: it
+> must exist, and it must not be older than `k_max_capture_age_ms` (32 ms —
+> about two of the server's 64 Hz ticks) on the caller's monotonic clock. A
+> decode **replaces** the capture, so the value re-applied is always the last
+> one the server sent.
+
+The bound is the "captured *this* frame" rule in the only units the client
+has. It is what refuses a capture that aged out — a stalled connection, a
+dead player, a paused game — where the server's value describes a pose the
+server left behind: writing it over the client's fresh prediction would move
+the local hitboxes *backwards*, which is worse than not fixing them at all.
+The refusals are counted (`animfix_skips`).
+
+The capture is deliberately **not** consumed by a re-apply. The engine writes
+a graph parameter more than once per decode (the prediction runs from the
+command path *and* from the frame path), and only the **last** write before
+the graph is evaluated matters — a consume-once rule would leave the client's
+own value in the graph, and the animfix would do nothing at all. (This was
+the first cut of the rule; it was wrong for this seam, and the correction is
+in the commit history.)
+
+**The bone seam was not used.** `CSkeletonInstance::SetupBones` (`0xaa0f80`)
+would have been the wrong place for this fix: it runs on the AG2 job's
+**worker thread**, it would have to rewrite a **full `CTransform`** (position
+*and* quaternion) or the hitboxes stretch (`docs/re/aim.md`), and — the
+decisive point — the graph-input seam already fixes the values **before** the
+pose is computed, so a bone write would only be a second, riskier copy of the
+same fix.
+
 ---
 
 *Companion documents:* the community definition of "animfix" / "local animfix"
