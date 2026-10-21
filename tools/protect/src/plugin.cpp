@@ -215,7 +215,7 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     functions.reserve(result.functions.size());
     for (const cs2::protect::FunctionTransform& transform : result.functions) {
       functions.push_back(cs2::protect::CoverageFunction{transform.symbol, transform.rewritten,
-                                                          transform.skipped.size()});
+                                                         transform.skipped.size()});
     }
     if (const auto error = cs2::protect::write_coverage(settings, module, entries, functions)) {
       llvm::errs() << "[cs2-protect] " << *error << "\n";

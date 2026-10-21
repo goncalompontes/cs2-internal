@@ -175,9 +175,9 @@ void write_transform_report(const llvm::Module& module, const TransformResult& r
   if (config.verbose) {
     for (const FunctionTransform& transform : result.functions) {
       for (std::size_t index = 0; index < transform.skipped.size(); ++index) {
-        llvm::errs() << "[cs2-protect] " << tag << ": transform " << transform.symbol << " skip reason="
-                     << to_string(transform.skipped[index]) << " callee="
-                     << transform.skipped_callees[index] << "\n";
+        llvm::errs() << "[cs2-protect] " << tag << ": transform " << transform.symbol
+                     << " skip reason=" << to_string(transform.skipped[index])
+                     << " callee=" << transform.skipped_callees[index] << "\n";
       }
     }
   }
@@ -211,7 +211,7 @@ auto coverage_entries(const SelectionResult& result) -> std::vector<CoverageEntr
 }
 
 auto coverage_entries(const RecordedSelection& selection, std::string_view module_id,
-                       const std::vector<RecordedFunction>& vanished) -> std::vector<CoverageEntry> {
+                      const std::vector<RecordedFunction>& vanished) -> std::vector<CoverageEntry> {
   std::vector<CoverageEntry> entries;
   entries.reserve(selection.entries.size());
   for (const RecordedEntry& recorded : selection.entries) {
@@ -241,8 +241,8 @@ auto coverage_entries(const RecordedSelection& selection, std::string_view modul
 }
 
 auto write_coverage(const Config& config, const llvm::Module& module,
-                     const std::vector<CoverageEntry>& entries,
-                     const std::vector<CoverageFunction>& functions) -> std::optional<std::string> {
+                    const std::vector<CoverageEntry>& entries,
+                    const std::vector<CoverageFunction>& functions) -> std::optional<std::string> {
   if (!config.policy) {
     return std::nullopt;
   }

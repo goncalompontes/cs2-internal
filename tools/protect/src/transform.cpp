@@ -88,7 +88,8 @@ constexpr std::string_view k_entries_metadata = "cs2.protect.entries";
 ///
 /// The three parts must differ: two equal parts cancel each other in the xor,
 /// and the split would buy nothing.
-[[nodiscard]] auto key_parts(std::uint64_t seed) noexcept -> std::array<std::uint64_t, k_key_parts> {
+[[nodiscard]] auto key_parts(std::uint64_t seed) noexcept
+    -> std::array<std::uint64_t, k_key_parts> {
   std::uint64_t state = seed;
   std::array<std::uint64_t, k_key_parts> parts{};
   for (std::size_t i = 0; i < parts.size(); ++i) {
@@ -217,9 +218,10 @@ void record_selection(llvm::Module& module, const SelectionResult& result) {
   llvm::NamedMDNode* functions = module.getOrInsertNamedMetadata(k_functions_metadata);
   for (const Selection& selection : result.selected) {
     llvm::MDNode* node = llvm::MDNode::get(
-        context, llvm::ArrayRef<llvm::Metadata*>{llvm::MDString::get(context, selection.symbol),
-                                                 llvm::MDString::get(context, selection.qualified),
-                                                 llvm::MDString::get(context, to_string(selection.level))});
+        context,
+        llvm::ArrayRef<llvm::Metadata*>{llvm::MDString::get(context, selection.symbol),
+                                        llvm::MDString::get(context, selection.qualified),
+                                        llvm::MDString::get(context, to_string(selection.level))});
     functions->addOperand(node);
   }
 
@@ -240,11 +242,10 @@ void record_selection(llvm::Module& module, const SelectionResult& result) {
     }
     llvm::MDNode* node = llvm::MDNode::get(
         context,
-        llvm::ArrayRef<llvm::Metadata*>{llvm::MDString::get(context, match.pattern),
-                                        llvm::MDString::get(context, match.module),
-                                        llvm::MDString::get(context, state),
-                                        llvm::MDString::get(context, reason),
-                                        llvm::MDString::get(context, to_string(match.level))});
+        llvm::ArrayRef<llvm::Metadata*>{
+            llvm::MDString::get(context, match.pattern), llvm::MDString::get(context, match.module),
+            llvm::MDString::get(context, state), llvm::MDString::get(context, reason),
+            llvm::MDString::get(context, to_string(match.level))});
     entries->addOperand(node);
   }
 }
@@ -262,7 +263,8 @@ void record_selection(llvm::Module& module, const SelectionResult& result) {
       function.symbol = md_string(node->getOperand(0));
       function.qualified = md_string(node->getOperand(1));
       const std::string level = md_string(node->getOperand(2));
-      function.level = level == "virtualized" ? ProtectionLevel::virtualized : ProtectionLevel::call;
+      function.level =
+          level == "virtualized" ? ProtectionLevel::virtualized : ProtectionLevel::call;
       selection.functions.push_back(std::move(function));
     }
   }
@@ -288,7 +290,7 @@ void record_selection(llvm::Module& module, const SelectionResult& result) {
 }
 
 auto transform_module(llvm::Module& module, const Config& config,
-                       const RecordedSelection& selection) -> TransformResult {
+                      const RecordedSelection& selection) -> TransformResult {
   TransformResult result;
   llvm::LLVMContext& context = module.getContext();
   llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
@@ -432,8 +434,10 @@ auto transform_module(llvm::Module& module, const Config& config,
     llvm::IRBuilder<> builder(site.call);
 
     llvm::Value* mixed = builder.CreateLoad(i64_type, key_globals[0], /*isVolatile=*/true);
-    mixed = builder.CreateXor(mixed, builder.CreateLoad(i64_type, key_globals[1], /*isVolatile=*/true));
-    mixed = builder.CreateXor(mixed, builder.CreateLoad(i64_type, key_globals[2], /*isVolatile=*/true));
+    mixed =
+        builder.CreateXor(mixed, builder.CreateLoad(i64_type, key_globals[1], /*isVolatile=*/true));
+    mixed =
+        builder.CreateXor(mixed, builder.CreateLoad(i64_type, key_globals[2], /*isVolatile=*/true));
     mixed = builder.CreateMul(mixed, llvm::ConstantInt::get(i64_type, k_mix_multiplier));
     mixed = builder.CreateXor(mixed, llvm::ConstantInt::get(i64_type, k_mix_xor));
     llvm::Value* low = builder.CreateShl(mixed, k_mix_rotate);
@@ -465,10 +469,3 @@ auto transform_module(llvm::Module& module, const Config& config,
 }
 
 }  // namespace cs2::protect
-
-
-
-
-
-
-

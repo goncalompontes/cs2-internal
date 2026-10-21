@@ -34,23 +34,23 @@ namespace cs2::protect {
 
 /// Why a call was not rewritten.
 enum class CallSkipReason : std::uint8_t {
-  variadic_callee,      ///< the callee is variadic: the indirect call cannot
-                        ///< reproduce the variadic ABI.
-  indirect_parameter,   ///< the callee has a `byval` / `sret` / `inalloca` /
-                        ///< `preallocated` parameter: Windows x64 rejects
-                        ///< these in an indirect signature.
-  musttail,             ///< the call is a `musttail` call: a tail call cannot
-                        ///< become an indirect call.
-  external_callee,      ///< the callee is not defined in this module: it is an
-                        ///< import, and it is in the import table anyway.
-  intrinsic_callee,     ///< the callee is a compiler intrinsic.
-  optnone_callee,       ///< the callee is `optnone`: rewriting it would defeat
-                        ///< the `optnone` intent.
-  invoke,               ///< the call is an `invoke`: the pass does not model the
-                        ///< EH edges yet.
-  indirect_callee,      ///< the call is already indirect: there is nothing to
-                        ///< hide.
-  unselected_caller,    ///< the caller is not selected.
+  variadic_callee,     ///< the callee is variadic: the indirect call cannot
+                       ///< reproduce the variadic ABI.
+  indirect_parameter,  ///< the callee has a `byval` / `sret` / `inalloca` /
+                       ///< `preallocated` parameter: Windows x64 rejects
+                       ///< these in an indirect signature.
+  musttail,            ///< the call is a `musttail` call: a tail call cannot
+                       ///< become an indirect call.
+  external_callee,     ///< the callee is not defined in this module: it is an
+                       ///< import, and it is in the import table anyway.
+  intrinsic_callee,    ///< the callee is a compiler intrinsic.
+  optnone_callee,      ///< the callee is `optnone`: rewriting it would defeat
+                       ///< the `optnone` intent.
+  invoke,              ///< the call is an `invoke`: the pass does not model the
+                       ///< EH edges yet.
+  indirect_callee,     ///< the call is already indirect: there is nothing to
+                       ///< hide.
+  unselected_caller,   ///< the caller is not selected.
 };
 
 [[nodiscard]] auto to_string(CallSkipReason reason) noexcept -> const char*;
@@ -85,7 +85,7 @@ struct FunctionTransform {
   std::string symbol;
   std::string qualified;
   std::size_t rewritten{0};
-  std::vector<CallSkipReason> skipped;      ///< one per skipped call.
+  std::vector<CallSkipReason> skipped;       ///< one per skipped call.
   std::vector<std::string> skipped_callees;  ///< the callee of each skipped call.
 };
 
@@ -93,9 +93,9 @@ struct FunctionTransform {
 struct TransformResult {
   std::vector<FunctionTransform> functions;
   std::vector<RecordedFunction> vanished;       ///< the selected functions that did
-                                               ///< not survive to the transform.
+                                                ///< not survive to the transform.
   std::vector<RecordedFunction> unimplemented;  ///< the selected functions whose
-                                               ///< level is not implemented.
+                                                ///< level is not implemented.
   std::size_t table_size{0};
   std::size_t descriptor_size{0};
 };

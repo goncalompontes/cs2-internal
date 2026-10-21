@@ -27,12 +27,12 @@ namespace cs2::protect {
 
 /// The state of a policy entry, as the coverage records it.
 enum class EntryState : std::uint8_t {
-  matched,       ///< the entry named a function that is protected.
-  unmatched,     ///< the entry named no function in this module.
-  blocked,       ///< the entry named a function that cannot be protected.
-  unimplemented, ///< the entry named a function whose level is not implemented.
-  vanished,      ///< the entry named a selected function that did not survive
-                 ///< to the transform phase.
+  matched,        ///< the entry named a function that is protected.
+  unmatched,      ///< the entry named no function in this module.
+  blocked,        ///< the entry named a function that cannot be protected.
+  unimplemented,  ///< the entry named a function whose level is not implemented.
+  vanished,       ///< the entry named a selected function that did not survive
+                  ///< to the transform phase.
 };
 
 [[nodiscard]] auto to_string(EntryState state) noexcept -> const char*;

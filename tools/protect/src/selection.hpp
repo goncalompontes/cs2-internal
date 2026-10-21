@@ -68,8 +68,8 @@ struct PolicyMatch {
   bool applicable{false};  ///< the scope of the entry names this module.
   bool matched{false};     ///< the entry named a function that is protected.
   bool blocked{false};     ///< the entry named a function that cannot be protected.
-  bool unimplemented{false};  ///< the entry named a function whose level is not
-                              ///< implemented yet.
+  bool unimplemented{false};                 ///< the entry named a function whose level is not
+                                             ///< implemented yet.
   std::optional<SkipReason> blocked_reason;  ///< why it cannot be protected.
 };
 

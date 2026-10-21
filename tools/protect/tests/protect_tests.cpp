@@ -434,8 +434,7 @@ void test_transform() {
   check(calls.size() > 2 && calls[2]->getCalledFunction() != nullptr &&
             calls[2]->getCalledFunction()->getName() == "sret_target",
         "the sret call was rewritten");
-  check(calls.size() > 3 && calls[3]->isMustTailCall(),
-        "the musttail call was rewritten");
+  check(calls.size() > 3 && calls[3]->isMustTailCall(), "the musttail call was rewritten");
 
   // The table holds the target.
   llvm::GlobalVariable* table = module->getGlobalVariable("cs2.protect.table", /*AllowLocal=*/true);
@@ -449,7 +448,8 @@ void test_transform() {
 
   // The descriptor holds an encrypted index, and the decode really yields
   // the index of the target.
-  llvm::GlobalVariable* descriptor = module->getGlobalVariable("cs2.protect.desc", /*AllowLocal=*/true);
+  llvm::GlobalVariable* descriptor =
+      module->getGlobalVariable("cs2.protect.desc", /*AllowLocal=*/true);
   check(descriptor != nullptr, "the descriptor global exists");
   std::uint64_t cipher = 0;
   if (descriptor != nullptr) {
@@ -498,7 +498,8 @@ void test_level_gate() {
   check(result.unimplemented.size() == 1, "the function is not transformed");
   check(result.table_size == 0, "no table is created");
   check(result.descriptor_size == 0, "no descriptor is created");
-  check(module->getGlobalVariable("cs2.protect.table", /*AllowLocal=*/true) == nullptr, "the module has no table");
+  check(module->getGlobalVariable("cs2.protect.table", /*AllowLocal=*/true) == nullptr,
+        "the module has no table");
 
   // The coverage records the entry as unimplemented, so that the
   // whole-build check fails for it.
