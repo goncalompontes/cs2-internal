@@ -272,10 +272,10 @@ else
     #
     # The policy is **not** passed on the command line: the checker reads it
     # from $CS2_PROTECT_CONFIG, exactly like the plugin does. Meson spells a
-    # path with forward slashes, and the coverage directory is keyed by the
-    # *spelling* of the policy path -- the checker and the plugin have to
-    # compute the same directory, and only the environment gives them the
-    # same string.
+    # path with forward slashes, so the coverage directory is keyed by the
+    # **normalised** path -- the separators are folded to one spelling on
+    # both sides, because the checker and the plugin have to compute the
+    # same directory, and only the environment gives them the same string.
     custom_target('protect-policy-check',
       output : 'protect-policy-check.stamp',
       command : [protect_check, '--output', '@OUTPUT@',
