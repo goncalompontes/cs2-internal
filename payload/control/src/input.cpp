@@ -429,21 +429,10 @@ void Input::anti_aim_tick(void* cmd, std::uint8_t* base) noexcept {
   anti_aim_fake_pitch_.store(pitch);
   anti_aim_basis_cos_.store(std::cos(pitch * k_deg_to_rad));
 
-  // **The gate.** The re-base changes the command's move values, and the
-  // command's `move_crc` (`base + 0x30`) is never written by the client — the
-  // engine's CRC routine over the move values was not found
-  // (`docs/re/angle-split.md` §5.4). Until that is settled a modified analog
-  // may be rejected by the server, so the re-base does not write — and with
-  // it the anti-aim as a whole: the fake angles on their own rotate the
-  // movement's wish basis and would walk the operator sideways.
-  if (!anti_aim_rebase_ok_.load()) {
-    anti_aim_reason_.store(k_anti_aim_reason_crc_gate);
-    anti_aim_rebase_skipped_.fetch_add(1);
-    return;
-  }
-
   // The player's held intent, read from the command's own button mask and
-  // expressed in the **camera** frame.
+  // expressed in the **camera** frame. The axes are computed **before** the
+  // gate below, so the diagnostics show what the re-base *would* write even
+  // while the gate is closed.
   std::uint64_t buttons = 0;
   if (cmd != nullptr &&
       writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_buttons_offset,
@@ -458,6 +447,19 @@ void Input::anti_aim_tick(void* cmd, std::uint8_t* base) noexcept {
       camera_angles, anti_aim::Angles{pitch, fake, 0.0F}, held);
   anti_aim_forward_.store(axes.forward);
   anti_aim_left_.store(axes.left);
+
+  // **The gate.** The re-base changes the command's move values, and the
+  // command's `move_crc` (`base + 0x30`) is never written by the client — the
+  // engine's CRC routine over the move values was not found
+  // (`docs/re/angle-split.md` §5.4). Until that is settled a modified analog
+  // may be rejected by the server, so the re-base does not write — and with
+  // it the anti-aim as a whole: the fake angles on their own rotate the
+  // movement's wish basis and would walk the operator sideways.
+  if (!anti_aim_rebase_ok_.load()) {
+    anti_aim_reason_.store(k_anti_aim_reason_crc_gate);
+    anti_aim_rebase_skipped_.fetch_add(1);
+    return;
+  }
 
   // The fake angles into the command's own `viewangles` ...
   //

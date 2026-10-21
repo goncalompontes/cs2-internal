@@ -346,7 +346,9 @@ class Input {
   /// feature is off: they stay at their last value).
   [[nodiscard]] float anti_aim_camera_yaw() const noexcept { return anti_aim_camera_yaw_.load(); }
   [[nodiscard]] float anti_aim_camera_pitch() const noexcept { return anti_aim_camera_pitch_.load(); }
-  /// The re-based analog axes (the command's `forwardmove`/`leftmove`).
+  /// The re-based analog axes (the command's `forwardmove`/`leftmove`). They
+  /// are computed even while the `move_crc` gate is closed — they are what the
+  /// re-base *would* write; `anti_aim_rebase` says whether it did.
   [[nodiscard]] float anti_aim_forward() const noexcept { return anti_aim_forward_.load(); }
   [[nodiscard]] float anti_aim_left() const noexcept { return anti_aim_left_.load(); }
   /// `cos` of the fake pitch: the factor the engine puts on the forward axis,
