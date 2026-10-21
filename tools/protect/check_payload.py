@@ -355,44 +355,98 @@ def image_runs(data: bytes) -> list[bytes]:
     return [part for part in data.split(b"\0") if part]
 
 
-def whole_run_matches(runs: list[bytes], length: int, digests: set[str]) -> bool:
-    """Whether one of the runs **is** one of the sequences.
+#: The text the proof of the salt is computed over. It is the plugin's
+#: constant (tools/protect/src/strings.cpp).
+SALT_PROOF_TEXT = b"cs2.protect.salt.proof"
 
-    The run has to be the whole string: a string that merely *starts* with a
-    protected one ("open" in "opened") is not a leak.
+
+def build_seed(policy: Path | None) -> int | None:
+    """The seed of the build: the environment's, else the policy's.
+
+    The digests of the literals are salted with it, so the check needs it to
+    recognise a literal in the image. A build without a seed has no salt,
+    and the digests are unsalted.
     """
-    for run in runs:
-        if len(run) != length:
-            continue
-        if hashlib.sha256(run).hexdigest().upper() in digests:
-            return True
-    return False
+    text = os.environ.get("CS2_PROTECT_SEED", "").strip()
+    if not text and policy is not None and policy.is_file():
+        try:
+            document = json.loads(policy.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            document = {}
+        seed = document.get("seed") if isinstance(document, dict) else None
+        if isinstance(seed, str):
+            text = seed.strip()
+        elif isinstance(seed, int):
+            text = f"0x{seed:x}"
+    if not text:
+        return None
+    digits = text
+    if len(digits) > 2 and digits[0] == "0" and digits[1] in "xX":
+        digits = digits[2:]
+    try:
+        # The seed is hexadecimal, and only its low 64 bits count.
+        return int(digits, 16) & 0xFFFFFFFFFFFFFFFF
+    except ValueError:
+        return None
 
 
-def prefix_matches(runs: list[bytes], length: int, digests: set[str]) -> bool:
-    """Whether a prefix of one of the runs is one of the sequences.
+def salt_proof(seed: int | None) -> str:
+    """The proof that a seed is the seed of the build."""
+    if seed is None:
+        return ""
+    return hashlib.sha256(seed.to_bytes(8, "little") + SALT_PROOF_TEXT).hexdigest().upper()
 
-    A literal that is not NUL-terminated in the image is the prefix of a
-    longer run, so the presence check has to look at the prefixes as well.
+
+def digests_of(run: bytes, seed: int | None) -> set[str]:
+    """The digests of a candidate: the plain one and the salted one.
+
+    Both are computed, so that a coverage of an older build -- whose
+    digests are unsalted -- is still read: the check does not have to know
+    which kind a coverage holds.
     """
-    for run in runs:
-        if len(run) < length:
-            continue
-        if hashlib.sha256(run[:length]).hexdigest().upper() in digests:
-            return True
-    return False
+    digests = {hashlib.sha256(run).hexdigest().upper()}
+    if seed is not None:
+        digests.add(
+            hashlib.sha256(seed.to_bytes(8, "little") + run).hexdigest().upper()
+        )
+    return digests
 
 
-def protected_literals(coverage: list[Coverage]) -> tuple[dict[int, set[str]], set[str]]:
+def digests_present(runs: list[bytes], by_length: dict[int, set[str]], seed: int | None) -> set[str]:
+    """The digests of the wanted literals that the image holds.
+
+    A literal that is not NUL-terminated in the image is the **prefix** of
+    a longer run, and a literal an analyst can grep for is a leak whatever
+    follows it: the prefixes are hashed as well. The predicate is the same
+    for the protected and for the unprotected image -- it is the same kind
+    of leak in both.
+    """
+    found: set[str] = set()
+    for length, digests in by_length.items():
+        for run in runs:
+            if len(run) < length:
+                continue
+            matched = digests & digests_of(run[:length], seed)
+            if matched:
+                found |= matched
+                break
+    return found
+
+
+def protected_literals(coverage: list[Coverage]) -> tuple[dict[int, set[str]], set[str], int]:
     """The digests of the literals the pass protected, and the refused ones.
 
     The digests are grouped by length: a run is only hashed with the lengths
-    that are actually wanted.
+    that are actually wanted. The third value is the number of literals the
+    coverage records, protected or refused: a coverage with no literal at
+    all is a coverage of a build without the string protection.
     """
     by_length: dict[int, set[str]] = {}
     refused: set[str] = set()
+    total = 0
     for entry in coverage:
         for literal in entry.strings:
+            total += 1
             digest = literal.sha256
             if not digest:
                 continue
@@ -400,7 +454,7 @@ def protected_literals(coverage: list[Coverage]) -> tuple[dict[int, set[str]], s
                 by_length.setdefault(literal.length, set()).add(digest)
             else:
                 refused.add(digest)
-    return by_length, refused
+    return by_length, refused, total
 
 
 def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
@@ -409,60 +463,101 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
 
     The check is a byte scan: the coverage carries the length and the digest
     of every protected literal (never the content), and the scan hashes the
-    candidates of the image and compares. A literal that is protected in one
-    module and **refused** in another is legitimately still in the image --
-    the gate does not half-protect -- and is reported instead of failing the
-    build.
+    candidates of the image and compares.
+
+    The number the check reports is the number of literals it **verified**:
+    the ones whose plaintext is not in the protected image. A literal that
+    is protected in one module and **refused** in another is legitimately
+    still in the image -- the gate does not half-protect -- and it is
+    reported as a survivor, with its coverage hash, so that the operator
+    can exclude it.
     """
-    by_length, refused = protected_literals(coverage)
+    by_length, refused, total = protected_literals(coverage)
     if not by_length:
         # The policy may select nothing, in which case there is nothing to
         # check. A policy that selects strings and protected none is a
-        # failure: the protection silently did nothing.
-        selected = policy_selects_strings(policy)
+        # failure -- unless the coverage has no string section at all, which
+        # means the coverage is from a build without the string protection.
+        if not policy_selects_strings(policy):
+            print("check_payload: no protected string in the coverage: the strings are not checked")
+            return 0
+        if total == 0:
+            check(
+                False,
+                "the policy selects strings, but the coverage of this build carries no string "
+                "section: the coverage is from a build without the string protection, and the "
+                "strings are not checked",
+            )
         check(
-            not selected,
+            False,
             "the policy selects strings, but no literal was protected: the protection did "
             "nothing",
         )
-        print("check_payload: no protected string in the coverage: the strings are not checked")
-        return 0
+
+    # The salt: the digests of the literals are salted with the seed of the
+    # build, and the coverage does not carry the salt. A check with the
+    # wrong salt would find nothing in the image and would report a
+    # protection that works, so the proof is verified first.
+    seed = build_seed(policy)
+    for entry in coverage:
+        if not entry.str_salt:
+            continue
+        if entry.str_salt != "build-seed":
+            check(
+                False,
+                f"the coverage is salted with '{entry.str_salt}', which this check does not "
+                "know: the strings cannot be checked",
+            )
+        if seed is None:
+            check(
+                False,
+                "the coverage is salted with the seed of the build, and this check does not "
+                "have the seed: set CS2_PROTECT_SEED, or give the check the policy that "
+                "carries it",
+            )
+        if entry.str_salt_proof and entry.str_salt_proof != salt_proof(seed):
+            check(
+                False,
+                "the seed of this check is not the seed of the build: the digests of the "
+                "coverage cannot be matched against the image",
+            )
 
     runs = image_runs(protected.data)
-    # A literal that is protected in one module and **refused** in another is
-    # legitimately still in the image: the gate does not half-protect, and the
-    # refused copy is the one that holds the plaintext.
     everywhere = {digest for digests in by_length.values() for digest in digests}
-    skipped = refused & everywhere
-    for length, digests in sorted(by_length.items()):
-        wanted = digests - skipped
-        if not wanted:
-            continue
+    survivors = digests_present(runs, by_length, seed) & everywhere
+    absent = everywhere - survivors
+
+    # A literal that is protected in one module and refused in another is
+    # legitimately still in the image. A literal that nobody refused and
+    # that is still in the image is a failure: the protection did nothing.
+    for digest in sorted(survivors - refused):
         check(
-            not whole_run_matches(runs, length, wanted),
+            False,
             f"the protected image still holds the plaintext of a protected string "
-            f"({length} bytes, sha256 {sorted(wanted)[0][:12]}): the protection did nothing",
+            f"(sha256 {digest[:12]}): the protection did nothing",
         )
-    print(f"check_payload: {sum(len(digests) for digests in by_length.values())} protected "
-          "strings are absent from the protected image")
+
+    print(f"check_payload: {len(absent)} protected strings are absent from the protected image")
+    if survivors:
+        print(f"check_payload: {len(survivors)} protected strings are still in the protected "
+              "image")
+        for digest in sorted(survivors):
+            print(
+                f"check_payload:   sha256 {digest[:12]}: protected in one module, refused in "
+                "another: it is legitimately still in the image"
+            )
 
     if unprotected is not None:
         plain_runs = image_runs(unprotected.data)
         for length, digests in sorted(by_length.items()):
             check(
-                whole_run_matches(plain_runs, length, digests)
-                or prefix_matches(plain_runs, length, digests),
+                bool(digests_present(plain_runs, {length: digests}, seed)),
                 f"the unprotected image does not hold the plaintext of a protected string "
                 f"({length} bytes): the check would be vacuous",
             )
         print("check_payload: the unprotected image holds the protected strings")
 
-    for digest in sorted(skipped):
-        print(
-            f"check_payload: the string {digest[:12]} is protected in one module and refused "
-            "in another: it is legitimately still in the image"
-        )
-    return sum(len(digests) for digests in by_length.values())
+    return len(absent)
 
 
 def policy_selects_strings(policy: Path | None) -> bool:
