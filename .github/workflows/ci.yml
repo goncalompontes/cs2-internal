@@ -66,10 +66,17 @@ jobs:
       - name: the host tests
         run: meson test -C build
 
-      - name: the payload build
-        run: meson setup build-payload payload
+      # The payload is **manually mapped** into the game and deliberately
+      # avoids the CRT (ADR-0010), so it must be linked against the *static*
+      # CRT: the cross file is what pins `b_vscrt = 'mt'`. Without it meson
+      # picks `md`, and the DLL then imports MSVCP140.dll / VCRUNTIME140.dll /
+      # ucrtbase.dll, which the injector's manual loader would have to
+      # resolve inside cs2.exe -- an artifact nobody has run in the game.
+      # The cross file is the documented configuration (docs/architecture.md).
+      - name: the payload build (configure)
+        run: meson setup build-payload payload --cross-file toolchain/windows-msvc.ini
 
-      - name: the payload build
+      - name: the payload build (compile)
         run: meson compile -C build-payload
 
       # The Vulkan headers are **git-ignored** (a large, non-redistributable
