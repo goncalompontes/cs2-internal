@@ -779,14 +779,33 @@ evaluations) were measured.
    Monte-Carlo solver scores the hitbox geometry, the field solver scores the chart
    cells.
 
-6. **§1.6's cost, measured on the saved 717-cell set.** The estimator's whole
-   search (32 candidates) costs p50/p95/p99 = **2.3 / 3.1 / 3.2 ms** at 64 samples,
-   **4.7 / 5.4 / 5.6 ms** at 128 and **9.8 / 11.0 / 11.7 ms** at 256 (the median of
-   six runs) — against the **15.6 ms** tick and the service's **12 ms** guard. The
-   run-to-run spread of the p99 is 2.5–3.6 ms (64), 4.9–6.2 ms (128) and
-   **10.8–15.9 ms (256)**: the 256-sample mode straddles the tick and is over the
-   guard, while 64 and 128 samples fit with room to spare. The existing cone
-   objective on the same field measures **48 / 60 / 62 ms** here (the published
-   34 ms is the same order). The sample-based objective is therefore **4–20×
-   cheaper** than the one it would replace, and 256 samples is the only mode that
-   does not fit the 12 ms guard.
+6. **§1.6's cost, measured on the saved 717-cell set — at a live hitbox count.**
+   The estimator's whole search (32 candidates) costs p50/p95/p99 = **4.3 / 5.2 /
+   5.7 ms** at 64 samples, **8.7 / 10.0 / 10.2 ms** at 128 and **19.9 / 22.8 /
+   24.6 ms** at 256 — against the **15.6 ms** tick and the service's **12 ms**
+   guard (the median of six runs; the six runs' p99 ranged 5.1–6.7 ms, 9.4–12.9 ms
+   and 22.0–31.5 ms).
+
+   **These numbers are at a live-sized hitbox set: 57 hitboxes** (19 per player ×
+   3 players, `docs/re/aim.md`: `m_nHitBoxes (19 on a player)`). The saved set
+   stores *chart cells*, so the benchmark's first reconstruction rebuilt only **24**
+   hitboxes (8 per target, one per hitgroup) — 2.4× fewer than a live solve — and
+   the cost was **understated by the same factor** (2.3 / 4.7 / 9.4 ms). The
+   benchmark now measures both, and the **live-sized** one is the one the budget
+   verdict is taken from: **64 samples fit with room to spare, 128 samples are at
+   the guard** (the median p99 is 10.2 ms, but the run-to-run spread crosses the
+   12 ms guard), and **256 samples do not fit** (the p50 is already over the tick).
+
+   The existing cone objective on the same field measures **60 / 65 / 68 ms** here
+   (the published 34 ms is the same order). The sample-based objective is
+   therefore **3–14× cheaper** than the one it would replace — not the 4–20× the
+   24-hitbox reconstruction suggested.
+
+   > **The cost ratio is not a quality-for-quality comparison.** The Monte-Carlo
+   > search evaluates 32 **fixed** candidates (the top-16 cells' Chebyshev centres
+   > and centroids) with no refinement inside a cell, while `argmax_hit_probability`
+   > runs `mass_ascent` (8 seed candidates plus up to 32 compass iterations refining
+   > to a local optimum over the 717 cells). And the two do **not** model the same
+   > dispersion: the Monte-Carlo kernel's support is `S + I = 0.00283` rad and its
+   > variance-matched σ is `0.00082` rad — **2.4× tighter** than the Gaussian's
+   > `σ = 0.002` — so their hit chances are not comparable either.

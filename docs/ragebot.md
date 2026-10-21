@@ -785,41 +785,88 @@ meson compile -C <build>
 ```
 
 Measured on this machine (the host build, `debugoptimized`; the 717-cell saved set,
-24 reconstructed hitboxes, a cone radius of 0.002 rad — the same σ the published
-`argmax_hit_probability` number uses). The numbers are the **median of six runs**;
-the run-to-run spread is quoted where it matters:
+a cone radius of 0.002 rad). The numbers are the **median of six runs**; the
+run-to-run spread of the p99 is quoted where it matters.
+
+**Two hitbox sets are measured, and the difference is the budget.** The saved set
+stores the field's *chart* cells, so the benchmark rebuilds one world-space capsule
+per (target, hitgroup) group — **8 per target, 24 in all**. A live CS2 player has
+**19** hitboxes (`docs/re/aim.md`: `m_nHitBoxes (19 on a player)`), so a live
+three-target solve hands the solver **57** hitboxes — **2.4×** the reconstruction,
+and the solver's cost is linear in the hitbox count. The benchmark therefore
+measures **both**: the reconstruction, and a **live-sized** set (the same
+silhouettes, cut along their axes into 19 pieces per target — the union of the
+pieces is exactly the original capsule, so the silhouette is preserved and only the
+count changes).
+
+**The live-sized set (57 hitboxes) — what a live solve costs:**
 
 | what | N=64 | N=128 | N=256 |
 |---|---|---|---|
-| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.07 / 0.09 / 0.10 ms | 0.14 / 0.19 / 0.21 ms | 0.28 / 0.33 / 0.37 ms |
-| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | **2.3 / 3.1 / 3.2 ms** | **4.7 / 5.4 / 5.6 ms** | **9.8 / 11.0 / 11.7 ms** |
+| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.13 / 0.18 / 0.19 ms | 0.26 / 0.35 / 0.37 ms | 0.53 / 0.74 / 1.04 ms |
+| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | **4.3 / 5.2 / 5.7 ms** | **8.7 / 10.0 / 10.2 ms** | **19.9 / 22.8 / 24.6 ms** |
+
+**The reconstructed set (24 hitboxes) — the old, understated measurement:**
+
+| what | N=64 | N=128 | N=256 |
+|---|---|---|---|
+| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.07 / 0.10 / 0.10 ms | 0.14 / 0.18 / 0.21 ms | 0.28 / 0.37 / 0.41 ms |
+| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | 2.3 / 2.8 / 3.0 ms | 4.7 / 5.5 / 6.1 ms | 9.4 / 10.6 / 11.1 ms |
 
 | the existing objective, on the same field | p50 | p95 | p99 |
 |---|---|---|---|
-| `argmax_hit_probability` (σ = 0.002) | 48 ms | 60 ms | 62 ms |
-| `hit_probability` (one evaluation) | 3.3 ms | 8.0 ms | 9.3 ms |
+| `argmax_hit_probability` (σ = 0.002) | 60 ms | 65 ms | 68 ms |
+| `hit_probability` (one evaluation) | 3.4 ms | 8.2 ms | 9.3 ms |
 
-One sample (one seed, one pellet, 24 hitboxes) costs **1.0 µs** (p50).
+One sample (one seed, one pellet) costs **1.0 µs** against the 24 hitboxes and
+**2.0 µs** against the 57.
 
-**The verdict.** The Monte-Carlo search is **4–20× cheaper than the existing
-objective** on the same field. At 64 and 128 samples it fits the tick with room to
-spare (p99 2.5–3.6 ms and 4.9–6.2 ms against the 15.6 ms tick and the service's
-12 ms guard). At **256 samples the p99 is 10.8–15.9 ms across the six runs — it
-straddles the 15.6 ms tick and is over the 12 ms guard**, so the 256-sample mode
-does **not** fit the budget reliably on this machine. The existing objective does
-**not** fit the tick at all (p50 44–49 ms).
+**The verdict (at the live-sized hitbox count).** The Monte-Carlo search is **3–14×
+cheaper than the existing objective** on the same field (60 ms ÷ 19.9 ms at 256
+samples, 60 ms ÷ 4.3 ms at 64) — not the 4–20× the 24-hitbox reconstruction
+suggested. Against the budget:
+
+* **64 samples fit with room to spare**: p99 5.7 ms (the six runs' p99 ranged
+  5.1–6.7 ms) against the 15.6 ms tick and the service's 12 ms guard.
+* **128 samples are *at* the guard**: the median p99 is 10.2 ms, but the six runs'
+  p99 ranged **9.4–12.9 ms** — it crosses the 12 ms guard on a loaded machine. This
+  is the mode the next task must size from, and it is not comfortably inside the
+  budget.
+* **256 samples do not fit at all**: the p50 (19.9 ms) is already over the 15.6 ms
+  tick and the p99 (24.6 ms) is over the guard.
+
+The existing objective does **not** fit the tick at all (p50 60 ms).
 
 The published figure for the existing objective is 34 ms (`docs/ragebot-perf.md`
 §3.9); the out-of-tree harness that produced it measures 29–50 ms on this machine
 for the same call, so the two are the same order — the numbers above are the
 committed, reproducible ones.
 
+**Two caveats that the cost ratio alone does not carry.**
+
+* **The two objectives do not model the same dispersion** (the review's m4). The
+  Monte-Carlo kernel is `S = I = 0.002 / √2`, so its **support** is
+  `S + I = 0.00283` rad and its variance-matched σ is
+  `√(S² + I²) / √6 = 0.00082` rad — the Monte-Carlo cone is **2.4× tighter** than
+  the Gaussian's `σ = 0.002` (whose support is unbounded). The *cost* comparison is
+  unaffected (the Monte-Carlo cost is set by the sample count, not by the radius),
+  but the **hit chances** the two print are not comparable — which is why the
+  benchmark prints "hit chance 1.000" for its chosen candidate: the cone is
+  smaller than the target.
+* **The two searches do different work.** The Monte-Carlo search evaluates **32
+  fixed candidates** (the top-16 cells' Chebyshev centres and centroids) with
+  **no refinement inside a cell**, while `argmax_hit_probability` runs `mass_ascent`
+  (`payload/aim/src/field.cpp`) — 8 seed candidates plus up to 32 compass
+  iterations that refine to a local optimum over the 717 cells. The Monte-Carlo
+  search is cheaper **and coarser**: the ratio is a cost ratio, not a
+  quality-for-quality comparison.
+
 **The benchmark's hitboxes are a reconstruction.** The saved set stores the field's
 *chart* cells, not the world-space solids they came from, so the benchmark rebuilds
-one world-space capsule per (target, hitgroup) group. The **cost** is what is
-measured and the reconstruction preserves its shape (24 hitboxes over three
-targets, the same order as a live multi-target solve), but the **hit chances** the
-benchmark prints are not meaningful.
+one world-space capsule per (target, hitgroup) group, and the **live-sized** set
+cuts those capsules into 19 pieces per target. The **cost** is what is measured;
+the **hit chances** the benchmark prints are not meaningful (a proxy geometry, and
+a cone 2.4× tighter than the Gaussian's).
 
 ### 13.7 What the new solver does not model
 
