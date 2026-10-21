@@ -494,8 +494,9 @@ the new code not yet tidied), the second is the state at `9fb8875` — the
 last commit on the branch that touches a source file, so the commits after
 it (the workflow and this report) do not move the numbers, and they are
 therefore still the tip's numbers. The re-review round re-ran the sweep
-over all ten groups there, and this round re-ran it over all ten again, at
-the same commit. The base commit's numbers were not measured separately:
+over all ten groups at the previous tip, and this round re-ran it over all
+ten again at `9fb8875`: the ten numbers are the same. The base commit's
+numbers were not measured separately:
 the sweep analyses the tree in place, and the base is 52 commits back.
 
 | group | with the refactors | at the tip (`9fb8875`) |
@@ -754,7 +755,7 @@ fresh checkout of the final tree — every step green (§7.2).
 | **F4** | the failures are collected per group, so one broken file that failed in both gated groups was reported as *two* translation units | the failed list is de-duplicated (`distinct_failures`), and a file's output is shown once, with the group that found it | a broken `payload/game/src/log.cpp`: the gate says "failed on 1 translation unit(s)" (it said 2) and exits 1 |
 | **F5** | the compiler is the runner image's LLVM and is **not** pinned; the workflow header claimed the configuration this repository is verified with locally | the header says the compiler is the image's, states the exposure (the image ships 20.1.8, the tree was verified with 22.1.8; the same `-std=c++26`, no `__cplusplus` conditionals) and records the image facts the workflow relies on | — |
 | **F6** | `meson` and `ninja` were installed unpinned in the same step that installs the pinned `requirements-dev.txt` | both are pinned in `requirements-dev.txt` (meson 1.11.2, ninja 1.13.0) and installed from it | — |
-| **F7** | §6.1's numbers did not follow from the method printed next to them: the table said "31 → 12 call sites" and the documented regexes give 35 → 14 tokens and 25 → 5 raw locals | §6.1 publishes the exact commands and the numbers they produce | the commands were run verbatim in git bash: **35, 15, 25, 5** — the `CloseHandle` count was 14 when this round was fixed and became 15 with the M1 commit `c4769f8` (the third mention in `win_handle.hpp`'s `usable()` comment); §6.1 is re-measured at the tip |
+| **F7** | §6.1's numbers did not follow from the method printed next to them: the table said "31 → 12 call sites" and the documented regexes gave 35 → 14 tokens and 25 → 5 raw locals | §6.1 publishes the exact commands and the numbers they produce | the commands were run verbatim in git bash: **35, 15, 25, 5** — the `CloseHandle` count was 14 when this round was fixed and became 15 with the M1 commit `c4769f8` (the third mention in `win_handle.hpp`'s `usable()` comment); §6.1 is re-measured at the tip |
 
 ### 9.5 The re-review's commits
 
