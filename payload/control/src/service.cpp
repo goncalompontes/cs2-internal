@@ -848,15 +848,27 @@ auto Service::input_status() noexcept -> Json {
   // The local animfix (`docs/re/animfix.md`): what it did, and the evidence
   // that it does something — the **server's** aim yaw against the **client's
   // predicted** one. The difference is the divergence the animfix removes.
+  // `animfix_status` says why the animfix is not ready (a stale calibration
+  // dump, an unhookable seam), so a feature that cannot work says so
+  // instead of looking idle.
   result.set("animfix", Json::boolean(input_.animfix()));
   result.set("animfix_ready", Json::boolean(input_.animfix_ready()));
+  result.set("animfix_status", Json::string(input_.animfix_status()));
   result.set("animfix_acted", Json::boolean(input_.animfix_acted()));
   result.set("animfix_captures", Json::number(static_cast<double>(input_.animfix_captures())));
   result.set("animfix_applies", Json::number(static_cast<double>(input_.animfix_applies())));
   result.set("animfix_skips", Json::number(static_cast<double>(input_.animfix_skips())));
-  result.set("animfix_server_aim_yaw", Json::number(input_.animfix_server_aim_yaw()));
-  result.set("animfix_predicted_aim_yaw", Json::number(input_.animfix_predicted_aim_yaw()));
-  result.set("animfix_aim_yaw_delta", Json::number(input_.animfix_aim_yaw_delta()));
+  result.set("animfix_data_valid", Json::boolean(input_.animfix_data_valid()));
+  if (input_.animfix_data_valid()) {
+    result.set("animfix_server_aim_yaw", Json::number(input_.animfix_server_aim_yaw()));
+    result.set("animfix_predicted_aim_yaw", Json::number(input_.animfix_predicted_aim_yaw()));
+    result.set("animfix_aim_yaw_delta", Json::number(input_.animfix_aim_yaw_delta()));
+  } else {
+    // No data yet: `null`, so "nothing observed" is not "no divergence".
+    result.set("animfix_server_aim_yaw", Json());
+    result.set("animfix_predicted_aim_yaw", Json());
+    result.set("animfix_aim_yaw_delta", Json());
+  }
   result.set("predict_ready", Json::boolean(input_.predict_ready()));
   result.set("predict_runs", Json::number(static_cast<double>(input_.predict_runs())));
   result.set("predicted_landing_tick",

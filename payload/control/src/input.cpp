@@ -32,12 +32,6 @@ constexpr std::size_t k_max_vtable_slots = 96;
 // The one Input the payload owns, for the static hook detour.
 Input* g_active = nullptr;
 
-// The animfix's two detours need a call-through target that survives the
-// `Input` (the same pattern as `g_active` above: the detour is a plain
-// function pointer the engine holds, so it cannot be a member).
-void* g_animfix_codec_original = nullptr;
-void* g_animfix_setter_original = nullptr;
-
 // The animfix's clock: a monotonic millisecond counter. The capture's age
 // is measured with it (`cs2/control/animfix.hpp`'s validity rule).
 [[nodiscard]] auto animfix_now_ms() noexcept -> std::uint64_t {
@@ -1483,14 +1477,26 @@ void __fastcall Input::create_move_input_detour(void* self, int slot, char activ
 //     `ReflectMove`) pushes the *client's* values into the AG2 graph through
 //     the parameter **setter**, for exactly those four float slots. It never
 //     writes the replicated value in the slot, so **the server's value never
-//     reaches the graph** — the prediction is the only writer.
+//     reaches the graph** — the prediction is the only writer through the
+//     setter.
 //
-// The animfix therefore hooks the **setter** and hands it the server's value
-// for the local player's four float slots. That seam needs **no ordering
-// assumption**: the correction lands exactly where the prediction writes, so
-// it does not matter whether the snapshot decode runs before or after the
-// prediction inside one frame. The codec hook only *captures* the server's
-// values (a copy — the slots are rewritten every frame).
+// The animfix therefore **captures** the server's values at the codec and
+// **re-applies** them into the graph's parameters in the **anim tick**
+// (`CAnimGraphGameSystem::AnimTickUpdate`, `0x35aeb0`), which runs *after*
+// the prediction in the same tick (§9.3) and *contains* the AG2 evaluation:
+// the values written there are the ones the pose is computed from.
+//
+// **Why not the setter** (`0x8492a0`), which is where the prediction writes
+// and would be the natural seam? Its third prologue instruction is a
+// RIP-relative load (`movss xmm0, [rip+0x13c0fa0]`), and the repo's inline
+// relocator rewrites such a displacement as `disp + (target - trampoline)`.
+// The module is mapped high under ASLR and the trampoline comes from
+// `VirtualAlloc` low, so the rewrite is ~141 TB and can never fit in an
+// `int32`: the hook engine bails with `unsupported_instruction` and the
+// animfix would never hook anything. The anim tick's prologue is
+// RIP-free, so the correction is written there instead — with the setter's
+// own write replicated by hand
+// (`*(float *)(*(node + 0x10)[index] + 0x18) = value`).
 //
 // The enum/bool slots the codec also decodes (`m_moveType`, `m_flinchHead`,
 // …) are **not** covered: the prediction pushes those into the graph with
@@ -1501,26 +1507,30 @@ void __fastcall Input::create_move_input_detour(void* self, int slot, char activ
 void __fastcall Input::animfix_codec_detour(void* dst, void* src, void* schema) noexcept {
   // The original runs **first**: the codec writes the server's values into
   // the slots, and the capture copies them out afterwards.
-  if (g_animfix_codec_original != nullptr) {
-    reinterpret_cast<animfix_codec_fn>(g_animfix_codec_original)(dst, src, schema);
-  }
   Input* input = g_active;
-  if (input == nullptr || !input->animfix_enabled_.load()) {
+  if (input == nullptr) {
+    return;
+  }
+  reinterpret_cast<animfix_codec_fn>(input->animfix_codec_hook_.original())(dst, src, schema);
+  if (!input->animfix_enabled_.load()) {
     return;
   }
   input->animfix_capture(dst);
 }
 
-void __fastcall Input::animfix_setter_detour(void* node, std::int16_t index,
-                                             const float* value) noexcept {
-  float substituted = value != nullptr ? *value : 0.0F;
+void __fastcall Input::animfix_anim_tick_detour(void* self, int tick_count) noexcept {
   Input* input = g_active;
-  if (input != nullptr && input->animfix_enabled_.load()) {
-    input->animfix_substitute(node, index, substituted);
+  if (input == nullptr) {
+    return;
   }
-  if (g_animfix_setter_original != nullptr) {
-    reinterpret_cast<animfix_setter_fn>(g_animfix_setter_original)(node, index, &substituted);
+  // The correction goes in **before** the original: the AG2 evaluation (and
+  // with it the pose) happens inside it, so the graph is evaluated from the
+  // server's values.
+  if (input->animfix_enabled_.load()) {
+    input->animfix_apply();
   }
+  reinterpret_cast<animfix_anim_tick_fn>(input->animfix_anim_tick_hook_.original())(self,
+                                                                                   tick_count);
 }
 
 auto Input::animfix_controller() const noexcept -> std::uintptr_t {
@@ -1562,83 +1572,159 @@ void Input::animfix_capture(void* controller) noexcept {
     }
     targets[i] = animfix::Target{node, index};
   }
+  if (!animfix::targets_are_distinct(targets)) {
+    // Two slots that share a graph parameter would collide: one of them would
+    // silently never be corrected. Refuse the controller instead.
+    animfix_targets_valid_.store(false);
+    return;
+  }
   {
     const std::lock_guard<std::mutex> lock(animfix_mutex_);
     animfix_targets_ = targets;
     animfix::store(animfix_capture_, values, animfix_now_ms());
   }
+  animfix_targets_valid_.store(true);
   animfix_captures_.fetch_add(1);
-  // "Acted" is relative to the last capture: the animfix has not corrected
-  // the graph since the server's newest values arrived.
-  animfix_acted_.store(false);
   animfix_server_yaw_.store(values[animfix::slot_position(animfix::Slot::aim_yaw)]);
 }
 
-auto Input::animfix_substitute(void* node, std::int16_t index, float& value) noexcept -> bool {
-  const std::uintptr_t target = reinterpret_cast<std::uintptr_t>(node);
-  const std::lock_guard<std::mutex> lock(animfix_mutex_);
-  const auto slot = animfix::find_slot(animfix_targets_, target, index);
-  if (!slot.has_value()) {
-    return false;  // not one of our slots
+// The re-apply: the server's values into the graph's parameters.
+//
+// The write is the setter's own (`*(float *)(*(node + 0x10)[index] + 0x18) =
+// value`), replicated here because the setter is not hookable (see the
+// comment above). The parameter's **current** value is read first: that is
+// the client's own prediction, and the difference between it and the
+// server's value is the divergence the animfix removes — the operator's
+// evidence that the feature does something.
+void Input::animfix_apply() noexcept {
+  animfix_acted_.store(false);
+  if (!animfix_targets_valid_.load()) {
+    return;
   }
-  if (*slot == animfix::Slot::aim_yaw) {
-    // The client's own prediction — the value the animfix replaces. It is
-    // recorded even when the re-apply is refused: the divergence is the
-    // operator's evidence.
-    animfix_predicted_yaw_.store(value);
+  const std::uint64_t now = animfix_now_ms();
+  {
+    const std::lock_guard<std::mutex> lock(animfix_mutex_);
+    if (!animfix::capture_is_fresh(animfix_capture_, now)) {
+      // No capture, or one that aged out: nothing may be written over the
+      // client's fresh prediction. Counted once per anim tick.
+      animfix_skips_.fetch_add(1);
+      return;
+    }
   }
-  const auto captured = animfix::take(animfix_capture_, *slot, animfix_now_ms());
-  if (!captured.has_value()) {
-    animfix_skips_.fetch_add(1);
-    return false;
+  std::array<animfix::Target, animfix::k_tracked_slot_count> targets{};
+  {
+    const std::lock_guard<std::mutex> lock(animfix_mutex_);
+    targets = animfix_targets_;
   }
-  value = *captured;
-  animfix_applies_.fetch_add(1);
-  animfix_acted_.store(true);
-  return true;
+  for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
+    const animfix::Slot slot = animfix::k_tracked_slots[i];
+    // The graph parameter's address: node -> the parameter array -> the
+    // parameter object -> the value.
+    std::uintptr_t array = 0;
+    if (!cs2::game::read(targets[i].node + animfix::k_node_array_offset, array) || array == 0) {
+      return;
+    }
+    std::uintptr_t object = 0;
+    const std::uint64_t element =
+        array + static_cast<std::uint64_t>(targets[i].index) * animfix::k_parameter_stride;
+    if (!cs2::game::read(element, object) || object == 0) {
+      return;
+    }
+    const std::uintptr_t value_address = object + animfix::k_parameter_value_offset;
+    // The client's own prediction — the value that is in the graph now.
+    float current = 0.0F;
+    if (!cs2::game::read(value_address, current)) {
+      return;
+    }
+    if (slot == animfix::Slot::aim_yaw) {
+      animfix_predicted_yaw_.store(current);
+      // Both numbers are known now: the server's aim yaw (from the capture)
+      // and the client's predicted one (the value the graph held). Until
+      // then the status says "no data" rather than "no divergence".
+      animfix_data_valid_.store(true);
+    }
+    float server = 0.0F;
+    {
+      const std::lock_guard<std::mutex> lock(animfix_mutex_);
+      const auto captured = animfix::take(animfix_capture_, slot, now);
+      if (!captured.has_value()) {
+        continue;  // already re-applied for this slot
+      }
+      server = *captured;
+    }
+    if (!cs2::game::write_bytes(value_address, &server, sizeof(server))) {
+      continue;
+    }
+    animfix_applies_.fetch_add(1);
+    animfix_acted_.store(true);
+  }
 }
 
 auto Input::animfix_aim_yaw_delta() const noexcept -> float {
   return animfix::aim_yaw_difference(animfix_server_yaw_.load(), animfix_predicted_yaw_.load());
 }
 
+auto Input::animfix_status() const noexcept -> std::string {
+  const std::lock_guard<std::mutex> lock(animfix_mutex_);
+  return animfix_status_;
+}
+
+void Input::set_animfix_status(std::string status) noexcept {
+  const std::lock_guard<std::mutex> lock(animfix_mutex_);
+  animfix_status_ = std::move(status);
+}
+
 void Input::animfix_install() noexcept {
-  if (animfix_codec_hook_.installed() && animfix_setter_hook_.installed()) {
+  if (animfix_codec_hook_.installed() && animfix_anim_tick_hook_.installed()) {
     return;
   }
   if (client_base_ == 0) {
+    set_animfix_status("the client module is not resolved yet");
     return;
   }
   const OffsetInfo* codec = find_offset("animfix_graph_codec");
-  const OffsetInfo* setter = find_offset("animfix_param_setter");
-  if (codec == nullptr || setter == nullptr || codec->module != "client.dll" ||
-      setter->module != "client.dll") {
+  const OffsetInfo* anim_tick = find_offset("animfix_anim_tick");
+  if (codec == nullptr || anim_tick == nullptr) {
+    // The offsets come from the generated SDK, which is rendered from the
+    // **calibration dump** — a build-specific, gitignored artifact. A dump
+    // that predates this feature has no entry for it, and the animfix would
+    // then be silently inert. Say so, loudly, in the log and in the status.
+    const std::string missing = codec == nullptr ? "animfix_graph_codec" : "animfix_anim_tick";
+    set_animfix_status("the calibration dump has no '" + missing +
+                       "' signature (re-run scripts/calibrate-live.py to refresh it)");
+    cs2::game::append_log("[cs2-payload] animfix: " + animfix_status());
     return;
   }
-  if (!animfix_setter_hook_.installed()) {
-    const auto error =
-        animfix_setter_hook_.install(reinterpret_cast<void*>(client_base_ + setter->rva),
-                                     reinterpret_cast<void*>(&Input::animfix_setter_detour));
+  if (codec->module != "client.dll" || anim_tick->module != "client.dll") {
+    set_animfix_status("the animfix's signatures are not from client.dll");
+    cs2::game::append_log("[cs2-payload] animfix: " + animfix_status());
+    return;
+  }
+  if (!animfix_anim_tick_hook_.installed()) {
+    const auto error = animfix_anim_tick_hook_.install(
+        reinterpret_cast<void*>(client_base_ + anim_tick->rva),
+        reinterpret_cast<void*>(&Input::animfix_anim_tick_detour));
     if (error.has_value()) {
-      cs2::game::append_log("[cs2-payload] animfix: the parameter setter is not hookable: " +
-                            std::string(cs2::hooks::to_string(*error)));
+      set_animfix_status(std::string("the anim tick is not hookable: ") +
+                         cs2::hooks::to_string(*error));
+      cs2::game::append_log("[cs2-payload] animfix: " + animfix_status());
       return;
     }
-    g_animfix_setter_original = animfix_setter_hook_.original();
   }
   if (!animfix_codec_hook_.installed()) {
     const auto error =
         animfix_codec_hook_.install(reinterpret_cast<void*>(client_base_ + codec->rva),
                                     reinterpret_cast<void*>(&Input::animfix_codec_detour));
     if (error.has_value()) {
-      cs2::game::append_log("[cs2-payload] animfix: the graph codec is not hookable: " +
-                            std::string(cs2::hooks::to_string(*error)));
+      set_animfix_status(std::string("the graph codec is not hookable: ") +
+                         cs2::hooks::to_string(*error));
+      cs2::game::append_log("[cs2-payload] animfix: " + animfix_status());
       return;
     }
-    g_animfix_codec_original = animfix_codec_hook_.original();
   }
+  set_animfix_status("ok");
   cs2::game::append_log(
-      "[cs2-payload] animfix: the graph codec and the parameter setter are hooked");
+      "[cs2-payload] animfix: the graph codec and the anim tick are hooked");
 }
 
 auto Input::current_cmd() noexcept -> void* {

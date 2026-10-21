@@ -221,14 +221,29 @@ pub fn known_signatures() -> Vec<Signature> {
         // The AG2 **parameter setter** — the one place a graph parameter's
         // value is written (`*(float *)(*(longlong *)(node + 0x10) + index * 8
         // + 0x18) = value`). The client's prediction pushes the local player's
-        // values through it, so it is where the animfix hands the **server's**
-        // value over instead. The pattern is unique; the RIP-relative
+        // values through it. It is **not hookable**: its third prologue
+        // instruction is a RIP-relative load whose displacement cannot be
+        // relocated to the trampoline (the module is mapped high, the
+        // trampoline low), so the animfix re-applies the server's values in
+        // the anim tick instead. The pattern is unique; the RIP-relative
         // displacement is relocated by the inline hook. RVA on 659940c1:
         // `0x8492a0`.
         sig(
             "client.dll",
             "animfix_param_setter",
             "F3 41 0F 10 08 4C 8B C9 F3 0F 10 05 A0 0F 3C 01",
+            None,
+            None,
+        ),
+        // `CAnimGraphGameSystem::AnimTickUpdate` — the per-tick animation
+        // driver, and the place the AG2 graph is evaluated. It runs **after**
+        // the client's prediction in the same tick, so a correction written
+        // here is the one the pose is computed from. Its 15-byte prologue is
+        // RIP-free (the relocator accepts it). RVA on 659940c1: `0x35aeb0`.
+        sig(
+            "client.dll",
+            "animfix_anim_tick",
+            "89 54 24 10 48 89 4C 24 08 55 57 41 54 41 55 41 57 48 8D AC 24",
             None,
             None,
         ),

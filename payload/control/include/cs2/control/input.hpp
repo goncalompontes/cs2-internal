@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <string>
 
 #include "cs2/control/anti_aim.hpp"
 #include "cs2/control/animfix.hpp"
@@ -619,12 +620,12 @@ class Input {
   // --- the local animfix (`docs/re/animfix.md`) ---------------------------
   //
   // The **local animfix** makes the **server's** animation win for the local
-  // player: the server replicates the AG2 graph inputs of
-  // `CCS2PawnGraphController`, the client's own prediction rewrites the very
-  // same slots, and the prediction is the only writer — so the server's
-  // values never reach the graph. The animfix captures the server's values
-  // at the netvar codec and hands them to the graph instead of the client's
-  // prediction, for the **four float slots** the server replicates
+  // player: the server replicates a part of the AG2 graph inputs of
+  // `CCS2PawnGraphController`, and the client's own prediction is the only
+  // writer of them (the engine's facts are in `docs/re/animfix.md` §9). The
+  // animfix captures the server's values at the netvar codec and puts them
+  // into the graph's parameters in the anim tick — where the graph is
+  // evaluated — for the **four float slots** the server replicates
   // (`m_flAirHeightAboveGround`, `m_flFlashedAmount`, `m_flAimPitchAngle`,
   // `m_flAimYawAngle`).
   //
@@ -636,10 +637,15 @@ class Input {
   // the client's predicted one — which is the divergence the animfix removes.
   void set_animfix(bool on) noexcept { animfix_enabled_.store(on); }
   [[nodiscard]] bool animfix() const noexcept { return animfix_enabled_.load(); }
-  // True when both hooks (the codec and the parameter setter) are installed.
+  // True when both hooks (the codec and the anim tick) are installed.
   [[nodiscard]] bool animfix_ready() const noexcept {
-    return animfix_codec_hook_.installed() && animfix_setter_hook_.installed();
+    return animfix_codec_hook_.installed() && animfix_anim_tick_hook_.installed();
   }
+  // **Why** the animfix is not ready ("" when it is). The offsets come from
+  // the generated SDK, which is rendered from the gitignored calibration
+  // dump — a dump that predates this feature has no entry for it, and the
+  // animfix would then be silently inert. The status says so out loud.
+  [[nodiscard]] std::string animfix_status() const noexcept;
   [[nodiscard]] std::uint64_t animfix_captures() const noexcept {
     return animfix_captures_.load();
   }
@@ -649,16 +655,23 @@ class Input {
   [[nodiscard]] std::uint64_t animfix_skips() const noexcept {
     return animfix_skips_.load();
   }
-  // True when the animfix corrected the graph since the last capture (i.e.
-  // it acted in the current tick).
+  // True when the last anim tick corrected the graph (the specification's
+  // "acted this frame").
   [[nodiscard]] bool animfix_acted() const noexcept { return animfix_acted_.load(); }
   // The server's aim yaw (the last value the codec delivered) and the
-  // client's predicted one (the last value the prediction wanted to write).
+  // client's predicted one (the value the graph held before the correction).
+  // Both are only meaningful once `animfix_data_valid()` is true.
   [[nodiscard]] float animfix_server_aim_yaw() const noexcept {
     return animfix_server_yaw_.load();
   }
   [[nodiscard]] float animfix_predicted_aim_yaw() const noexcept {
     return animfix_predicted_yaw_.load();
+  }
+  // True once the animfix has seen both the server's aim yaw and the
+  // client's predicted one — so "no data" is distinguishable from "no
+  // divergence".
+  [[nodiscard]] bool animfix_data_valid() const noexcept {
+    return animfix_data_valid_.load();
   }
   // The signed difference between the two, in degrees: the divergence.
   [[nodiscard]] float animfix_aim_yaw_delta() const noexcept;
@@ -1080,30 +1093,36 @@ class Input {
   // --- the local animfix --------------------------------------------------
   //
   // The decision logic lives in the pure header (`cs2/control/animfix.hpp`);
-  // this is only the engine access. The state below is touched on the
-  // **game's main thread** (the snapshot decode and the prediction both run
-  // there), and the counters the control thread reads are atomic.
+  // this is only the engine access. The **capture** (the codec detour) and
+  // the **re-apply** (the anim tick detour) both run on the **game's main
+  // thread** — the snapshot decode and the game system's update are both
+  // main-thread work — so the state below is only touched there; the mutex
+  // is the belt to that braces (and the counters the control thread reads
+  // are atomic).
   using animfix_codec_fn = void (*)(void* dst, void* src, void* schema);
-  using animfix_setter_fn = void (*)(void* node, std::int16_t index, const float* value);
+  using animfix_anim_tick_fn = void (*)(void* self, int tick_count);
   static void __fastcall animfix_codec_detour(void* dst, void* src, void* schema) noexcept;
-  static void __fastcall animfix_setter_detour(void* node, std::int16_t index,
-                                                const float* value) noexcept;
+  static void __fastcall animfix_anim_tick_detour(void* self, int tick_count) noexcept;
   // Install the two hooks (idempotent).
   void animfix_install() noexcept;
   // Copy the server's values out of the local controller (the codec detour).
   void animfix_capture(void* controller) noexcept;
-  // Hand the server's value to the setter instead of the client's (the setter
-  // detour). False when the write is not one of ours, or when the capture is
-  // not fresh enough to be re-applied.
-  auto animfix_substitute(void* node, std::int16_t index, float& value) noexcept -> bool;
+  // Put the server's values into the graph's parameters (the anim tick
+  // detour, before the graph is evaluated).
+  void animfix_apply() noexcept;
   // The local player's `CCS2PawnGraphController*` (0 when it is not known).
   [[nodiscard]] auto animfix_controller() const noexcept -> std::uintptr_t;
+  // The status string (why the animfix is not ready, or "ok").
+  void set_animfix_status(std::string status) noexcept;
   cs2::hooks::InlineHook animfix_codec_hook_{};
-  cs2::hooks::InlineHook animfix_setter_hook_{};
-  std::mutex animfix_mutex_{};
+  cs2::hooks::InlineHook animfix_anim_tick_hook_{};
+  mutable std::mutex animfix_mutex_{};
   animfix::Capture animfix_capture_{};
   std::array<animfix::Target, animfix::k_tracked_slot_count> animfix_targets_{};
+  std::string animfix_status_{"the animfix has not been installed yet"};
   std::atomic<bool> animfix_enabled_{false};
+  std::atomic<bool> animfix_targets_valid_{false};
+  std::atomic<bool> animfix_data_valid_{false};
   std::atomic<std::uint64_t> animfix_captures_{0};
   std::atomic<std::uint64_t> animfix_applies_{0};
   std::atomic<std::uint64_t> animfix_skips_{0};
