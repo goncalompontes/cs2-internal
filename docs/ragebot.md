@@ -684,6 +684,13 @@ ignores the geometry). The hit's `multiplier`, the weapon's damage and the range
 falloff over the hit distance give the sample's damage; the hitbox's `group` is the
 hitgroup.
 
+> **An exact tie is broken by the rule, not by the caller's array.** The nearer
+> hit wins; at the *same* distance the **hitgroup preference** decides (the
+> selection rule's third key), then the damage multiplier, then the target index.
+> The first version kept the first hitbox in the caller's list, so `[head, body]`
+> and `[body, head]` reported different hitgroups and different damage (the
+> review's m2).
+
 The intersection is **exact**: a capsule is the union of its two cap spheres and
 its side cylinder, and an oriented box is a slab test in its own frame. Both use the
 same span arithmetic as the occluders — it now lives in `cs2/aim/ray_span.hpp`, so
@@ -727,6 +734,22 @@ takes the seed source as a **parameter** and implements both:
 |---|---|---|
 | `sequence` (the default) | `md5_pseudo_random(sequence + i)`, `i` in `[0, N)` | the **expectation over the next N shots** — the seed advances with the command number, so `sequence + i` is a *different shot* |
 | `angle_grid` | `md5_pseudo_random(hash(probe yaw, probe pitch, tick))`, the probes sweeping the candidate's neighbourhood at `probe_step` | the **probability over the shot that would be taken** — the seed is a function of the aim, so within a cell there are many seeds and the lottery is the *choice* |
+
+> **The `angle_grid` sweep's width, and the candidate's own seed.** The probe
+> angles sweep the candidate's neighbourhood at `probe_step`; the sweep's centre
+> index is **integral** (`sample_count / 2`), so **the candidate's own angle is one
+> of the probes** and its own seed is in the sample set. (With the first version's
+> half-integer centre it never was: the centre was 31.5 / 63.5 / 127.5 for
+> N = 64 / 128 / 256, and the candidate's own seed was never drawn — the review's
+> m1.) The sweep reaches `floor(N / 2)` steps either side — **±15.95°** at N = 64,
+> **±31.9°** at N = 128 and **±63.8°** at N = 256, with the default
+> `probe_step` of 0.0087 rad — and is asymmetric by one step for an even count.
+>
+> The stand-in hash is injective **on the quantisation grid**, not on the raw
+> angles: the quantisation is deliberate (the stand-in models "the same aim gives
+> the same seed"), so two probe angles within one quantum (1e-4 rad) share a seed.
+> The probe step is 87 quanta, so two neighbouring probes never collide (the
+> review's m8).
 
 > **The `angle_grid` hash is a STAND-IN.** The engine's `get_tick_view_angles` is
 > **not reverse-engineered** (`docs/re/aim.md` §"The seed"; the RVAs there resolve to

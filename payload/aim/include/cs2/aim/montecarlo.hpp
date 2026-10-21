@@ -163,6 +163,13 @@ struct SeedContext {
 // the seeds that neighbourhood would produce, so the resulting hit chance is the
 // **probability over the shot that would be taken**.
 //
+// **The candidate's own angle is one of the probes**: the sweep's centre index is
+// integral (`sample_count / 2`), so the candidate's own seed is in the sample set.
+// The sweep reaches `floor(sample_count / 2)` steps either side of the candidate
+// (asymmetric by one step for an even count) — at the default `probe_step` of
+// 0.0087 rad, a half-width of 15.95° at N = 64, 31.9° at N = 128 and 63.8° at
+// N = 256.
+//
 // The hash is a **stand-in** for the engine's unre-engineered `get_tick_view_angles`.
 [[nodiscard]] auto sample_seed(const SeedContext& context, const Vec2& aim, int index,
                                int sample_count) noexcept -> std::int32_t;
@@ -176,12 +183,21 @@ struct SeedContext {
 // and mixed with the tick. It reproduces the **shape** of the community's model — the
 // seed is a function of the aim and the tick — and nothing more, so the numbers the
 // `angle_grid` policy produces are indicative, not exact.
+//
+// **The hash is injective on the grid, not on the angles.** The quantisation is
+// deliberate — the stand-in models "the same aim gives the same seed" — so two
+// probe angles within one quantum (1e-4 rad) share a seed. The probe step
+// (0.0087 rad by default) is 87 quanta, so two neighbouring probes never collide.
 [[nodiscard]] auto angle_seed_hash(float yaw, float pitch, std::uint32_t tick) noexcept
     -> std::uint32_t;
 
 // --- The sample -------------------------------------------------------------------
 
 // One drawn pellet set and the outcome of the test.
+//
+// The **nearest** hit wins. An exact tie is broken by **the rule** — the hitgroup
+// preference, then the damage multiplier, then the target index — so the outcome
+// never depends on the order the caller listed the hitboxes in.
 struct Sample {
   // The chart-space offset of the sample's **first** pellet: the `(right, up)`
   // tangent-plane displacement of the shot's direction, in radians. A multi-pellet
@@ -202,6 +218,9 @@ struct HitChance {
   float expected_damage = 0.0F;  ///< the mean damage over ALL the samples
   int samples = 0;               ///< how many samples were drawn
   int hits = 0;                  ///< how many of them hit
+  // **A diagnostic, not a probability.** The pair comes from the single
+  // **nearest** hit across all the samples: in a multi-target scene it can come
+  // from one sample in N and need not represent where the shot usually lands.
   int target = -1;               ///< the target of the nearest hit, -1 when nothing hit
   int hitgroup = 0;              ///< the hitgroup of the nearest hit
   // The mean damage the samples did **to `target`** — the per-target attribution.

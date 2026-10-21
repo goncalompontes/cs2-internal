@@ -56,6 +56,30 @@ constexpr int MAX_TRACKED_TARGETS = 32;
               .y = spread * r1 * std::sin(a1) + inaccuracy * r2 * std::sin(a2)};
 }
 
+// Whether the candidate hit beats the incumbent one.
+//
+// The **nearest** hit wins; at an exact tie the **hitgroup preference** decides
+// (the selection rule's third key), then the damage multiplier, then the target
+// index. The tie is therefore broken by **the rule**, not by the caller's array:
+// a tie used to keep the first hitbox in the list, so `[head, body]` and
+// `[body, head]` reported different hitgroups and different damage (the review's
+// m2).
+[[nodiscard]] auto nearer_hit(float candidate_distance, const Hitbox& candidate,
+                              float incumbent_distance, const Hitbox& incumbent) noexcept -> bool {
+  if (candidate_distance != incumbent_distance) {
+    return candidate_distance < incumbent_distance;
+  }
+  const int candidate_preference = hitgroup_preference(candidate.group);
+  const int incumbent_preference = hitgroup_preference(incumbent.group);
+  if (candidate_preference != incumbent_preference) {
+    return candidate_preference < incumbent_preference;
+  }
+  if (candidate.multiplier != incumbent.multiplier) {
+    return candidate.multiplier > incumbent.multiplier;
+  }
+  return candidate.target < incumbent.target;
+}
+
 // The remaining health of `target`, and whether it is known at all.
 [[nodiscard]] auto remaining_health(const MonteCarloInput& input, int target) noexcept
     -> std::optional<float> {
@@ -135,7 +159,7 @@ constexpr int MAX_TRACKED_TARGETS = 32;
       if (!distance.has_value()) {
         continue;
       }
-      if (hit == nullptr || *distance < nearest) {
+      if (hit == nullptr || nearer_hit(*distance, hitbox, nearest, *hit)) {
         nearest = *distance;
         hit = &hitbox;
       }
@@ -246,8 +270,12 @@ auto angle_seed_hash(float yaw, float pitch, std::uint32_t tick) noexcept -> std
   std::uint32_t hash = quantise(yaw) * 0x27d4eb2dU;
   hash ^= quantise(pitch) * 0x165667b1U;
   hash ^= tick * 0x9e3779b9U;
-  // splitmix32's finalizer: a bijection, so two different probe angles never share a
-  // hash (a stand-in, but a deterministic and injective one).
+  // splitmix32's finalizer: a bijection **on the quantised values** — two
+  // different grid points never share a hash. The quantisation itself is
+  // deliberate: the stand-in models "the same aim gives the same seed", so two
+  // probe angles within one quantum (1e-4 rad) **do** share a seed (the hash is
+  // not injective over the raw angles — the review's m8). The probe step (0.0087
+  // rad by default) is 87 quanta, so two neighbouring probes never collide.
   hash ^= hash >> 16;
   hash *= 0x85ebca6bU;
   hash ^= hash >> 13;
@@ -264,7 +292,17 @@ auto sample_seed(const SeedContext& context, const Vec2& aim, int index, int sam
   // The probe angles: a yaw sweep across the candidate's neighbourhood, centred on the
   // candidate (velocity's `find_spread_correction` probes the yaw in half-degree
   // steps). The pitch is the candidate's own.
-  const float centre = 0.5F * static_cast<float>(std::max(sample_count, 1) - 1);
+  //
+  // **The candidate's own angle is one of the probes.** The centre index is
+  // **integral** (`sample_count / 2`), so the probe at that index is the
+  // candidate's own aim and the candidate's own seed is in the sample set. (With
+  // a half-integer centre it never was: for N = 64/128/256 the centre was
+  // 31.5/63.5/127.5 and the candidate's own seed was never drawn — the review's
+  // m1.) The sweep reaches `floor(N / 2)` steps either side, so it is asymmetric
+  // by one step for an even count; at the default `probe_step` of 0.0087 rad its
+  // half-width is **15.95°** (N = 64), **31.9°** (N = 128) and **63.8°** (N = 256).
+  const int count = std::max(sample_count, 1);
+  const float centre = static_cast<float>(count / 2);
   const float probe_yaw = aim.x + (static_cast<float>(index) - centre) * context.probe_step;
   const float probe_pitch = aim.y;
   return md5_pseudo_random(angle_seed_hash(probe_yaw, probe_pitch, context.tick));
@@ -366,7 +404,9 @@ auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
         break;
       }
     }
-    if (!have_nearest || sample.distance < nearest) {
+    if (!have_nearest || sample.distance < nearest ||
+        (sample.distance == nearest &&
+         hitgroup_preference(sample.hitgroup) < hitgroup_preference(chance.hitgroup))) {
       have_nearest = true;
       nearest = sample.distance;
       chance.target = sample.target;

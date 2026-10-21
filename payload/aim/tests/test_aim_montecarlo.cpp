@@ -455,6 +455,68 @@ auto main() -> int {
     expect(cs2::aim::angle_seed_hash(0.1F, -0.05F, 42U) !=
                cs2::aim::angle_seed_hash(0.1F, -0.05F, 43U),
            "the stand-in hash depends on the tick");
+    // The hash is injective on the **grid**, not on the raw angles: the
+    // quantisation is deliberate (the stand-in models "the same aim gives the same
+    // seed"), so two angles within one quantum share a seed — and two neighbouring
+    // probes never do.
+    expect(cs2::aim::angle_seed_hash(0.3F, -0.1F, 55U) ==
+               cs2::aim::angle_seed_hash(0.30001F, -0.1F, 55U),
+           "the stand-in hash is quantised: angles within one quantum share a seed");
+    expect(cs2::aim::angle_seed_hash(0.3F, -0.1F, 55U) !=
+               cs2::aim::angle_seed_hash(0.3F + grid.probe_step, -0.1F, 55U),
+           "two neighbouring probes never share a seed");
+
+    // **The candidate's own seed is in the sample set** (the review's m1: with a
+    // half-integer centre the centre index was 31.5/63.5/127.5 and the
+    // candidate's own seed was never drawn).
+    for (const int count : {64, 128, 256}) {
+      const auto own =
+          cs2::aim::md5_pseudo_random(cs2::aim::angle_seed_hash(aim.x, aim.y, grid.tick));
+      bool found = false;
+      for (int index = 0; index < count; ++index) {
+        if (cs2::aim::sample_seed(grid, aim, index, count) == own) {
+          found = true;
+        }
+      }
+      expect(found, "the angle_grid policy samples the candidate's own seed");
+    }
+  }
+
+  // --- 7b. a tied nearest hit is broken by the rule, not by the input order ----
+  {
+    // Two coincident hitboxes: the head (multiplier 4) and the chest (multiplier
+    // 1). The rule's third key (the hitgroup preference) decides, whichever order
+    // the caller lists them in (the review's m2: `[head, body]` and
+    // `[body, head]` used to report different hitgroups and different damage).
+    Hitbox head;
+    head.is_capsule = true;
+    head.capsule = sphere(Vec3{.x = 100.0F, .y = 0.0F, .z = 0.0F}, 2.0F);
+    head.multiplier = 4.0F;
+    head.target = 1;
+    head.group = cs2::aim::HITGROUP_HEAD;
+    Hitbox body = head;
+    body.multiplier = 1.0F;
+    body.group = cs2::aim::HITGROUP_CHEST;
+
+    MonteCarloInput input;
+    input.weapon.damage = 35.0F;
+    input.weapon.range_modifier = 1.0F;
+    input.kernel = SpreadKernel{.spread = 0.0F, .inaccuracy = 0.0F, .pellets = 1};
+    input.samples = 4;
+
+    const std::vector<Hitbox> head_first{head, body};
+    input.hitboxes = head_first;
+    const auto first = cs2::aim::evaluate_hit_chance(input, Vec2{});
+    const std::vector<Hitbox> body_first{body, head};
+    input.hitboxes = body_first;
+    const auto second = cs2::aim::evaluate_hit_chance(input, Vec2{});
+    expect(first.has_value() && second.has_value(), "the tied case evaluates");
+    expect(first->hitgroup == cs2::aim::HITGROUP_HEAD && second->hitgroup == cs2::aim::HITGROUP_HEAD,
+           "the tie is broken by the hitgroup preference, not by the input order");
+    expect(near(first->expected_damage, second->expected_damage, 1e-6F),
+           "the tied case reports the same damage in both orders");
+    expect(near(first->expected_damage, 140.0F, 1e-3F),
+           "the tied case reports the head's damage");
   }
 
   // --- 8. the selection rule -------------------------------------------------
