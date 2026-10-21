@@ -232,8 +232,8 @@ concurrent work owns. Applying them blindly would fight `docs/style-guide.md`.
 | `modernize-types` | 8 | wants `auto` exactly where the style guide wants the type spelled out ("auto where the type is evident; spell the type out when it carries meaning") — e.g. `overlay/include/cs2/overlay/menu_pages.hpp:556` |
 | `readability` | 9 | `payload/control/src/input.hpp:666` and `payload/control/src/service.cpp:187` (owned by the concurrent work), `external/Vulkan-Headers/.../vk_layer.h` (vendored) |
 | `readability-extra` | 40 | 11 in `payload/control/src/service.cpp` (owned by the concurrent work) |
-| `trailing-return-type` | 134 | the two biggest files are owned by the concurrent work |
-| `modernize-extra` | 445 | includes the two biggest files |
+| `trailing-return-type` | 148 | the two biggest files are owned by the concurrent work, and the pass's own new code (the wrapper and its host test) adds a few |
+| `modernize-extra` | 448 | includes the two biggest files |
 | `misc-extra` | 3 | all three are false positives: `misc-redundant-expression` on comparisons that are not redundant (`payload/game/src/camera_live.cpp:99`, `payload/tls/src/bootstrap.cpp:49`, `payload/diag/src/watchdog.cpp:105`) |
 
 **The plan.**
@@ -459,7 +459,7 @@ git show e539bc6:<path> | grep -c '[^[:space:]]'
 grep -c '[^[:space:]]' <path>
 ```
 
-The table is the state at commit `187361d` (the tip of the branch when this
+The table is the state at commit `b212124` (the tip of the branch when this
 round's numbers were taken); the two commands above reproduce it, and they
 move with the tree.
 
@@ -485,13 +485,16 @@ declarations and the comments that say why.
 
 **Method:** the sweep's own dry run — `python scripts/clang-tidy-fix.py
 --group <group> -j 8` — over the 101 translation units of the four build
-dirs, with the sweep's header filters. It was run twice on the same tree:
-once at the commit **before this pass's own style commit** (`d2b884c`, i.e.
-with the refactors applied and the new code not yet tidied) and once at the
-tip. The base commit's numbers were not measured separately: the sweep
-analyses the tree in place, and the base is fifteen commits back.
+dirs, with the sweep's header filters. The two columns are two different
+commits, and the table says which: the first is the state **before this
+pass's own style commit** (`d2b884c`, i.e. with the refactors applied and
+the new code not yet tidied), the second is **the tip** of the branch when
+this round's numbers were taken (`b212124`; the re-review round re-ran the
+sweep over all ten groups there). The base commit's numbers were not
+measured separately: the sweep analyses the tree in place, and the base is
+fifteen commits back.
 
-| group | with the refactors | at the tip |
+| group | with the refactors | at the tip (`b212124`) |
 |---|---|---|
 | `performance` | 0 | 0 |
 | `nodiscard` | 1 | **0** |
@@ -501,14 +504,23 @@ analyses the tree in place, and the base is fifteen commits back.
 | `readability` | 9 | 9 |
 | `misc-extra` | 3 | 3 |
 | `readability-extra` | 40 | 40 |
-| `trailing-return-type` | 134 | 134 |
-| `modernize-extra` | 445 | 445 |
+| `trailing-return-type` | 134 | 148 |
+| `modernize-extra` | 445 | 448 |
 
 The 22 findings this pass removed are all in the code this pass added or
 touched: the policies' `is_valid` was not `[[nodiscard]]` (1), and the handle
 locals that are never reset were not `const` (21). The 3 that are left are
 the pre-existing ones listed in §4.2. **The tree introduces no new finding
 under the gated groups, and the gated groups are clean.**
+
+The two groups that grew since the first measurement are the two that count
+*every* occurrence in the tree: the new code (the wrapper, its host test and
+the review rounds' commits) brings 14 more `trailing-return-type` findings
+and 3 more `modernize-extra` ones. The new code is written in the house
+style, but the trailing-return-type group is a stylistic sweep over the
+whole tree, and the wrapper's *test* file is full of one-line helpers and
+lambdas — the kind of code the group wants to rewrite. The gated groups
+(`performance`, `nodiscard`) are untouched by all of it: 0 and 0.
 
 ### 6.4 The suites
 
