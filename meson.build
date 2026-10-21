@@ -319,6 +319,10 @@ control_animfix_test = executable('control_animfix_test',
   include_directories : [
     include_directories('payload/control/include'),
   ],
+  # The animfix's test runs the repository's own inline relocator over the
+  # seams' prologues: they must be hookable (and the parameter setter's must
+  # not be), or the feature would be silently inert.
+  dependencies : hooks_dep,
 )
 test('control-animfix', control_animfix_test)
 
