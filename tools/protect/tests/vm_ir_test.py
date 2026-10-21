@@ -113,9 +113,12 @@ def coverage_files(directory: Path) -> list[Path]:
     return sorted(directory.glob("*.cov"))
 
 
-def check_verdicts(verdicts: dict[str, tuple[str, str]], what: str) -> None:
+def check_verdicts(verdicts: dict[str, tuple[str, str]], what: str,
+                   expected: dict[str, tuple[str, str]] | None = None) -> None:
     """The verdict of every function of the fixture."""
-    for symbol, (verdict, reason) in EXPECTED.items():
+    if expected is None:
+        expected = EXPECTED
+    for symbol, (verdict, reason) in expected.items():
         check(symbol in verdicts, f"{what}: the verdict of '{symbol}' is missing")
         assert symbol in verdicts
         found_verdict, found_reason = verdicts[symbol]
@@ -226,6 +229,7 @@ def check_production(clang_cl: Path, plugin: Path, source: Path, policy: Path, w
     local = work / source.name
     shutil.copyfile(source, local)
 
+    reports: dict[str, str] = {}
     for output, with_plugin in ((plain, False), (protected, True)):
         command = [
             str(clang_cl),
@@ -247,6 +251,7 @@ def check_production(clang_cl: Path, plugin: Path, source: Path, policy: Path, w
             f"the {'protected' if with_plugin else 'unprotected'} build failed:\n"
             f"{completed.stdout}\n{completed.stderr}",
         )
+        reports[output.stem] = completed.stderr
         # The compiler writes the IR into the working directory, with the
         # name of the source.
         produced = work / local.with_suffix(".ll").name
@@ -255,6 +260,21 @@ def check_production(clang_cl: Path, plugin: Path, source: Path, policy: Path, w
 
     protected_ir = protected.read_text(encoding="utf-8", errors="replace")
     plain_ir = plain.read_text(encoding="utf-8", errors="replace")
+
+    # The analysis ran: the extension points fire in the production path,
+    # and the verdict is in the report and in the coverage. A test that
+    # only exercised the `opt` path could pass for the wrong reason.
+    check_verdicts(verdicts_of_report(reports["protected"]), "the report of the production path",
+                   {"vm_leaf": ("virtualizable", "")})
+    files = coverage_files(work / "coverage-protected")
+    check(len(files) == 1, f"the coverage holds {len(files)} files and not one")
+    coverage = verdicts_of_coverage(files[0])
+    check("vm_leaf" in coverage, "the coverage of the production path has no verdict")
+    if "vm_leaf" in coverage:
+        check(
+            coverage["vm_leaf"].get("verdict") == "virtualizable",
+            "the coverage of the production path has the wrong verdict",
+        )
 
     # The analysis adds nothing to the module: there is no bytecode, and no
     # interpreter.

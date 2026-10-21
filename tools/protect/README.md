@@ -1074,7 +1074,10 @@ effort" path — a half-lowered function computes garbage, and in a
 manually mapped payload with no exception tables that kills the game.
 
 The checks run in the order of the specification's table, and the first
-one that holds is the reason that is reported:
+one that holds is the reason that is reported. The two budget checks are
+the exception: the argument count is raised in the call scan and the slot
+count when the allocator runs out, so a function that exceeds **both** is
+reported as `too_many_arguments`.
 
 | reason | refused because |
 |---|---|
