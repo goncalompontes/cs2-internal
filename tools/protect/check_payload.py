@@ -393,12 +393,11 @@ def protected_literals(coverage: list[Coverage]) -> tuple[dict[int, set[str]], s
     refused: set[str] = set()
     for entry in coverage:
         for literal in entry.strings:
-            digest = str(literal.get("sha256", ""))
+            digest = literal.sha256
             if not digest:
                 continue
-            if literal.get("state") == "protected":
-                length = int(literal.get("length", 0))
-                by_length.setdefault(length, set()).add(digest)
+            if literal.state == "protected":
+                by_length.setdefault(literal.length, set()).add(digest)
             else:
                 refused.add(digest)
     return by_length, refused

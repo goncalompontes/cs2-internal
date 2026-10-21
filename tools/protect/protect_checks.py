@@ -379,7 +379,7 @@ class Coverage:
         self.entries: dict[str, str] = {}
         #: The literals of the string protection: the length and the digest
         #: of the content, never the content itself.
-        self.strings: list[dict[str, object]] = []
+        self.strings: list[StringLiteral] = []
 
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -453,27 +453,26 @@ class Coverage:
         content: the coverage is a file, and a file holds the strings.
         """
         state, _, rest = value.partition(" ")
-        literal: dict[str, object] = {
-            "state": state.strip(),
-            "length": 0,
-            "sha256": "",
-            "uses": 0,
-            "functions": 0,
-            "reason": "",
-        }
+        length = 0
+        sha256 = ""
+        uses = 0
+        functions = 0
+        reason = ""
         for part in rest.split():
             name, _, number = part.partition("=")
             if name == "len":
-                literal["length"] = int(number)
+                length = int(number)
             elif name == "sha256":
-                literal["sha256"] = number.strip().upper()
+                sha256 = number.strip().upper()
             elif name == "uses":
-                literal["uses"] = int(number)
+                uses = int(number)
             elif name == "functions":
-                literal["functions"] = int(number)
+                functions = int(number)
             elif name == "reason":
-                literal["reason"] = number.strip()
-        self.strings.append(literal)
+                reason = number.strip()
+        self.strings.append(
+            StringLiteral(state.strip(), length, sha256, uses, functions, reason)
+        )
 
     def _check_digest(self, lines: list[str], digest: str) -> bool:
         """Whether the file still is the one the plugin wrote.
@@ -557,6 +556,25 @@ def belongs_to_tree(coverage: Coverage, root: Path) -> bool:
     except ValueError:
         # Two paths on different drives (Windows) are never relative.
         return False
+
+
+class StringLiteral(NamedTuple):
+    """One literal of the string protection, as the coverage records it.
+
+    The coverage carries the length and the digest of the content, never the
+    content: the coverage is a file, and a file holds the strings.
+    """
+
+    #: "protected" or "refused".
+    state: str
+    #: The length of the content, without the trailing NUL.
+    length: int
+    #: The SHA-256 of the content, in upper case.
+    sha256: str
+    uses: int
+    functions: int
+    #: The refusal reason ("" when the literal was protected).
+    reason: str
 
 
 class CoverageRead(NamedTuple):
