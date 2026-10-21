@@ -247,7 +247,10 @@ The payload must never hard-code an RVA (ADR-0012).
    `python scripts/resolve-offsets-offline.py` refreshes
    `calibration/offsets.json` from the module files on disk (see
    [`offsets.md`](offsets.md)); the interfaces and the schema still need the
-   live calibration.
+   live calibration. The offline refresh **refuses** to write a dump that
+   lost a signature - a signature that stops matching is named
+   (`unresolved: <name>`) and the run exits non-zero with the previous dump
+   untouched (`--allow-unresolved` writes the degraded dump on purpose).
 4. Write the findings into `docs/re/<module>.md`: VA **and** RVA, what produces
    the value, the invariant that proves it's the right object, and the
    anchor → steps → address recipe for the next build. The doc is the

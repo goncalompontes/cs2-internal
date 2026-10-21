@@ -51,7 +51,10 @@ python scripts\resolve-offsets-offline.py --check  # compares, writes nothing
 The dumper resolves the very same curated signatures from the module's file on
 disk that the live calibration resolves in the process' memory, so the two
 agree byte for byte. A signature that stops matching is **named**
-(`unresolved: <name>`), not dropped.
+(`unresolved: <name>`), not dropped - and the dump is **not** written: a
+dump without that offset is a dump the payload cannot use, so the run exits
+non-zero and the previous dump stays. `--allow-unresolved` writes the
+degraded dump anyway, on purpose.
 
 The **live** calibration (`scripts/calibrate-live.py`, a running game) is still
 needed for the **interfaces** and the **schema** — they are runtime state, not

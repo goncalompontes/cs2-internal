@@ -93,10 +93,43 @@ resolve-offsets-offline: game: F:\SteamLibrary\steamapps\common\Counter-Strike G
 resolve-offsets-offline: dumper: ...\cargo\release\cs2-dumper.exe
 resolve-offsets-offline: client.dll: 21 offset(s) [...\game\csgo\bin\win64\client.dll]
 resolve-offsets-offline: engine2.dll: 2 offset(s) [...\game\bin\win64\engine2.dll]
+resolve-offsets-offline: interfaces.json, schema.json, schema_system.json are untouched - they still need the live calibration (scripts/calibrate-live.py) and a running game
 resolve-offsets-offline: no difference: ...\calibration\offsets.json matches the offline resolution (23 offset(s))
 ```
 
-## 3. What still needs the live process
+## 3. What the script refuses to do
+
+The dump is only worth writing if it carries **every** offset the payload
+needs, so the write is refused whenever the resolution is not complete:
+
+| the state | what happens |
+|---|---|
+| a signature did not resolve | nothing is written, exit 1, the previous dump stays |
+| a module failed (a missing file, a dumper error) | nothing is written, exit 1 |
+| the resolution does not cover the module's signatures | nothing is written, exit 1 |
+| a dumper that is not there | a message on stderr, exit 1 - not a traceback |
+
+`--allow-unresolved` writes the degraded dump anyway, on purpose: the run
+then says `DEGRADED` and names the signatures it left out. The **default**
+is the safe one - a dump that lost an offset is a dump the payload cannot
+use, and the operator must see the missing signature by name rather than a
+success message and a dead feature.
+
+The **cross-check** is what makes "the offsets came from the module they
+claim" more than a claim: the dumper reports how many signatures the
+registry holds per module (`--list-signature-counts`), and the script
+requires the resolution to account for exactly that many (resolved **plus**
+unresolved). A module that was not really scanned - a wrong file in the
+game tree, a module name that does not match - is a shortfall and a loud
+error, not a dump full of plausible-looking wrong RVAs. The dumper also
+names the module it looked the signatures up under, and the script requires
+it to be the one that was asked for.
+
+The write itself is **atomic**: the whole list goes to a temporary file in
+the same directory and is moved over the old one, so a failure half-way
+leaves the previous dump exactly as it was.
+
+## 4. What still needs the live process
 
 | dump | source | needs the game? |
 |---|---|---|
@@ -110,7 +143,7 @@ fills at start-up, and a heap of schema classes), not patterns in a binary:
 they cannot be read out of a file, and the live calibration
 (`scripts/calibrate-live.py`) stays the way to refresh them.
 
-## 4. Adding a signature
+## 5. Adding a signature
 
 1. Cut the signature and add it to
    `external/dumper/src/analysis.rs::known_signatures()` (see

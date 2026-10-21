@@ -429,6 +429,13 @@ stderr (`unresolved: <name>`) and `--check` exits non-zero — a signature that
 silently stops matching is an offset the payload cannot resolve, so it must
 be visible.
 
+The **write** is refused in the same situation: the dump is not written, the
+exit code is 1 and the previous dump stays untouched. A dump that lost an
+offset is a dump the payload cannot use — the operator sees the missing
+signature by name instead of a success message and a dead feature.
+`--allow-unresolved` writes the degraded dump anyway, on purpose (the run
+says `DEGRADED` and names the signatures it left out).
+
 > The **interfaces** and the **schema** (`calibration/interfaces.json`,
 > `calibration/schema.json`, `calibration/schema_system.json`) come from the
 > live process and still need §11's live calibration. The offline refresh
