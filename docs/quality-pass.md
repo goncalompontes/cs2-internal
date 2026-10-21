@@ -533,11 +533,15 @@ the whole point of this pass:
    run in the way the runner runs them: the Vulkan headers are cloned into a
    scratch copy of the tree (and the copy **without** them is what proves
    the step is needed — §9), and the payload is configured with the cross
-   file (§9). What could not be verified is the *runner's* environment: that
-   `ilammy/msvc-dev-cmd` and the runner's LLVM are where the workflow
-   expects them. The style gate's clang-tidy is pinned (LLVM 22.1.8, the
-   version the gated groups were measured with), so that one no longer
-   depends on the runner's image.
+   file — the command, the `dumpbin` result and the build directory that
+   carries the artifact are in §9. What could not be verified is the
+   *runner's* environment: that `ilammy/msvc-dev-cmd` and the runner's
+   LLVM are where the workflow expects them. The style gate's clang-tidy is
+   pinned (LLVM 22.1.8, the version the gated groups were measured with),
+   so that one no longer depends on the runner's image. The **compiler**
+   does depend on it: clang-cl comes from the runner image's LLVM, which is
+   not pinned (the workflow's header says so, and records the image's
+   facts).
 3. **The SDK the payload is built against.** The SDK headers
    (`payload/sdk/*.hpp`) are generated from the calibration dumps, and the
    dumps are git-ignored: they come from a live calibration against a
@@ -646,7 +650,7 @@ specification forbade.
 | finding | what it was | what changed | how it was proven |
 |---|---|---|---|
 | **B1** (blocker) | the workflow built the overlay without `external/Vulkan-Headers`, which is git-ignored and never fetched: the job died at configure time | the runner clones the headers (a pinned tag) before the overlay is configured | a scratch copy of the tree **without** the headers fails with `Include dir ../external/Vulkan-Headers/include does not exist` (exit 1); with the clone step it configures and links `cs2_overlay_layer.dll` |
-| **M1** | the workflow built the payload *without* the cross file, so meson picked `/MD`: the DLL imported `MSVCP140.dll`, `VCRUNTIME140.dll` and the `ucrtbase` api-set — an artifact the injector's manual loader would have to resolve inside `cs2.exe` | the workflow configures the payload with `toolchain/windows-msvc.ini` (`b_vscrt = mt`); the local build was reconfigured the same way | `dumpbin /dependents` on the two builds: the native one imports the CRT DLLs, the cross one imports only `KERNEL32`, `USER32` and `D3DCOMPILER_47` |
+| **M1** | the workflow built the payload *without* the cross file, so meson picked `/MD`: the DLL imported `MSVCP140.dll`, `VCRUNTIME140.dll` and the `ucrtbase` api-set — an artifact the injector's manual loader would have to resolve inside `cs2.exe` | the workflow configures the payload with `toolchain/windows-msvc.ini` (`b_vscrt = mt`) | the command is `meson setup build-payload payload --cross-file toolchain/windows-msvc.ini`; `dumpbin /dependents build-payload\payload.dll` on that build lists only `KERNEL32.dll`, `USER32.dll` and `D3DCOMPILER_47.dll`, while a build without the cross file lists `MSVCP140.dll`, `VCRUNTIME140.dll` and the `api-ms-win-crt-*` set. The build directory carries the evidence (`b_vscrt = mt` in `meson-info/intro-buildoptions.json`, and `payload.dll` next to it) |
 | **M2** | the move constructor moved the policy, so the moved-from wrapper's destructor called a **moved-from** policy (a `std::function` closer is empty after the move → `std::bad_function_call` out of a `noexcept` destructor) | the wrapper tracks the ownership itself (`owns_`); the policy is asked about a handle only when one is *taken* | the host test drives a `std::function` policy: with the old wrapper the test ends the process with `std::bad_function_call`; with the new one it passes |
 | **M3** | the wrapper's empty state was `Handle{}` and the destructor asked the policy whether that value was live — an undocumented, unenforced requirement | the **empty value is reserved**: the wrapper never owns it and never releases it, and `reset()` with the handle the wrapper already holds keeps it instead of releasing it twice | the host test drives a policy whose zero value is live: with the old wrapper it fails `!descriptor.valid()` (and would close stdin); with the new one the zero value is left alone and a handle is released exactly once |
 | **m1** | two releases in the injector happened later than they used to (the toolhelp snapshot, the entry thread) | both handles are in an inner block again | the diff against the pre-pass code: the release points are the same lines as the hand-written `CloseHandle` calls |
