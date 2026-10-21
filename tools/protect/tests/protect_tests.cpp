@@ -33,6 +33,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -604,6 +605,7 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16
 @.str.compare = private unnamed_addr constant [9 x i8] c"compared\00"
 @.str.address = private unnamed_addr constant [8 x i8] c"address\00"
 @.str.twoblock = private unnamed_addr constant [9 x i8] c"twoblock\00"
+@.str.aspace = internal addrspace(1) constant [8 x i8] c"aspace1\00"
 
 @global.init = private constant { ptr, i64 } { ptr @.str.escapes, i64 7 }
 
@@ -691,6 +693,13 @@ then:
   ret void
 
 else:
+  ret void
+}
+
+define void @uses_aspace(ptr addrspace(1) %out) {
+entry:
+  %c = load i8, ptr addrspace(1) @.str.aspace
+  store i8 %c, ptr addrspace(1) %out
   ret void
 }
 )";
@@ -811,6 +820,8 @@ void test_string_gate() {
                "a literal whose address is compared is refused");
   check_reason(".str.address", cs2::protect::StringSkipReason::unsupported_use,
                "a literal whose address is taken as an integer is refused");
+  check_reason(".str.aspace", cs2::protect::StringSkipReason::unsupported_address_space,
+               "a literal in another address space is refused");
 }
 
 /// The transform: the literal leaves the image, the blob and the decode are
@@ -932,6 +943,51 @@ void test_string_transform() {
   std::filesystem::remove_all(directory, error);
 }
 
+/// The transform: a literal in another address space is refused, and the
+/// module comes out whole.
+///
+/// The blob and the buffer are created in the **default** address space, so
+/// a literal in another one cannot be replaced by them: the users would
+/// point at a buffer of the wrong address space and the module would come
+/// out broken ("Broken module found"). The gate refuses such a literal, and
+/// the refusal leaves it exactly as it is.
+void test_string_address_space() {
+  llvm::LLVMContext context;
+  const auto module = build_string_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  cs2::protect::Policy policy;
+  policy.strings = {"aspace1"};
+  policy.strings_min_length = 4;
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const cs2::protect::StringResult result = cs2::protect::transform_strings(*module, config, {});
+  check(result.protected_count == 0, "a literal in another address space is not protected");
+  check(result.refused_count == 1, "the literal in another address space is refused");
+  if (!result.literals.empty()) {
+    check(result.literals[0].reason.has_value(), "the refusal has a reason");
+    if (result.literals[0].reason.has_value()) {
+      check_equal(cs2::protect::to_string(*result.literals[0].reason),
+                  "unsupported_address_space", "the refusal names the address space");
+    }
+  }
+  // The literal is left exactly as it is.
+  check(module->getGlobalVariable(".str.aspace", /*AllowLocal=*/true) != nullptr,
+        "the refused literal is still in the module");
+  // And the module is whole: a broken module is the failure this refusal
+  // exists to avoid.
+  std::string message;
+  llvm::raw_string_ostream stream(message);
+  const bool broken = llvm::verifyModule(*module, &stream);
+  check(!broken, "the module of a refused address space verifies");
+  if (broken) {
+    std::fprintf(stderr, "FAIL: the module does not verify: %s\n", stream.str().c_str());
+  }
+}
+
 /// The transform: the decode runs before **every** use of the literal.
 ///
 /// A literal that is used in two blocks of one function -- one of them the
@@ -1020,6 +1076,7 @@ auto main() -> int {
   test_string_policy();
   test_string_gate();
   test_string_transform();
+  test_string_address_space();
   test_string_decode_dominance();
   if (g_failures != 0) {
     std::printf("protect: %d check(s) failed\n", g_failures);

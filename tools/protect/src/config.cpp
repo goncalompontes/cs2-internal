@@ -346,6 +346,21 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
   return policy;
 }
 
+/// The spelling of the policy path the coverage directory is keyed by.
+///
+/// The plugin and the checkers have to compute the **same** directory, and
+/// the path they are given is spelled in two ways: the environment carries
+/// it as the operator spelled it (`C:/tools/protect/policy.json`), and a
+/// reader that goes through a path object turns the forward slashes into
+/// backslashes on Windows. The key is therefore the path with the
+/// separators normalised to forward slashes -- the same spelling on every
+/// platform, and the one tools/protect/protect_checks.py computes.
+[[nodiscard]] auto policy_key(std::string_view policy_path) -> std::string {
+  std::string key(policy_path);
+  std::ranges::replace(key, '\\', '/');
+  return key;
+}
+
 /// The directory the per-module coverage goes to.
 ///
 /// `CS2_PROTECT_COVERAGE` names it outright (the escape hatch for a CI
@@ -366,7 +381,7 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
     root = temp;
   }
   llvm::SHA256 hasher;
-  hasher.update(policy_path);
+  hasher.update(policy_key(policy_path));
   const std::string digest = llvm::toHex(hasher.final());
   return root / "cs2-protect-coverage" / digest.substr(0, 16);
 }

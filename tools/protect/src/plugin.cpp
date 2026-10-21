@@ -242,7 +242,7 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     // build.
     std::string salt;
     if (strings.salted) {
-      salt = "build-seed sha256=" + cs2::protect::salt_proof(settings);
+      salt = "build-seed digest=" + cs2::protect::salt_proof(settings);
     }
     if (const auto error = cs2::protect::write_coverage(settings, module, entries, functions,
                                                         protect, covered, salt)) {

@@ -45,13 +45,18 @@ namespace cs2::protect {
 /// Why a literal was not protected.
 ///
 /// The order of the enumerators is the order of the specification's table:
-/// the first rule that holds is the reason that is reported.
+/// the first rule that holds is the reason that is reported. The order is
+/// the order of the **rules**, not the order of the uses: a literal with
+/// two reasons has one verdict.
 enum class StringSkipReason : std::uint8_t {
   escapes_to_initializer,  ///< the literal's address ends up in a global
                            ///< initializer: a pointer to a decoded buffer
                            ///< cannot exist before the program runs.
   unsupported_shape,       ///< the literal is not a `ConstantDataSequential`
                            ///< of `i8`.
+  unsupported_address_space,  ///< the literal is in another address space:
+                              ///< the blob and the buffer are in the default
+                              ///< one, and the module would come out broken.
   empty,                   ///< the literal is empty.
   too_short,               ///< the literal is shorter than the policy's
                            ///< `strings_min_length`.

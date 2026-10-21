@@ -52,6 +52,7 @@ import os
 import struct
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 from protect_checks import (
     MIX_MULTIPLIER,
@@ -348,11 +349,12 @@ def image_runs(data: bytes) -> list[bytes]:
     """The NUL-terminated byte sequences of an image.
 
     A string literal is a NUL-terminated sequence of bytes in the data of the
-    image, so splitting the image on the NUL bytes yields the candidates. A
-    literal that is not NUL-terminated is a *prefix* of one of them, which is
-    why the scan below hashes the prefixes as well.
+    image, so splitting the image on the NUL bytes yields the candidates.
+
+    The **duplicates** are dropped: the scan below only asks whether a
+    literal is in the image, and the same run twice is the same answer.
     """
-    return [part for part in data.split(b"\0") if part]
+    return list({part for part in data.split(b"\0") if part})
 
 
 #: The text the proof of the salt is computed over. It is the plugin's
@@ -397,49 +399,90 @@ def salt_proof(seed: int | None) -> str:
     return hashlib.sha256(seed.to_bytes(8, "little") + SALT_PROOF_TEXT).hexdigest().upper()
 
 
-def digests_of(run: bytes, seed: int | None) -> set[str]:
-    """The digests of a candidate: the plain one and the salted one.
+class DigestForms(NamedTuple):
+    """Which forms of the digest the coverage of this build holds."""
 
-    Both are computed, so that a coverage of an older build -- whose
-    digests are unsalted -- is still read: the check does not have to know
-    which kind a coverage holds.
+    #: The coverage names the salt: its digests are `sha256(seed || content)`.
+    salted: bool
+    #: The coverage names no salt: its digests are the unsalted `sha256(content)`.
+    plain: bool
+
+
+def digest_forms(coverage: list[Coverage]) -> DigestForms:
+    """Which forms of the digest the coverage of this build holds.
+
+    A coverage that names the salt carries **salted** digests, and a coverage
+    of an older build carries the unsalted ones. The scan computes only the
+    forms the coverage holds: the scan is the expensive part of this check,
+    and a digest that cannot match is wasted work.
     """
-    digests = {hashlib.sha256(run).hexdigest().upper()}
-    if seed is not None:
-        digests.add(
-            hashlib.sha256(seed.to_bytes(8, "little") + run).hexdigest().upper()
-        )
-    return digests
+    salted = False
+    plain = False
+    for entry in coverage:
+        if not entry.strings:
+            continue
+        if entry.str_salt:
+            salted = True
+        else:
+            plain = True
+    return DigestForms(salted, plain)
 
 
-def digests_present(runs: list[bytes], by_length: dict[int, set[str]], seed: int | None) -> tuple[set[str], set[str]]:
-    """The digests of the wanted literals that the image holds.
+def scan_literals(runs: list[bytes], by_length: dict[int, set[str]], seed: int | None,
+                  forms: DigestForms) -> tuple[set[str], set[str]]:
+    """The wanted literals the image holds: as a whole run, and inside a run.
 
-    Two sets: the literals that are in the image as a **whole run**, and
-    the ones that are only the **prefix** of a longer run. A literal that
-    is not NUL-terminated in the image is the prefix of a longer run, and
-    an analyst can grep for it either way -- the predicate is the same for
-    the protected and for the unprotected image.
+    The scan is at **every offset** of every run. A literal that is in the
+    image as a substring *is* in the image, and the MSVC ABI merges a literal
+    with a longer literal that **ends with it**: the bytes of the deleted
+    literal survive as the tail of the longer one, and a scan that only looks
+    at the start of the runs cannot see it. A scan that cannot see it counts
+    it as absent, and the number it publishes is the number it did not look
+    at.
 
-    The two are kept apart because they are not the same failure: a whole
-    run is the protected literal itself (the pass did not remove it), while
-    a prefix is the beginning of *another* string of the image, which the
-    pass cannot remove.
+    Two sets are returned, and they are not the same failure:
+
+    * the literals that are in the image as a **whole run** -- a
+      NUL-terminated string of their own: a copy of the literal itself;
+    * the literals that are only **inside** a run -- as its prefix or as its
+      tail: the bytes of another string of the image.
     """
-    exact: set[str] = set()
-    prefixes: set[str] = set()
+    whole: set[str] = set()
+    part: set[str] = set()
+    salt = seed.to_bytes(8, "little") if seed is not None else b""
+    sha256 = hashlib.sha256
     for length, digests in by_length.items():
+        wanted: set[bytes] = set()
+        for digest in digests:
+            try:
+                wanted.add(bytes.fromhex(digest))
+            except ValueError:
+                continue
+        if not wanted:
+            continue
         for run in runs:
-            if len(run) < length:
+            size = len(run)
+            if size < length:
                 continue
-            matched = digests & digests_of(run[:length], seed)
-            if not matched:
-                continue
-            if len(run) == length:
-                exact |= matched
-                break
-            prefixes |= matched
-    return exact, prefixes
+            for offset in range(size - length + 1):
+                piece = run[offset:offset + length]
+                if forms.salted:
+                    digest = sha256(salt + piece).digest()
+                    if digest in wanted:
+                        name = digest.hex().upper()
+                        if offset == 0 and size == length:
+                            whole.add(name)
+                        else:
+                            part.add(name)
+                if forms.plain:
+                    digest = sha256(piece).digest()
+                    if digest in wanted:
+                        name = digest.hex().upper()
+                        if offset == 0 and size == length:
+                            whole.add(name)
+                        else:
+                            part.add(name)
+    return whole, part
 
 
 def protected_literals(coverage: list[Coverage]) -> tuple[dict[int, set[str]], set[str], int]:
@@ -456,7 +499,7 @@ def protected_literals(coverage: list[Coverage]) -> tuple[dict[int, set[str]], s
     for entry in coverage:
         for literal in entry.strings:
             total += 1
-            digest = literal.sha256
+            digest = literal.digest
             if not digest:
                 continue
             if literal.state == "protected":
@@ -472,14 +515,25 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
 
     The check is a byte scan: the coverage carries the length and the digest
     of every protected literal (never the content), and the scan hashes the
-    candidates of the image and compares.
+    candidates of the image and compares. The scan is at **every offset** of
+    every run of the image, because a literal that is in the image as a
+    substring is in the image -- the MSVC ABI merges a literal with a longer
+    literal that ends with it, and the bytes of the deleted literal survive
+    as the tail of the longer one.
 
-    The number the check reports is the number of literals it **verified**:
-    the ones whose plaintext is not in the protected image. A literal that
-    is protected in one module and **refused** in another is legitimately
-    still in the image -- the gate does not half-protect -- and it is
-    reported as a survivor, with its coverage hash, so that the operator
-    can exclude it.
+    The number the check reports is the number the scan produced: the
+    literals whose plaintext is not in the protected image, and the ones
+    whose plaintext **is**. A literal that is protected in one module and
+    **refused** in another is legitimately still in the image -- the gate
+    does not half-protect -- and a literal whose bytes survive as the tail
+    of another string of the image is greppable too. Both are reported with
+    their coverage hash, and neither is a failure: the pass did its work on
+    the literal it protected, and the two causes are properties of the ABI
+    and of the payload's data model, not of the pass.
+
+    What **is** a failure is a literal that is in the image as a whole
+    string and that nobody refused: that is the pass's own copy, and it
+    means the protection did nothing.
     """
     by_length, refused, total = protected_literals(coverage)
     if not by_length:
@@ -531,51 +585,69 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
                 "coverage cannot be matched against the image",
             )
 
+    forms = digest_forms(coverage)
     runs = image_runs(protected.data)
     everywhere = {digest for digests in by_length.values() for digest in digests}
-    exact, prefixes = digests_present(runs, by_length, seed)
-    survivors = (exact | prefixes) & everywhere
+    whole, part = scan_literals(runs, by_length, seed, forms)
+    survivors = (whole | part) & everywhere
     absent = everywhere - survivors
 
     # A literal that is protected in one module and refused in another is
-    # legitimately still in the image. A literal that nobody refused and
-    # that is in the image as a **whole run** is a failure: the pass did
-    # not remove it. A literal that is only the prefix of another string
-    # is greppable, but the pass cannot remove another string's prefix --
-    # it is reported, not a failure.
-    for digest in sorted(exact - refused):
+    # legitimately still in the image: the refused module keeps its copy,
+    # and the linker keeps the COMDAT. A literal that nobody refused and
+    # that is in the image as a **whole string** is a failure: that is the
+    # pass's own copy, and it means the pass did not remove it. A literal
+    # that is only *inside* another string of the image is greppable, but
+    # the pass cannot remove another string's bytes -- it is reported.
+    for digest in sorted(whole - refused):
         check(
             False,
             f"the protected image still holds the plaintext of a protected string "
             f"(sha256 {digest[:12]}): the protection did nothing",
         )
 
-    print(f"check_payload: {len(absent)} protected strings are absent from the protected image")
+    print(f"check_payload: {len(absent)} of the {len(everywhere)} protected strings are absent "
+          "from the protected image")
     if survivors:
-        print(f"check_payload: {len(survivors)} protected strings are still in the protected "
-              "image")
+        print(f"check_payload: {len(survivors)} of the {len(everywhere)} protected strings are "
+              "still in the protected image")
+        refused_elsewhere = survivors & refused
+        merged = survivors - refused_elsewhere
+        print(f"check_payload:   {len(refused_elsewhere)} of them are refused in another module: "
+              "that module's copy of the literal survives the link")
+        print(f"check_payload:   {len(merged)} of them are protected in every module: their "
+              "bytes survive as the tail of another string of the image (the MSVC ABI merges a "
+              "literal with a longer one that ends with it)")
         for digest in sorted(survivors):
-            if digest in exact:
+            if digest in refused:
                 print(
-                    f"check_payload:   sha256 {digest[:12]}: protected in one module, refused in "
-                    "another: it is legitimately still in the image"
+                    f"check_payload:   sha256 {digest[:12]}: refused in another module: that "
+                    "module's copy of the literal survives the link"
                 )
                 continue
             print(
-                f"check_payload:   sha256 {digest[:12]}: the prefix of another string of the "
-                "image: it is greppable, but the pass cannot remove another string's prefix"
+                f"check_payload:   sha256 {digest[:12]}: the bytes are the tail of another "
+                "string of the image: the pass cannot remove another string's bytes"
             )
 
     if unprotected is not None:
         plain_runs = image_runs(unprotected.data)
-        for length, digests in sorted(by_length.items()):
-            plain_exact, plain_prefixes = digests_present(plain_runs, {length: digests}, seed)
-            check(
-                bool(plain_exact or plain_prefixes),
-                f"the unprotected image does not hold the plaintext of a protected string "
-                f"({length} bytes): the check would be vacuous",
-            )
-        print("check_payload: the unprotected image holds the protected strings")
+        # The same scan as on the protected side, at every offset: the
+        # unprotected image has to hold the plaintext of every protected
+        # literal, or the comparison would be vacuous for that literal. A
+        # scan that only looks at the start of the runs would fail a build
+        # whose image holds the plaintext as the tail of another string --
+        # a verdict that depends on the layout of the image and not on the
+        # protection.
+        plain_whole, plain_part = scan_literals(plain_runs, by_length, seed, forms)
+        missing = everywhere - (plain_whole | plain_part)
+        check(
+            not missing,
+            f"the unprotected image does not hold the plaintext of {len(missing)} protected "
+            f"strings (sha256 {sorted(missing)[0][:12]}): the check would be vacuous",
+        )
+        print(f"check_payload: the unprotected image holds the plaintext of all the "
+              f"{len(everywhere)} protected strings")
 
     return len(absent)
 
@@ -606,15 +678,20 @@ def main(argv: list[str]) -> int:
     if coverage_dir is None:
         env = os.environ.get("CS2_PROTECT_COVERAGE", "").strip()
         coverage_dir = Path(env) if env else None
+    # The policy, and the **spelling** the plugin was given: the coverage
+    # directory is keyed by the path of the policy, and the plugin hashes the
+    # environment's string -- not the path a reader builds out of it, which
+    # spells the forward slashes as backslashes on Windows. The two have to
+    # compute the same directory, so the key is the environment's spelling.
+    policy_env = os.environ.get("CS2_PROTECT_CONFIG", "").strip()
     policy = args.policy
-    if policy is None:
-        env = os.environ.get("CS2_PROTECT_CONFIG", "").strip()
-        policy = Path(env) if env else None
+    if policy is None and policy_env:
+        policy = Path(policy_env)
     if coverage_dir is None and policy is not None:
         # The same default the plugin computes (the digest of the policy
         # path), so that the two find the same directory without the build
         # having to pass anything around.
-        coverage_dir = default_coverage_dir(str(policy))
+        coverage_dir = default_coverage_dir(policy_env or str(policy))
     source_root = args.source_root
     if source_root is None:
         env = os.environ.get("CS2_PROTECT_SOURCE_ROOT", "").strip()

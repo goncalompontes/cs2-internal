@@ -193,12 +193,17 @@ struct UseSite {
   llvm::Function* function{nullptr};
   /// Whether the use is one the pass **cannot** rewrite.
   ///
-  /// A constant expression the pass does not understand -- a `ptrtoint`, an
-  /// `inttoptr`, a `select`, a GEP of a GEP -- is a use like any other: the
-  /// gate has to **refuse** the literal, not skip the use. A skipped use
-  /// would let the pass delete the literal while the expression still
-  /// refers to it, and the X86 backend dies on the dangling reference
-  /// ("Cannot select: ... PLEASE submit a bug report").
+  /// A constant expression the pass does not understand -- a `ptrtoint`, or
+  /// a GEP with a variable index -- is a use like any other: the gate has
+  /// to **refuse** the literal, not skip the use. A skipped use would let
+  /// the pass delete the literal while the expression still refers to it,
+  /// and the X86 backend dies on the dangling reference ("Cannot select:
+  /// ... PLEASE submit a bug report").
+  ///
+  /// The other constant expressions are **not** cases: an `inttoptr` needs
+  /// a **constant** operand and can never name a literal, a `select` with a
+  /// constant condition is folded by the parser, and a GEP of a GEP is
+  /// folded into a single GEP.
   bool unsupported{false};
 };
 
@@ -279,18 +284,17 @@ struct ExpressionOffset {
     }
     const auto offset = expression_offset(*expression, layout);
     if (!offset.has_value()) {
-      // The expression is not a GEP the pass can rewrite: a `ptrtoint`, an
-      // `inttoptr`, a `select`, a GEP with a variable index. The literal is
-      // refused.
+      // The expression is not a GEP the pass can rewrite: a `ptrtoint`, or a
+      // GEP with a variable index. The literal is refused.
       sites.push_back(UseSite{nullptr, 0, false, 0, false, nullptr, true});
       continue;
     }
     for (llvm::User* nested : expression->users()) {
       auto* instruction = llvm::dyn_cast<llvm::Instruction>(nested);
       if (instruction == nullptr) {
-        // A GEP of a GEP, or a GEP that reaches a global initializer: the
-        // pass cannot rewrite it, and the offset it would compute is
-        // relative to the nested expression and not to the literal.
+        // A GEP that reaches a global initializer: the pass cannot rewrite
+        // it, and the offset it would compute is relative to the nested
+        // expression and not to the literal.
         sites.push_back(UseSite{nullptr, 0, false, 0, false, nullptr, true});
         continue;
       }
@@ -545,6 +549,8 @@ struct Decoder {
       return "escapes_to_initializer";
     case StringSkipReason::unsupported_shape:
       return "unsupported_shape";
+    case StringSkipReason::unsupported_address_space:
+      return "unsupported_address_space";
     case StringSkipReason::empty:
       return "empty";
     case StringSkipReason::too_short:
@@ -600,6 +606,11 @@ struct Decoder {
 [[nodiscard]] auto string_gate(llvm::GlobalVariable& literal, const Config& config,
                                const RecordedSelection& selection)
     -> std::optional<StringSkipReason> {
+  // The rules, in the order of the specification's table. The reason that is
+  // reported is the first **rule** that holds, not the first failing use: a
+  // literal with two reasons has one verdict, whatever the order of its use
+  // list is.
+
   // The address of the literal in a global initializer: a pointer to a
   // decoded buffer cannot exist before the program runs.
   if (constant_escapes(literal)) {
@@ -610,6 +621,12 @@ struct Decoder {
   // replace.
   if (!is_protectable_linkage(literal) || !literal.isConstant()) {
     return StringSkipReason::unsupported_shape;
+  }
+  // The address space: the blob and the buffer are created in the **default**
+  // address space, and a literal in another one cannot be replaced by them:
+  // the module would come out broken (the X86 backend dies on the mismatch).
+  if (literal.getAddressSpace() != 0) {
+    return StringSkipReason::unsupported_address_space;
   }
   const auto content = string_content(literal);
   if (!content.has_value()) {
@@ -628,27 +645,48 @@ struct Decoder {
   }
 
   // The users: every one of them has to be a plain pointer use in a function
-  // the pass may rewrite.
+  // the pass may rewrite. The rules that hold for the uses are collected
+  // first, and the first one in the order of the table is the reason.
   const llvm::DataLayout& layout = literal.getParent()->getDataLayout();
+  bool optnone = false;
+  bool virtualized = false;
+  bool eh = false;
+  bool unsupported = false;
   for (const UseSite& site : use_sites(literal, layout)) {
-    llvm::Function* function = site.function;
-    if (site.unsupported || function == nullptr) {
+    if (site.unsupported || site.function == nullptr) {
       // A use the pass cannot rewrite: the literal is refused, and it is
       // left exactly as it is.
-      return StringSkipReason::unsupported_use;
+      unsupported = true;
+      continue;
     }
-    if (function->hasFnAttribute(llvm::Attribute::OptimizeNone)) {
-      return StringSkipReason::optnone_function;
+    if (site.function->hasFnAttribute(llvm::Attribute::OptimizeNone)) {
+      optnone = true;
+      continue;
     }
-    if (is_virtualized(*function, selection)) {
-      return StringSkipReason::virtualized_function;
+    if (is_virtualized(*site.function, selection)) {
+      virtualized = true;
+      continue;
     }
-    if (has_eh_pads(*function)) {
-      return StringSkipReason::eh_use;
+    if (has_eh_pads(*site.function)) {
+      eh = true;
+      continue;
     }
     if (!is_plain_pointer_use(site)) {
-      return StringSkipReason::unsupported_use;
+      unsupported = true;
+      continue;
     }
+  }
+  if (optnone) {
+    return StringSkipReason::optnone_function;
+  }
+  if (virtualized) {
+    return StringSkipReason::virtualized_function;
+  }
+  if (eh) {
+    return StringSkipReason::eh_use;
+  }
+  if (unsupported) {
+    return StringSkipReason::unsupported_use;
   }
   return std::nullopt;
 }

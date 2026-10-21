@@ -302,7 +302,10 @@ void write_string_report(const llvm::Module& module, const StringResult& result,
         llvm::errs() << "s";
       }
     }
-    llvm::errs() << ", sha256 " << literal.digest;
+    // The digest, not the content: the report goes to stderr, and a build
+    // log is a file. The digest is salted with the seed of the build, so it
+    // does not yield the content either.
+    llvm::errs() << ", digest " << literal.digest;
     if (literal.protected_literal) {
       llvm::errs() << "): protected\n";
       continue;
@@ -475,6 +478,11 @@ auto write_coverage(const Config& config, const llvm::Module& module,
   // itself. The coverage is a file, and a file holds the strings. The
   // digest is salted with the build seed, and the salt is **not** in the
   // coverage: the coverage alone does not yield the strings.
+  //
+  // The field is named `digest=` and not `sha256=`: the digest is
+  // `sha256(seed || content)`, not `sha256(content)`, and a reader that
+  // assumes the unsalted form finds nothing. A coverage of an older build
+  // names the field `sha256=`, and the readers take both.
   if (!strings_salt.empty()) {
     text += "str-salt " + std::string(strings_salt) + "\n";
   }
@@ -483,7 +491,7 @@ auto write_coverage(const Config& config, const llvm::Module& module,
     text += literal.protected_literal ? "protected" : "refused";
     text += " len=";
     text += std::to_string(literal.length);
-    text += " sha256=";
+    text += " digest=";
     text += literal.digest;
     text += " uses=";
     text += std::to_string(literal.uses);
