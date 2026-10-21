@@ -71,8 +71,12 @@ class InlineHook {
   [[nodiscard]] std::optional<InlineError> install(void* target, void* detour) noexcept;
   void uninstall() noexcept;
 
-  [[nodiscard]] bool installed() const noexcept { return installed_.load(std::memory_order_acquire); }
-  [[nodiscard]] void* original() const noexcept { return trampoline_.load(std::memory_order_acquire); }
+  [[nodiscard]] bool installed() const noexcept {
+    return installed_.load(std::memory_order_acquire);
+  }
+  [[nodiscard]] void* original() const noexcept {
+    return trampoline_.load(std::memory_order_acquire);
+  }
 
  private:
   // A trampoline that has been uninstalled but whose pages are still mapped.

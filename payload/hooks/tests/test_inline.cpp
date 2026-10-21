@@ -76,9 +76,8 @@ auto lifetime_detour(int a, int b) -> int {
 // the pages stay mapped, so the call returns the original's value.
 void test_the_trampoline_outlives_the_uninstall() {
   cs2::hooks::InlineHook hook;
-  const auto error =
-      hook.install(reinterpret_cast<void*>(&lifetime_target),
-                   reinterpret_cast<void*>(&lifetime_detour));
+  const auto error = hook.install(reinterpret_cast<void*>(&lifetime_target),
+                                  reinterpret_cast<void*>(&lifetime_detour));
   if (error) {
     std::printf("inline: install failed: %s\n", cs2::hooks::to_string(*error));
     assert(false);

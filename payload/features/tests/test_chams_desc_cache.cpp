@@ -136,8 +136,7 @@ class OldDescCache {
 
 // One thread of the probe: it looks the desc up, and when the cache does not
 // know it, it resolves it and publishes it.
-void probe_shipped(cs2::features::DescCache& cache, Probe& probe, std::uint64_t desc,
-                   int rounds) {
+void probe_shipped(cs2::features::DescCache& cache, Probe& probe, std::uint64_t desc, int rounds) {
   for (int round = 0; round < rounds; ++round) {
     const auto hit = cache.lookup(desc);
     if (!hit.has_value()) {
@@ -236,7 +235,8 @@ void test_an_older_generation_is_a_miss() {
   (void)cache.publish(DESC_A, stamp, entity_of(DESC_A), false);
   const auto hit = cache.lookup(DESC_A);
   expect(hit.has_value(), "the entry is a hit in its own generation");
-  expect(hit.has_value() && hit->entity == entity_of(DESC_A), "the entry is the one that was published");
+  expect(hit.has_value() && hit->entity == entity_of(DESC_A),
+         "the entry is the one that was published");
 
   // A new frame: the entry belongs to the older generation, so it is a miss.
   cache.advance();

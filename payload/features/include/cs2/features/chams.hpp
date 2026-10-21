@@ -170,7 +170,9 @@ class DescCache {
   //
   // The release: a reader that observes the new generation also observes
   // everything the payload published before the bump.
-  void advance() noexcept { frame_stamp_.fetch_add(1, std::memory_order_release); }
+  void advance() noexcept {
+    frame_stamp_.fetch_add(1, std::memory_order_release);
+  }
 
   // The current generation.
   [[nodiscard]] auto stamp() const noexcept -> std::uint64_t {
@@ -180,7 +182,7 @@ class DescCache {
   // The slot a desc hashes to.
   [[nodiscard]] static auto slot_of(std::uint64_t desc_address) noexcept -> std::size_t {
     return static_cast<std::size_t>((desc_address >> 4) &
-                                     static_cast<std::uint64_t>(k_desc_cache_size - 1));
+                                    static_cast<std::uint64_t>(k_desc_cache_size - 1));
   }
 
   // The cached entry for `desc_address`, or nothing.
@@ -390,7 +392,9 @@ class Chams {
   // The counter is separate from `seen_` on purpose: a dropped draw never
   // reached the decision, so `seen == drawn + skipped` keeps holding and the
   // refusal is visible on its own.
-  void count_refusal() noexcept { refused_.fetch_add(1, std::memory_order_relaxed); }
+  void count_refusal() noexcept {
+    refused_.fetch_add(1, std::memory_order_relaxed);
+  }
 
  private:
   // The material the current mode uses (0 when none could be resolved).
