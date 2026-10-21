@@ -197,7 +197,7 @@ auto main() -> int {
   int function_closed = 0;
   {
     FunctionHandle file(3, FunctionPolicy{[&function_closed](int) { ++function_closed; },
-                                         [](int handle) { return handle > 0; }});
+                                          [](int handle) { return handle > 0; }});
     const FunctionHandle moved(std::move(file));
     assert(moved.valid());
     assert(moved.get() == 3);
@@ -216,7 +216,7 @@ auto main() -> int {
   int reset_closed = 0;
   {
     FunctionHandle file(3, FunctionPolicy{[&reset_closed](int) { ++reset_closed; },
-                                         [](int handle) { return handle > 0; }});
+                                          [](int handle) { return handle > 0; }});
     const FunctionHandle moved(std::move(file));
     assert(moved.get() == 3);
     // The source holds nothing, and it still has a usable policy.
@@ -253,7 +253,7 @@ auto main() -> int {
   {
     // A policy that *can* work is asked, and the handle is adopted.
     const PoisonedHandle handle(5, PoisonedPolicy{[&poisoned_closed](int) { ++poisoned_closed; },
-                                                   [](int handle) { return handle > 0; }});
+                                                  [](int handle) { return handle > 0; }});
     assert(handle.valid());
     assert(handle.get() == 5);
     assert(poisoned_closed == 0);
