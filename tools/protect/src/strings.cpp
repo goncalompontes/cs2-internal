@@ -142,6 +142,15 @@ struct UseSite {
   bool in_bounds{false};
   /// The function the use is in.
   llvm::Function* function{nullptr};
+  /// Whether the use is one the pass **cannot** rewrite.
+  ///
+  /// A constant expression the pass does not understand -- a `ptrtoint`, an
+  /// `inttoptr`, a `select`, a GEP of a GEP -- is a use like any other: the
+  /// gate has to **refuse** the literal, not skip the use. A skipped use
+  /// would let the pass delete the literal while the expression still
+  /// refers to it, and the X86 backend dies on the dangling reference
+  /// ("Cannot select: ... PLEASE submit a bug report").
+  bool unsupported{false};
 };
 
 /// Whether the address of a constant ends up in a global initializer.
@@ -204,31 +213,44 @@ struct ExpressionOffset {
         if (instruction->getOperand(index) != &literal) {
           continue;
         }
-        sites.push_back(UseSite{instruction, index, false, 0, false, instruction->getFunction()});
+        sites.push_back(UseSite{instruction, index, false, 0, false, instruction->getFunction(),
+                                false});
       }
       continue;
     }
     // A constant expression: a folded GEP or a bitcast.
     auto* expression = llvm::dyn_cast<llvm::ConstantExpr>(user);
     if (expression == nullptr) {
+      // Neither an instruction nor a constant expression: a piece of a
+      // global initializer. The gate refuses such a literal before this
+      // matters, and the use is reported so that the gate cannot pass a
+      // literal it cannot rewrite.
+      sites.push_back(UseSite{nullptr, 0, false, 0, false, nullptr, true});
       continue;
     }
     const auto offset = expression_offset(*expression, layout);
     if (!offset.has_value()) {
+      // The expression is not a GEP the pass can rewrite: a `ptrtoint`, an
+      // `inttoptr`, a `select`, a GEP with a variable index. The literal is
+      // refused.
+      sites.push_back(UseSite{nullptr, 0, false, 0, false, nullptr, true});
       continue;
     }
     for (llvm::User* nested : expression->users()) {
       auto* instruction = llvm::dyn_cast<llvm::Instruction>(nested);
       if (instruction == nullptr) {
+        // A GEP of a GEP, or a GEP that reaches a global initializer: the
+        // pass cannot rewrite it, and the offset it would compute is
+        // relative to the nested expression and not to the literal.
+        sites.push_back(UseSite{nullptr, 0, false, 0, false, nullptr, true});
         continue;
       }
       for (unsigned index = 0; index < instruction->getNumOperands(); ++index) {
         if (instruction->getOperand(index) != expression) {
           continue;
         }
-        sites.push_back(
-            UseSite{instruction, index, true, offset->offset, offset->in_bounds,
-                    instruction->getFunction()});
+        sites.push_back(UseSite{instruction, index, true, offset->offset, offset->in_bounds,
+                                instruction->getFunction(), false});
       }
     }
   }
@@ -548,7 +570,9 @@ struct Decoder {
   const llvm::DataLayout& layout = literal.getParent()->getDataLayout();
   for (const UseSite& site : use_sites(literal, layout)) {
     llvm::Function* function = site.function;
-    if (function == nullptr) {
+    if (site.unsupported || function == nullptr) {
+      // A use the pass cannot rewrite: the literal is refused, and it is
+      // left exactly as it is.
       return StringSkipReason::unsupported_use;
     }
     if (function->hasFnAttribute(llvm::Attribute::OptimizeNone)) {

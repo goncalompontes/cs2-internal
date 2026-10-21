@@ -602,12 +602,14 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16
 @.str.virtual = private unnamed_addr constant [8 x i8] c"virtual\00"
 @.str.eh = private unnamed_addr constant [5 x i8] c"ehxy\00"
 @.str.compare = private unnamed_addr constant [9 x i8] c"compared\00"
+@.str.address = private unnamed_addr constant [8 x i8] c"address\00"
 @.str.twoblock = private unnamed_addr constant [9 x i8] c"twoblock\00"
 
 @global.init = private constant { ptr, i64 } { ptr @.str.escapes, i64 7 }
 
 declare void @may_throw()
 declare i32 @__gxx_personality_v0(...)
+declare i64 @use_address(i64)
 
 define void @uses_plain(ptr %out) {
 entry:
@@ -669,6 +671,12 @@ define i1 @compares_addresses() {
 entry:
   %c = icmp eq ptr @.str.compare, null
   ret i1 %c
+}
+
+define i64 @takes_the_address() {
+entry:
+  %a = call i64 @use_address(i64 ptrtoint (ptr @.str.address to i64))
+  ret i64 %a
 }
 
 define void @uses_two_blocks(ptr %out, i1 %cond) {
@@ -801,6 +809,8 @@ void test_string_gate() {
                "a literal used by a function with an EH pad is refused");
   check_reason(".str.compare", cs2::protect::StringSkipReason::unsupported_use,
                "a literal whose address is compared is refused");
+  check_reason(".str.address", cs2::protect::StringSkipReason::unsupported_use,
+               "a literal whose address is taken as an integer is refused");
 }
 
 /// The transform: the literal leaves the image, the blob and the decode are

@@ -38,10 +38,11 @@ SKIP = 77
 PROTECTED_LITERALS = ("healthy", "shared", "formatted", "four", "twoblok")
 
 #: The literals the policy does not protect: the denied one, the one the
-#: policy does not select, and the one the gate refuses because its address
-#: escapes into a global initializer. All three have to be in **both**
+#: policy does not select, the one the gate refuses because its address
+#: escapes into a global initializer, and the one the gate refuses because
+#: its address is taken as an integer. All four have to be in **both**
 #: images.
-UNPROTECTED_LITERALS = ("deniedxx", "untouched", "escaped")
+UNPROTECTED_LITERALS = ("deniedxx", "untouched", "escaped", "address")
 
 #: The number of literals the policy protects. The report has to name each
 #: of them as protected: a pass that protected fewer of them would leave a

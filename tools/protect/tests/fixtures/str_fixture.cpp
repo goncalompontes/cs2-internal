@@ -126,3 +126,14 @@ extern "C" __declspec(dllexport) auto probe_blocks(const char* text) noexcept ->
   }
   return hash;
 }
+
+// A literal whose **address** is taken as an integer.
+//
+// The pass cannot rewrite that use: the address of a decoded buffer cannot
+// exist before the program runs. The gate refuses the literal, it stays in
+// the image, and the two builds agree. A pass that *skips* the use instead
+// of refusing it deletes the literal and leaves the constant expression
+// dangling -- and the X86 backend dies on it.
+extern "C" __declspec(dllexport) auto probe_address() noexcept -> std::uint64_t {
+  return reinterpret_cast<std::uint64_t>("address");
+}
