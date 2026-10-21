@@ -533,6 +533,58 @@ auto function_body(const std::string& source, const std::string& marker) -> std:
   return {};
 }
 
+// The arguments of the call whose name starts at `at`, split at the
+// top-level commas.
+//
+// The rules below are about **which value** a call is given, so the check
+// has to look at the arguments and not at the text around them: a rule that
+// is satisfied *somewhere else* in the file is not satisfied at all.
+[[nodiscard]] auto call_arguments(const std::string& source, std::size_t at) -> std::vector<std::string> {
+  std::vector<std::string> arguments;
+  const std::size_t open = source.find('(', at);
+  if (open == std::string::npos) {
+    return arguments;
+  }
+  int depth = 0;
+  std::size_t start = open + 1;
+  for (std::size_t index = open; index < source.size(); ++index) {
+    const char c = source[index];
+    if (c == '(') {
+      ++depth;
+      continue;
+    }
+    if (c == ')') {
+      --depth;
+      if (depth == 0) {
+        arguments.push_back(source.substr(start, index - start));
+        return arguments;
+      }
+      continue;
+    }
+    if (c == ',' && depth == 1) {
+      arguments.push_back(source.substr(start, index - start));
+      start = index + 1;
+    }
+  }
+  return arguments;
+}
+
+// The source with the spaces around it removed.
+[[nodiscard]] auto trimmed(const std::string& text) -> std::string {
+  const auto is_space = [](char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+  };
+  std::size_t begin = 0;
+  while (begin < text.size() && is_space(text[begin])) {
+    ++begin;
+  }
+  std::size_t end = text.size();
+  while (end > begin && is_space(text[end - 1])) {
+    --end;
+  }
+  return text.substr(begin, end - begin);
+}
+
 // --- H3: the switch-off clears the refusal latch -----------------------------
 //
 // The refusal latch (`install_failed_`) stops a refused install from being
@@ -545,6 +597,11 @@ auto function_body(const std::string& source, const std::string& marker) -> std:
 // The rule is pure (`hook_target::refusal_after_switch`), so what is missing
 // is the **wiring**: the `configure()` call site. Deleting the clear of
 // `install_failed_` used to leave the whole suite green.
+//
+// The check has to pin **the value that is stored**, and not merely that the
+// rule is mentioned nearby: neutering the call — passing a constant instead
+// of the switch's own answer — left the suite green too, and that is the
+// defect the rule exists to prevent (a latch the switch-off never clears).
 void test_the_switch_off_clears_the_refusal_latch(const std::filesystem::path& base) {
   const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
   const std::string body = function_body(source, "void Chams::configure(");
@@ -562,6 +619,22 @@ void test_the_switch_off_clears_the_refusal_latch(const std::filesystem::path& b
   const std::size_t rule = body.find("refusal_after_switch", store);
   expect(rule != std::string::npos && rule - store < 200,
          "the latch that is stored is the switch's answer (refusal_after_switch)");
+  if (rule == std::string::npos) {
+    return;
+  }
+  const std::vector<std::string> arguments = call_arguments(body, rule);
+  expect(arguments.size() == 2, "the rule is called with the switch and the latch");
+  if (arguments.size() != 2) {
+    return;
+  }
+  // The **first** argument is the switch's own answer — the operator's
+  // setting. A constant there would store a latch the switch-off never
+  // clears, which is the H3 defect.
+  expect(trimmed(arguments[0]) == "visuals.chams",
+         "the rule is given the switch's own answer (visuals.chams)");
+  // The **second** argument is the latch the rule is about.
+  expect(trimmed(arguments[1]).find("install_failed_") != std::string::npos,
+         "the rule is given the latch it is about to clear");
 
   // The rule itself: the switch-off clears it.
   expect(!cs2::features::hook_target::refusal_after_switch(false, true),
