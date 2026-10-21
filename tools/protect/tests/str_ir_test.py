@@ -162,9 +162,9 @@ def check_ir(ir: str, what: str) -> None:
     # literal is checked as well: the MSVC ABI spells the name of a string
     # literal after the string itself, so a literal that is not deleted
     # leaks its content through its own symbol.
-    for name in ("healthy", "shared", "formatted", "four"):
+    for name in ("healthy", "shared", "formatted", "four", "twoblok"):
         check(f'c"{name}' not in ir, f"{what}: the plaintext of a protected literal is still there")
-        check(f'@{name}' not in ir, f"{what}: the name of a protected literal is still there")
+        check(f'{name}?$AA@' not in ir, f"{what}: the name of a protected literal is still there")
 
     # The blob and the decode are there.
     check("@cs2.protect.strblob." in ir, f"{what}: the blob is missing")
