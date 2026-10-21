@@ -23,8 +23,8 @@
 namespace cs2::core {
 
 // The policy must provide:
-//   bool is_valid(Handle) const noexcept;  // is this a live handle?
-//   void close(Handle) const noexcept;      // release a live handle
+//   [[nodiscard]] bool is_valid(Handle) const noexcept;  // is this a live handle?
+//   void close(Handle) const noexcept;                    // release a live handle
 template <typename Handle, typename Policy>
 class ScopedHandle {
  public:

@@ -49,7 +49,7 @@ auto rd32(const std::byte* p) -> std::uint32_t {
 
 auto find_pid(const char* name) -> std::uint32_t {
   // The snapshot is owned by the wrapper, so it is released on every path.
-  cs2::core::ScopedKernelHandle snapshot(
+  const cs2::core::ScopedKernelHandle snapshot(
       CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
   if (!snapshot.valid()) {
     return 0;
@@ -72,7 +72,7 @@ auto peb_module_base(HANDLE process, const char* name) -> std::optional<std::uin
 
 auto remote_module_base(HANDLE process, const char* name) -> std::optional<std::uintptr_t> {
   const DWORD pid = GetProcessId(process);
-  cs2::core::ScopedKernelHandle snapshot(
+  const cs2::core::ScopedKernelHandle snapshot(
       CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid));
   if (snapshot.valid()) {
     MODULEENTRY32 entry{};
@@ -206,7 +206,7 @@ auto peb_module_base(HANDLE process, const char* name) -> std::optional<std::uin
 void dump_target_modules(HANDLE process) {
   const DWORD pid = GetProcessId(process);
   std::printf("injector: --- toolhelp ---\n");
-  cs2::core::ScopedKernelHandle snapshot(
+  const cs2::core::ScopedKernelHandle snapshot(
       CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid));
   if (!snapshot.valid()) {
     std::printf("  snapshot FAILED (err %lu)\n", GetLastError());
@@ -455,7 +455,7 @@ auto setup_tls(HANDLE process, std::uintptr_t remote_base, const cs2::loader::pe
   }
   DWORD index = TLS_OUT_OF_INDEXES;
   {
-    cs2::core::ScopedKernelHandle thread(
+    const cs2::core::ScopedKernelHandle thread(
         CreateRemoteThread(process, nullptr, 0,
                            reinterpret_cast<LPTHREAD_START_ROUTINE>(*tls_alloc), nullptr, 0,
                            nullptr));
@@ -517,7 +517,7 @@ auto ensure_module(HANDLE process, const std::string& name) -> std::optional<std
     return std::nullopt;
   }
   {
-    cs2::core::ScopedKernelHandle thread(
+    const cs2::core::ScopedKernelHandle thread(
         CreateRemoteThread(process, nullptr, 0,
                            reinterpret_cast<LPTHREAD_START_ROUTINE>(*load_library), memory, 0,
                            nullptr));
@@ -673,7 +673,7 @@ auto register_exception_table(HANDLE process, std::uintptr_t remote_base,
   }
   DWORD exit_code = 0;
   {
-    cs2::core::ScopedKernelHandle thread(
+    const cs2::core::ScopedKernelHandle thread(
         CreateRemoteThread(process, nullptr, 0,
                            reinterpret_cast<LPTHREAD_START_ROUTINE>(memory), nullptr, 0, nullptr));
     if (!thread.valid()) {
@@ -695,7 +695,7 @@ void print_usage() {
 
 auto main(int argc, char** argv) -> int {
   if (argc > 1 && std::strcmp(argv[1], "--procs") == 0) {
-    cs2::core::ScopedKernelHandle snapshot(
+    const cs2::core::ScopedKernelHandle snapshot(
         CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
     if (!snapshot.valid()) {
       std::printf("injector: process snapshot FAILED (err %lu)\n", GetLastError());
@@ -885,7 +885,7 @@ auto main(int argc, char** argv) -> int {
     return 1;
   }
 
-  cs2::core::ScopedKernelHandle thread(
+  const cs2::core::ScopedKernelHandle thread(
       CreateRemoteThread(process, nullptr, 0,
                          reinterpret_cast<LPTHREAD_START_ROUTINE>(stub_mem), nullptr, 0, nullptr));
   if (!thread.valid()) {

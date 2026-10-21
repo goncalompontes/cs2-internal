@@ -294,7 +294,7 @@ auto ModelPublisher::map() noexcept -> bool {
   {
     // The file and the mapping are owned by their wrappers, so every path out
     // of this block releases them.
-    core::ScopedKernelHandle file(
+    const core::ScopedKernelHandle file(
         CreateFileA(shm_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                     nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!file.valid()) {

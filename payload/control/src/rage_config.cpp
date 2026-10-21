@@ -86,7 +86,7 @@ auto kernel_file_api() noexcept -> KernelFileApi {
 struct FilePolicy {
   CloseHandleFn close_handle = nullptr;
 
-  bool is_valid(void* handle) const noexcept {
+  [[nodiscard]] bool is_valid(void* handle) const noexcept {
     return handle != nullptr && handle != INVALID_HANDLE_VALUE;
   }
   void close(void* handle) const noexcept {
@@ -140,7 +140,7 @@ auto rage_config_load(RageConfigStore& store) noexcept -> bool {
   {
     // The handle is owned by the wrapper, so every path out of this block
     // releases it -- including the early return above (which never got one).
-    core::ScopedHandle<void*, FilePolicy> file(
+    const core::ScopedHandle<void*, FilePolicy> file(
         api.create_file(path, k_generic_read, k_share_read, nullptr, k_open_existing,
                         k_file_attribute_normal, nullptr),
         FilePolicy{api.close_handle});
@@ -228,7 +228,7 @@ auto rage_config_save(const RageConfigStore& store) noexcept -> bool {
   // releases it.
   int ok = 0;
   {
-    core::ScopedHandle<void*, FilePolicy> file(
+    const core::ScopedHandle<void*, FilePolicy> file(
         api.create_file(path, k_generic_write, k_share_read, nullptr, k_create_always,
                         k_file_attribute_normal, nullptr),
         FilePolicy{api.close_handle});

@@ -73,7 +73,7 @@ auto ensure_mapped() -> bool {
   {
     // The file and the mapping are owned by their wrappers, so every path out
     // of this function releases them.
-    core::ScopedKernelHandle file(
+    const core::ScopedKernelHandle file(
         CreateFileA(g_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!file.valid()) {

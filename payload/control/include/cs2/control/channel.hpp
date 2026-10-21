@@ -21,7 +21,7 @@ struct PipeHandlePolicy {
   // A pipe that was never opened is a null handle; `CreateNamedPipeA` reports
   // failure with INVALID_HANDLE_VALUE, which `Channel::open` rejects before
   // the handle is stored.
-  bool is_valid(void* handle) const noexcept {
+  [[nodiscard]] bool is_valid(void* handle) const noexcept {
     return handle != nullptr;
   }
   void close(void* handle) const noexcept;

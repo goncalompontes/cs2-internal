@@ -88,7 +88,7 @@ void append_log(std::string_view text) noexcept {
   constexpr unsigned long k_open_always = 0x4;
   constexpr unsigned long k_file_attribute_normal = 0x80;
   // The handle is owned by the wrapper, so it is released on every path.
-  core::ScopedHandle<void*, core::KernelHandlePolicy> file(
+  const core::ScopedKernelHandle file(
       create_file(path, k_file_append_data, k_file_share_read, nullptr, k_open_always,
                   k_file_attribute_normal, nullptr));
   if (!file.valid()) {

@@ -22,14 +22,13 @@ struct FakePolicy {
   // a test can prove that a moved wrapper keeps its own closer.
   int* counter = &g_closed;
 
-  bool is_valid(int handle) const noexcept {
+  [[nodiscard]] bool is_valid(int handle) const noexcept {
     return handle > 0;
   }
   void close(int handle) const noexcept {
     assert(handle > 0);
     ++(*counter);
-  }
-};
+  }};
 
 using FakeHandle = cs2::core::ScopedHandle<int, FakePolicy>;
 
@@ -37,14 +36,14 @@ using FakeHandle = cs2::core::ScopedHandle<int, FakePolicy>;
 
 auto main() -> int {
   // A default-constructed wrapper holds nothing and releases nothing.
-  FakeHandle empty;
+  const FakeHandle empty;
   assert(!empty.valid());
   assert(empty.get() == 0);
   assert(g_closed == 0);
 
   // A live handle is released when the wrapper goes out of scope.
   {
-    FakeHandle file(7);
+    const FakeHandle file(7);
     assert(file.valid());
     assert(file.get() == 7);
     assert(g_closed == 0);  // not released yet
@@ -83,7 +82,7 @@ auto main() -> int {
   // Moving transfers the ownership; the source holds nothing.
   {
     FakeHandle file(5);
-    FakeHandle moved(std::move(file));
+    const FakeHandle moved(std::move(file));
     assert(moved.valid());
     assert(moved.get() == 5);
     assert(!file.valid());
@@ -109,7 +108,7 @@ auto main() -> int {
   int other_closed = 0;
   {
     FakeHandle file(8, FakePolicy{&other_closed});
-    FakeHandle moved(std::move(file));
+    const FakeHandle moved(std::move(file));
     assert(moved.get() == 8);
     assert(other_closed == 0);
   }
