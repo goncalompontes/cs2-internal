@@ -385,9 +385,13 @@ def run_group(
     exclude_header_filter: str,
     apply: bool,
     verbose: bool,
+    group: str = "",
+    reported: set[str] | None = None,
 ) -> tuple[list[str], Counter[str]]:
     failures: list[str] = []
     findings: Counter[str] = Counter()
+    if reported is None:
+        reported = set()
 
     def work(item: tuple[Path, Path]) -> tuple[Path, bool, Counter[str], str]:
         source, build_dir = item
@@ -403,8 +407,13 @@ def run_group(
         findings.update(counts)
         if not ok:
             failures.append(rel(source))
-            print(f"\n--- clang-tidy failed on {rel(source)} ---", file=sys.stderr)
-            print(output, file=sys.stderr)
+            # A translation unit that fails in two groups is one translation
+            # unit: its output is shown once, and the summary counts it once.
+            if rel(source) not in reported:
+                reported.add(rel(source))
+                print(f"\n--- clang-tidy failed on {rel(source)} (group: {group}) ---",
+                      file=sys.stderr)
+                print(output, file=sys.stderr)
         elif verbose and counts:
             print(f"  {rel(source)}: {sum(counts.values())} finding(s)")
 
@@ -419,6 +428,23 @@ def gated_findings(selected: list[str], per_group: dict[str, Counter[str]]) -> l
     clang-tidy (see scripts/scenario/tests/test_clang_tidy_fix.py).
     """
     return [name for name in selected if sum(per_group.get(name, Counter()).values()) > 0]
+
+
+def distinct_failures(failures: list[str]) -> list[str]:
+    """The translation units that failed, each of them once.
+
+    The failures are collected per group, so a translation unit that fails
+    in two groups is listed twice -- but it is still *one* translation
+    unit, and the count the gate prints must not count it twice.
+    """
+    seen: set[str] = set()
+    unique: list[str] = []
+    for source in failures:
+        if source not in seen:
+            seen.add(source)
+            unique.append(source)
+    return unique
+
 
 # --- reporting ------------------------------------------------------------
 
@@ -560,6 +586,7 @@ def main(argv: list[str] | None = None) -> int:
 
     watch = sorted({p for p, _ in plan} | set(tracked_sources()))
     failed: list[str] = []
+    reported: set[str] = set()
     per_group: dict[str, Counter[str]] = {}
 
     for name, checks in groups:
@@ -569,7 +596,8 @@ def main(argv: list[str] | None = None) -> int:
         checks_csv = "-*," + ",".join(checks)
         before = snapshot(watch)
         group_failures, findings = run_group(clang_tidy, plan, checks_csv, jobs, header_filter,
-                                             args.exclude_header_filter, apply, args.verbose)
+                                             args.exclude_header_filter, apply, args.verbose,
+                                             name, reported)
         failed.extend(group_failures)
         per_group[name] = findings
         after = snapshot(watch)
@@ -586,8 +614,11 @@ def main(argv: list[str] | None = None) -> int:
             stage(changed, f"chore(clang-tidy): apply {name} fixes")
 
     if failed:
-        print(f"\nfailed on {len(failed)} translation unit(s):", file=sys.stderr)
-        for name in failed:
+        # A translation unit that failed in two groups is still one
+        # translation unit: the count must not count it twice.
+        distinct = distinct_failures(failed)
+        print(f"\nfailed on {len(distinct)} translation unit(s):", file=sys.stderr)
+        for name in distinct:
             print(f"  {name}", file=sys.stderr)
         return 1
 

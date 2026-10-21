@@ -126,6 +126,31 @@ class TestParseFindings(unittest.TestCase):
         self.assertEqual(SWEEP_MODULE.gated_findings(["performance"], findings), [])
 
 
+class TestDistinctFailures(unittest.TestCase):
+    """The count the gate prints when a translation unit fails."""
+
+    def test_a_failure_is_counted_once(self) -> None:
+        self.assertEqual(
+            SWEEP_MODULE.distinct_failures(["payload/game/src/log.cpp"]),
+            ["payload/game/src/log.cpp"],
+        )
+
+    def test_a_failure_in_two_groups_is_one_translation_unit(self) -> None:
+        # The failures are collected per group, so a file that fails in both
+        # gated groups is listed twice -- and it is still one file.
+        failures = ["payload/game/src/log.cpp", "payload/game/src/log.cpp"]
+        self.assertEqual(
+            SWEEP_MODULE.distinct_failures(failures), ["payload/game/src/log.cpp"]
+        )
+
+    def test_two_different_failures_are_kept(self) -> None:
+        failures = ["a.cpp", "b.cpp", "a.cpp"]
+        self.assertEqual(SWEEP_MODULE.distinct_failures(failures), ["a.cpp", "b.cpp"])
+
+    def test_no_failure_is_no_failure(self) -> None:
+        self.assertEqual(SWEEP_MODULE.distinct_failures([]), [])
+
+
 class TestCommandLine(unittest.TestCase):
     """The command line: the gate can be inspected and replaced."""
 
