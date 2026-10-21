@@ -545,7 +545,8 @@ auto function_body(const std::string& source, const std::string& marker) -> std:
 // The rules below are about **which value** a call is given, so the check
 // has to look at the arguments and not at the text around them: a rule that
 // is satisfied *somewhere else* in the file is not satisfied at all.
-[[nodiscard]] auto call_arguments(const std::string& source, std::size_t at) -> std::vector<std::string> {
+[[nodiscard]] auto call_arguments(const std::string& source, std::size_t at)
+    -> std::vector<std::string> {
   std::vector<std::string> arguments;
   const std::size_t open = source.find('(', at);
   if (open == std::string::npos) {
@@ -577,9 +578,7 @@ auto function_body(const std::string& source, const std::string& marker) -> std:
 
 // The source with the spaces around it removed.
 [[nodiscard]] auto trimmed(const std::string& text) -> std::string {
-  const auto is_space = [](char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-  };
+  const auto is_space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
   std::size_t begin = 0;
   while (begin < text.size() && is_space(text[begin])) {
     ++begin;
@@ -764,8 +763,7 @@ void test_the_pool_holds_the_concurrent_jobs() {
   expect(camera.slot_count() == cs2::features::guard::TOTAL_SLOT_COUNT,
          "the default pool is the camera's");
   RecursionGuard camera_closed{RecursionGuard::Policy::fail_closed};
-  expect(camera_closed.slot_count() == camera.slot_count(),
-         "the policy does not change the pool");
+  expect(camera_closed.slot_count() == camera.slot_count(), "the policy does not change the pool");
   for (std::size_t owner = 1; owner <= camera_closed.slot_count(); ++owner) {
     expect(camera_closed.try_enter(static_cast<OwnerId>(owner)),
            "the camera's pool takes its owners");
@@ -776,7 +774,7 @@ void test_the_pool_holds_the_concurrent_jobs() {
   // The draw path's pool: eight times the camera's, so a tenth concurrent
   // render job — the case the old pool refused — is let in.
   RecursionGuard draw{RecursionGuard::Policy::fail_closed,
-                       cs2::features::guard::DRAW_PATH_SLOT_COUNT};
+                      cs2::features::guard::DRAW_PATH_SLOT_COUNT};
   expect(draw.slot_count() == cs2::features::guard::DRAW_PATH_SLOT_COUNT,
          "the draw path's pool is the one that was asked for");
   expect(draw.slot_count() > camera.slot_count(),
@@ -836,12 +834,9 @@ void test_the_refusal_is_counted(const std::filesystem::path& base) {
   expect(at != std::string::npos, "the status line is there");
   if (at != std::string::npos) {
     const std::string line = raw.substr(at, raw.size() - at);
-    expect(line.find("rec=") != std::string::npos,
-           "the status line shows the recursion breaks");
-    expect(line.find("pool=") != std::string::npos,
-           "the status line shows the pool exhaustion");
-    expect(line.find("tdn=") != std::string::npos,
-           "the status line shows the teardown drops");
+    expect(line.find("rec=") != std::string::npos, "the status line shows the recursion breaks");
+    expect(line.find("pool=") != std::string::npos, "the status line shows the pool exhaustion");
+    expect(line.find("tdn=") != std::string::npos, "the status line shows the teardown drops");
     const std::string stripped = strip_comments(line);
     expect(stripped.find("refused_recursion()") != std::string::npos,
            "the status line reads the recursion counter");

@@ -181,9 +181,8 @@ class RecursionGuard {
   // (eight slots and a reserve), and the draw path asks for its own, which
   // has to hold one slot per concurrent render job.
   explicit RecursionGuard(Policy policy = Policy::fail_open,
-                           std::size_t slot_count = TOTAL_SLOT_COUNT) noexcept
-      : slot_count_(slot_count < MAX_SLOT_COUNT ? slot_count : MAX_SLOT_COUNT),
-        policy_(policy) {
+                          std::size_t slot_count = TOTAL_SLOT_COUNT) noexcept
+      : slot_count_(slot_count < MAX_SLOT_COUNT ? slot_count : MAX_SLOT_COUNT), policy_(policy) {
     if (slot_count_ == 0) {
       slot_count_ = 1;
     }
@@ -248,7 +247,7 @@ class RecursionGuard {
         }
         const std::uint64_t released = pack(owner, depth_of(state) - 1);
         if (slots_[index].state.compare_exchange_strong(state, released, std::memory_order_acq_rel,
-                                                         std::memory_order_acquire)) {
+                                                        std::memory_order_acquire)) {
           return;
         }
         // The exchange failed: the slot changed under us. Only the owner

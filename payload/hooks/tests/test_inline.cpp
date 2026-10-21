@@ -142,8 +142,7 @@ void test_the_trampoline_outlives_the_uninstall() {
   caller.join();
 
   // The call returned the original's value: no freed memory was executed.
-  expect(g_result.load(std::memory_order_acquire) == 10,
-         "the trampoline outlives the uninstall");
+  expect(g_result.load(std::memory_order_acquire) == 10, "the trampoline outlives the uninstall");
 }
 
 // The **destructor**: the hook is destroyed while the detour is inside and
@@ -185,8 +184,7 @@ void test_the_trampoline_outlives_the_destruction() {
   caller.join();
 
   // The call returned the original's value: no freed memory was executed.
-  expect(g_result.load(std::memory_order_acquire) == 10,
-         "the trampoline outlives the destruction");
+  expect(g_result.load(std::memory_order_acquire) == 10, "the trampoline outlives the destruction");
 }
 
 }  // namespace
@@ -204,7 +202,7 @@ auto main() -> int {
   g_original = reinterpret_cast<Fn>(hook.original());
   expect(hook.installed(), "the hook is installed");
 
-  expect(target(2, 3) == 1010, "the detour ran");          // detour ran
+  expect(target(2, 3) == 1010, "the detour ran");  // detour ran
   expect(g_original(2, 3) == 10, "the trampoline calls the original");
 
   hook.uninstall();

@@ -795,15 +795,13 @@ auto Chams::status_line(char* out, std::size_t size) const noexcept -> bool {
   // heap allocation. The description is a `string_view`, so it is printed
   // with a precision (`%.*s`) instead of being copied into a temporary.
   const std::string_view state = hook_target::describe(hook_status());
-  const int written =
-      std::snprintf(out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu rec=%llu pool=%llu tdn=%llu",
-                    static_cast<int>(state.size()), state.data(),
-                    static_cast<unsigned long long>(seen()),
-                    static_cast<unsigned long long>(drawn()),
-                    static_cast<unsigned long long>(skipped()),
-                    static_cast<unsigned long long>(refused_recursion()),
-                    static_cast<unsigned long long>(refused_exhausted()),
-                    static_cast<unsigned long long>(refused_teardown()));
+  const int written = std::snprintf(
+      out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu rec=%llu pool=%llu tdn=%llu",
+      static_cast<int>(state.size()), state.data(), static_cast<unsigned long long>(seen()),
+      static_cast<unsigned long long>(drawn()), static_cast<unsigned long long>(skipped()),
+      static_cast<unsigned long long>(refused_recursion()),
+      static_cast<unsigned long long>(refused_exhausted()),
+      static_cast<unsigned long long>(refused_teardown()));
   if (written >= 0 && static_cast<std::size_t>(written) < size) {
     return true;
   }
@@ -819,15 +817,14 @@ auto Chams::status_line(char* out, std::size_t size) const noexcept -> bool {
   // a million draws a second), so in practice the operator sees the full
   // state.
   const std::string_view short_view = short_state(state, 24);
-  const int retry =
-      std::snprintf(out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu rec=%llu pool=%llu tdn=%llu",
-                    static_cast<int>(short_view.size()), short_view.data(),
-                    static_cast<unsigned long long>(seen()),
-                    static_cast<unsigned long long>(drawn()),
-                    static_cast<unsigned long long>(skipped()),
-                    static_cast<unsigned long long>(refused_recursion()),
-                    static_cast<unsigned long long>(refused_exhausted()),
-                    static_cast<unsigned long long>(refused_teardown()));
+  const int retry = std::snprintf(
+      out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu rec=%llu pool=%llu tdn=%llu",
+      static_cast<int>(short_view.size()), short_view.data(),
+      static_cast<unsigned long long>(seen()), static_cast<unsigned long long>(drawn()),
+      static_cast<unsigned long long>(skipped()),
+      static_cast<unsigned long long>(refused_recursion()),
+      static_cast<unsigned long long>(refused_exhausted()),
+      static_cast<unsigned long long>(refused_teardown()));
   // `snprintf` returns the length the line would have had: a length that does
   // not fit means the line was truncated, and the caller is better off
   // knowing than showing half a status.
