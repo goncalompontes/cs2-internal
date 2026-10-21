@@ -60,10 +60,10 @@ jobs:
           "CC=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CXX=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: the host build
+      - name: the host build (configure)
         run: meson setup build .
 
-      - name: the host build
+      - name: the host build (compile)
         run: meson compile -C build
 
       - name: the host tests
@@ -101,10 +101,10 @@ jobs:
       - name: the overlay build (compile)
         run: meson compile -C build-overlay
 
-      - name: the injector build
+      - name: the injector build (configure)
         run: meson setup build-injector injector
 
-      - name: the injector build
+      - name: the injector build (compile)
         run: meson compile -C build-injector
 
       - name: the Python suite
