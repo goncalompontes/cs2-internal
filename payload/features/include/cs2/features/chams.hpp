@@ -118,10 +118,11 @@ namespace cs2::features {
 // sequence, reads the entry, and takes the sequence again: if it changed, or
 // if it was odd, the entry it read is not the entry it is looking at.
 //
-// The properties the protocol has to have:
+// The properties the protocol has to have (T33,
+// `docs/orchestration/spec-t33-chams-race.md` §2.1):
 //
 //   * **a reader never pairs fields from two different writes** — that is the
-//     point of the sequence word;
+//     point of the sequence word, and it is the whole point of the fix;
 //   * **a writer never blocks a reader** — the sequence is a store, not a
 //     lock. The reader retries a bounded number of times and then resolves
 //     the desc itself, so the draw path never waits and never allocates;
