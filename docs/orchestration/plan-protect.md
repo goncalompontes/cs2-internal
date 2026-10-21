@@ -283,6 +283,19 @@ The payload is **manually mapped** into `cs2.exe` by the injector
   global constructors, no unwind tables it cannot justify. This is why the VM
   interpreter is **emitted as LLVM IR** rather than linked in as C++.
 
+  > **Corrected (2026-10-22, by the T22 investigation).** The **mechanism**
+  > was wrong: the built image's entry point **is** `_DllMainCRTStartup` and
+  > the injector calls it (`injector/src/main.cpp` uses the PE's
+  > `entry_point_rva`), so **the CRT startup does run**. What does *not* run
+  > is the payload's **own** C++ global construction: the image references
+  > neither `__xc_a` nor `__xc_z`, so the CRT never walks the user module's
+  > `.CRT$XCU`, and the payload's globals stay **zero-initialised**. The
+  > **conclusion** is unchanged — a pass must not add a global with a dynamic
+  > initialiser, and the injected runtime code must be freestanding — but the
+  > reason is that the payload has no such globals today, not that the CRT is
+  > absent. Adding one would make the CRT walk it, which changes the image's
+  > initialisation semantics and is not wanted.
+
 > **Corrected on 2026-10-21** (the survey found these, and the built image
 > confirms them): the payload is built **`/MD`** (dynamic CRT — the image
 > imports `MSVCP140.dll`, `VCRUNTIME140.dll` and eight `api-ms-win-crt-*`
