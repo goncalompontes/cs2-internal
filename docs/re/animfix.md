@@ -903,6 +903,185 @@ must reproduce):
 
 ---
 
+## 9. The ordering measurement (2026-10-21, the T20 implementer)
+
+> **Appended, not rewritten.** Everything above is the RE's own text and
+> stands; this section records the measurement the T20 task required (the
+> order of the snapshot decode and the client's prediction inside one frame)
+> and the corrections the measurement produced. The **live** measurement the
+> task asked for could **not** be run — the agent is in Windows session 0
+> with no GPU, so CS2 cannot start here (`AGENTS.md` §"Launching the game").
+> The measurement below is therefore **static**: it was taken on the same
+> `client.dll` (sha256 `659940c1…`, the live build) with Ghidra 12.1.4
+> through REA, plus a byte-level scan of the module.
+
+### 9.1 What was measured, and how
+
+The RE could not order the two writes because *both* go through pointers
+into a member array and neither has a direct caller (§8, item 4). The
+measurement therefore followed the **writes** instead of the calls:
+
+| question | how it was answered |
+|---|---|
+| What does the **codec** write, and where? | decompile `0x8d9740` and read its call sites' register setup (the *assembly*, not the pseudocode — the pseudocode drops the destination argument) |
+| What does the **prediction** write, and where? | decompile `0x8e3540` (`ReflectPawnState`) and its helpers `0x8e2f70` (`ReflectAim`) / `0x8e3200` (`ReflectMove`) / `0x8be340` |
+| Where does the graph **read** the values? | decompile the setter `0x8492a0` and the AG2 evaluation `0x12e4f90`'s caller `0x38a070` |
+| In which **frame phase** does each run? | the callers of the pawn's reflect (`0xc905e0`), the anim tick (`0x35aeb0`) and the AG2 job (`0x3552f0`) |
+
+### 9.2 The result: the prediction wins, and the server's value never reaches the graph
+
+**The codec** (`0x8d9740`, `void Codec(CCS2PawnGraphController* dst, CClass* src, CSchemaTable*)`)
+decodes the **server's** replicated values into the **destination** controller.
+The destination is its **first argument**: every call site sets
+`LEA R9, [R13 + <slot>]` with `R13` = the first argument, e.g. for
+`m_flAimYawAngle`:
+
+```asm
+0x1808da70c: LEA RAX, [0x181c0ee70]      ; the field-name string
+0x1808da713: MOV qword ptr [RSP + 0x30], -0x7a11b6da   ; the name hash
+0x1808da71c: LEA R9, [R13 + 0x4e8]        ; the destination: the aim-yaw slot
+0x1808da723: MOV qword ptr [RSP + 0x38], RAX
+0x1808da728: LEA R8, [RBP + 0x658]        ; the decoded value
+0x1808da734: LEA RDX, [RSP + 0x30]        ; the name hash
+0x1808da739: MOV RCX, RBX                ; the source object
+0x1808da73c: CALL 0x1808baec0            ; the field writer
+```
+
+**The prediction** never writes those slots. `ReflectPawnState` (`0x8e3540`)
+→ `ReflectAim` (`0x8e2f70`) computes the *client's* aim angles and pushes them
+into the graph through the **parameter setter** `0x8492a0`:
+
+```c
+// FUN_1808e2f70 (ReflectAim), the aim-pitch half
+if ((*(longlong *)(param_1 + 0x4d8) != 0) && (-1 < *(short *)(param_1 + 0x4e0))) {
+  FUN_1808492a0(*(longlong *)(param_1 + 0x4d8), *(short *)(param_1 + 0x4e0), &local_68);
+}
+```
+
+and the setter is the one place a graph parameter's value is written:
+
+```c
+// FUN_1808492a0 — SetGraphParam(node, index, value)
+*(float *)(*(longlong *)(*(longlong *)(node + 0x10) + (longlong)index * 8) + 0x18) = *value;
+```
+
+**So the slot layout is uniform** — `{ value @+0x00, node* @+0x08, int16 index
+@+0x10 }`, stride `0x18` — and the chain is:
+
+```
+the codec      -> controller + 0x4e8      (the server's replicated float)
+the prediction -> setter(node, index)     (the client's predicted float)
+the AG2 graph  <- the parameter at +0x18  (whatever the setter wrote last)
+```
+
+**The prediction is the only writer of the graph's parameters.** The server's
+replicated value is *stored* in the slot and then never used: the client's
+prediction is what the graph is evaluated from. That is mechanism (B) of §5 in
+its sharpest form — and it is **not** a question of which of the two runs
+last: the server's value does not reach the graph at all.
+
+### 9.3 The frame phase (the ordering the task asked for)
+
+* The **snapshot decode** (and with it the codec) runs in the client's
+  **network** phase, on the main thread.
+* The **prediction** runs on the **command** path:
+  `CPlayer_MovementServices::ProcessCommand` (`0xa70de0`) → the pawn's virtual
+  `+0xa00` → `0xc905e0` → `ReflectPawnState` (`0x8e3540`). `0xc905e0` is the
+  pawn's virtual at vtable offset `0xa00` (four vtables carry it:
+  `0x1c8ab38`, `0x1c90878`, `0x1c91448`, `0x1c95fb8`).
+* The **AG2 evaluation** runs in the **anim** phase:
+  `CAnimGraphGameSystem::AnimTickUpdate` (`0x35aeb0`) → `FUN_18038a390` (which
+  either runs the job inline or queues it to the thread pool) → the job
+  `0x3552f0` → `FUN_18038a070` (per entity) → **`0x12e4f90`** (the graph
+  evaluation) → `0x12e52b0` (the pose commit).
+
+So the order inside a frame is **decode → predict → evaluate**, and the
+prediction's write is the last one before the graph reads the parameters.
+**The prediction wins.** The seam that the RE's §7 step 3 suggested
+(`AnimTickUpdate` / the AG2 update) is on the *wrong side* of the prediction
+for the write-back: a detour on `AnimTickUpdate` that writes **before** the
+original is overwritten by the prediction inside the same call, and one that
+writes **after** it is already too late (the job has been dispatched).
+
+**The seam this measurement selects** is therefore the **setter**
+(`0x8492a0`, a 16-byte prologue → hookable, one RIP-relative displacement
+that the repo's relocator handles): the correction is handed to the engine at
+the exact place the prediction writes, so it does not depend on the order at
+all. The codec stays the **capture** point (it is where the server's values
+arrive).
+
+### 9.4 Corrections to the sections above
+
+1. **The codec decodes 14 slots, not 28.** The full list of the fields it
+   writes (each guarded by "is the field in the snapshot?"), with the field
+   names the codec itself carries:
+
+   | slot | field | type written |
+   |---|---|---|
+   | `+0x2d8` | `m_bIsDefusing` | bool |
+   | `+0x2f0` | `m_moveType` | int |
+   | `+0x308` | `m_moveDirectionID` | int |
+   | `+0x470` | `m_flAirHeightAboveGround` | float |
+   | `+0x488` | `m_leftFootTarget` | vector |
+   | `+0x4a0` | `m_rightFootTarget` | vector |
+   | `+0x4b8` | `m_flFlashedAmount` | float |
+   | `+0x4d0` | `m_flAimPitchAngle` | float |
+   | `+0x4e8` | `m_flAimYawAngle` | float |
+   | `+0x500` | `m_flinchHead` | int |
+   | `+0x518` | `m_flinchHeadRestart` | bool |
+   | `+0x530` | `m_flinchBody` | int |
+   | `+0x548` | `m_flinchBodyRestart` | bool |
+   | `+0x560` | `m_flinchIsOnFire` | bool |
+
+   The other 14 slots (`m_flMoveSpeedX/Y`, `m_flMoveSpeedHorizontal`,
+   `m_flPreviousMoveSpeedHorizontal`, `m_flCrouchAmount`,
+   `m_flWeaponDropAmount`, `m_flGroundTurnAngleOrVelocity`, `m_flLadder*`,
+   `m_groundAction`, `m_groundActionDirection`, `m_airAction`,
+   `m_moveIsWalking`) are **registered** as network vars by the schema
+   registration (`0x8daab0`) but the codec never decodes them — the server
+   does not send them. So §5's "the server replicates the 28 graph inputs"
+   is **too strong**: it replicates **14**, and `move_speed_horizontal` /
+   `move_crouch_amount` — the two the T20 specification named — are among the
+   ones it does **not** replicate.
+2. **`0x8daab0` is not a "mirrored codec"**: it is the **schema registration**
+   of `CCS2PawnGraphController` (it carries the field-name strings
+   `m_flMoveSpeedX` … `m_flinchIsOnFire` and registers them). There is only
+   **one** codec, `0x8d9740`.
+3. **The four *float* slots are exactly the ones the prediction rewrites
+   through the setter**: `+0x470` (written by `FUN_1808be340`), `+0x4b8`
+   (by `ReflectPawnState`), `+0x4d0` and `+0x4e8` (by `ReflectAim`). The
+   replicated **enum/bool** slots are pushed into the graph with *direct*
+   stores (`*(undefined8 *)(param_obj + 0x18) = <the enum descriptor>`), which
+   no available seam intercepts — and the **flinch** slots (`+0x500` … `+0x560`)
+   are pushed by **nobody** at all, so the flinch reaction never plays on the
+   client.
+4. The **slot layout** is now known: `{ value @+0x00, node* @+0x08, int16
+   index @+0x10 }`, stride `0x18` — the parameter object the node and the
+   index point at holds the value at `+0x18`.
+
+### 9.5 What is still open
+
+* **The anim-state divergence** (§5, mechanism A) is **not** closed by this
+  work and is not closed by the T20 task: the client's
+  `CCSPlayerAnimationState` is never replicated, so its move type, ground/air
+  action and turn-on-spot angle are the client's own. The experiment that
+  would settle which of the anim state's inputs the server uses differently
+  is still the RE's §8 item 3 (a write-breakpoint on `ms + 0x328` and a diff
+  of the anim state against a remote player's replicated graph inputs).
+* The **enum/bool** graph inputs (the move type, the flinch) are not covered
+  by the animfix: pushing them needs either the engine's static enum
+  descriptor tables (`DAT_182532910` and friends) or a hook on the reflect
+  itself, which is a vtable slot (`+0xa00`) and not an inline-hookable
+  function.
+* The **bone-write seam** (`CSkeletonInstance::SetupBones`, `0xaa0f80`) was
+  **not** used: it runs on the AG2 job's worker thread, it would have to
+  rewrite a **full `CTransform`** (position *and* quaternion) or the hitboxes
+  stretch (`docs/re/aim.md`), and the graph-input seam already fixes the
+  values *before* the pose is computed — so a bone write would be a second,
+  riskier copy of the same fix.
+
+---
+
 *Companion documents:* the community definition of "animfix" / "local animfix"
 is being written by the research sibling task (`docs/research/animfix.md`; it
 may not be in the tree yet). The hitbox/bone model this report re-derives is
