@@ -844,6 +844,9 @@ to the increments would need the counters to carry their own epoch and be
 re-based with a compare-exchange on the draw path — a lot of machinery for a
 number nobody reads absolutely.
 
+§9.2's last sentence ("the counters are reset with it") describes the state
+before this section and no longer holds.
+
 ### 10.6 The trampoline's lifetime
 
 `InlineHook::uninstall()` used to **free** the trampoline and **then** null
