@@ -48,8 +48,23 @@ That is the 2026-10-21 handoff for the feature wave: where every artifact lives
 config), what landed, what is open, and the **orchestration playbook** — a
 written spec per task, one git worktree per agent, an implementer sub-agent, an
 **adversarial** reviewer sub-agent that reads the same spec, a fix round, and a
-merge with the full verify loop. The mechanics of that loop are a plugin
-(`tools.orchestrate.plan` / `.review` / `.merge`), and every task spec, the
+merge with the full verify loop. The mechanics of that loop are a plugin, and
+the loop it runs is **plan → verify → review → fix → merge**, over eight
+`tools.orchestrate.*` tools: `plan` creates the task's worktree and returns
+the implementer's prompt, `verify` runs the verify loop in that worktree,
+`review` points a review worktree at the commit and returns the reviewer's
+prompt, `fix` takes the review's findings back to the implementer's worktree,
+`merge` merges the branch into the integration branch, `status` is the task
+board, `size` says what makes the worktrees big, and `cleanup` removes the
+worktrees that are done with. The plugin's **source** is its own repository
+(`C:\Users\gpmpo\orchestration-plugin`) and the installed copy is a **build** of
+it, so the thing to read and the thing to edit have the same shape. **The merge
+verifies the merged tree before it commits**, and it **refuses a branch that
+was never reviewed** (or whose review said *DO NOT SHIP*) unless
+`allow_unreviewed: true` is passed — a session must not be surprised by that.
+The index is [`docs/orchestration/README.md`](docs/orchestration/README.md), the
+detail is the plugin's own `README.md`
+(`C:\Users\gpmpo\orchestration-plugin\README.md`), and every task spec, the
 shared brief, the reviewer's role and the review prompt template live in
 [`docs/orchestration/`](docs/orchestration/).
 
