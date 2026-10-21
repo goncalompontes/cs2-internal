@@ -53,9 +53,30 @@ using ReadFileFn = int(__stdcall*)(HANDLE, void*, unsigned long, unsigned long*,
 using WriteFileFn = int(__stdcall*)(HANDLE, const void*, unsigned long, unsigned long*, void*);
 using CloseHandleFn = int(__stdcall*)(HANDLE);
 
-auto kernel_fn(const char* name) noexcept -> void* {
+// The kernel32 entry points the config's file I/O needs. They are resolved by
+// name rather than imported: the payload is manually mapped, so it does not
+// rely on the loader filling an import table.
+//
+// The load and the save need different subsets of them, and each checks the
+// subset it uses, so one resolution serves both.
+struct KernelFileApi {
+  CreateFileAFn create_file = nullptr;
+  ReadFileFn read_file = nullptr;
+  WriteFileFn write_file = nullptr;
+  CloseHandleFn close_handle = nullptr;
+};
+
+auto kernel_file_api() noexcept -> KernelFileApi {
   const HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
-  return kernel32 == nullptr ? nullptr : reinterpret_cast<void*>(GetProcAddress(kernel32, name));
+  if (kernel32 == nullptr) {
+    return {};
+  }
+  KernelFileApi api{};
+  api.create_file = reinterpret_cast<CreateFileAFn>(GetProcAddress(kernel32, "CreateFileA"));
+  api.read_file = reinterpret_cast<ReadFileFn>(GetProcAddress(kernel32, "ReadFile"));
+  api.write_file = reinterpret_cast<WriteFileFn>(GetProcAddress(kernel32, "WriteFile"));
+  api.close_handle = reinterpret_cast<CloseHandleFn>(GetProcAddress(kernel32, "CloseHandle"));
+  return api;
 }
 #endif
 
@@ -84,13 +105,8 @@ auto rage_profile_find(RageConfigStore& store, const char* weapon, bool create) 
 auto rage_config_load(RageConfigStore& store) noexcept -> bool {
   store.count = 0;
 #if defined(_WIN32)
-  using CreateFileA = CreateFileAFn;
-  using ReadFileT = ReadFileFn;
-  using CloseHandleT = CloseHandleFn;
-  auto create_file = reinterpret_cast<CreateFileA>(kernel_fn("CreateFileA"));
-  auto read_file = reinterpret_cast<ReadFileT>(kernel_fn("ReadFile"));
-  auto close_handle = reinterpret_cast<CloseHandleT>(kernel_fn("CloseHandle"));
-  if (create_file == nullptr || read_file == nullptr || close_handle == nullptr) {
+  const KernelFileApi api = kernel_file_api();
+  if (api.create_file == nullptr || api.read_file == nullptr || api.close_handle == nullptr) {
     return false;
   }
   char path[MAX_PATH];
@@ -101,15 +117,15 @@ auto rage_config_load(RageConfigStore& store) noexcept -> bool {
   constexpr unsigned long k_share_read = 0x1UL;
   constexpr unsigned long k_open_existing = 0x3UL;
   constexpr unsigned long k_file_attribute_normal = 0x80UL;
-  HANDLE file = create_file(path, k_generic_read, k_share_read, nullptr, k_open_existing,
-                            k_file_attribute_normal, nullptr);
+  const HANDLE file = api.create_file(path, k_generic_read, k_share_read, nullptr, k_open_existing,
+                                      k_file_attribute_normal, nullptr);
   if (file == nullptr || file == INVALID_HANDLE_VALUE) {
     return false;
   }
   char buffer[k_max_file_bytes] = {};
   unsigned long read = 0;
-  const int ok = read_file(file, buffer, sizeof(buffer) - 1, &read, nullptr);
-  close_handle(file);
+  const int ok = api.read_file(file, buffer, sizeof(buffer) - 1, &read, nullptr);
+  api.close_handle(file);
   if (ok == 0) {
     return false;
   }
@@ -177,27 +193,22 @@ auto rage_config_save(const RageConfigStore& store) noexcept -> bool {
     }
     used += written;
   }
-  using CreateFileA = CreateFileAFn;
-  using WriteFileT = WriteFileFn;
-  using CloseHandleT = CloseHandleFn;
-  auto create_file = reinterpret_cast<CreateFileA>(kernel_fn("CreateFileA"));
-  auto write_file = reinterpret_cast<WriteFileT>(kernel_fn("WriteFile"));
-  auto close_handle = reinterpret_cast<CloseHandleT>(kernel_fn("CloseHandle"));
-  if (create_file == nullptr || write_file == nullptr || close_handle == nullptr) {
+  const KernelFileApi api = kernel_file_api();
+  if (api.create_file == nullptr || api.write_file == nullptr || api.close_handle == nullptr) {
     return false;
   }
   constexpr unsigned long k_generic_write = 0x40000000UL;
   constexpr unsigned long k_share_read = 0x1UL;
   constexpr unsigned long k_create_always = 0x2UL;
   constexpr unsigned long k_file_attribute_normal = 0x80UL;
-  HANDLE file = create_file(path, k_generic_write, k_share_read, nullptr, k_create_always,
-                            k_file_attribute_normal, nullptr);
+  const HANDLE file = api.create_file(path, k_generic_write, k_share_read, nullptr, k_create_always,
+                                      k_file_attribute_normal, nullptr);
   if (file == nullptr || file == INVALID_HANDLE_VALUE) {
     return false;
   }
   unsigned long written = 0;
-  const int ok = write_file(file, buffer, static_cast<unsigned long>(used), &written, nullptr);
-  close_handle(file);
+  const int ok = api.write_file(file, buffer, static_cast<unsigned long>(used), &written, nullptr);
+  api.close_handle(file);
   return ok != 0;
 #else
   (void)store;
