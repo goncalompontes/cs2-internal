@@ -259,17 +259,31 @@ inline void observe_decode(SnapshotClock& clock, std::uint64_t now_ms) noexcept 
   return sorted[(clock.count - 1) / 2];
 }
 
-// The staleness bound: the observed snapshot interval, clamped to the floor
-// and to the hard maximum.
+// The margin the bound carries over the observed interval.
+//
+// The median is, by construction, the value that **half** the intervals
+// exceed - so a capture measured against it would age out in the second half
+// of every gap, and the client's own prediction would win those frames. That
+// is the oscillation the animfix exists to remove, and it would show up as a
+// jitter at the server's tick rate.
+//
+// Twice the median covers the jitter (a snapshot that arrives late is still
+// the server's current value) while the median itself keeps the outliers
+// out.
+inline constexpr std::uint64_t k_bound_margin = 2;
+
+// The staleness bound: the observed snapshot interval with the margin over
+// it, clamped to the floor and to the hard maximum.
 [[nodiscard]] inline auto snapshot_bound_ms(const SnapshotClock& clock) noexcept -> std::uint64_t {
   const std::uint64_t interval = snapshot_interval_ms(clock);
   if (interval == 0) {
     return k_min_snapshot_interval_ms;
   }
-  if (interval > k_max_snapshot_interval_ms) {
+  const std::uint64_t margin = interval * k_bound_margin;
+  if (margin > k_max_snapshot_interval_ms) {
     return k_max_snapshot_interval_ms;
   }
-  return interval > k_min_snapshot_interval_ms ? interval : k_min_snapshot_interval_ms;
+  return margin > k_min_snapshot_interval_ms ? margin : k_min_snapshot_interval_ms;
 }
 
 // --- the validity rule ----------------------------------------------------

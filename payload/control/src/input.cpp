@@ -1694,7 +1694,13 @@ void Input::animfix_apply() noexcept {
     animfix_applies_.fetch_add(1);
     corrected = true;
   }
-  if (!corrected) {
+  if (corrected) {
+    // The **duty cycle**: the anim ticks on which the correction won. The
+    // operator divides it by the client anim ticks to see the fraction of
+    // frames that carry the server's value - a duty cycle below 100 % is the
+    // oscillation at the server's tick rate.
+    animfix_corrected_ticks_.fetch_add(1);
+  } else {
     // Nothing was corrected in this anim tick: count it, with the reason of
     // the first refusal, so the operator can tell "the codec has not run
     // yet" from "every capture aged out".

@@ -116,6 +116,15 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
         "skips_no_capture": int(final.get("animfix_skip_no_capture") or 0),
         "skips_stale": int(final.get("animfix_skip_stale") or 0),
         "skips_controller": int(final.get("animfix_skip_controller") or 0),
+        # The anim ticks the driver ran, and the client ones (the correction
+        # is written on the client tick: the server tick of a listen server
+        # evaluates the server's own copies of the entities).
+        "anim_ticks": int(final.get("animfix_anim_ticks") or 0),
+        "client_ticks": int(final.get("animfix_client_ticks") or 0),
+        # The **duty cycle**: the client anim ticks on which the correction
+        # won. Below 100 % the pose alternates between the server's and the
+        # client's aim yaw at the server's tick rate.
+        "corrected_ticks": int(final.get("animfix_corrected_ticks") or 0),
         # The server's snapshot rate: the staleness bound is measured
         # against it, so this is how old the server's values may be.
         "snapshot_interval_ms": int(final.get("animfix_snapshot_interval_ms") or 0),
@@ -160,6 +169,10 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
 
     rate = observed_applies / watch if watch > 0 else float(observed_applies)
     result["apply_rate"] = round(rate, 1)
+    client_ticks = int(final.get("animfix_client_ticks") or 0)
+    corrected_ticks = int(final.get("animfix_corrected_ticks") or 0)
+    duty = (corrected_ticks / client_ticks) if client_ticks > 0 else 0.0
+    result["duty_cycle"] = round(duty, 4)
     result["verdict"] = (
         f"the animfix acted: {observed_captures} captures, {observed_applies} graph "
         f"writes corrected ({rate:.1f}/s), {observed_skips} refused; the server's aim "

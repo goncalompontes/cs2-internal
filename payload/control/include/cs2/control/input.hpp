@@ -846,6 +846,11 @@ class Input {
   [[nodiscard]] std::uint64_t animfix_client_ticks() const noexcept {
     return animfix_client_ticks_.load();
   }
+  // The anim ticks on which the correction won: the **duty cycle** is this
+  // over the client anim ticks.
+  [[nodiscard]] std::uint64_t animfix_corrected_ticks() const noexcept {
+    return animfix_corrected_ticks_.load();
+  }
   [[nodiscard]] std::uint64_t animfix_skip_controller() const noexcept {
     return animfix_skip_controller_.load();
   }
@@ -1409,6 +1414,7 @@ class Input {
   // graph the local player's hitboxes come from).
   std::atomic<std::uint64_t> animfix_anim_ticks_{0};
   std::atomic<std::uint64_t> animfix_client_ticks_{0};
+  std::atomic<std::uint64_t> animfix_corrected_ticks_{0};
   std::atomic<std::uint64_t> animfix_snapshot_interval_{0};
   std::atomic<bool> animfix_acted_{false};
   std::atomic<float> animfix_server_yaw_{0.0F};

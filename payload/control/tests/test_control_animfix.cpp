@@ -69,6 +69,46 @@ auto server_values(float aim_yaw) -> std::array<float, animfix::k_tracked_slot_c
   return {12.5F, 0.25F, -3.0F, aim_yaw};
 }
 
+// The **duty cycle**: the fraction of the anim ticks on which the correction
+// wins.
+//
+// The server's snapshots arrive at the given intervals (cycling); the client
+// animates every `anim_period_ms`. At each anim tick the newest capture is
+// applied when it is younger than the bound. A duty cycle below 100 % means
+// the client's own prediction wins some frames - the oscillation at the
+// server's tick rate that the animfix exists to remove.
+auto duty_cycle(const std::vector<std::uint64_t>& server_intervals, std::uint64_t anim_period_ms)
+    -> double {
+  animfix::SnapshotClock clock{};
+  std::uint64_t now = 1000;
+  std::uint64_t last_decode = now;
+  std::uint64_t next_decode = now + server_intervals.front();
+  std::size_t next_interval = 1;
+  std::uint64_t ticks = 0;
+  std::uint64_t applied = 0;
+  const std::uint64_t horizon = 8000;  // eight seconds of ticks
+  while (now < horizon) {
+    // The next event: the anim tick, or a snapshot at its own time (the
+    // decode runs on the network path, not on the anim tick).
+    const std::uint64_t tick_at = now + anim_period_ms;
+    if (tick_at < next_decode) {
+      now = tick_at;
+      ++ticks;
+      const std::uint64_t bound = animfix::snapshot_bound_ms(clock);
+      if (now - last_decode <= bound) {
+        ++applied;
+      }
+      continue;
+    }
+    now = next_decode;
+    last_decode = now;
+    animfix::observe_decode(clock, now);
+    next_decode = now + server_intervals[next_interval % server_intervals.size()];
+    ++next_interval;
+  }
+  return static_cast<double>(applied) / static_cast<double>(ticks);
+}
+
 // A capture of the server's values at `now_ms`, for the controller above.
 auto captured_at(std::uint64_t now_ms, float aim_yaw = 42.0F) -> animfix::Capture {
   animfix::Capture capture{};
@@ -150,16 +190,17 @@ void test_the_bound_is_the_observed_snapshot_interval() {
   animfix::SnapshotClock clock{};
   // Before the first decode there is no interval: the floor applies.
   assert(animfix::snapshot_bound_ms(clock) == animfix::k_min_snapshot_interval_ms);
-  // A 64 Hz server: the interval is ~16 ms.
+  // A 64 Hz server: the interval is ~16 ms, and the bound is the interval
+  // with the margin over it.
   animfix::observe_decode(clock, 1000);
   animfix::observe_decode(clock, 1016);
-  assert(animfix::snapshot_bound_ms(clock) == 16);
+  assert(animfix::snapshot_bound_ms(clock) == 32);
   // A 30 Hz server: the interval is ~33 ms, and the bound follows it.
   animfix::SnapshotClock slow{};
   animfix::observe_decode(slow, 1000);
   animfix::observe_decode(slow, 1033);
   animfix::observe_decode(slow, 1066);
-  assert(animfix::snapshot_bound_ms(slow) == 33);
+  assert(animfix::snapshot_bound_ms(slow) == 66);
   // A **stall** must not loosen the bound: a stalled connection produces no
   // new decodes at all, so the estimate stays at the server's normal rate
   // and the capture ages out against it.
@@ -189,7 +230,7 @@ void test_a_late_decode_does_not_widen_the_bound() {
     animfix::observe_decode(clock, 1000 + static_cast<std::uint64_t>(i) * 16);
   }
   const std::uint64_t healthy = animfix::snapshot_bound_ms(clock);
-  assert(healthy == 16);
+  assert(healthy == 32);
   // One late decode.
   animfix::observe_decode(clock, 1000 + 7 * 16 + 500);
   assert(animfix::snapshot_bound_ms(clock) == healthy);
@@ -204,7 +245,51 @@ void test_a_late_decode_does_not_widen_the_bound() {
     animfix::observe_decode(fast, 1000 + static_cast<std::uint64_t>(i) * 16);
   }
   animfix::observe_decode(fast, 1000 + 7 * 16 + 2);
-  assert(animfix::snapshot_bound_ms(fast) == 16);
+  assert(animfix::snapshot_bound_ms(fast) == 32);
+}
+
+// The bound has a **hard maximum** as well as the margin: no measurement may
+// make the window unbounded. (Removing the clamp would let a server whose
+// snapshots arrive every few hundred milliseconds keep a stale value alive
+// for the same time.)
+void test_the_bound_has_a_hard_maximum() {
+  assert(animfix::k_max_snapshot_interval_ms == 250);
+  assert(animfix::k_max_snapshot_interval_ms > animfix::k_min_snapshot_interval_ms);
+  // A server whose snapshots arrive every 200 ms: the bound is the margin
+  // over the interval, clamped to the maximum.
+  animfix::SnapshotClock slow{};
+  for (int i = 0; i < 8; ++i) {
+    animfix::observe_decode(slow, 1000 + static_cast<std::uint64_t>(i) * 200);
+  }
+  assert(animfix::snapshot_interval_ms(slow) == 200);
+  assert(animfix::snapshot_bound_ms(slow) == animfix::k_max_snapshot_interval_ms);
+}
+
+// The **duty cycle** of the correction: the fraction of the anim ticks on
+// which the server's value wins. The bound carries a margin over the median
+// precisely so that this is 100 % on an ordinary connection - the median is
+// by construction the value that half the intervals exceed, so a capture
+// measured against it would age out in the second half of every gap and the
+// client's own prediction would win those frames (a jitter at the server's
+// tick rate, which is the failure the animfix exists to remove).
+void test_the_correction_holds_a_full_duty_cycle() {
+  // A 64 Hz server and a 144 Hz client: every anim tick is corrected.
+  assert(duty_cycle({16}, 7) >= 0.99);
+  // The same server with jitter (16-19 ms).
+  assert(duty_cycle({16, 17, 18, 19}, 7) >= 0.99);
+  // A quarter of the snapshots 16 ms late (16/32 ms).
+  assert(duty_cycle({16, 16, 16, 32}, 7) >= 0.99);
+  // Half of them late.
+  assert(duty_cycle({16, 32}, 7) >= 0.99);
+  // A 48 ms hitch every eighth snapshot: the hitch is longer than the
+  // bound, so the last frames of it are refused - the rest is not.
+  const double hitched = duty_cycle({16, 16, 16, 16, 16, 16, 16, 48}, 7);
+  assert(hitched >= 0.85);
+  assert(hitched < 1.0);
+  // A **total** stall (no snapshot for half a second) is refused: the bound
+  // does not move without a decode, so the capture ages out.
+  const double stalled = duty_cycle({16, 16, 16, 16, 16, 16, 16, 500}, 7);
+  assert(stalled < 0.6);
 }
 
 // --- the validity rule --------------------------------------------------------
@@ -558,6 +643,8 @@ auto main(int argc, char** argv) -> int {
   test_the_engines_own_guard_is_reproduced();
   test_the_bound_is_the_observed_snapshot_interval();
   test_a_late_decode_does_not_widen_the_bound();
+  test_the_bound_has_a_hard_maximum();
+  test_the_correction_holds_a_full_duty_cycle();
   test_nothing_is_reapplied_before_the_first_capture();
   test_a_fresh_capture_is_reapplied();
   test_an_aged_out_capture_is_refused();

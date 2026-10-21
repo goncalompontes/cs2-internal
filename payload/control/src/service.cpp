@@ -875,6 +875,12 @@ auto Service::input_status() noexcept -> Json {
   result.set("animfix_anim_ticks", Json::number(static_cast<double>(input_.animfix_anim_ticks())));
   result.set("animfix_client_ticks",
              Json::number(static_cast<double>(input_.animfix_client_ticks())));
+  // The **duty cycle**: the client anim ticks on which the correction won.
+  // Divided by the client anim ticks, it is the fraction of the frames that
+  // carry the server's value - a duty cycle below 100 % is the oscillation
+  // at the server's tick rate that the animfix exists to remove.
+  result.set("animfix_corrected_ticks",
+             Json::number(static_cast<double>(input_.animfix_corrected_ticks())));
   result.set("animfix_skip_controller",
              Json::number(static_cast<double>(input_.animfix_skip_controller())));
   // The server's snapshot rate: the staleness bound is measured against it.
