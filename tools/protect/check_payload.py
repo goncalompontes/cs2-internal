@@ -14,25 +14,34 @@ through an encrypted descriptor. The image has to survive that:
   * the number of the encrypted dispatches in the protected image is the
     number of the calls the pass reports having rewritten -- and it is zero
     in the unprotected one;
-  * every dispatch *reaches the right callee*: the check decodes the
-    descriptor of the image with the key the pass used, resolves the index
-    in the table of the image and compares the address with the code of the
-    image.
+  * every dispatch **decodes to a callee of the image**: the check decodes
+    the descriptor of the image with the key the pass used, resolves the
+    index in the table of the image, and checks that the address is code of
+    the image.
 
 The last two are the ones that catch the dangerous failures. The key is a
 compile-time key, so the whole dispatch is a compile-time constant, and a
 compiler that folds it away leaves a *direct* call behind: the image would
 then behave exactly like the unprotected one, and the protection would be
-void. And a dispatch that reaches the *wrong* callee does not crash: it
-calls another function, which is the failure mode this project exists to
-avoid.
+void. And a dispatch that reaches a wrong address does not crash: it calls
+another function, which is the failure mode this project exists to avoid.
+
+What the last check proves is exactly this: the descriptor, decoded with
+the key the pass used, names an entry of the table of the image, and that
+entry is code of the image. It does **not** compare the entry with the
+callee of the original call site (the plugin does not record it), so a
+table that holds the wrong function would pass it.
 
 The cipher is repeated here (the plugin's `transform.cpp` is the other
 half): the check has to know what the call site computes, and a change of
 the cipher has to change both.
 
-Usage: check_payload.py --protected FILE --unprotected FILE --objdump FILE
-                       [--coverage DIR] [--policy FILE]
+Usage: check_payload.py --protected FILE --objdump FILE [--unprotected FILE]
+                       [--coverage DIR] [--policy FILE] [--source-root DIR]
+
+The unprotected image is optional: without it the checks that compare the
+two images (the exports, the imports and the "the unprotected image has no
+dispatch") are skipped, and the rest of the checks still run.
 """
 from __future__ import annotations
 
@@ -50,6 +59,7 @@ from protect_checks import (
     DispatchSite,
     PeImage,
     count_dispatches,
+    default_coverage_dir,
     disassemble,
     find_dispatch_sites,
     mix64,
@@ -258,8 +268,8 @@ def check_dispatch_targets(image: PeImage, sites: list[DispatchSite],
     for entry in coverage:
         if entry.rewritten > 0 and entry.path not in {item.path for item in matched.values()}:
             print(
-                f"check_payload: the coverage '{entry.path.name}' describes no table of this "
-                "image: it belongs to another build and is not counted"
+                f"check_payload: the coverage '{entry.path.name}' names no table of this "
+                "image: the dispatches of that module are not in it"
             )
 
     total = 0
@@ -332,10 +342,11 @@ def reported_rewrites(coverage: list[Coverage]) -> int:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protected", type=Path, required=True)
-    parser.add_argument("--unprotected", type=Path, required=True)
+    parser.add_argument("--unprotected", type=Path, default=None)
     parser.add_argument("--objdump", type=Path, required=True)
     parser.add_argument("--coverage", type=Path, default=None)
     parser.add_argument("--policy", type=Path, default=None)
+    parser.add_argument("--source-root", type=Path, default=None)
     args = parser.parse_args(argv)
 
     coverage_dir = args.coverage
@@ -346,39 +357,72 @@ def main(argv: list[str]) -> int:
     if policy is None:
         env = os.environ.get("CS2_PROTECT_CONFIG", "").strip()
         policy = Path(env) if env else None
+    if coverage_dir is None and policy is not None:
+        # The same default the plugin computes (the digest of the policy
+        # path), so that the two find the same directory without the build
+        # having to pass anything around.
+        coverage_dir = default_coverage_dir(str(policy))
+    source_root = args.source_root
+    if source_root is None:
+        env = os.environ.get("CS2_PROTECT_SOURCE_ROOT", "").strip()
+        source_root = Path(env) if env else None
 
     try:
         protected = PeImage(args.protected.read_bytes())
-        unprotected = PeImage(args.unprotected.read_bytes())
-        check_exports(protected, unprotected)
-        print("check_payload: the exports are the same")
-        check_imports(protected, unprotected)
-        print("check_payload: the imports are the same")
+        unprotected: PeImage | None = None
+        if args.unprotected is not None:
+            unprotected = PeImage(args.unprotected.read_bytes())
+            check_exports(protected, unprotected)
+            print("check_payload: the exports are the same")
+            check_imports(protected, unprotected)
+            print("check_payload: the imports are the same")
+        else:
+            print("check_payload: no unprotected image given: the exports and the imports are "
+                  "not compared")
         dir64 = check_relocations(protected)
         print(f"check_payload: the base relocation table has {dir64} DIR64 entries")
         entries = check_unwind_table(protected)
         print(f"check_payload: the unwind table has {entries} entries")
 
-        plain_sites = find_dispatch_sites(disassemble(args.objdump, args.unprotected),
-                                          unprotected.image_base, unprotected)
         protected_sites = find_dispatch_sites(disassemble(args.objdump, args.protected),
                                               protected.image_base, protected)
-        print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
-              f"dispatches, the unprotected one {len(plain_sites)}")
-        check(len(plain_sites) == 0, "the unprotected image has an encrypted dispatch")
+        if unprotected is not None:
+            plain_sites = find_dispatch_sites(disassemble(args.objdump, args.unprotected),
+                                              unprotected.image_base, unprotected)
+            print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
+                  f"dispatches, the unprotected one {len(plain_sites)}")
+            check(len(plain_sites) == 0, "the unprotected image has an encrypted dispatch")
+        else:
+            print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
+                  "dispatches")
 
         check_constants(protected, protected_sites)
 
         files: list[Coverage] = []
         if coverage_dir and policy:
-            files, skipped = read_coverage(coverage_dir, policy)
-            for name, reason, rewritten in skipped:
+            read = read_coverage(coverage_dir, policy, source_root)
+            for name, reason in read.malformed:
+                print(f"check_payload: the coverage '{name}' is malformed: {reason}",
+                      file=sys.stderr)
+            for name, reason, rewritten in read.skipped:
                 if rewritten > 0:
                     print(f"check_payload: the coverage '{name}' is skipped: {reason}")
-            if skipped:
-                print(f"check_payload: {len(skipped)} coverage files do not describe this "
+            if read.skipped:
+                print(f"check_payload: {len(read.skipped)} coverage files do not describe this "
                       "build and are not counted")
-        if files:
+            check(
+                not read.malformed,
+                "a coverage file of this policy is malformed: the build's evidence is not "
+                "trustworthy",
+            )
+            files = read.files
+            check(
+                bool(files),
+                f"no coverage file of this policy describes this build (the directory is "
+                f"'{coverage_dir}'): the number of the rewrites cannot be checked. The "
+                "coverage of a build is written by the plugin while it compiles; re-run the "
+                "Meson configure step and the build.",
+            )
             expected = reported_rewrites(files)
             check(
                 len(protected_sites) == expected,

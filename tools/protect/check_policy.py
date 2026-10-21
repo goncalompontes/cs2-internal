@@ -13,12 +13,14 @@ reads the file with the LLVM SDK's JSON parser (which keeps the *first* of
 two equal keys); Python's `json` keeps the *last*. A duplicated key is
 therefore an error on both sides, with the same message.
 
-Usage: check_policy.py [--policy FILE] [--coverage DIR] [--output FILE]
+Usage: check_policy.py [--policy FILE] [--coverage DIR] [--source-root DIR] [--output FILE]
 
-  --policy    the policy file (default: $CS2_PROTECT_CONFIG)
-  --coverage  the coverage directory (default: $CS2_PROTECT_COVERAGE, else
-              <temp>/cs2-protect-coverage/<sha256 of the policy path>)
-  --output    a stamp file to write when the check passes
+  --policy      the policy file (default: $CS2_PROTECT_CONFIG)
+  --coverage    the coverage directory (default: $CS2_PROTECT_COVERAGE, else
+                <temp>/cs2-protect-coverage/<sha256 of the policy path>)
+  --source-root the tree that is being built (default: $CS2_PROTECT_SOURCE_ROOT);
+                the coverage of another tree is not counted
+  --output      a stamp file to write when the check passes
 
 The coverage directory default is the same one the plugin computes, so the
 two agree without the build having to pass anything around.
@@ -40,7 +42,11 @@ from typing import Any
 # and the two readers have to agree on it.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from protect_checks import Coverage, read_coverage as read_coverage_files  # noqa: E402
+from protect_checks import (  # noqa: E402
+    Coverage,
+    default_coverage_dir,
+    read_coverage as read_coverage_files,
+)
 
 #: The keys the policy file may carry.
 POLICY_KEYS = ("protect", "deny", "seed")
@@ -137,14 +143,8 @@ def policy_patterns(policy: dict[str, Any]) -> list[str]:
     return patterns
 
 
-def default_coverage_dir(policy_path: str) -> Path:
-    """The directory the plugin writes the coverage to."""
-    digest = hashlib.sha256(policy_path.encode()).hexdigest().upper()[:16]
-    root = os.environ.get("TEMP") or os.environ.get("TMP") or "."
-    return Path(root) / "cs2-protect-coverage" / digest
-
-
-def read_coverage(coverage_dir: Path, policy_path: Path) -> tuple[dict[str, str], bool]:
+def read_coverage(coverage_dir: Path, policy_path: Path,
+                  source_root: Path | None = None) -> tuple[dict[str, str], bool]:
     """The state of every policy entry, over every coverage file of this policy.
 
     The state of an entry is "matched" (it named a function that is
@@ -158,17 +158,21 @@ def read_coverage(coverage_dir: Path, policy_path: Path) -> tuple[dict[str, str]
     last compile) and the check cannot say anything.
 
     A coverage file that does not describe *this* build is not evidence about
-    it: a file that was edited by hand (its content digest does not match)
-    and a file of an earlier state of the source (the digest of the source
-    does not match) are skipped, and the reason is reported. Without that, a
-    file left behind by another build would fail the build of a good one.
+    it: a file that was edited by hand (its content digest does not match),
+    a file of an earlier state of the source (the digest of the source does
+    not match) and the coverage of another tree (another worktree that
+    shares the policy) are skipped, and the reason is reported. Without
+    that, a file left behind by another build would fail the build of a good
+    one.
     """
     states: dict[str, str] = {}
     current = False
     if not coverage_dir.is_dir():
         return states, current
     digest = hashlib.sha256(policy_path.read_bytes()).hexdigest().upper()
-    files, skipped = read_coverage_files(coverage_dir, policy_path)
+    files, skipped, malformed = read_coverage_files(coverage_dir, policy_path, source_root)
+    for name, reason in malformed:
+        print(f"check_policy: the coverage '{name}' is malformed: {reason}", file=sys.stderr)
     for name, reason, rewritten in skipped:
         if rewritten > 0:
             print(f"check_policy: the coverage '{name}' is skipped: {reason}", file=sys.stderr)
@@ -233,6 +237,7 @@ def main(argv: list[str]) -> int:
     # value; the plugin trims it as well, so the two agree on the path.
     policy_path = os.environ.get("CS2_PROTECT_CONFIG", "").strip()
     coverage_dir: Path | None = None
+    source_root: Path | None = None
     output: Path | None = None
     args = list(argv)
     while args:
@@ -241,6 +246,8 @@ def main(argv: list[str]) -> int:
             policy_path = args.pop(0).strip()
         elif arg == "--coverage" and args:
             coverage_dir = Path(args.pop(0))
+        elif arg == "--source-root" and args:
+            source_root = Path(args.pop(0))
         elif arg == "--output" and args:
             output = Path(args.pop(0))
         else:
@@ -277,9 +284,12 @@ def main(argv: list[str]) -> int:
     if coverage_dir is None:
         env = os.environ.get("CS2_PROTECT_COVERAGE", "").strip()
         coverage_dir = Path(env) if env else default_coverage_dir(policy_path)
+    if source_root is None:
+        env = os.environ.get("CS2_PROTECT_SOURCE_ROOT", "").strip()
+        source_root = Path(env) if env else None
 
     digest = hashlib.sha256(policy_file.read_bytes()).hexdigest().upper()
-    states, current = read_coverage(coverage_dir, policy_file)
+    states, current = read_coverage(coverage_dir, policy_file, source_root)
     if not current:
         print(
             f"check_policy: {policy_path}: no coverage of this policy in "
