@@ -1061,6 +1061,13 @@ hashes the candidates of the image and compares with the digests. The
 coverage of an older build carries **unsalted** digests, and the check tries
 both forms, so an older coverage is still read.
 
+**The build log of a protected build is not a secret.** It names no content
+(unless `CS2_PROTECT_VERBOSE=1`), and the digests it carries are salted with
+the seed of the build -- the same argument as the coverage's. The *seed* is
+the secret: it is in the policy (or in the environment), and the policy is
+not shipped. A build that protects nothing but leaves the strings in the
+image is not fixed by any of this: the image check is what says so.
+
 ### 14.7 What the payload build measured
 
 With the policy of `tools/protect/policy.local.json` (the config keys, the
