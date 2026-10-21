@@ -758,10 +758,12 @@ void test_the_chams_fail_closed_and_the_camera_does_not(const std::filesystem::p
 // so the pool has to hold one slot per **concurrent render job**, not one per
 // thread. The scene system's job count is **unmeasured** (the live run has
 // still not happened), so the pool is sized with headroom: the draw path's
-// pool is eight times the camera's.
+// pool is 7.1 times the camera's (not eight: eight is the camera's
+// `SLOT_COUNT` without its reserve).
 //
-// The pool is **per instance**, so the camera keeps its pool — and its cost —
-// exactly as it was.
+// The pool is **per instance**, so the camera keeps its pool — and its
+// per-call cost — exactly as it was (its guard *object* grew, because the
+// slots array is sized for the largest pool any guard may ask for).
 //
 // The header is pure, so the pool's size is observable: a fail-closed guard
 // lets exactly `slot_count` owners in and refuses the next one. That is what
@@ -781,7 +783,7 @@ void test_the_pool_holds_the_concurrent_jobs() {
   expect(!camera_closed.try_enter(static_cast<OwnerId>(camera_closed.slot_count() + 1)),
          "the camera's pool refuses the owner that does not fit");
 
-  // The draw path's pool: eight times the camera's, so a tenth concurrent
+  // The draw path's pool: 7.1 times the camera's, so a tenth concurrent
   // render job — the case the old pool refused — is let in.
   RecursionGuard draw{RecursionGuard::Policy::fail_closed,
                       cs2::features::guard::DRAW_PATH_SLOT_COUNT};
