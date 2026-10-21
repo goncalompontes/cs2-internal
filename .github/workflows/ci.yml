@@ -68,6 +68,9 @@ jobs:
   build:
     name: build and test
     runs-on: windows-latest
+    # The whole verify loop takes a few minutes. The cap keeps a hung step
+    # from holding the runner (and says in the log that it was the cap).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -88,6 +91,10 @@ jobs:
           # (mypy, clang-tidy). The file's own rule: "a gate that changes its
           # mind between runs is not a gate".
           python -m pip install -r requirements-dev.txt
+          # The versions the build used, in the log: meson prints the ninja
+          # it picked, and this says which one that is.
+          meson --version
+          ninja --version
 
       - name: the compiler (clang-cl) and the LLVM tools
         run: |
