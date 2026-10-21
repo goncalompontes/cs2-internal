@@ -387,15 +387,36 @@ class Chams {
   [[nodiscard]] auto skipped() const noexcept -> std::uint64_t {
     return skipped_.load(std::memory_order_relaxed);
   }
-  // The draws the feature **dropped** instead of forwarding: the ones the
-  // guard refused (the recursion, or the pool was exhausted) and the ones
-  // that arrived while the hook was being torn down.
+  // The draws the feature **dropped** instead of forwarding.
   //
-  // They are counted separately because they are **not** in `seen`: a
-  // refused draw never reached the decision, so `seen == drawn + skipped`
-  // still holds and the refusal is visible on its own.
-  [[nodiscard]] auto refused() const noexcept -> std::uint64_t {
-    return refused_.load(std::memory_order_relaxed);
+  // The three causes are counted **separately** — they need different
+  // responses from the operator, and the counters are not reset, so a
+  // climbing number is the only signal there is:
+  //
+  //   * `refused_recursion` — the guard broke a **recursion**: this thread
+  //     was already inside the detour. Rare, and it means the hook's target
+  //     is wrong.
+  //   * `refused_exhausted` — the guard's **pool** was exhausted: the draw
+  //     was dropped because every slot was held by another render job. This
+  //     one is the serious one: the primitive is **not drawn at all**, every
+  //     frame, so a climbing number means the chams are eating the scene.
+  //   * `refused_teardown` — the hook was torn down while the draw was in
+  //     flight. One drop per teardown.
+  //
+  // They are counted separately from `seen`, so `seen == drawn + skipped`
+  // still holds and the refusals are visible on their own.
+  //
+  // The draws the guard refused because this thread was already inside.
+  [[nodiscard]] auto refused_recursion() const noexcept -> std::uint64_t {
+    return refused_recursion_.load(std::memory_order_relaxed);
+  }
+  // The draws the guard refused because its pool was exhausted.
+  [[nodiscard]] auto refused_exhausted() const noexcept -> std::uint64_t {
+    return refused_exhausted_.load(std::memory_order_relaxed);
+  }
+  // The draws that arrived while the hook was being torn down.
+  [[nodiscard]] auto refused_teardown() const noexcept -> std::uint64_t {
+    return refused_teardown_.load(std::memory_order_relaxed);
   }
   [[nodiscard]] auto original() const noexcept -> void* {
     return hook_.original();
@@ -434,11 +455,18 @@ class Chams {
   // Count a draw the feature **dropped**: the guard refused it, or the hook
   // was torn down while the draw was in flight.
   //
-  // The counter is separate from `seen_` on purpose: a dropped draw never
+  // The counters are separate from `seen_` on purpose: a dropped draw never
   // reached the decision, so `seen == drawn + skipped` keeps holding and the
-  // refusal is visible on its own.
-  void count_refusal() noexcept {
-    refused_.fetch_add(1, std::memory_order_relaxed);
+  // refusal is visible on its own. The three **causes** are separate too —
+  // see `refused_recursion()` for why.
+  void count_refusal_recursion() noexcept {
+    refused_recursion_.fetch_add(1, std::memory_order_relaxed);
+  }
+  void count_refusal_exhausted() noexcept {
+    refused_exhausted_.fetch_add(1, std::memory_order_relaxed);
+  }
+  void count_refusal_teardown() noexcept {
+    refused_teardown_.fetch_add(1, std::memory_order_relaxed);
   }
 
  private:
@@ -539,9 +567,12 @@ class Chams {
   std::atomic<std::uint64_t> seen_{0};
   std::atomic<std::uint64_t> drawn_{0};
   std::atomic<std::uint64_t> skipped_{0};
-  // The draws the feature dropped instead of forwarding (the guard refused
-  // them, or the hook was torn down while the draw was in flight).
-  std::atomic<std::uint64_t> refused_{0};
+  // The draws the feature dropped instead of forwarding, **by cause**: the
+  // guard broke a recursion, the guard's pool was exhausted, or the hook was
+  // torn down while the draw was in flight.
+  std::atomic<std::uint64_t> refused_recursion_{0};
+  std::atomic<std::uint64_t> refused_exhausted_{0};
+  std::atomic<std::uint64_t> refused_teardown_{0};
   // The desc cache: the desc -> (entity, view model) table the draw path
   // uses. It is safe for the two writers the per-owner guard allows.
   DescCache desc_cache_{};

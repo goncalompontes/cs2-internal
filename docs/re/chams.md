@@ -896,20 +896,43 @@ does not happen.
 
 A refusal is now **counted** and reported: the refusal path returned before
 `on_draw`, so it moved no counter at all and a dropped primitive was
-invisible. The status line grew a field:
+invisible.
+
+The three **causes** are counted **separately**, because they need different
+responses and the counters are not reset — a climbing number is the
+operator's only signal:
 
 ```
-hook=installed seen=1234 chams=56 skip=1178 refused=0
+hook=installed seen=1234 chams=56 skip=1178 rec=0 pool=0 tdn=0
 ```
 
 * `seen` — the draws that reached the feature's **decision**;
 * `chams` — the draws that were re-drawn with the chams' material;
 * `skip` — the draws that were forwarded untouched;
-* `refused` — the draws the feature **dropped**: the ones the guard refused
-  and the ones that arrived while the hook was being torn down.
+* `rec` — the draws the guard refused because this thread was **already
+  inside** (the recursion the guard exists to break). Rare, and it means the
+  hook's target is wrong;
+* `pool` — the draws the guard refused because its **pool** was exhausted.
+  This is the serious one: the primitive is **not drawn at all**, every
+  frame, so a climbing `pool` means the chams are eating the scene (§10.4.1);
+* `tdn` — the draws that arrived while the hook was being torn down. One per
+  teardown.
+
+The counters count the drops that could be **attributed**: a draw that
+arrives after the feature is gone (`g_active == nullptr`) is dropped too, but
+there is no object left to count it on, so it is not in the numbers. The
+window is tiny — the hook is un-patched before `g_active` is cleared.
 
 `seen == chams + skip` holds by construction: a dropped draw never reaches
 the decision, so it is not in `seen` at all.
+
+The line has to fit the overlay's 192-byte HUD buffer, and the counters are
+what the operator reads, so the **state** is the field that gives room: when
+the line does not fit, the state is cut (at its parenthesis, and at 24
+characters at the most) and the line is written again. The longest line the
+counters can produce — the counters at their 64-bit maximum and the longest
+state — is 220 bytes, and the cut brings it to 183. The overflow needs 10^19
+draws, so in practice the operator sees the full state.
 
 ### 10.5 The counters are not reset
 

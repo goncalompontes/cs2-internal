@@ -194,8 +194,12 @@ void __fastcall draw_primitive_detour(void* desc, void* render_context, void* me
     // The hook is being torn down: there is no trampoline to call, so the
     // draw is dropped for this frame rather than crashing the renderer. The
     // drop is **counted**: a dropped draw is otherwise invisible.
+    //
+    // It is counted as a **teardown** drop, which is its own cause: it
+    // happens once per teardown, and the operator's response to it is
+    // different from the response to a guard refusal.
     if (active != nullptr) {
-      active->count_refusal();
+      active->count_refusal_teardown();
     }
     return;
   }
@@ -239,11 +243,40 @@ void __fastcall draw_primitive_detour(void* desc, void* render_context, void* me
     //
     // Either way the refusal is **counted** and reported: it is a drop, and
     // a drop that is not counted is a silent hole in the model.
-    active->count_refusal();
+    //
+    // The two causes are counted **separately**, because the operator's
+    // response to them is different. The guard's first pass refuses the
+    // **recursion** (this owner is already inside); the pool is exhausted
+    // when it is not — and the pool exhaustion is the one that drops
+    // primitives **every frame**.
+    if (active->draw_guard().is_inside(current_owner())) {
+      active->count_refusal_recursion();
+    } else {
+      active->count_refusal_exhausted();
+    }
     return;
   }
   active->on_draw(desc, render_context, mesh_primitive, material, material_mode, draw_values,
                   deferred, stats, layer);
+}
+
+// The state's short form: the description up to its parenthesis, and at most
+// `max_length` characters.
+//
+// The sentence behind the parenthesis is the **log's** business (the refusal
+// is logged in full when it happens); the HUD's line has to hold the
+// counters too, and the counters are what the operator reads.
+[[nodiscard]] auto short_state(std::string_view state, std::size_t max_length) noexcept
+    -> std::string_view {
+  const std::size_t parenthesis = state.find('(');
+  std::size_t length = parenthesis == std::string_view::npos ? state.size() : parenthesis;
+  if (length > max_length) {
+    length = max_length;
+  }
+  while (length > 0 && (state[length - 1] == ' ' || state[length - 1] == '\t')) {
+    --length;
+  }
+  return state.substr(0, length);
 }
 
 }  // namespace
@@ -422,9 +455,9 @@ void Chams::on_draw(void* desc, void* render_context, void* mesh_primitive, cons
   if (original == nullptr) {
     // The hook is being torn down: there is no trampoline to call, so the
     // draw is dropped for this frame rather than crashing the renderer. The
-    // drop is counted as a **refusal**, not as a skip: the draw was not
+    // drop is counted as a **teardown** drop, not as a skip: the draw was not
     // forwarded, and `skipped` means "forwarded untouched".
-    count_refusal();
+    count_refusal_teardown();
     return;
   }
   // Every draw that reaches the feature's decision is **seen**: the counter
@@ -757,15 +790,43 @@ auto Chams::status_line(char* out, std::size_t size) const noexcept -> bool {
   // heap allocation. The description is a `string_view`, so it is printed
   // with a precision (`%.*s`) instead of being copied into a temporary.
   const std::string_view state = hook_target::describe(hook_status());
-  const int written = std::snprintf(
-      out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu refused=%llu",
-      static_cast<int>(state.size()), state.data(), static_cast<unsigned long long>(seen()),
-      static_cast<unsigned long long>(drawn()), static_cast<unsigned long long>(skipped()),
-      static_cast<unsigned long long>(refused()));
+  const int written =
+      std::snprintf(out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu rec=%llu pool=%llu tdn=%llu",
+                    static_cast<int>(state.size()), state.data(),
+                    static_cast<unsigned long long>(seen()),
+                    static_cast<unsigned long long>(drawn()),
+                    static_cast<unsigned long long>(skipped()),
+                    static_cast<unsigned long long>(refused_recursion()),
+                    static_cast<unsigned long long>(refused_exhausted()),
+                    static_cast<unsigned long long>(refused_teardown()));
+  if (written >= 0 && static_cast<std::size_t>(written) < size) {
+    return true;
+  }
+  // The line did not fit. The **state** is the only field that can give
+  // room: the counters are what the operator reads (a climbing `pool` means
+  // the chams are eating the scene), so they are the last to go. The state
+  // is cut short and the line is written again.
+  //
+  // The bound: the caller's buffer is 192 bytes (the overlay's HUD line),
+  // and the longest line the counters can produce — the counters at their
+  // 64-bit maximum and the longest state — is 220 bytes. The cut brings it
+  // to 183. The overflow needs 10^19 draws (three hundred thousand years at
+  // a million draws a second), so in practice the operator sees the full
+  // state.
+  const std::string_view short_view = short_state(state, 24);
+  const int retry =
+      std::snprintf(out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu rec=%llu pool=%llu tdn=%llu",
+                    static_cast<int>(short_view.size()), short_view.data(),
+                    static_cast<unsigned long long>(seen()),
+                    static_cast<unsigned long long>(drawn()),
+                    static_cast<unsigned long long>(skipped()),
+                    static_cast<unsigned long long>(refused_recursion()),
+                    static_cast<unsigned long long>(refused_exhausted()),
+                    static_cast<unsigned long long>(refused_teardown()));
   // `snprintf` returns the length the line would have had: a length that does
   // not fit means the line was truncated, and the caller is better off
   // knowing than showing half a status.
-  return written >= 0 && static_cast<std::size_t>(written) < size;
+  return retry >= 0 && static_cast<std::size_t>(retry) < size;
 }
 
 }  // namespace cs2::features

@@ -774,24 +774,43 @@ void test_the_chams_use_the_draw_pool(const std::filesystem::path& base) {
 
 // The refusal has to be **counted**: a refused draw is a dropped primitive,
 // and a drop that is not counted is a silent hole in the model.
+//
+// The three **causes** are counted separately: they need different responses
+// (the pool exhaustion drops primitives every frame, the recursion break
+// means the hook's target is wrong, the teardown drop happens once), and the
+// counters are not reset, so a climbing number is the operator's only signal.
 void test_the_refusal_is_counted(const std::filesystem::path& base) {
   const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
   const std::string body = function_body(source, "draw_primitive_detour");
   expect(!body.empty(), "the draw detour is there");
-  expect(body.find("count_refusal()") != std::string::npos,
-         "the detour counts the draw it refused");
+  expect(body.find("count_refusal_recursion()") != std::string::npos,
+         "the detour counts the recursion it broke");
+  expect(body.find("count_refusal_exhausted()") != std::string::npos,
+         "the detour counts the draw the pool could not take");
+  expect(body.find("count_refusal_teardown()") != std::string::npos,
+         "the detour counts the draw that arrived during the teardown");
 
-  // The counter is reported: the status line shows it. The format string is
-  // a **string literal**, so this check reads the source as it is (the
+  // The counters are reported: the status line shows them. The format string
+  // is a **string literal**, so this check reads the source as it is (the
   // stripped source has the literals removed).
   const std::string raw = read_file(base / "src" / "chams.cpp");
   const std::size_t at = raw.find("Chams::status_line");
   expect(at != std::string::npos, "the status line is there");
   if (at != std::string::npos) {
     const std::string line = raw.substr(at, raw.size() - at);
-    expect(line.find("refused=") != std::string::npos, "the status line shows the refusals");
+    expect(line.find("rec=") != std::string::npos,
+           "the status line shows the recursion breaks");
+    expect(line.find("pool=") != std::string::npos,
+           "the status line shows the pool exhaustion");
+    expect(line.find("tdn=") != std::string::npos,
+           "the status line shows the teardown drops");
     const std::string stripped = strip_comments(line);
-    expect(stripped.find("refused()") != std::string::npos, "the status line reads the counter");
+    expect(stripped.find("refused_recursion()") != std::string::npos,
+           "the status line reads the recursion counter");
+    expect(stripped.find("refused_exhausted()") != std::string::npos,
+           "the status line reads the exhaustion counter");
+    expect(stripped.find("refused_teardown()") != std::string::npos,
+           "the status line reads the teardown counter");
   }
 }
 

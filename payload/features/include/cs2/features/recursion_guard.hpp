@@ -270,6 +270,16 @@ class RecursionGuard {
     return 0;
   }
 
+  // Is `owner` inside the guarded region right now?
+  //
+  // The draw path asks this when the guard **refused** a call: the refusal
+  // is the **recursion** (the owner is already inside) or the **pool** being
+  // exhausted (it is not), and the two need different counters and different
+  // responses from the operator.
+  [[nodiscard]] auto is_inside(OwnerId owner) const noexcept -> bool {
+    return depth(owner) > 0;
+  }
+
  private:
   // The slot's state: the owner in the high half, the depth in the low half.
   // A depth of zero means the slot is free. The depth is one while the owner
