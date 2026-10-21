@@ -739,28 +739,28 @@ meson compile -C <build>
 
 Measured on this machine (the host build, `debugoptimized`; the 717-cell saved set,
 24 reconstructed hitboxes, a cone radius of 0.002 rad — the same σ the published
-`argmax_hit_probability` number uses). The numbers are the median run of five; the
-run-to-run spread is quoted where it matters:
+`argmax_hit_probability` number uses). The numbers are the **median of six runs**;
+the run-to-run spread is quoted where it matters:
 
 | what | N=64 | N=128 | N=256 |
 |---|---|---|---|
-| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.07 / 0.10 / 0.12 ms | 0.14 / 0.19 / 0.23 ms | 0.29 / 0.38 / 0.39 ms |
-| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | **2.4 / 3.1 / 3.2 ms** | **4.8 / 5.7 / 6.1 ms** | **9.8 / 11.5 / 13.1 ms** |
+| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.07 / 0.09 / 0.10 ms | 0.14 / 0.19 / 0.21 ms | 0.28 / 0.33 / 0.37 ms |
+| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | **2.3 / 3.1 / 3.2 ms** | **4.7 / 5.4 / 5.6 ms** | **9.8 / 11.0 / 11.7 ms** |
 
 | the existing objective, on the same field | p50 | p95 | p99 |
 |---|---|---|---|
 | `argmax_hit_probability` (σ = 0.002) | 48 ms | 60 ms | 62 ms |
-| `hit_probability` (one evaluation) | 3.6 ms | 8.1 ms | 9.4 ms |
+| `hit_probability` (one evaluation) | 3.3 ms | 8.0 ms | 9.3 ms |
 
 One sample (one seed, one pellet, 24 hitboxes) costs **1.0 µs** (p50).
 
 **The verdict.** The Monte-Carlo search is **4–20× cheaper than the existing
 objective** on the same field. At 64 and 128 samples it fits the tick with room to
-spare (p99 3.2 ms and 6.1 ms against the 15.6 ms tick and the service's 12 ms
-guard). At **256 samples the p99 is 11.6–15.9 ms across the five runs — it
+spare (p99 2.5–3.6 ms and 4.9–6.2 ms against the 15.6 ms tick and the service's
+12 ms guard). At **256 samples the p99 is 10.8–15.9 ms across the six runs — it
 straddles the 15.6 ms tick and is over the 12 ms guard**, so the 256-sample mode
 does **not** fit the budget reliably on this machine. The existing objective does
-**not** fit the tick at all (p50 48 ms).
+**not** fit the tick at all (p50 44–49 ms).
 
 The published figure for the existing objective is 34 ms (`docs/ragebot-perf.md`
 §3.9); the out-of-tree harness that produced it measures 29–50 ms on this machine
