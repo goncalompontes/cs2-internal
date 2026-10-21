@@ -55,36 +55,65 @@ review is outstanding.
 * tip `64f3594`; it **merges the integration tip** as `67bd9b7` (a merge
   commit, not a rebase — the no-rebase rule), so T19's anti-aim is already in
   the tree
-* the last review round is `rev-t20-animfix-r4` (`C:\Users\gpmpo\cs2-wt\rev-t20-animfix-r4`),
-  launched but **not finished** when the session ended
-* the fix round that the fourth review must check:
-  `12653f6` the bound rejects the outliers · `4b7ecc0` the correction is not
-  consumed by the first anim tick · `8f8c2d0` the write targets are read from
-  the live controller · `b612804` the scenario switches the feature off even
-  when the first read fails · `aabb18b` the comments and the seam test follow
-  the engine · `64f3594` the status block says what its counters count
+* **four** review rounds have run. The 4th (`rev-t20-animfix-r4`, tip
+  `64f3594`) returned **SHIP WITH FIXES** with three majors:
+  * **M-A** — the **median** bound refuses the capture in the second half of
+    every gap, so the "the server's value stays in the graph" promise only
+    holds on a perfectly regular server. The reviewer **measured the duty
+    cycle**: 100 % (perfect) → 97 % (jitter 16–19 ms) → 82.6 % (25 % of the
+    snapshots delayed) → 63.1 % (50 % delayed). The fix is a **margin** on the
+    bound (`min(2 × median, 250 ms)` restores 100 % for the jitter and 25 %
+    cases), plus a **duty-cycle** figure in the status.
+  * **M-B** — `docs/re/animfix.md` §9.6 still documents the **round-3** rules
+    (it says "exponential moving average", "at most once" and lists "already
+    used" as a refusal reason — all three false) and `:1014` still asserts the
+    frame ordering as fact. The document that exists to prevent drift is
+    itself the drifted one.
+  * **M-C** — the M2 fix is **not pinned by a test that can fail**; the
+    commit message's mutation claim is false (the reviewer restored the
+    consume-once machinery and the whole suite stayed green).
+  * plus the minors m-1…m-7 and the nits n-1…n-4.
+* a **fifth fix round is running** (dispatched at the end of the session)
 * host suite **46/46**, Python **402**, mypy clean (55 files) — verified
 
-**To finish:** re-run the review (`orchestrate.review({commit:"feat/t20-animfix", project:"cs2", spec_file:"docs/orchestration/spec-t20-animfix.md", task:"t20-animfix-r4"})`) if the in-flight one was lost, then
-`orchestrate.merge({branch:"feat/t20-animfix", project:"cs2"})`. The merge
-gate refuses only a **DO NOT SHIP** verdict, so a **SHIP WITH FIXES** merges.
+**To finish:** let the fifth fix round land, then re-run the review
+(`orchestrate.review({commit:"feat/t20-animfix", project:"cs2", spec_file:"docs/orchestration/spec-t20-animfix.md", task:"t20-animfix-r5"})`),
+then `orchestrate.merge({branch:"feat/t20-animfix", project:"cs2"})`. The
+merge gate refuses only a **DO NOT SHIP** verdict, so a **SHIP WITH FIXES**
+merges.
+
+**The reviewer's proven facts, worth keeping:** the anim tick's flag polarity
+is **proven from the live DLL** (`cmoveq %rdx,%rcx` at `0x35af26` ⇒ flag == 0
+⇒ server tick, flag != 0 ⇒ client tick); the finite-value guard is **bit-exact**
+against the engine's own predicate (0 mismatches over 1 000 000 random bit
+patterns plus every boundary float); the seam test now catches **all six**
+signature corruptions (the round-3 test was blind to every one); and the merge
+with the integration tip is clean with T19 byte-identical.
 
 ### T21 — the project-wide quality pass
 
 * branch `feat/t21-quality-pass`, worktree `C:\Users\gpmpo\cs2-wt\t21-quality-pass`
-* tip `b212124`; the round-3 fix commits are
+* tip `528fa59`; the round-3 fix commits are
   `48d6ff1` the policy contract says when `close` is asked · `187361d` the
   report names its build directory and the policy's requirements ·
-  `8cdef05` §6.2 publishes the command its numbers come from · `f208595` the
-  type checker's cache is ignored · `5489a08` a CI timeout and the build
-  tools' versions in the log · `b212124` the new test's local handle is const
-* the last review round is `rev-t21-quality-pass-r2`
-  (`C:\Users\gpmpo\cs2-wt\rev-t21-quality-pass-r2`), **not finished** when the
-  session ended
+  `8cdef05` §6.2 publishes the command its numbers come from · `b212124` the
+  new test's local handle is const · `b824a9e` the clang-tidy table is
+  re-measured at the tip · `528fa59` the second re-review is in the report ·
+  `c4769f8` **M1 — the policy contract gains `usable()` and the wrapper asks
+  it first, so a policy whose default state cannot answer is never called**
+  (the reviewer's `std::bad_function_call` → `std::terminate` path is closed)
+* the **third review round is running** (`rev-t21-quality-pass-r3`)
 * host suite **44/44**, Python **404**, mypy clean (52 files)
 
-**To finish:** re-run the review if it was lost, then
+**To finish:** let the r3 review land, then
 `orchestrate.merge({branch:"feat/t21-quality-pass", project:"cs2"})`.
+
+**The reviewer's own judgement, worth keeping:** the empty-SDK payload build
+is worth keeping (it is the only compile gate on the payload, the overlay and
+the injector), and the implementer **declined** the checked-in stub SDK
+because a frozen stub would rot and quietly stop being a compile gate — the
+generator stays, with its crates and dumper build cached. The whole workflow
+was re-run on a fresh `git archive HEAD` checkout and every step was green.
 
 ## 4. What the reviews found — the argument for the loop
 
@@ -96,8 +125,10 @@ The reviews were worth every round. The ones that mattered:
 | T20, 1st | the setter seam **cannot be hooked** — its third prologue instruction is a RIP-relative load the relocator cannot rewrite across the ~141 TB delta between the high-mapped module and the low-allocated trampoline. The animfix hooked **nothing** and failed silently |
 | T20, 2nd | the hand-replicated write **bypassed the engine's finite-value guard**; the write target came from a **stale capture** and was never re-validated against the live controller |
 | T20, 3rd | the staleness bound was an **EMA with no outlier rejection** (one late decode inflated it 8.5×); the once-per-capture gate consumed the correction on whichever anim tick ran first, and the server/client flag was ignored |
+| T20, 4th | the **median** bound refuses the capture in the second half of every gap — the measured **duty cycle** falls from 100 % to 63 % under a 50 % snapshot loss, so the jitter the fix was meant to remove is still there; the RE's §9.6 still documented the **round-3** rules (three false statements); the M2 fix was **not pinned by a test that can fail** and its commit message's mutation claim was false |
 | T21, 1st | the new CI workflow was **red on the first run** — `external/Vulkan-Headers` is gitignored and nothing fetched it; the CI built the payload `/MD` instead of the `/MT` that is actually injected |
 | T21, 2nd | the wrapper still had a path that calls a **moved-from policy** (`reset()` → `std::bad_function_call` → `std::terminate` out of a `noexcept` destructor) |
+| T21, 3rd | the wrapper's **default** policy could `std::terminate` the same way — fixed by the `usable()` contract |
 
 **The pattern worth keeping:** the reviewer that breaks the maths and watches
 the test fail is worth more than the reviewer that reads it. Several of these
