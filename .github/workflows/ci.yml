@@ -34,8 +34,27 @@
 # against are the ones the host build generates, which is why the host build
 # runs first.
 #
-# The compiler is clang-cl -- the compiler the payload is built with -- and it
-# is the configuration this repository is verified with locally.
+# THE COMPILER IS THE RUNNER IMAGE'S. clang-cl comes from the image's LLVM
+# (C:\Program Files\LLVM\bin) and is **not** pinned: there is no way to
+# install a specific LLVM from a package the runner already has, and no pip
+# package that ships the compiler. The tree was verified locally with
+# clang-cl 22.1.8; the image (windows-2025) ships 20.1.8, which maps
+# /std:c++latest to the same -std=c++26 and the same __cplusplus (202400),
+# and the tree has no __cplusplus conditionals and no clang-21+ language
+# features -- so the exposure is low, but it is **not** verified. If the
+# image's LLVM ever changes in a way that matters, the fix is to pin it (the
+# way clang-tidy is pinned) or to move the payload build into a container.
+#
+# THE RUNNER IMAGE THIS WORKFLOW WAS WRITTEN AGAINST (windows-2025):
+#   * Windows Server 2025
+#   * LLVM 20.1.8 -- the compiler (clang-cl). The *style gate* does not use
+#     it: it runs the pinned clang-tidy 22.1.8 (requirements-dev.txt).
+#   * MSVC 14.51 -- the CRT, the Windows SDK and lib.exe, through
+#     ilammy/msvc-dev-cmd (the same toolset the local build uses)
+#   * Rust/Cargo 1.99 -- the SDK generator (the step above checks for it)
+#   * Python 3.12.10 -- the image's; the workflow uses setup-python's 3.11
+#   * Ninja 1.13.2 -- the image's; the workflow installs the pinned 1.13.0
+#   * no meson -- the workflow installs the pinned 1.11.2
 
 name: ci
 
