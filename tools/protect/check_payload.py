@@ -355,12 +355,25 @@ def image_runs(data: bytes) -> list[bytes]:
     return [part for part in data.split(b"\0") if part]
 
 
-def digest_matches(runs: list[bytes], length: int, digests: set[str]) -> bool:
-    """Whether one of the runs holds a sequence with one of the digests.
+def whole_run_matches(runs: list[bytes], length: int, digests: set[str]) -> bool:
+    """Whether one of the runs **is** one of the sequences.
 
-    The digest is of the *content* of the literal, without the trailing NUL,
-    so the prefixes of the runs are hashed as well: a literal that is not
-    NUL-terminated is the prefix of a longer run.
+    The run has to be the whole string: a string that merely *starts* with a
+    protected one ("open" in "opened") is not a leak.
+    """
+    for run in runs:
+        if len(run) != length:
+            continue
+        if hashlib.sha256(run).hexdigest().upper() in digests:
+            return True
+    return False
+
+
+def prefix_matches(runs: list[bytes], length: int, digests: set[str]) -> bool:
+    """Whether a prefix of one of the runs is one of the sequences.
+
+    A literal that is not NUL-terminated in the image is the prefix of a
+    longer run, so the presence check has to look at the prefixes as well.
     """
     for run in runs:
         if len(run) < length:
@@ -417,11 +430,19 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
         return 0
 
     runs = image_runs(protected.data)
+    # A literal that is protected in one module and **refused** in another is
+    # legitimately still in the image: the gate does not half-protect, and the
+    # refused copy is the one that holds the plaintext.
+    everywhere = {digest for digests in by_length.values() for digest in digests}
+    skipped = refused & everywhere
     for length, digests in sorted(by_length.items()):
+        wanted = digests - skipped
+        if not wanted:
+            continue
         check(
-            not digest_matches(runs, length, digests),
+            not whole_run_matches(runs, length, wanted),
             f"the protected image still holds the plaintext of a protected string "
-            f"({length} bytes, sha256 {sorted(digests)[0][:12]}): the protection did nothing",
+            f"({length} bytes, sha256 {sorted(wanted)[0][:12]}): the protection did nothing",
         )
     print(f"check_payload: {sum(len(digests) for digests in by_length.values())} protected "
           "strings are absent from the protected image")
@@ -430,13 +451,14 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
         plain_runs = image_runs(unprotected.data)
         for length, digests in sorted(by_length.items()):
             check(
-                digest_matches(plain_runs, length, digests),
+                whole_run_matches(plain_runs, length, digests)
+                or prefix_matches(plain_runs, length, digests),
                 f"the unprotected image does not hold the plaintext of a protected string "
                 f"({length} bytes): the check would be vacuous",
             )
         print("check_payload: the unprotected image holds the protected strings")
 
-    for digest in sorted(refused & {d for digests in by_length.values() for d in digests}):
+    for digest in sorted(skipped):
         print(
             f"check_payload: the string {digest[:12]} is protected in one module and refused "
             "in another: it is legitimately still in the image"
@@ -451,7 +473,8 @@ def policy_selects_strings(policy: Path | None) -> bool:
     try:
         document = json.loads(policy.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
-        return False    strings = document.get("strings")
+        return False
+    strings = document.get("strings")
     return isinstance(strings, list) and bool(strings)
 
 
