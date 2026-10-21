@@ -1033,6 +1033,66 @@ void test_vm_refusals() {
     check_refused(*function, cs2::protect::VmRefusal::unsupported_instruction,
                   "an instruction the lowering does not model is refused");
   }
+
+  // A callee with an `sret` parameter: Windows x64 rejects it in an
+  // indirect signature.
+  {
+    auto* callee = llvm::Function::Create(
+        llvm::FunctionType::get(i32, {llvm::PointerType::getUnqual(context)}, false),
+        llvm::GlobalValue::ExternalLinkage, "with_sret", &module);
+    callee->addParamAttr(0, llvm::Attribute::StructRet);
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                            llvm::GlobalValue::ExternalLinkage, "caller", &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    auto* out = builder.CreateAlloca(i32, nullptr, "out");
+    builder.CreateRet(builder.CreateCall(callee, {out}));
+    check_refused(*function, cs2::protect::VmRefusal::indirect_parameter,
+                  "a callee with an sret parameter is refused");
+  }
+
+  // A `musttail` call: the tail-call contract does not survive the rewrite.
+  {
+    auto* callee = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                          llvm::GlobalValue::ExternalLinkage, "tail", &module);
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                            llvm::GlobalValue::ExternalLinkage, "caller", &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    auto* call = builder.CreateCall(callee, {function->getArg(0)});
+    call->setTailCallKind(llvm::CallInst::TCK_MustTail);
+    builder.CreateRet(call);
+    check_refused(*function, cs2::protect::VmRefusal::musttail, "a musttail call is refused");
+  }
+
+  // A call with more arguments than the budget.
+  {
+    std::vector<llvm::Type*> parameters(65, i32);
+    auto* callee = llvm::Function::Create(llvm::FunctionType::get(i32, parameters, false),
+                                          llvm::GlobalValue::ExternalLinkage, "many", &module);
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                            llvm::GlobalValue::ExternalLinkage, "caller", &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    std::vector<llvm::Value*> arguments(65, function->getArg(0));
+    builder.CreateRet(builder.CreateCall(callee, arguments));
+    check_refused(*function, cs2::protect::VmRefusal::too_many_arguments,
+                  "a call with too many arguments is refused");
+  }
+
+  // An atomic access: the ordering guarantees are not modelled.
+  {
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                            llvm::GlobalValue::ExternalLinkage, "atomic", &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    auto* slot = builder.CreateAlloca(i32, nullptr, "slot");
+    builder.CreateStore(function->getArg(0), slot);
+    auto* loaded = builder.CreateAlignedLoad(i32, slot, llvm::MaybeAlign());
+    loaded->setAtomic(llvm::AtomicOrdering::SequentiallyConsistent);
+    builder.CreateRet(loaded);
+    check_refused(*function, cs2::protect::VmRefusal::atomic_access, "an atomic access is refused");
+  }
 }
 
 /// The virtualizer's front end: a call.
