@@ -490,6 +490,20 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
       model_.hud.sections.push_back(std::move(section));
     }
   }
+  // The 3D chams: whether the scene system's draw hook is installed, the
+  // draws it saw, the draws it drew with the chams' material, the draws it
+  // skipped — and, when the hook is not installed, the reason (no offset, no
+  // module, a prologue mismatch, a refused patch).
+  char chams_status[192] = {};
+  const bool chams_known = chams_status_provider_ != nullptr &&
+                           chams_status_provider_(chams_status_context_, chams_status,
+                                                  sizeof(chams_status));
+  if (chams_known) {
+    render::HudSection section;
+    section.title = "chams";
+    section.lines.push_back(render::HudLine{.label = "state", .value = chams_status});
+    model_.hud.sections.push_back(std::move(section));
+  }
 
   // ESP (screen-space draw list).
   const game::Matrix4x4 view = reader_->view_matrix(0);
@@ -576,6 +590,11 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
                format_long(static_cast<long long>(screen_height));
     summary += " esp=" + format_long(static_cast<long long>(model_.draw.commands.size()));
     summary += " drawn=" + format_long(esp_stats.drawn);
+    // The chams: the hook's state and its counters, so the feature is
+    // verifiable without the overlay.
+    if (chams_known) {
+      summary += " chams=" + std::string(chams_status);
+    }
     game::append_log(summary);
   }
   return model_;

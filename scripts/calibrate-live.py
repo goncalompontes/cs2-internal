@@ -148,8 +148,10 @@ def main():
     # longer matches is reported on stderr ("unresolved: …") so a global that
     # moved across builds is visible rather than silent. engine2.dll carries the
     # Cbuf console entry used by the control channel's `exec` (docs/re/engine2.md).
+    # scenesystem.dll carries the scene system's draw — the chams' hook target
+    # (`scene_draw_primitive`, docs/re/chams.md §8).
     offsets = []
-    for module in ("client.dll", "engine2.dll"):
+    for module in ("client.dll", "engine2.dll", "scenesystem.dll"):
         if module not in bases:
             continue
         proc = subprocess.run(

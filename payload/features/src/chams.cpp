@@ -1,5 +1,6 @@
 #include "cs2/features/chams.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -10,6 +11,8 @@
 #include "cs2/game/material.hpp"
 #include "cs2/game/memory.hpp"
 #include "cs2/game/module.hpp"
+
+#include "offsets.hpp"
 
 namespace cs2::features {
 namespace {
@@ -31,10 +34,24 @@ Chams* g_active = nullptr;
 //        ISceneLayer*);
 //
 // The material is the **fourth** argument (index 3 counting `this`).
+//
+// The signature is the one the RE re-derived from the function's own body and
+// its call site (`docs/re/chams.md` §8): the *real* draw is a nine-argument
+// member function, and the material is in `R9` — the fourth argument. The
+// detour below was always right; only the **address** it patched was wrong.
 using DrawPrimitiveFn = void(__fastcall*)(void* desc, void* render_context, void* mesh_primitive,
                                           const void* material, const void* material_mode,
                                           void* draw_values, bool deferred, void* stats,
                                           void* layer);
+
+// The module the draw lives in, and the dumper's signature for it.
+//
+// The address is **not** a constant: it is resolved through the signature the
+// calibration dump carries (ADR-0012: no hard-coded RVA), and the bytes at
+// the resolved address are compared with the expected prologue before
+// anything is patched.
+inline constexpr std::string_view k_scene_module = "scenesystem.dll";
+inline constexpr std::string_view k_scene_draw_offset = "scene_draw_primitive";
 
 // The scene object desc -> the entity that owns the model.
 //
@@ -141,12 +158,16 @@ thread_local int g_draw_depth = 0;
 // (0xc0000005) on a read of a garbage address, with the fault inside the
 // renderer.
 //
-// So the target must be re-derived from the class's **own vtable**
-// (`CAnimatableSceneObjectDesc` at `scenesystem.dll + 0x5E5C90`, whose slot 1
-// holds the virtual that calls the draw) before the hook can be trusted. Until
-// then the chams are refused rather than crashing the game, and this constant
-// is the single switch that turns them back on.
-inline constexpr bool k_draw_hook_target_verified = false;
+// The target was re-derived from the class's **own** RTTI chain and vftable
+// (`docs/re/chams.md` §8): the real draw is at `scenesystem.dll + 0x580A0`
+// and it **is** a nine-argument member function, so the detour and the
+// typedef above never changed — only the address did.
+//
+// A constant cannot express that, and a constant is what made the crash
+// possible. What replaced it is a **runtime verification**: the address comes
+// from the dumper's signature and the bytes at that address are read through
+// the fault-safe reader and compared with the prologue the RE measured
+// (`cs2/features/hook_target.hpp`). A mismatch refuses the hook and says why.
 
 void __fastcall draw_primitive_detour(void* desc, void* render_context, void* mesh_primitive,
                                       const void* material, const void* material_mode,
@@ -213,12 +234,26 @@ void Chams::configure(const Config::Visuals& visuals) noexcept {
   // and removed when they are turned off, so a disabled feature never patches
   // the renderer's code.
   if (visuals.chams) {
+    if (!hook_.installed() && hook_status_.load(std::memory_order_relaxed) ==
+                                  hook_target::Status::idle) {
+      // The chams have just been switched on: the state starts at "the
+      // install is being attempted", and the log's latch is reset so a
+      // refusal is reported again the next time the feature is used.
+      hook_status_.store(hook_target::Status::pending, std::memory_order_relaxed);
+      reported_status_.store(hook_target::Status::pending, std::memory_order_relaxed);
+    }
     (void)install();
   } else if (hook_.installed()) {
     hook_.uninstall();
     if (g_active == this) {
       g_active = nullptr;
     }
+  }
+  if (!visuals.chams) {
+    // The chams are off: nothing is patched, and the next refusal is logged
+    // again (the latch is reset with the state).
+    hook_status_.store(hook_target::Status::idle, std::memory_order_relaxed);
+    reported_status_.store(hook_target::Status::idle, std::memory_order_relaxed);
   }
 }
 
@@ -309,13 +344,20 @@ void Chams::update(const game::Snapshot& snapshot) noexcept {
 void Chams::on_draw(void* desc, void* render_context, void* mesh_primitive, const void* material,
                     const void* material_mode, void* draw_values, bool deferred, void* stats,
                     void* layer) noexcept {
+  // Every draw that reaches the feature is **seen**: the counter answers "how
+  // many draws did the hook see", and `seen == drawn + skipped` always.
+  seen_.fetch_add(1, std::memory_order_relaxed);
   auto* original = reinterpret_cast<DrawPrimitiveFn>(hook_.original());
   if (original == nullptr) {
+    // The hook is being torn down: there is no trampoline to call, so the
+    // draw is dropped for this frame rather than crashing the renderer.
+    skipped_.fetch_add(1, std::memory_order_relaxed);
     return;
   }
   // The cheapest way out: with the feature off the draw is forwarded
   // untouched, without touching the engine at all.
   if (!enabled_.load(std::memory_order_relaxed)) {
+    skipped_.fetch_add(1, std::memory_order_relaxed);
     original(desc, render_context, mesh_primitive, material, material_mode, draw_values, deferred,
              stats, layer);
     return;
@@ -453,53 +495,92 @@ auto Chams::install() noexcept -> bool {
   if (!enabled_.load(std::memory_order_relaxed)) {
     return false;
   }
-  // **The hook target is not verified.** The address came from an RTTI *lambda*
-  // type: `DrawPrimitive@CAnimatableSceneObjectDesc@@QEAAXPEAVIRenderContext@@…`. A
-  // lambda's `operator()` takes **eight** parameters and has **no `this`**, while
-  // the member function it mirrors takes the `this` plus the same eight. The
-  // detour below assumes the member function's shape, so patching the lambda's
-  // `operator()` shifts the whole argument list: the callee receives the
-  // material pointer where it expects the mesh pointer and dereferences it.
-  // That is exactly the access violation the live test produced (a read of a
-  // garbage address with the fault inside the renderer).
+
+  // --- The target -----------------------------------------------------------
   //
-  // So the hook is **refused** until the target is re-derived from the class's
-  // own vtable. The chams stay off and say so; the rest of the feature (the
-  // material, the colour, the decision) is ready for it.
-  if (!k_draw_hook_target_verified) {
-    install_failed_.store(true, std::memory_order_relaxed);
-    game::append_log(
-        "[cs2-features] chams: the draw hook is disabled - the target address "
-        "was taken from an RTTI lambda type and does not carry the member "
-        "function's 'this'; the target must be re-derived from the class's own "
-        "vtable before the chams can be hooked");
-    return false;
+  // The address comes from the dumper's `scene_draw_primitive` signature
+  // (ADR-0012: no hard-coded RVA). The offset is **absent** when the
+  // calibration dump predates the signature — the operator has to refresh it
+  // with `scripts/calibrate-live.py` — and the chams then stay off and say so.
+  const cs2::sdk::OffsetInfo* offset = cs2::sdk::find_offset(k_scene_draw_offset);
+  const game::ModuleInfo scene = game::find_module(k_scene_module);
+
+  hook_target::Facts facts;
+  facts.offset_present = offset != nullptr;
+  if (offset != nullptr) {
+    facts.rva = offset->rva;
+    facts.offset_module = offset->module;
   }
-  const game::ModuleInfo scene = game::find_module("scenesystem.dll");
-  if (!scene.valid()) {
-    return false;  // the game is not up yet: retry on the next frame
+  facts.module_present = scene.valid();
+  facts.module_base = scene.base;
+  facts.module_size = scene.size;
+  if (offset != nullptr && scene.valid()) {
+    // The prologue is read through the **fault-safe** reader: the payload is
+    // manually mapped without registered exception tables, so a bad address
+    // must never fault.
+    const auto target = scene.base + static_cast<std::uintptr_t>(offset->rva);
+    facts.prologue_read =
+        game::read_bytes(target, facts.prologue.data(), facts.prologue.size());
+    facts.prologue_length = facts.prologue_read ? facts.prologue.size() : 0;
   }
-  const std::uintptr_t target = scene.base + k_draw_primitive_rva;
-  if (!scene.contains(target)) {
-    // A build the offsets were not derived on. Do not hook: a stale address
-    // would patch arbitrary code.
-    install_failed_.store(true, std::memory_order_relaxed);
-    game::append_log(
-        "[cs2-features] chams: scenesystem.dll does not hold the draw at the "
-        "expected offset; the chams are off");
-    return false;
+
+  const hook_target::Status verdict =
+      hook_target::decide(facts, hook_target::SCENE_DRAW_PROLOGUE, k_scene_module);
+  switch (verdict) {
+    case hook_target::Status::no_offset:
+      report(verdict,
+             "[cs2-features] chams: the calibration dump has no 'scene_draw_primitive' "
+             "offset for scenesystem.dll - refresh it with scripts/calibrate-live.py; "
+             "the chams are off");
+      install_failed_.store(true, std::memory_order_relaxed);
+      return false;
+    case hook_target::Status::no_module:
+      // The game is not up yet: retry on the next frame. This is a normal
+      // state, so it is recorded but not logged.
+      report(verdict, "");
+      return false;
+    case hook_target::Status::outside_module:
+      report(verdict,
+             "[cs2-features] chams: the resolved draw does not lie inside "
+             "scenesystem.dll; the chams are off");
+      install_failed_.store(true, std::memory_order_relaxed);
+      return false;
+    case hook_target::Status::unreadable:
+      report(verdict,
+             "[cs2-features] chams: the draw's prologue could not be read; the "
+             "chams are off");
+      return false;
+    case hook_target::Status::mismatch:
+      report(verdict,
+             "[cs2-features] chams: the prologue at the resolved draw does not "
+             "match the one the RE measured - scenesystem.dll is not the build "
+             "the chams were derived on; the chams are off");
+      install_failed_.store(true, std::memory_order_relaxed);
+      return false;
+    case hook_target::Status::accepted:
+      break;
+    default:
+      return false;
   }
+
+  // --- The patch ------------------------------------------------------------
+  //
+  // Every check above passed: the address is the one the measurement was
+  // taken on, and the bytes there are the ones the measurement saw.
+  const auto target = scene.base + static_cast<std::uintptr_t>(offset->rva);
   g_active = this;
   const auto error = hook_.install(reinterpret_cast<void*>(target),
                                    reinterpret_cast<void*>(&draw_primitive_detour));
   if (error.has_value()) {
     g_active = nullptr;
     install_failed_.store(true, std::memory_order_relaxed);
-    game::append_log("[cs2-features] chams: the draw hook failed: " +
-                     std::string(hooks::to_string(*error)));
+    report(hook_target::Status::refused,
+           std::string("[cs2-features] chams: the draw hook failed: ") +
+               hooks::to_string(*error));
     return false;
   }
-  game::append_log("[cs2-features] chams: the scene system's draw is hooked");
+  report(hook_target::Status::installed,
+         "[cs2-features] chams: the scene system's draw is hooked");
   return true;
 }
 
@@ -569,6 +650,33 @@ auto Chams::is_visible(std::uintptr_t entity) const noexcept -> bool {
     }
   }
   return false;
+}
+
+void Chams::report(hook_target::Status status, std::string_view message) noexcept {
+  hook_status_.store(status, std::memory_order_relaxed);
+  // **The log is latched.** `game::append_log` opens, writes and closes a file
+  // per call, and the install path runs on the render thread and can be
+  // retried every frame: a line per attempt wrote ~500 MB a day in the
+  // animfix (the same bug, the same cost). So a line is written only when the
+  // state **changes**.
+  hook_target::Status reported = reported_status_.load(std::memory_order_relaxed);
+  while (reported != status) {
+    if (reported_status_.compare_exchange_weak(reported, status, std::memory_order_relaxed)) {
+      if (!message.empty()) {
+        game::append_log(message);
+      }
+      return;
+    }
+  }
+}
+
+auto Chams::status_line() const -> std::string {
+  std::string line = "hook=";
+  line += hook_target::describe(hook_status_.load(std::memory_order_relaxed));
+  line += " seen=" + std::to_string(seen_.load(std::memory_order_relaxed));
+  line += " chams=" + std::to_string(drawn_.load(std::memory_order_relaxed));
+  line += " skip=" + std::to_string(skipped_.load(std::memory_order_relaxed));
+  return line;
 }
 
 }  // namespace cs2::features

@@ -393,6 +393,22 @@ features_esp_geometry_test = executable('features_esp_geometry_test',
 )
 test('features-esp-geometry', features_esp_geometry_test)
 
+# The chams' draw-hook **target guard**: the rule that decides whether a
+# function entry may be patched. It is a pure function (the bytes are an
+# argument), so the host build can prove it: the right prologue is accepted, a
+# changed, a truncated or an unreadable one is refused, and a missing offset
+# is refused. The previous target came from an RTTI *lambda* type and took the
+# game down with an access violation, so the rule needs a test of its own.
+features_chams_target_test = executable('features_chams_target_test',
+  files(
+    'payload/features/tests/test_chams_target.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/features/include'),
+  ],
+)
+test('features-chams-target', features_chams_target_test)
+
 # The material system's parameter-name hash and the chams' "is this entity one
 # of ours" decision. Both are pure (no engine, no Windows), so they are built
 # natively here and regression-tested: the hash is keyed by the engine's own

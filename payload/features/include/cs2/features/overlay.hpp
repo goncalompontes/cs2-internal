@@ -87,6 +87,17 @@ class Overlay {
     movement_status_context_ = context;
   }
 
+  // A provider for the **chams'** one-line status: whether the scene system's
+  // draw hook is installed, how many draws were seen, how many were drawn
+  // with the chams' material, how many were skipped — and, when the hook is
+  // not installed, the reason it is not. It is added to the HUD when it
+  // returns true (the chams are on).
+  using ChamsStatusProvider = bool (*)(void* context, char* out, std::size_t size);
+  void set_chams_status_provider(ChamsStatusProvider provider, void* context) noexcept {
+    chams_status_provider_ = provider;
+    chams_status_context_ = context;
+  }
+
   // A provider for a pawn's **real studio hitboxes** (world capsules), so the
   // overlay can draw them. Returns the number written (<= `max`).
   //
@@ -139,6 +150,8 @@ class Overlay {
   void* rage_status_context_ = nullptr;
   MovementStatusProvider movement_status_provider_ = nullptr;
   void* movement_status_context_ = nullptr;
+  ChamsStatusProvider chams_status_provider_ = nullptr;
+  void* chams_status_context_ = nullptr;
   HitboxProvider hitbox_provider_ = nullptr;
   void* hitbox_context_ = nullptr;
   RageTargetProvider rage_target_provider_ = nullptr;
