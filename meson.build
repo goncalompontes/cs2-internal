@@ -549,6 +549,7 @@ if python.found()
     ['state', 'test_state'],
     ['control', 'test_control'],
     ['awaiting', 'test_awaiting'],
+    ['bot-match', 'test_bot_match'],
     ['session', 'test_session'],
     ['settings', 'test_settings'],
     ['heatmap', 'test_heatmap'],
