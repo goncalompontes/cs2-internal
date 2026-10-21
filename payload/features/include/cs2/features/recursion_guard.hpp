@@ -91,7 +91,7 @@
 // So the policy is a **constructor argument** with the camera's value as the
 // default: `RecursionGuard guard;` fails open (the camera's behaviour, and
 // the behaviour every existing caller has), and the chams' guard is built
-// with `Policy::fail_closed`.
+// with `Policy::fail_closed` and the draw path's pool.
 //
 // ## The limits
 //
