@@ -256,3 +256,32 @@ The first decision for the next session: **the seed**. Is the new solver's
 hit chance the probability over the *shot that would be taken* (the seed the
 engine would use for that pose) or the expectation over seeds? The community
 does the first, and the research says that is what works in practice.
+
+### 11.3 What the session closed with
+
+**Merged into `feat/occlusion-penetration`** (each with its review):
+
+| task | what landed |
+|---|---|
+| T20 (animfix) | the capture/re-apply seam, the duty cycle, the latched log |
+| T21 (quality pass) | the RAII pass, the CI workflow, the report |
+| T28 (offline offsets) | the offline resolver, the gates, the refusal to write a degraded dump |
+| T30 (prediction copy) | the caller's buffer instead of the `thread_local` |
+| T31 (bot match) | the team first, the live round last |
+| T27 (camera guard) | the two-pass guard, no per-frame module lookup, `docs/re/thirdperson.md` |
+| T26 (chams) | the draw hook's target resolved through a dumper signature and verified against the prologue; the per-owner guard; the allocation-free status line |
+
+**Parked on their branches, not merged:**
+
+| branch | why |
+|---|---|
+| `feat/t20b-animfix-estimator` | the re-review returned **DO NOT SHIP** (the residual in A1a) — the gate refuses a DO NOT SHIP verdict, and the branch's own documentation carries two false sentences (A3) |
+| `feat/t29-hit-log` | the review **never finished** (the report is a 416-byte stub) — a large feature with no adversarial review is parked, not landed |
+| `feat/t31-…` (merged, unreviewed) | see §10 — the only merge without a review |
+
+**The live test is ready.** The offsets are refreshed (**29**: 26 `client.dll`,
+2 `engine2.dll`, 1 `scenesystem.dll` — the chams' `scene_draw_primitive` at
+`0x580A0` is in there, so the chams are no longer dormant), the payload is
+built in the injected configuration (`/MT`, importing exactly `KERNEL32`,
+`USER32`, `D3DCOMPILER_47`), and the injector is built. The game is up with a
+bot match in it.
