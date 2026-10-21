@@ -41,10 +41,9 @@ void* g_animfix_setter_original = nullptr;
 // The animfix's clock: a monotonic millisecond counter. The capture's age
 // is measured with it (`cs2/control/animfix.hpp`'s validity rule).
 [[nodiscard]] auto animfix_now_ms() noexcept -> std::uint64_t {
-  return static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
 }
 
 auto flags_offset() noexcept -> std::uint32_t {
@@ -1382,28 +1381,29 @@ void Input::animfix_install() noexcept {
     return;
   }
   if (!animfix_setter_hook_.installed()) {
-    const auto error = animfix_setter_hook_.install(
-        reinterpret_cast<void*>(client_base_ + setter->rva),
-        reinterpret_cast<void*>(&Input::animfix_setter_detour));
+    const auto error =
+        animfix_setter_hook_.install(reinterpret_cast<void*>(client_base_ + setter->rva),
+                                     reinterpret_cast<void*>(&Input::animfix_setter_detour));
     if (error.has_value()) {
       cs2::game::append_log("[cs2-payload] animfix: the parameter setter is not hookable: " +
-                             std::string(cs2::hooks::to_string(*error)));
+                            std::string(cs2::hooks::to_string(*error)));
       return;
     }
     g_animfix_setter_original = animfix_setter_hook_.original();
   }
   if (!animfix_codec_hook_.installed()) {
-    const auto error = animfix_codec_hook_.install(
-        reinterpret_cast<void*>(client_base_ + codec->rva),
-        reinterpret_cast<void*>(&Input::animfix_codec_detour));
+    const auto error =
+        animfix_codec_hook_.install(reinterpret_cast<void*>(client_base_ + codec->rva),
+                                    reinterpret_cast<void*>(&Input::animfix_codec_detour));
     if (error.has_value()) {
       cs2::game::append_log("[cs2-payload] animfix: the graph codec is not hookable: " +
-                             std::string(cs2::hooks::to_string(*error)));
+                            std::string(cs2::hooks::to_string(*error)));
       return;
     }
     g_animfix_codec_original = animfix_codec_hook_.original();
   }
-  cs2::game::append_log("[cs2-payload] animfix: the graph codec and the parameter setter are hooked");
+  cs2::game::append_log(
+      "[cs2-payload] animfix: the graph codec and the parameter setter are hooked");
 }
 
 auto Input::current_cmd() noexcept -> void* {

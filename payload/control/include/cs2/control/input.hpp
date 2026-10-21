@@ -22,8 +22,8 @@
 // The write is inert unless the `usercmd` backend is selected, so the
 // live-validated `console` path is unaffected.
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>

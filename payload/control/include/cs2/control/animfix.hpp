@@ -201,8 +201,8 @@ inline void mark_applied(Capture& capture, Slot slot) noexcept {
 
 // Take the captured value for `slot` if the validity rule allows it. The
 // slot is marked as re-applied, so the same capture is never used twice.
-[[nodiscard]] inline auto take(Capture& capture, Slot slot,
-                               std::uint64_t now_ms) noexcept -> std::optional<float> {
+[[nodiscard]] inline auto take(Capture& capture, Slot slot, std::uint64_t now_ms) noexcept
+    -> std::optional<float> {
   if (!may_reapply(capture, slot, now_ms)) {
     return std::nullopt;
   }

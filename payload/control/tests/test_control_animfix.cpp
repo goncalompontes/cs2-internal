@@ -128,8 +128,8 @@ void test_an_aged_out_capture_is_refused() {
   assert(!animfix::may_reapply(capture, animfix::Slot::aim_yaw, too_late));
   assert(!animfix::take(capture, animfix::Slot::aim_yaw, too_late).has_value());
   // The boundary itself is still allowed (the age is inclusive).
-  assert(animfix::may_reapply(capture, animfix::Slot::aim_yaw,
-                              1000 + animfix::k_max_capture_age_ms));
+  assert(
+      animfix::may_reapply(capture, animfix::Slot::aim_yaw, 1000 + animfix::k_max_capture_age_ms));
 }
 
 // A capture that aged out and is then **refreshed** by a new one works

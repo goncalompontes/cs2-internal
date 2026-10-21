@@ -347,6 +347,10 @@ control_sound_test = executable('control_sound_test',
     # name table lives next to it), so the host build needs that include path.
     include_directories('overlay/include'),
   ],
+  # `cs2/control/service.hpp` reaches `cs2/control/input.hpp`, which holds the
+  # local animfix's inline hooks - so the host build needs the hook engine's
+  # include path (and its library, for the destructor).
+  dependencies : hooks_dep,
 )
 test('control-sound', control_sound_test)
 
