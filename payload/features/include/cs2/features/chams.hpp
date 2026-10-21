@@ -153,10 +153,7 @@ namespace cs2::features {
 class DescCache {
  public:
   // How many slots the cache has (a power of two, so the slot is a mask).
-  //
-  // The name is the legacy one; it is not renamed here (a drive-by rename of
-  // the old constants is noise).
-  static constexpr int k_desc_cache_size = 64;
+  static constexpr int SLOT_COUNT = 64;
 
   // How many times a writer tries to claim a slot before it gives the entry
   // up. The caller keeps the values it computed either way: the entry is
@@ -191,7 +188,7 @@ class DescCache {
   // The slot a desc hashes to.
   [[nodiscard]] static auto slot_of(std::uint64_t desc_address) noexcept -> std::size_t {
     return static_cast<std::size_t>((desc_address >> 4) &
-                                    static_cast<std::uint64_t>(k_desc_cache_size - 1));
+                                    static_cast<std::uint64_t>(SLOT_COUNT - 1));
   }
 
   // The cached entry for `desc_address`, or nothing.
@@ -342,7 +339,7 @@ class DescCache {
     std::atomic<std::uint8_t> view_model{0};
   };
 
-  std::array<Slot, static_cast<std::size_t>(k_desc_cache_size)> slots_{};
+  std::array<Slot, static_cast<std::size_t>(SLOT_COUNT)> slots_{};
   // The generation the cache is serving. The payload's per-frame step bumps
   // it; the render threads read it.
   std::atomic<std::uint64_t> frame_stamp_{0};

@@ -451,6 +451,12 @@ void test_the_chams_hold_the_shared_guard(const std::filesystem::path& base) {
 // The tree must hold **exactly one** implementation of the guard: a second
 // copy is a second set of rules, and the two would drift.
 void test_the_tree_holds_one_guard(const std::filesystem::path& features) {
+  // The directory is checked first: a wrong `argv[1]` must **report** the
+  // mistake, not die with an uncaught `filesystem_error`.
+  if (!std::filesystem::is_directory(features)) {
+    expect(false, "the features directory is there");
+    return;
+  }
   int implementations = 0;
   std::string holder;
   for (const auto& entry : std::filesystem::recursive_directory_iterator(features)) {
@@ -671,6 +677,36 @@ void test_the_guard_is_held_across_the_trampoline_call(const std::filesystem::pa
   expect(scope < call, "the guard is held across the trampoline call");
 }
 
+// The declaration of `name` in the source: the identifier followed by a
+// brace or an assignment.
+//
+// A cosmetic reformat of the line (`camera_guard_ = {}`, `camera_guard_ {}`)
+// must not fail the suite, so the check looks at the **declaration** and not
+// at one spelling of it.
+[[nodiscard]] auto declaration_of(const std::string& source, const std::string& name)
+    -> std::string {
+  std::size_t search = 0;
+  while (search < source.size()) {
+    const std::size_t found = source.find(name, search);
+    if (found == std::string::npos) {
+      return {};
+    }
+    std::size_t next = found + name.size();
+    while (next < source.size() && (source[next] == ' ' || source[next] == '\t')) {
+      ++next;
+    }
+    if (next < source.size() && (source[next] == '{' || source[next] == '=')) {
+      const std::size_t end = source.find(';', next);
+      if (end == std::string::npos) {
+        return {};
+      }
+      return source.substr(found, end - found);
+    }
+    search = found + 1;
+  }
+  return {};
+}
+
 // --- H7: the chams' guard fails closed, the camera's does not ----------------
 //
 // The shared guard's fail-open rationale is the **camera's**: refusing a call
@@ -698,7 +734,9 @@ void test_the_chams_fail_closed_and_the_camera_does_not(const std::filesystem::p
   const std::filesystem::path camera = base / "include" / "cs2" / "features" / "thirdperson.hpp";
   const std::string camera_header = strip_comments(read_file(camera));
   expect(!camera_header.empty(), "the camera's header is there");
-  expect(camera_header.find("camera_guard_{}") != std::string::npos,
+  const std::string declaration = declaration_of(camera_header, "camera_guard_");
+  expect(!declaration.empty(), "the camera's guard is declared");
+  expect(declaration.find("Policy") == std::string::npos,
          "the camera's guard is built with the default policy");
   expect(camera_header.find("fail_closed") == std::string::npos,
          "the camera's guard does not fail closed");
@@ -823,6 +861,12 @@ auto main(int argc, char** argv) -> int {
   }
   const std::filesystem::path root = std::filesystem::path(argv[1]);
   const std::filesystem::path features = root / "payload" / "features";
+  // A wrong root is reported, not thrown: the test's verdict is its exit
+  // code, and an uncaught `filesystem_error` would be a crash, not a report.
+  if (!std::filesystem::is_directory(features)) {
+    std::printf("features-chams-draw-hook: the repository root is missing (%s)\n", argv[1]);
+    return 1;
+  }
 
   test_the_first_call_is_not_refused();
   test_the_same_thread_is_refused_the_second_time();
