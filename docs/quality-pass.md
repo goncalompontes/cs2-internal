@@ -451,21 +451,31 @@ not one of the five.)
 
 ### 6.2 The files
 
-**Method:** `git show <base>:<path> | wc -l` against the file at the tip.
+**Method:** the number of **non-blank** lines of the file at the base commit
+and at the tip (git bash):
+
+```sh
+git show e539bc6:<path> | grep -c '[^[:space:]]'
+grep -c '[^[:space:]]' <path>
+```
+
+The table is the state at commit `187361d` (the tip of the branch when this
+round's numbers were taken); the two commands above reproduce it, and they
+move with the tree.
 
 | file | before | after |
 |---|---|---|
 | `payload/features/src/present_hook.cpp` | 182 | 144 |
-| `payload/control/src/rage_config.cpp` | 192 | 230 |
-| `payload/control/include/cs2/control/channel.hpp` | 38 | 54 |
+| `payload/control/src/rage_config.cpp` | 192 | 244 |
+| `payload/control/include/cs2/control/channel.hpp` | 38 | 59 |
 | `payload/features/src/config_store.cpp` | 968 | 972 |
 | `payload/features/src/model_publisher.cpp` | 359 | 361 |
 | `payload/features/include/cs2/features/model_publisher.hpp` | 116 | 120 |
 | `payload/game/src/log.cpp` | 90 | 94 |
 | `payload/diag/src/watchdog.cpp` | 159 | 163 |
 | `overlay/src/transport.cpp` | 203 | 210 |
-| `injector/src/main.cpp` | 824 | 831 |
-| `scripts/clang-tidy-fix.py` | 448 | 518 |
+| `injector/src/main.cpp` | 824 | 837 |
+| `scripts/clang-tidy-fix.py` | 448 | 553 |
 
 The only file that got *smaller* is the present hook (−38 lines: the
 duplicated log writer). Everything else grew a little: the wrapper's
@@ -734,6 +744,27 @@ fresh checkout of the final tree — every step green (§7.2).
 | `bf129e1` | **ci:** the compiler is the runner image's, and the header says so (F5) |
 | `ab32d9c` | **docs(quality-pass):** the handle counts are reproducible (F7) |
 | `0763061` | **docs(quality-pass):** the M1 evidence is the command and the artifact (F1) |
+
+### 9.6 The second re-review
+
+The pass was reviewed a third time. The reviewer re-ran the whole workflow on
+a fresh checkout again, confirmed every fix of the last round against the
+*code* (not the report), and found one major item left: the wrapper's
+contract did not cover the **default** policy. A policy whose closer is
+resolved at run time has a default state in which it cannot answer anything,
+and the wrapper asked that default whether the handle was live — the same
+failure family as F2, one door over.
+
+| finding | what it was | what changed | how it was proven |
+|---|---|---|---|
+| **M1** | the single-argument constructor uses the policy's *default*, and `adopt()` asked that default whether the handle was live: a `std::function` closer is empty in its default state, and calling it throws `std::bad_function_call` out of a `noexcept` function — `std::terminate`. The same happened on `reset()` of a default-constructed wrapper | the policy contract has one more method, `usable()` ("can this policy work at all?"), and the wrapper asks it **first, every time**. A policy that says no is never asked anything else, so the default state of a stateful policy is harmless and no path can call a policy that cannot answer | the host test builds a wrapper from a policy whose default state cannot answer, with a handle and with `reset()`, and the process must survive. With the usability check removed, the test ends the process with `std::bad_function_call` — the reviewer's crash, reproduced |
+| **m1** | §6.2's numbers did not follow from the method printed next to them (they were non-blank line counts, not `wc -l`), and the "after" column was measured at an old commit | §6.2 publishes the real command and the numbers it produces, and names the commit the table was taken at | the commands were run verbatim in git bash |
+| **m2** | §6.3's "at the tip" column was measured at an old commit: two rows were stale | the table was re-measured at the tip, and the label says which commit | the sweep was re-run over all ten groups at the tip |
+| **m3** | the header said the wrapper "never asks the policy again", which is true of the validity test and not of the release | the contract says when `close` is asked | — |
+| **m4** | F1's evidence named no build directory | the report names the `build-payload/` directory of the branch worktree | — |
+| **m5** | the workflow header said the payload compiles against the headers the host build generates, and that the host build runs first for that reason | it does not: the payload project has its own `sdk-headers` target, so the payload build regenerates the headers itself | the fresh-tree run shows the generator twice |
+| **m6** | the CI spends a minute building the Rust dumper and pulling crates from crates.io, only to write *empty* headers | **the generator stays**, and the crates and the build are cached (the key follows the dumper's lock file). A checked-in stub was considered and declined: the payload would then be compiled against a *frozen* shape of the generated headers instead of the current one, and the stub would rot whenever the generator's output changes — a compile gate that quietly stops being one | the fresh-tree workflow still passes end to end, with the cache step in it |
+| the nits | the "Pinned" header in `requirements-dev.txt` is contradicted by the MCP SDK's range; the CI job had no timeout; the workflow never said which ninja meson used; §3 did not mention the policy's requirements; the type checker's cache was not ignored | all five are fixed: the exception is named, the job has `timeout-minutes`, the versions are printed, §3 says what a policy must satisfy, and `.mypy_cache/` is ignored | — |
 
 ---
 
