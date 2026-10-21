@@ -513,16 +513,26 @@ the whole point of this pass:
    run in the way the runner runs them: the Vulkan headers are cloned into a
    scratch copy of the tree (and the copy **without** them is what proves
    the step is needed — §9), and the payload is configured with the cross
-   file, which is the local configuration too. What could not be verified is
-   the *runner's* environment: that `ilammy/msvc-dev-cmd` and the runner's
-   LLVM are where the workflow expects them. The style gate's clang-tidy is
-   pinned (LLVM 22.1.8, the version the gated groups were measured with),
-   so that one no longer depends on the runner's image.
-3. **A Linux host build.** The CI runs on Windows because the payload is a
+   file (§9). What could not be verified is the *runner's* environment: that
+   `ilammy/msvc-dev-cmd` and the runner's LLVM are where the workflow
+   expects them. The style gate's clang-tidy is pinned (LLVM 22.1.8, the
+   version the gated groups were measured with), so that one no longer
+   depends on the runner's image.
+3. **The SDK the payload is built against.** The SDK headers
+   (`payload/sdk/*.hpp`) are generated from the calibration dumps, and the
+   dumps are git-ignored: they come from a live calibration against a
+   running game. **There are no dumps in the tree**, so the generator writes
+   *empty* headers and the payload is built with **zero offsets** — here,
+   on CI, and on any fresh checkout. The payload the CI compiles is
+   therefore a *compile* of the payload, **not** the shipped artifact; the
+   shipped one is built after a calibration (docs/windows-validation.md).
+   The generated headers are also written *into the source tree*, so a build
+   leaves `payload/sdk/*.hpp` behind (they are git-ignored).
+4. **A Linux host build.** The CI runs on Windows because the payload is a
    Windows artifact and that is the configuration this repository is verified
    with. A Linux runner was not available here, so the host build's
    portability to Linux is **not** verified by this pass.
-4. **The injector's runtime.** The injector compiles; it was not run against
+5. **The injector's runtime.** The injector compiles; it was not run against
    a target (no game, and the injector's own test aids are built, not
    exercised).
 
