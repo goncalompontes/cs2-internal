@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from . import (autostrafe, bhop, bot_match, game_events, join_bot_match, move_and_aim,
-               move_to, movement_probe, screens, status, strafe_probe, subtick_aim,
-               subtick_move, subtick_shot, usercmd_move, aim_probe, aim_shot, rage, heatmap)
+from . import (anti_aim, autostrafe, bhop, bot_match, game_events, join_bot_match,
+               move_and_aim, move_to, movement_probe, screens, status, strafe_probe,
+               subtick_aim, subtick_move, subtick_shot, usercmd_move, aim_probe, aim_shot,
+               rage, heatmap)
 
 #: The shape of a built-in scenario: ``run(game, **kwargs) -> dict``.
 #:
@@ -34,6 +35,7 @@ SCENARIOS: dict[str, Scenario] = {
     "movement-probe": movement_probe.run,
     "strafe-probe": strafe_probe.run,
     "autostrafe": autostrafe.run,
+    "anti-aim": anti_aim.run,
     "move-to": move_to.run,
     "screens": screens.run,
     "status": status.run,

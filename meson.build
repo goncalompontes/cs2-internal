@@ -275,6 +275,24 @@ control_strafe_test = executable('control_strafe_test',
 )
 test('control-strafe', control_strafe_test)
 
+# The anti-aim's **decision maths** (the fake yaw, the pitch clamp, the
+# per-command jitter and the **movement re-base**) — a pure, dependency-free
+# header, built natively so the re-base has a host regression test. The test
+# takes the repository root: its last check is a **source** check that the
+# payload never writes the camera's live view angles (`CCSGOInput + 0x688`) —
+# the anti-aim writes the command's own angles, so the camera cannot follow.
+control_anti_aim_test = executable('control_anti_aim_test',
+  files(
+    'payload/control/tests/test_control_anti_aim.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+  ],
+)
+test('control-anti-aim', control_anti_aim_test,
+  args : [meson.current_source_dir()],
+)
+
 # The input backend's **button gate** and the ragebot's auto-stop counter-wish
 # (both pure functions in `cs2/control/strafe_geometry.hpp`). The gate is what
 # decides whether a feature's button reaches the command: the triggerbot used
@@ -496,6 +514,7 @@ if python.found()
     ['session', 'test_session'],
     ['settings', 'test_settings'],
     ['heatmap', 'test_heatmap'],
+    ['anti-aim', 'test_anti_aim'],
     ['registry', 'test_registry'],
     ['mcp', 'test_mcp'],
     ['settings-table', 'test_settings_table'],
