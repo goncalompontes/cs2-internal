@@ -1402,7 +1402,12 @@ class Input {
   void set_animfix_status(std::string status) noexcept;
   cs2::hooks::InlineHook animfix_codec_hook_{};
   cs2::hooks::InlineHook animfix_anim_tick_hook_{};
+  // The capture's state is touched on the **game's main thread** only (the
+  // codec decode and the anim tick); the status string is written and read on
+  // the **control thread**. Two mutexes, so a status read can never block the
+  // anim tick.
   mutable std::mutex animfix_mutex_{};
+  mutable std::mutex animfix_status_mutex_{};
   animfix::Capture animfix_capture_{};
   animfix::SnapshotClock animfix_clock_{};
   std::string animfix_status_{

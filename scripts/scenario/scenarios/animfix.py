@@ -41,10 +41,11 @@ from ..session import Game, SessionError
 
 WATCH = 6.0     # how long to observe the animfix doing its thing
 SAMPLE = 0.1
-#: The animfix must have corrected the graph at least this often per second
-#: while the watch window runs. The server ticks at 64 Hz, so the animfix
-#: gets a chance on every tick; a tenth of that is already "it is working".
-MIN_APPLY_RATE = 1.0
+#: The floor for the *duty cycle*: the fraction of the client anim ticks on
+#: which the correction won. It is 1.0 on a regular connection; below that
+#: the pose alternates between the server's and the client's aim yaw at the
+#: server's tick rate, and the operator has to know.
+MIN_DUTY_CYCLE = 0.9
 
 
 def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
@@ -180,10 +181,11 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
         f"{result['predicted_aim_yaw']} (divergence {result['aim_yaw_delta']} deg, "
         f"peak {result['max_abs_aim_yaw_delta']} deg)"
     )
-    if rate < MIN_APPLY_RATE:
+    if duty < MIN_DUTY_CYCLE:
         result["verdict"] += (
-            f" — the correction rate is below {MIN_APPLY_RATE}/s: the animfix is only "
-            "just keeping up"
+            f" — the duty cycle is only {duty:.1%} (below {MIN_DUTY_CYCLE:.0%}): the pose "
+            "alternates between the server's and the client's aim yaw at the server's "
+            "tick rate"
         )
     if result["max_abs_aim_yaw_delta"] < 0.5:
         result["verdict"] += (

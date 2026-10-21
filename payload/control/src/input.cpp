@@ -1753,12 +1753,12 @@ auto Input::animfix_aim_yaw_delta() const noexcept -> float {
 }
 
 auto Input::animfix_status() const noexcept -> std::string {
-  const std::lock_guard<std::mutex> lock(animfix_mutex_);
+  const std::lock_guard<std::mutex> lock(animfix_status_mutex_);
   return animfix_status_;
 }
 
 void Input::set_animfix_status(std::string status) noexcept {
-  const std::lock_guard<std::mutex> lock(animfix_mutex_);
+  const std::lock_guard<std::mutex> lock(animfix_status_mutex_);
   animfix_status_ = std::move(status);
 }
 
