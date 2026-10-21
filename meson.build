@@ -368,6 +368,7 @@ features_config_test = executable('features_config_test',
     include_directories('overlay/include'),
     include_directories('payload/game/include'),
     include_directories('payload/render/include'),
+    core_inc,
   ],
 )
 test('features-config', features_config_test)
@@ -446,6 +447,7 @@ menu_pages_test = executable('menu_pages_test',
     include_directories('payload/game/include'),
     include_directories('payload/render/include'),
     include_directories('payload/third_party/imgui'),
+    core_inc,
   ],
 )
 test('menu-pages', menu_pages_test)

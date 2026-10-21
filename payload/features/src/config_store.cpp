@@ -15,6 +15,9 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+
+#include "cs2/core/handle.hpp"
+#include "cs2/core/win_handle.hpp"
 #endif
 
 namespace cs2::features {
@@ -738,35 +741,37 @@ auto apply_field(std::string_view section, std::string_view field, std::string_v
 
 #if defined(_WIN32)
 auto read_file(const char* path, TextBuffer<k_max_config_bytes>& out) -> bool {
-  HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                            FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE) {
+  // The handle is owned by the wrapper: it is released on every path out of
+  // this function, including the early return below.
+  core::ScopedHandle<void*, core::KernelHandlePolicy> file(
+      CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                  FILE_ATTRIBUTE_NORMAL, nullptr));
+  if (!file.valid()) {
     return false;
   }
   char chunk[4096];
   DWORD read = 0;
   bool ok = true;
-  while (ReadFile(file, chunk, sizeof(chunk), &read, nullptr) != 0 && read > 0) {
+  while (ReadFile(static_cast<HANDLE>(file.get()), chunk, sizeof(chunk), &read, nullptr) != 0 &&
+         read > 0) {
     if (!out.append(std::string_view(chunk, static_cast<std::size_t>(read)))) {
       ok = false;  // the file does not fit
       break;
     }
   }
-  CloseHandle(file);
   return ok;
 }
 
 auto write_file(const char* path, std::string_view text) -> bool {
-  HANDLE file = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
-                            FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE) {
+  core::ScopedHandle<void*, core::KernelHandlePolicy> file(
+      CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
+                  FILE_ATTRIBUTE_NORMAL, nullptr));
+  if (!file.valid()) {
     return false;
   }
   DWORD written = 0;
-  const bool ok =
-      WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr) != 0;
-  CloseHandle(file);
-  return ok;
+  return WriteFile(static_cast<HANDLE>(file.get()), text.data(), static_cast<DWORD>(text.size()),
+                   &written, nullptr) != 0;
 }
 #else
 // The POSIX branch only builds the host test (the payload is Windows-only),
