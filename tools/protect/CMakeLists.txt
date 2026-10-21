@@ -196,6 +196,12 @@ add_test(NAME protect-str-diff-test
           --policy ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/str.policy.json
           --work ${CMAKE_CURRENT_BINARY_DIR}/str-diff-test)
 
+# The two string tests skip themselves (with CTest's skip code) when the
+# plugin has not been built, so that a machine without the LLVM SDK still has
+# a green suite.
+set_tests_properties(protect-str-ir-test protect-str-diff-test
+  PROPERTIES SKIP_RETURN_CODE 77)
+
 # The readers of the coverage: a malformed file has to be reported and
 # ignored (never a traceback), and the coverage of another tree has to be
 # skipped (it would count every rewrite twice).
