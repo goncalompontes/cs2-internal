@@ -30,10 +30,13 @@
 # -- the generator writes *empty* headers and the payload is built with zero
 # offsets. The CI's payload.dll is therefore a *compile* of the payload, not
 # the shipped artifact: the shipped one is built after a calibration
-# (docs/windows-validation.md). Both projects generate the headers
-# themselves -- the host project and the payload project each have their own
-# `sdk-headers` target -- so the payload step does not depend on the host
-# build having run first.
+# (docs/windows-validation.md). The schema-facing code is guarded by
+# `#if __has_include("schemas/client_dll.hpp")`, so with an empty SDK it is
+# **compiled out**: the payload step is a compile gate for the non-schema
+# code only, and the SDK paths are compiled after a local calibration.
+# Both projects generate the headers themselves -- the host project and the
+# payload project each have their own `sdk-headers` target -- so the payload
+# step does not depend on the host build having run first.
 #
 # THE COMPILER IS THE RUNNER IMAGE'S. clang-cl comes from the image's LLVM
 # (C:\Program Files\LLVM\bin) and is **not** pinned: there is no way to
@@ -122,10 +125,13 @@ jobs:
       # without it, the build fails deep inside a build step with "cargo not
       # found".
       #
-      # The dumper stays in the build on purpose: the payload is then compiled
-      # against the *current* shape of the generated headers, not against a
-      # checked-in stub that would rot whenever the generator's output
-      # changes. The price is a Rust toolchain and the dumper's crates -- and
+      # The dumper stays in the build on purpose: the payload is compiled
+      # against the *generated* headers, and a checked-in stub was considered
+      # and declined -- a frozen stub is no closer to the real shape than the
+      # empty headers are, and it rots whenever the generator's output
+      # changes. What the step proves is what the header above says: a
+      # compile of the payload's non-schema code.
+      # The price is a Rust toolchain and the dumper's crates -- and
       # the cache below makes that price small: the crates are fetched once
       # and the dumper is not rebuilt on every run.
       - name: the Rust toolchain (the SDK generator)
