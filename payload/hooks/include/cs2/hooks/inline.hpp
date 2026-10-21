@@ -31,10 +31,10 @@
 //
 // ## The trampoline's lifetime
 //
-// Publishing the null before the free closes the window for every detour that
-// **enters** after the null — but a detour that **already holds** the pointer
-// can still call it. So the trampoline's pages are **never unmapped**: the
-// trampoline is **retired** at the uninstall (the pointer is published as
+// Publishing the null before the teardown closes the window for every detour
+// that **enters** after the null — but a detour that **already holds** the
+// pointer can still call it. So the trampoline's pages are **never unmapped**:
+// the trampoline is **retired** at the uninstall (the pointer is published as
 // null and dropped) and its pages stay mapped — and executable — until the
 // process exits.
 //

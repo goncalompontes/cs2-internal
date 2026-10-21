@@ -208,7 +208,7 @@ class DescCache {
       }
       // The entry's own fields are relaxed: the sequence is what makes them
       // consistent, and they are published by the writer's release fence
-      // below.
+      // before the even sequence.
       const std::uint64_t entry_stamp = slot.stamp.load(std::memory_order_relaxed);
       const std::uint64_t entry_desc = slot.desc.load(std::memory_order_relaxed);
       const std::uint64_t entry_entity = slot.entity.load(std::memory_order_relaxed);
