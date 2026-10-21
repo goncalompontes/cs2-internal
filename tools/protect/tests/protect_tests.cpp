@@ -30,7 +30,10 @@
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
@@ -39,6 +42,7 @@
 #include "report.hpp"
 #include "selection.hpp"
 #include "transform.hpp"
+#include "vm.hpp"
 
 namespace {
 
@@ -579,6 +583,500 @@ void test_level_gate_two_entries() {
   }
 }
 
+/// The virtualizer's analysis -------------------------------------------------
+
+/// The analysis of a function, with a fixed seed.
+///
+/// The seed is fixed so that the test does not depend on the build: the
+/// analysis is deterministic, and the test asserts on the shape of the
+/// bytecode, not on its bytes.
+[[nodiscard]] auto analyze(llvm::Function& function) -> cs2::protect::VmFunction {
+  cs2::protect::VmOptions options;
+  options.seed = 0x5EED5EED5EED5EEDULL;
+  return cs2::protect::analyze_function(function, options);
+}
+
+/// The opcodes of a lowered function, in order.
+[[nodiscard]] auto opcodes_of(const cs2::protect::VmFunction& function)
+    -> std::vector<cs2::protect::VmOpcode> {
+  std::vector<cs2::protect::VmOpcode> opcodes;
+  opcodes.reserve(function.code.size());
+  for (const cs2::protect::VmInstruction& instruction : function.code) {
+    opcodes.push_back(instruction.opcode);
+  }
+  return opcodes;
+}
+
+/// The number of the instructions of one opcode.
+[[nodiscard]] auto count_of(const std::vector<cs2::protect::VmOpcode>& opcodes,
+                             cs2::protect::VmOpcode opcode) -> std::size_t {
+  std::size_t count = 0;
+  for (const cs2::protect::VmOpcode candidate : opcodes) {
+    if (candidate == opcode) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+/// A function that the virtualizer must refuse, and the reason it must give.
+void check_refused(llvm::Function& function, cs2::protect::VmRefusal expected,
+                   const char* what) {
+  const auto result = analyze(function);
+  if (result.virtualizable) {
+    std::fprintf(stderr, "FAIL: %s (the function was accepted)\n", what);
+    ++g_failures;
+    return;
+  }
+  if (result.failure.reason != expected) {
+    std::fprintf(stderr, "FAIL: %s (expected '%s', got '%s')\n", what,
+                 cs2::protect::to_string(expected),
+                 cs2::protect::to_string(result.failure.reason));
+    ++g_failures;
+  }
+}
+
+/// A function that the virtualizer must accept.
+void check_accepted(llvm::Function& function, const char* what) {
+  const auto result = analyze(function);
+  if (!result.virtualizable) {
+    std::fprintf(stderr, "FAIL: %s (refused: %s: %s)\n", what,
+                 cs2::protect::to_string(result.failure.reason),
+                 result.failure.detail.c_str());
+    ++g_failures;
+  }
+}
+
+/// The virtualizer's front end: a function that can be lowered.
+void test_vm_virtualizable() {
+  llvm::LLVMContext context;
+  llvm::Module module("vm.obj", context);
+  auto* function = llvm::Function::Create(
+      llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
+                               {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
+      llvm::GlobalValue::ExternalLinkage, "add_one", &module);
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+  llvm::IRBuilder<> builder(entry);
+  llvm::Value* sum = builder.CreateAdd(function->getArg(0), builder.getInt32(1));
+  builder.CreateRet(sum);
+
+  const auto result = analyze(*function);
+  check(result.virtualizable, "the function is virtualizable");
+  check(result.failure.detail.empty(), "a virtualizable function has no refusal");
+  // The slots: the argument, the result of the addition and the constant.
+  check(result.slots == 3, "the function uses three slots");
+  // The instructions: the constant, the addition and the return.
+  check(result.instructions == 3, "the function has three instructions");
+  check(result.calls == 0, "the function makes no call");
+  check(result.bytecode_bytes == cs2::protect::k_header_bytes + 3 * cs2::protect::k_instruction_bytes,
+        "the container holds the header and the instruction stream");
+
+  // The header is the contract: it names the layout of the frame.
+  check(result.header.magic == cs2::protect::k_vm_magic, "the header carries the magic");
+  check(result.header.version == cs2::protect::k_vm_version, "the header carries the version");
+  check(result.header.slot_count == result.slots, "the header names the slots");
+  check(result.header.arg_slots == cs2::protect::k_frame_argument_slots,
+        "the header names the argument region");
+  check(result.header.call_slots == cs2::protect::k_frame_call_slots,
+        "the header names the call scratch");
+  check(result.header.instruction_count == result.instructions, "the header names the instructions");
+  check(result.frame_bytes == cs2::protect::k_frame_bytes, "the frame is the fixed size");
+
+  // The container is encrypted: the magic is not in the clear.
+  check(result.blob.size() == result.bytecode_bytes, "the blob is the container");
+  check(result.blob[0] != static_cast<std::uint8_t>(cs2::protect::k_vm_magic & 0xFFU) ||
+            result.blob[1] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 8U) & 0xFFU) ||
+            result.blob[2] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 16U) & 0xFFU) ||
+            result.blob[3] != static_cast<std::uint8_t>((cs2::protect::k_vm_magic >> 24U) & 0xFFU),
+        "the container is not encrypted: the magic is in the clear");
+
+  // The opcodes are permuted: the canonical number of an opcode is not the
+  // byte in the container.
+  const auto [perm_a, perm_b] = cs2::protect::opcode_permutation(0x5EED5EED5EED5EEDULL);
+  check(perm_a % 2 == 1, "the multiplier of the permutation is odd");
+  check(cs2::protect::canonical_opcode(cs2::protect::permuted_opcode(
+                                             cs2::protect::VmOpcode::Add, perm_a, perm_b),
+                                         perm_a, perm_b) == cs2::protect::VmOpcode::Add,
+        "the permutation is invertible");
+}
+
+/// The virtualizer's front end: the parallel copy of a swapping back-edge.
+void test_vm_parallel_copy() {
+  llvm::LLVMContext context;
+  llvm::Module module("swap.obj", context);
+  auto* function = llvm::Function::Create(
+      llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
+                               {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
+      llvm::GlobalValue::ExternalLinkage, "swap", &module);
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+  llvm::BasicBlock* loop = llvm::BasicBlock::Create(context, "loop", function);
+
+  llvm::IRBuilder<> builder(entry);
+  builder.CreateBr(loop);
+
+  builder.SetInsertPoint(loop);
+  auto* first = builder.CreatePHI(llvm::Type::getInt32Ty(context), 2, "first");
+  auto* second = builder.CreatePHI(llvm::Type::getInt32Ty(context), 2, "second");
+  first->addIncoming(builder.getInt32(0), entry);
+  second->addIncoming(builder.getInt32(1), entry);
+  llvm::Value* sum = builder.CreateAdd(first, second);
+  llvm::Value* difference = builder.CreateSub(sum, second);
+  // The back edge swaps the two values: a sequential copy would break it.
+  first->addIncoming(second, loop);
+  second->addIncoming(first, loop);
+  builder.CreateBr(loop);
+
+  const auto result = analyze(*function);
+  check(result.virtualizable, "the function with the swapping back-edge is virtualizable");
+  const auto opcodes = opcodes_of(result);
+  // Two edges reach the loop, and each of them copies two values: four
+  // pushes and four pops.
+  check(count_of(opcodes, cs2::protect::VmOpcode::Arg) == 4,
+        "the parallel copy pushes both sources on both edges");
+  check(count_of(opcodes, cs2::protect::VmOpcode::Pop) == 4,
+        "the parallel copy pops both destinations on both edges");
+  // The copy of the back edge is the last one: the first of its pushes is
+  // the last push that is not preceded by another push.
+  std::size_t last_push = 0;
+  std::size_t first_push = 0;
+  bool found = false;
+  for (std::size_t index = 0; index < opcodes.size(); ++index) {
+    if (opcodes[index] != cs2::protect::VmOpcode::Arg) {
+      continue;
+    }
+    if (index > 0 && opcodes[index - 1] == cs2::protect::VmOpcode::Arg) {
+      continue;
+    }
+    if (!found) {
+      first_push = index;
+      found = true;
+    }
+    last_push = index;
+  }
+  check(found, "the copy pushes the sources");
+  if (!found || last_push + 3 >= opcodes.size() || first_push + 3 >= opcodes.size()) {
+    return;
+  }
+  // The pushes come first, and the pops follow, in the reverse order.
+  check(opcodes[last_push] == cs2::protect::VmOpcode::Arg &&
+            opcodes[last_push + 1] == cs2::protect::VmOpcode::Arg &&
+            opcodes[last_push + 2] == cs2::protect::VmOpcode::Pop &&
+            opcodes[last_push + 3] == cs2::protect::VmOpcode::Pop,
+        "the copy pushes every source and then pops every destination");
+
+  // The first copy is the edge from the entry: its destinations are the
+  // slots of the two phis, and the pops are in the reverse order (the last
+  // pop fills the first phi).
+  const auto first_phi = result.code[first_push + 3].dst;
+  const auto second_phi = result.code[first_push + 2].dst;
+  check(first_phi != second_phi, "the two phis have two slots");
+
+  // The copy of the back edge swaps the two values: the first phi takes
+  // the value of the second one, and the destinations are popped in the
+  // reverse order, so the second phi is filled first.
+  check(result.code[last_push].src1 == second_phi,
+        "the first push takes the value of the second phi");
+  check(result.code[last_push + 1].src1 == first_phi,
+        "the second push takes the value of the first phi");
+  check(result.code[last_push + 2].dst == second_phi, "the first pop fills the second phi");
+  check(result.code[last_push + 3].dst == first_phi, "the second pop fills the first phi");
+}
+
+/// The virtualizer's front end: the flags of the arithmetic.
+void test_vm_flags() {
+  llvm::LLVMContext context;
+  llvm::Module module("flags.obj", context);
+  auto* function = llvm::Function::Create(
+      llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
+                               {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
+      llvm::GlobalValue::ExternalLinkage, "flags", &module);
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+  llvm::IRBuilder<> builder(entry);
+  llvm::Value* wrapped = builder.CreateNSWAdd(function->getArg(0), builder.getInt32(1));
+  llvm::Value* bounded = builder.CreateNUWMul(wrapped, builder.getInt32(3));
+  builder.CreateRet(bounded);
+
+  const auto result = analyze(*function);
+  check(result.virtualizable, "the function with the flags is virtualizable");
+  bool saw_nsw = false;
+  bool saw_nuw = false;
+  for (const cs2::protect::VmInstruction& instruction : result.code) {
+    if (instruction.opcode != cs2::protect::VmOpcode::Add &&
+        instruction.opcode != cs2::protect::VmOpcode::Mul) {
+      continue;
+    }
+    if ((instruction.flags & cs2::protect::k_flag_nsw) != 0) {
+      saw_nsw = true;
+    }
+    if ((instruction.flags & cs2::protect::k_flag_nuw) != 0) {
+      saw_nuw = true;
+    }
+  }
+  check(saw_nsw, "the nsw flag is carried into the bytecode");
+  check(saw_nuw, "the nuw flag is carried into the bytecode");
+}
+
+/// The virtualizer's front end: an `undef` that is read twice.
+void test_vm_freeze() {
+  llvm::LLVMContext context;
+  llvm::Module module("undef.obj", context);
+  auto* function = llvm::Function::Create(
+      llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
+                               {static_cast<llvm::Type*>(llvm::Type::getInt32Ty(context))}, false),
+      llvm::GlobalValue::ExternalLinkage, "undef", &module);
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+  llvm::IRBuilder<> builder(entry);
+  auto* undef = llvm::UndefValue::get(llvm::Type::getInt32Ty(context));
+  llvm::Value* first = builder.CreateAdd(undef, function->getArg(0));
+  llvm::Value* second = builder.CreateAdd(undef, function->getArg(0));
+  builder.CreateRet(builder.CreateAdd(first, second));
+
+  const auto result = analyze(*function);
+  check(result.virtualizable, "the function with the undef is virtualizable");
+  // The undef is frozen: it is materialised once, and the two reads use
+  // the same slot.
+  std::vector<std::uint16_t> sources;
+  for (const cs2::protect::VmInstruction& instruction : result.code) {
+    if (instruction.opcode != cs2::protect::VmOpcode::Add) {
+      continue;
+    }
+    sources.push_back(instruction.src1);
+  }
+  check(sources.size() == 3, "the function has three additions");
+  check(sources.size() >= 2 && sources[0] == sources[1],
+        "the two reads of the undef use the same slot: it is frozen");
+  check(count_of(opcodes_of(result), cs2::protect::VmOpcode::Const) == 1,
+        "the undef is materialised once");
+}
+
+/// The virtualizer's front end: the refusals.
+void test_vm_refusals() {
+  llvm::LLVMContext context;
+  llvm::Module module("refusals.obj", context);
+  llvm::Type* const i32 = llvm::Type::getInt32Ty(context);
+  llvm::Type* const void_type = llvm::Type::getVoidTy(context);
+
+  // A variadic function.
+  {
+    auto* function = llvm::Function::Create(
+        llvm::FunctionType::get(i32, {i32}, true), llvm::GlobalValue::ExternalLinkage,
+        "variadic_function", &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    builder.CreateRet(function->getArg(0));
+    check_refused(*function, cs2::protect::VmRefusal::variadic_function,
+                  "a variadic function is refused");
+  }
+
+  // A call to a variadic function.
+  {
+    auto* callee = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, true),
+                                          llvm::GlobalValue::ExternalLinkage, "printf", &module);
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                             llvm::GlobalValue::ExternalLinkage, "caller",
+                                             &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    builder.CreateRet(builder.CreateCall(callee, {function->getArg(0)}));
+    check_refused(*function, cs2::protect::VmRefusal::variadic_callee,
+                  "a call to a variadic function is refused");
+  }
+
+  // An indirect call.
+  {
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                             llvm::GlobalValue::ExternalLinkage, "indirect",
+                                             &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    auto* pointer = llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context));
+    builder.CreateRet(builder.CreateCall(function->getFunctionType(), pointer,
+                                               llvm::ArrayRef<llvm::Value*>{function->getArg(0)}));
+    check_refused(*function, cs2::protect::VmRefusal::indirect_call,
+                  "an indirect call is refused");
+  }
+
+  // A float.
+  {
+    auto* function = llvm::Function::Create(
+        llvm::FunctionType::get(i32, {llvm::Type::getFloatTy(context)}, false),
+        llvm::GlobalValue::ExternalLinkage, "float", &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    builder.CreateRet(builder.getInt32(0));
+    check_refused(*function, cs2::protect::VmRefusal::unsupported_type,
+                  "a float is refused");
+  }
+
+  // A `memcpy` whose length is not a constant.
+  {
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(void_type, {i32}, false),
+                                             llvm::GlobalValue::ExternalLinkage, "dynamic",
+                                             &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    auto* buffer = builder.CreateAlloca(llvm::Type::getInt8Ty(context), nullptr, "buffer");
+    builder.CreateMemCpy(buffer, llvm::MaybeAlign(), buffer, llvm::MaybeAlign(),
+                         function->getArg(0));
+    builder.CreateRetVoid();
+    check_refused(*function, cs2::protect::VmRefusal::dynamic_memcpy,
+                  "a memcpy with a dynamic length is refused");
+  }
+
+  // The address of the function is taken.
+  {
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                             llvm::GlobalValue::ExternalLinkage, "taken",
+                                             &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    auto* slot = builder.CreateAlloca(llvm::PointerType::getUnqual(context), nullptr, "slot");
+    builder.CreateStore(function, slot);
+    builder.CreateRet(function->getArg(0));
+    check_refused(*function, cs2::protect::VmRefusal::address_taken,
+                  "a function whose address is taken is refused");
+  }
+
+  // More slots than the budget.
+  {
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                             llvm::GlobalValue::ExternalLinkage, "wide",
+                                             &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value* value = function->getArg(0);
+    for (int index = 0; index < 300; ++index) {
+      value = builder.CreateAdd(value, builder.getInt32(1));
+    }
+    builder.CreateRet(value);
+    check_refused(*function, cs2::protect::VmRefusal::too_many_slots,
+                  "a function with too many slots is refused");
+  }
+
+  // An EH edge.
+  {
+    auto* personality = llvm::Function::Create(
+        llvm::FunctionType::get(i32, {llvm::PointerType::getUnqual(context)}, false),
+        llvm::GlobalValue::ExternalLinkage, "__gxx_personality_v0", &module);
+    auto* throwing = llvm::Function::Create(
+        llvm::FunctionType::get(i32, {i32}, false), llvm::GlobalValue::ExternalLinkage, "throwing",
+        &module);
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                             llvm::GlobalValue::ExternalLinkage, "eh", &module);
+    function->setPersonalityFn(personality);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::BasicBlock* normal = llvm::BasicBlock::Create(context, "normal", function);
+    llvm::BasicBlock* unwind = llvm::BasicBlock::Create(context, "unwind", function);
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value* result =
+        builder.CreateInvoke(throwing, normal, unwind, function->getArg(0));
+    builder.SetInsertPoint(normal);
+    builder.CreateRet(result);
+    builder.SetInsertPoint(unwind);
+    builder.CreateLandingPad(llvm::StructType::get(context, llvm::ArrayRef<llvm::Type*>{i32}), 0);
+    builder.CreateResume(builder.getInt32(0));
+    check_refused(*function, cs2::protect::VmRefusal::eh_pad, "an EH edge is refused");
+  }
+
+  // A volatile access.
+  {
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                             llvm::GlobalValue::ExternalLinkage, "volatile",
+                                             &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    auto* slot = builder.CreateAlloca(i32, nullptr, "slot");
+    builder.CreateStore(function->getArg(0), slot);
+    auto* loaded = builder.CreateLoad(i32, slot);
+    loaded->setVolatile(true);
+    builder.CreateRet(loaded);
+    check_refused(*function, cs2::protect::VmRefusal::volatile_access,
+                  "a volatile access is refused");
+  }
+
+  // A recursion.
+  {
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                             llvm::GlobalValue::ExternalLinkage, "recursive",
+                                             &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    builder.CreateRet(builder.CreateCall(function, {function->getArg(0)}));
+    check_refused(*function, cs2::protect::VmRefusal::recursion, "a recursion is refused");
+  }
+
+  // A callee that is itself selected at the virtualized level.
+  {
+    auto* callee = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                          llvm::GlobalValue::ExternalLinkage, "virtualized",
+                                          &module);
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                             llvm::GlobalValue::ExternalLinkage, "caller",
+                                             &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    builder.CreateRet(builder.CreateCall(callee, {function->getArg(0)}));
+    cs2::protect::VmOptions options;
+    options.seed = 1;
+    const std::vector<std::string> virtualized{"virtualized"};
+    options.virtualized_symbols = virtualized;
+    const auto result = cs2::protect::analyze_function(*function, options);
+    check(!result.virtualizable, "a call to a virtualized function is refused");
+    check(result.failure.reason == cs2::protect::VmRefusal::virtualized_callee,
+          "the refusal of a call to a virtualized function names the reason");
+  }
+
+  // An instruction the lowering does not model.
+  {
+    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                             llvm::GlobalValue::ExternalLinkage, "unsupported",
+                                             &module);
+    llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+    llvm::IRBuilder<> builder(entry);
+    // A `ctpop`: the ISA has no opcode for it.
+    builder.CreateRet(builder.CreateCall(
+        llvm::Intrinsic::getOrInsertDeclaration(&module, llvm::Intrinsic::ctpop, i32,
+                                                          llvm::ArrayRef<llvm::Type*>{i32}),
+        {function->getArg(0)}));
+    check_refused(*function, cs2::protect::VmRefusal::unsupported_instruction,
+                  "an instruction the lowering does not model is refused");
+  }
+}
+
+/// The virtualizer's front end: a call.
+void test_vm_call() {
+  llvm::LLVMContext context;
+  llvm::Module module("call.obj", context);
+  llvm::Type* const i32 = llvm::Type::getInt32Ty(context);
+  auto* callee = llvm::Function::Create(llvm::FunctionType::get(i32, {i32, i32}, false),
+                                        llvm::GlobalValue::ExternalLinkage, "add_two", &module);
+  llvm::BasicBlock* callee_entry = llvm::BasicBlock::Create(context, "entry", callee);
+  {
+    llvm::IRBuilder<> builder(callee_entry);
+    builder.CreateRet(builder.CreateAdd(callee->getArg(0), callee->getArg(1)));
+  }
+  auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                                           llvm::GlobalValue::ExternalLinkage, "caller", &module);
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
+  llvm::IRBuilder<> builder(entry);
+  builder.CreateRet(builder.CreateCall(callee, {function->getArg(0), builder.getInt32(2)}));
+
+  const auto result = analyze(*function);
+  check(result.virtualizable, "the function with the call is virtualizable");
+  check(result.calls == 1, "the function has one call site");
+  check(result.call_sites.size() == 1, "the call site is recorded");
+  if (result.call_sites.size() == 1) {
+    const auto& site = result.call_sites.front();
+    check_equal(site.callee, "add_two", "the call site names the callee");
+    check(site.argument_types.size() == 2, "the call site names the two arguments");
+    check_equal(site.return_type, "i32", "the call site names the type of the return value");
+    check(site.pool_index < result.pool.size(), "the call site has an entry in the pool");
+  }
+  const auto opcodes = opcodes_of(result);
+  check(count_of(opcodes, cs2::protect::VmOpcode::Arg) == 2, "the arguments are pushed");
+  check(count_of(opcodes, cs2::protect::VmOpcode::Call) == 1, "the call is one instruction");
+}
+
 }  // namespace
 
 auto main() -> int {
@@ -590,6 +1088,12 @@ auto main() -> int {
   test_level_gate();
   test_level_gate_two_entries();
   test_vanished();
+  test_vm_virtualizable();
+  test_vm_parallel_copy();
+  test_vm_flags();
+  test_vm_freeze();
+  test_vm_refusals();
+  test_vm_call();
   if (g_failures != 0) {
     std::printf("protect: %d check(s) failed\n", g_failures);
     return 1;
