@@ -703,7 +703,8 @@ there: every step passed, the old failure was reproduced (`exit 1`,
 the fix was reproduced (clone → configure → link `cs2_overlay_layer.dll`).
 The verdict was **ship with fixes** again, this time with no blocker: the
 findings were the wrapper's remaining contract hole, and the workflow's
-undeclared dependencies.
+undeclared dependencies. After the fixes, the whole workflow was re-run on a
+fresh checkout of the final tree — every step green (§7.2).
 
 | finding | what it was | what changed | how it was proven |
 |---|---|---|---|
