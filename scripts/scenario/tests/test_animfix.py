@@ -205,6 +205,37 @@ class TestAnimfixScenario(unittest.TestCase):
         game = FakeGame(block, climbing=False)
         with self.assertRaises(Exception):
             animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
+        # The feature is switched off again even when the run fails.
+        self.assertEqual(game.writes[-1], ("animfix", False))
+
+    def test_a_failure_inside_the_watch_loop_still_switches_the_feature_off(self) -> None:
+        """A pipe hiccup must not leave the animfix on for the rest of the round."""
+        block = {
+            "animfix": True,
+            "animfix_ready": True,
+            "animfix_status": "ok",
+            "animfix_acted": True,
+            "animfix_captures": 5,
+            "animfix_applies": 20,
+            "animfix_skips": 0,
+            "animfix_data_valid": True,
+            "animfix_server_aim_yaw": 10.0,
+            "animfix_predicted_aim_yaw": 7.0,
+            "animfix_aim_yaw_delta": 3.0,
+        }
+        game = FakeGame(block)
+        calls = {"n": 0}
+
+        def flaky(via: Any = None) -> InputStatus:
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise RuntimeError("the pipe hiccuped")
+            return game._status()
+
+        game.input = flaky  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            animfix_scenario.run(cast(Game, game), watch=0.0, setup=False)
+        self.assertEqual(game.writes[-1], ("animfix", False))
 
     def test_hooks_that_did_not_resolve_are_reported_not_failed(self) -> None:
         """No signatures in this build: the scenario says so instead of failing."""

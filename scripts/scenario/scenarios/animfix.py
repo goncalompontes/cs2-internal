@@ -59,11 +59,14 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
 
     # The feature is off by default; the scenario switches it on (the one
     # write it does) so the operator can see what it does — and off again
-    # when it is done, so the round is left as it was found.
+    # when it is done, so the round is left as it was found. The switch-off
+    # is in a `finally`: a pipe hiccup inside the watch loop must not leave
+    # the animfix on for the rest of the round.
     game.animfix(True)
 
     status = game.input()
     if not status.get("animfix"):
+        game.animfix(False)
         raise SessionError("the payload did not accept the animfix command")
 
     captures_before = int(status.get("animfix_captures") or 0)
@@ -71,56 +74,58 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
     skips_before = int(status.get("animfix_skips") or 0)
     deltas: list[float] = []
     acted_samples = 0
+    final = status
 
-    deadline = time.monotonic() + watch
-    while time.monotonic() < deadline:
-        live = game.input()
-        if live.get("animfix_acted"):
-            acted_samples += 1
-        delta = live.get("animfix_aim_yaw_delta")
-        if delta is not None:
-            deltas.append(float(delta))
-        time.sleep(SAMPLE)
+    try:
+        deadline = time.monotonic() + watch
+        while time.monotonic() < deadline:
+            live = game.input()
+            if live.get("animfix_acted"):
+                acted_samples += 1
+            delta = live.get("animfix_aim_yaw_delta")
+            if delta is not None:
+                deltas.append(float(delta))
+            time.sleep(SAMPLE)
+        final = game.input()
+    finally:
+        # Leave the feature as it was found.
+        game.animfix(False)
 
-    status = game.input()
-    # Leave the feature as it was found.
-    game.animfix(False)
-
-    observed_captures = int(status.get("animfix_captures") or 0) - captures_before
-    observed_applies = int(status.get("animfix_applies") or 0) - applies_before
-    observed_skips = int(status.get("animfix_skips") or 0) - skips_before
-    ready = bool(status.get("animfix_ready"))
-    animfix_status = str(status.get("animfix_status") or "")
+    observed_captures = int(final.get("animfix_captures") or 0) - captures_before
+    observed_applies = int(final.get("animfix_applies") or 0) - applies_before
+    observed_skips = int(final.get("animfix_skips") or 0) - skips_before
+    ready = bool(final.get("animfix_ready"))
+    animfix_status = str(final.get("animfix_status") or "")
 
     result: dict[str, Any] = {
         "screen": str(awaiting.screen(game)),
-        "animfix": bool(status.get("animfix")),
+        "animfix": bool(final.get("animfix")),
         "animfix_ready": ready,
         "animfix_status": animfix_status,
-        "animfix_acted": bool(status.get("animfix_acted")),
+        "animfix_acted": bool(final.get("animfix_acted")),
         "captures_during_window": observed_captures,
         "applies_during_window": observed_applies,
         "skips_during_window": observed_skips,
         # The refusals, by reason — so "the codec has not run yet" is
         # distinguishable from "every capture aged out" (a stalled
         # connection) and from "the capture was already used".
-        "skips_no_capture": int(status.get("animfix_skip_no_capture") or 0),
-        "skips_stale": int(status.get("animfix_skip_stale") or 0),
-        "skips_applied": int(status.get("animfix_skip_applied") or 0),
-        "skips_controller": int(status.get("animfix_skip_controller") or 0),
+        "skips_no_capture": int(final.get("animfix_skip_no_capture") or 0),
+        "skips_stale": int(final.get("animfix_skip_stale") or 0),
+        "skips_applied": int(final.get("animfix_skip_applied") or 0),
+        "skips_controller": int(final.get("animfix_skip_controller") or 0),
         # The server's snapshot rate: the staleness bound is measured
         # against it, so this is how old the server's values may be.
-        "snapshot_interval_ms": int(status.get("animfix_snapshot_interval_ms") or 0),
+        "snapshot_interval_ms": int(final.get("animfix_snapshot_interval_ms") or 0),
         # The values the engine's own guard refused. It should be zero.
-        "rejected": int(status.get("animfix_rejected") or 0),
+        "rejected": int(final.get("animfix_rejected") or 0),
         "acted_samples": acted_samples,
-        "data_valid": bool(status.get("animfix_data_valid")),
-        "server_aim_yaw": status.get("animfix_server_aim_yaw"),
-        "predicted_aim_yaw": status.get("animfix_predicted_aim_yaw"),
+        "data_valid": bool(final.get("animfix_data_valid")),
+        "server_aim_yaw": final.get("animfix_server_aim_yaw"),
+        "predicted_aim_yaw": final.get("animfix_predicted_aim_yaw"),
         # The **divergence**: the signed difference between the server's aim
         # yaw and the client's predicted one, in degrees. It is what the
         # animfix removes, and it is only non-zero while the player turns.
-        "aim_yaw_delta": status.get("animfix_aim_yaw_delta"),
+        "aim_yaw_delta": final.get("animfix_aim_yaw_delta"),
         "max_abs_aim_yaw_delta": round(max((abs(d) for d in deltas), default=0.0), 2),
     }
 
