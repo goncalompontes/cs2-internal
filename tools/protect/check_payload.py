@@ -412,25 +412,34 @@ def digests_of(run: bytes, seed: int | None) -> set[str]:
     return digests
 
 
-def digests_present(runs: list[bytes], by_length: dict[int, set[str]], seed: int | None) -> set[str]:
+def digests_present(runs: list[bytes], by_length: dict[int, set[str]], seed: int | None) -> tuple[set[str], set[str]]:
     """The digests of the wanted literals that the image holds.
 
-    A literal that is not NUL-terminated in the image is the **prefix** of
-    a longer run, and a literal an analyst can grep for is a leak whatever
-    follows it: the prefixes are hashed as well. The predicate is the same
-    for the protected and for the unprotected image -- it is the same kind
-    of leak in both.
+    Two sets: the literals that are in the image as a **whole run**, and
+    the ones that are only the **prefix** of a longer run. A literal that
+    is not NUL-terminated in the image is the prefix of a longer run, and
+    an analyst can grep for it either way -- the predicate is the same for
+    the protected and for the unprotected image.
+
+    The two are kept apart because they are not the same failure: a whole
+    run is the protected literal itself (the pass did not remove it), while
+    a prefix is the beginning of *another* string of the image, which the
+    pass cannot remove.
     """
-    found: set[str] = set()
+    exact: set[str] = set()
+    prefixes: set[str] = set()
     for length, digests in by_length.items():
         for run in runs:
             if len(run) < length:
                 continue
             matched = digests & digests_of(run[:length], seed)
-            if matched:
-                found |= matched
+            if not matched:
+                continue
+            if len(run) == length:
+                exact |= matched
                 break
-    return found
+            prefixes |= matched
+    return exact, prefixes
 
 
 def protected_literals(coverage: list[Coverage]) -> tuple[dict[int, set[str]], set[str], int]:
@@ -524,13 +533,17 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
 
     runs = image_runs(protected.data)
     everywhere = {digest for digests in by_length.values() for digest in digests}
-    survivors = digests_present(runs, by_length, seed) & everywhere
+    exact, prefixes = digests_present(runs, by_length, seed)
+    survivors = (exact | prefixes) & everywhere
     absent = everywhere - survivors
 
     # A literal that is protected in one module and refused in another is
     # legitimately still in the image. A literal that nobody refused and
-    # that is still in the image is a failure: the protection did nothing.
-    for digest in sorted(survivors - refused):
+    # that is in the image as a **whole run** is a failure: the pass did
+    # not remove it. A literal that is only the prefix of another string
+    # is greppable, but the pass cannot remove another string's prefix --
+    # it is reported, not a failure.
+    for digest in sorted(exact - refused):
         check(
             False,
             f"the protected image still holds the plaintext of a protected string "
@@ -542,16 +555,23 @@ def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
         print(f"check_payload: {len(survivors)} protected strings are still in the protected "
               "image")
         for digest in sorted(survivors):
+            if digest in exact:
+                print(
+                    f"check_payload:   sha256 {digest[:12]}: protected in one module, refused in "
+                    "another: it is legitimately still in the image"
+                )
+                continue
             print(
-                f"check_payload:   sha256 {digest[:12]}: protected in one module, refused in "
-                "another: it is legitimately still in the image"
+                f"check_payload:   sha256 {digest[:12]}: the prefix of another string of the "
+                "image: it is greppable, but the pass cannot remove another string's prefix"
             )
 
     if unprotected is not None:
         plain_runs = image_runs(unprotected.data)
         for length, digests in sorted(by_length.items()):
+            plain_exact, plain_prefixes = digests_present(plain_runs, {length: digests}, seed)
             check(
-                bool(digests_present(plain_runs, {length: digests}, seed)),
+                bool(plain_exact or plain_prefixes),
                 f"the unprotected image does not hold the plaintext of a protected string "
                 f"({length} bytes): the check would be vacuous",
             )
