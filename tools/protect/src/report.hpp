@@ -74,10 +74,12 @@ struct CoverageProtect {
 /// The coverage **must not** carry the content of a protected string: the
 /// coverage is a file, and a file holds the strings. It carries the length
 /// and a digest of the content instead, which is enough for the payload
-/// check to prove that the plaintext is not in the image.
+/// check to prove that the plaintext is not in the image. The digest is
+/// **salted with the build seed**, so that the coverage cannot be brute
+/// forced back into the strings.
 struct CoverageString {
   std::size_t length{0};
-  /// The SHA-256 of the content, in hexadecimal.
+  /// The salted SHA-256 of the content, in hexadecimal.
   std::string digest;
   std::size_t uses{0};
   std::size_t functions{0};
@@ -143,11 +145,16 @@ void write_string_report(const llvm::Module& module, const StringResult& result,
 /// The file also carries the digest of the source file and a digest of its
 /// own content, so that a reader can tell a coverage file of *this* build
 /// from one of another build or from a file that was edited by hand.
+///
+/// The `strings_salt` names the salt of the digests of the literals ("" when
+/// there is none): the salt itself is **not** in the file, so that the file
+/// cannot be brute forced back into the strings.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
                                   const std::vector<CoverageEntry>& entries,
                                   const std::vector<CoverageFunction>& functions,
                                   const CoverageProtect& protect,
-                                  const std::vector<CoverageString>& strings = {}) -> std::optional<std::string>;
+                                  const std::vector<CoverageString>& strings = {},
+                                  std::string_view strings_salt = {}) -> std::optional<std::string>;
 
 /// Writes the machine-readable coverage of one module from a selection.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,

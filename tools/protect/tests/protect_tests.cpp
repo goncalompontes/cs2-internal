@@ -906,6 +906,29 @@ void test_string_transform() {
     }
   }
 
+  // The digest is salted with the build seed: the same literal, hashed
+  // with a seed and without one, gives two digests, and a coverage (or a
+  // build log) that carried the unsalted one would yield the strings.
+  llvm::LLVMContext salted_context;
+  const auto salted_module = build_string_module(salted_context);
+  cs2::protect::Policy salted_policy;
+  salted_policy.strings = {"healthy"};
+  salted_policy.strings_min_length = 4;
+  salted_policy.seed = 0x0123456789ABCDEFULL;
+  cs2::protect::Config salted_config;
+  salted_config.policy = salted_policy;
+  const cs2::protect::StringResult salted =
+      cs2::protect::transform_strings(*salted_module, salted_config, {});
+  check(!cs2::protect::salt_proof(salted_config).empty(),
+        "a build with a seed has a proof of its salt");
+  const std::vector<cs2::protect::CoverageString> salted_covered =
+      cs2::protect::coverage_strings(salted);
+  check(salted_covered.size() == 1, "the salted coverage has one literal");
+  if (!salted_covered.empty() && !covered.empty()) {
+    check(salted_covered[0].digest != covered[0].digest,
+          "the digest of a literal is not salted with the build seed");
+  }
+
   std::filesystem::remove_all(directory, error);
 }
 

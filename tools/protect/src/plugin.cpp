@@ -236,8 +236,16 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     protect.key_parts.assign(result.key_parts.begin(), result.key_parts.end());
     const std::vector<cs2::protect::CoverageString> covered =
         cs2::protect::coverage_strings(strings);
-    if (const auto error =
-            cs2::protect::write_coverage(settings, module, entries, functions, protect, covered)) {
+    // The salt of the digests is named in the coverage, and the salt itself
+    // is not: the coverage cannot be brute forced back into the strings.
+    // The proof tells a reader with a salt whether it is the salt of the
+    // build.
+    std::string salt;
+    if (strings.salted) {
+      salt = "build-seed sha256=" + cs2::protect::salt_proof(settings);
+    }
+    if (const auto error = cs2::protect::write_coverage(settings, module, entries, functions, protect,
+                                                        covered, salt)) {
       llvm::errs() << "[cs2-protect] " << *error << "\n";
       llvm::report_fatal_error("cs2-protect: the coverage could not be written",
                                /*gen_crash_diag=*/false);

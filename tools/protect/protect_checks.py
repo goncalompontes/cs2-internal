@@ -380,6 +380,13 @@ class Coverage:
         #: The literals of the string protection: the length and the digest
         #: of the content, never the content itself.
         self.strings: list[StringLiteral] = []
+        #: The salt the digests of the literals were computed with ("" when
+        #: the coverage has no salt line: an older build, or a build without
+        #: a seed). The salt itself is not in the coverage.
+        self.str_salt: str = ""
+        #: The proof that a salt is the salt of the build: a digest of a
+        #: fixed text with the salt. It is in the coverage, the salt is not.
+        self.str_salt_proof: str = ""
 
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -416,6 +423,8 @@ class Coverage:
                         self.entries[rest.strip()] = state.strip()
                 elif key == "str":
                     self._read_str(value)
+                elif key == "str-salt":
+                    self._read_str_salt(value)
                 elif key == "content-sha256":
                     digest = value.strip().lower()
         except ValueError as error:
@@ -473,6 +482,20 @@ class Coverage:
         self.strings.append(
             StringLiteral(state.strip(), length, sha256, uses, functions, reason)
         )
+
+    def _read_str_salt(self, value: str) -> None:
+        """The `str-salt` line: the salt the digests were computed with.
+
+        The line names the salt and carries its proof; the salt itself is
+        not in the coverage. A coverage of an older build has no such line,
+        and its digests are unsalted.
+        """
+        parts = value.split()
+        self.str_salt = parts[0].strip() if parts else ""
+        for part in parts[1:]:
+            name, _, number = part.partition("=")
+            if name == "sha256":
+                self.str_salt_proof = number.strip().upper()
 
     def _check_digest(self, lines: list[str], digest: str) -> bool:
         """Whether the file still is the one the plugin wrote.

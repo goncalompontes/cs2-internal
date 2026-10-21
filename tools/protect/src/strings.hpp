@@ -73,6 +73,13 @@ struct StringLiteral {
   std::string content;
   /// The length of the content, without the trailing NUL.
   std::size_t length{0};
+  /// The digest of the content, in hexadecimal.
+  ///
+  /// The digest is **salted with the build seed**: an unsalted SHA-256 of
+  /// a four-to-twelve byte literal is a dictionary attack away from the
+  /// plaintext, so a coverage (or a build log) that carries it would still
+  /// hold the strings.
+  std::string digest;
   /// The number of uses the pass rewrote.
   std::size_t uses{0};
   /// The number of functions the pass rewrote a use in.
@@ -97,6 +104,8 @@ struct StringResult {
   std::size_t blob_bytes{0};
   /// The number of decode calls the pass emitted.
   std::size_t decodes{0};
+  /// Whether the digests of the literals are salted with the build seed.
+  bool salted{false};
 };
 
 /// Whether the policy selects a literal with this content.
@@ -120,6 +129,13 @@ struct StringResult {
 [[nodiscard]] auto string_gate(llvm::GlobalVariable& literal, const Config& config,
                                const RecordedSelection& selection)
     -> std::optional<StringSkipReason>;
+
+/// The digest of a literal, salted with the build seed.
+///
+/// The salt is the seed of the build: the environment's `CS2_PROTECT_SEED`
+/// when it is set, else the policy's `seed`. A build without a seed has no
+/// salt, and the digests are unsalted.
+[[nodiscard]] auto salt_proof(const Config& config) -> std::string;
 
 /// Encrypts the selected literals of one module and rewrites their users.
 ///

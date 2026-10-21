@@ -18,6 +18,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/SHA256.h"
 
 namespace cs2::protect {
 
@@ -79,6 +80,48 @@ constexpr std::string_view k_blob_prefix = "cs2.protect.strblob.";
 }
 
 // --- The uses ----------------------------------------------------------------
+
+/// The text the proof of the salt is computed over.
+constexpr std::string_view k_salt_proof_text = "cs2.protect.salt.proof";
+
+/// The salt of the digests of the literals.
+///
+/// The coverage is a file, and a file holds the strings: an unsalted
+/// SHA-256 of a four-to-twelve byte literal is a dictionary attack away
+/// from the plaintext. The digest is therefore salted with the **build
+/// seed**, which is in neither the coverage nor the build log: the
+/// coverage alone does not yield the strings.
+///
+/// The salt is the seed of the build: the environment's `CS2_PROTECT_SEED`
+/// when it is set, else the policy's `seed`. A build without a seed has no
+/// salt, and the digests are unsalted -- the coverage says so, and the
+/// check says so too.
+[[nodiscard]] auto build_salt(const Config& config) -> std::optional<std::uint64_t> {
+  if (config.seed.has_value()) {
+    return config.seed;
+  }
+  if (config.policy.has_value() && config.policy->seed.has_value()) {
+    return config.policy->seed;
+  }
+  return std::nullopt;
+}
+
+/// The digest of a literal, salted with the build seed.
+///
+/// The salt goes in front of the content, as the **little-endian** bytes of
+/// the seed: the check computes the same digest, and it has to be the same
+/// byte for byte.
+[[nodiscard]] auto literal_digest(std::string_view content, std::optional<std::uint64_t> salt)
+    -> std::string {
+  llvm::SHA256 hasher;
+  if (salt.has_value()) {
+    const std::uint64_t value = *salt;
+    hasher.update(llvm::ArrayRef<std::uint8_t>(
+        reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)));
+  }
+  hasher.update(content);
+  return llvm::toHex(hasher.final());
+}
 
 /// Whether a global is a literal the pass may replace.
 ///
@@ -479,6 +522,19 @@ struct Decoder {
 
 }  // namespace
 
+[[nodiscard]] auto salt_proof(const Config& config) -> std::string {
+  // The coverage names the salt of the digests, and the salt itself is not
+  // in the coverage. The proof is a digest of a fixed text with the salt: a
+  // reader that has a salt computes it and knows whether its salt is the
+  // salt of the build. Without it, a reader with the **wrong** salt would
+  // find no literal in the image and would report a protection that works.
+  const std::optional<std::uint64_t> salt = build_salt(config);
+  if (!salt.has_value()) {
+    return {};
+  }
+  return literal_digest(k_salt_proof_text, salt);
+}
+
 [[nodiscard]] auto to_string(StringSkipReason reason) noexcept -> const char* {
   switch (reason) {
     case StringSkipReason::escapes_to_initializer:
@@ -609,6 +665,10 @@ struct Decoder {
   llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
   const llvm::DataLayout& layout = module.getDataLayout();
 
+  // The salt of the digests: the build seed, when the build has one.
+  const std::optional<std::uint64_t> salt = build_salt(config);
+  result.salted = salt.has_value();
+
   // The candidates: the local constants of the module.
   std::vector<llvm::GlobalVariable*> candidates;
   for (llvm::GlobalVariable& global : module.globals()) {
@@ -665,6 +725,7 @@ struct Decoder {
     StringLiteral literal;
     literal.content = candidate.content;
     literal.length = candidate.content.size();
+    literal.digest = literal_digest(candidate.content, salt);
     if (verdicts[position].has_value()) {
       // Refused: the literal is left exactly as it is.
       literal.reason = *verdicts[position];
