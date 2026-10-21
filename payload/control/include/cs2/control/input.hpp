@@ -342,7 +342,8 @@ class Input {
   [[nodiscard]] float anti_aim_fake_pitch() const noexcept { return anti_aim_fake_pitch_.load(); }
   /// The camera's own yaw and pitch (the live view angles). The anti-aim only
   /// reads them — the operator's view must not move, and these two numbers are
-  /// the proof that it did not.
+  /// the proof that it did not. They are sampled while the anti-aim runs (the
+  /// feature is off: they stay at their last value).
   [[nodiscard]] float anti_aim_camera_yaw() const noexcept { return anti_aim_camera_yaw_.load(); }
   [[nodiscard]] float anti_aim_camera_pitch() const noexcept { return anti_aim_camera_pitch_.load(); }
   /// The re-based analog axes (the command's `forwardmove`/`leftmove`).
