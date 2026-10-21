@@ -331,15 +331,6 @@ Note that the existing `CallSkipReason` in `transform.hpp` already covers
 gate must **reuse** that reasoning where it applies (do not write a second
 copy of the same rules), and extend it with the VM-specific ones.
 
-> **The order of the call rules is T19's**: variadic callee, indirect
-> parameter, musttail, indirect call. The table above lists them in a
-> different order — the implementation follows the transform's, and the
-> README documents the deviation. One order, one copy.
->
-> **`local_variable` comes from the lowering, not from the gate** (§3.2), so
-> it can only be reported **after** every gate check has passed. The table
-> above lists it near the end for that reason.
-
 ## 5. What the pass does with the verdict, and what it does **not** do
 
 - The `virtualized` level of the policy **stays unimplemented** in this task.
