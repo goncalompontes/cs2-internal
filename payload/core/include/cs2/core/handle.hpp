@@ -28,11 +28,17 @@ namespace cs2::core {
 //
 // THE POLICY IS ASKED ONLY WHEN A HANDLE IS TAKEN. From then on the wrapper
 // knows whether it owns what it holds, and it never asks the policy again.
-// That is what makes the wrapper safe with a policy that cannot survive a
-// move: the destructor of a moved-from wrapper must not call a moved-from
-// policy, and a policy that carries a `std::function` closer throws
-// (`std::bad_function_call`) when it is called empty -- out of a `noexcept`
-// destructor, that is `std::terminate`.
+//
+// A MOVE COPIES THE POLICY. The policy is a *value*, so a moved-from wrapper
+// keeps a usable one, and there is therefore never a *moved-from* policy for
+// the wrapper to call -- neither in the destructor, nor in `reset()`. That
+// matters: a policy that carries a `std::function` closer is empty after the
+// move, and calling it throws (`std::bad_function_call`) -- out of a
+// `noexcept` function, that is `std::terminate`, and a `terminate` in a
+// payload that is manually mapped and has no exceptions is the worst outcome
+// there is. The price is that the policy must be copyable; the policies in
+// the tree are plain old data (a resolved entry point, a comparison), so the
+// copy allocates nothing.
 //
 // THE EMPTY VALUE IS RESERVED. `Handle{}` is the wrapper's "holds nothing",
 // and the wrapper never owns it and never releases it. A handle kind whose
@@ -43,9 +49,9 @@ namespace cs2::core {
 // closing something that is live.
 //
 // `Handle` must be comparable with `==` (the wrapper compares a handle with
-// the empty value), and `Policy` must be default-constructible: the
-// single-argument constructor uses the policy's default, and that default
-// must be able to release a handle.
+// the empty value), and `Policy` must be default-constructible and
+// copyable: the single-argument constructor uses the policy's default (and
+// that default must be able to release a handle), and a move copies it.
 template <typename Handle, typename Policy>
 class ScopedHandle {
  public:
@@ -66,13 +72,13 @@ class ScopedHandle {
   ScopedHandle(const ScopedHandle&) = delete;
   ScopedHandle& operator=(const ScopedHandle&) = delete;
 
-  ScopedHandle(ScopedHandle&& other) noexcept : policy_(std::move(other.policy_)) {
+  ScopedHandle(ScopedHandle&& other) noexcept : policy_(other.policy_) {
     take_from(other);
   }
   ScopedHandle& operator=(ScopedHandle&& other) noexcept {
     if (this != &other) {
       reset();
-      policy_ = std::move(other.policy_);
+      policy_ = other.policy_;
       take_from(other);
     }
     return *this;

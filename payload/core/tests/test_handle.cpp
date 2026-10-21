@@ -159,10 +159,11 @@ auto main() -> int {
   assert(other_closed == 1);
   assert(g_closed == 7);  // the global counter was not touched
 
-  // A moved-from policy must never be called. The policy here is empty after
-  // the move, so a call would throw `std::bad_function_call` out of the
-  // wrapper's `noexcept` destructor (and out of `valid()`), and the test
-  // would end the process instead of failing an assertion.
+  // A moved-from wrapper holds nothing, so its destructor must not release
+  // anything -- and the policy it carries must never be one that was moved
+  // out of: the policy here is a `std::function`, and an empty one throws
+  // `std::bad_function_call` out of the wrapper's `noexcept` destructor, so
+  // the test would end the process instead of failing an assertion.
   int function_closed = 0;
   {
     FunctionHandle file(3, FunctionPolicy{[&function_closed](int) { ++function_closed; },
@@ -170,12 +171,33 @@ auto main() -> int {
     const FunctionHandle moved(std::move(file));
     assert(moved.valid());
     assert(moved.get() == 3);
-    // The moved-from wrapper holds nothing, and it does not ask its
-    // (moved-from) policy about it.
+    // The moved-from wrapper holds nothing, and it does not ask its policy
+    // about it.
     assert(!file.valid());
     assert(file.get() == 0);
-  }  // the moved-from wrapper is destroyed here: it must not call the policy
+  }  // the moved-from wrapper is destroyed here: it must not release anything
   assert(function_closed == 1);  // the moved-to wrapper released it, once
+
+  // A moved-from wrapper is still a *usable* wrapper: the move copies the
+  // policy, so the source has a usable one and can take a new handle. If the
+  // wrapper moved the policy instead, the source's policy would be empty and
+  // `reset` would throw `std::bad_function_call` out of a `noexcept`
+  // function -- the test would end the process (0xC0000409).
+  int reset_closed = 0;
+  {
+    FunctionHandle file(3, FunctionPolicy{[&reset_closed](int) { ++reset_closed; },
+                                         [](int handle) { return handle > 0; }});
+    const FunctionHandle moved(std::move(file));
+    assert(moved.get() == 3);
+    // The source holds nothing, and it still has a usable policy.
+    assert(!file.valid());
+    assert(file.get() == 0);
+    file.reset(7);
+    assert(file.valid());
+    assert(file.get() == 7);
+    assert(reset_closed == 0);
+  }  // the moved-to wrapper releases 3, the source releases 7
+  assert(reset_closed == 2);
 
   // The empty value is reserved: the wrapper never owns it, so a policy that
   // says the zero value is live does not get it closed (stdin!).
