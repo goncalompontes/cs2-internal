@@ -514,6 +514,7 @@ if python.found()
     ['session', 'test_session'],
     ['settings', 'test_settings'],
     ['heatmap', 'test_heatmap'],
+    ['anti-aim', 'test_anti_aim'],
     ['registry', 'test_registry'],
     ['mcp', 'test_mcp'],
     ['settings-table', 'test_settings_table'],
