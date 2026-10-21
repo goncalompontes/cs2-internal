@@ -536,17 +536,45 @@ test('features-chams-target', features_chams_target_test)
 # fails when the detour stops holding the shared guard, when a second
 # implementation appears, when a `thread_local` comes back, or when the
 # status line starts allocating on the game's render thread.
+#
+# The status line's **formatting** is a pure function in the chams' header,
+# so the test drives it with the counters at their 64-bit maximum and checks
+# that the line still fits the overlay's 192-byte HUD buffer.
 features_chams_draw_hook_test = executable('features_chams_draw_hook_test',
   files(
     'payload/features/tests/test_chams_draw_hook.cpp',
   ),
   include_directories : [
     include_directories('payload/features/include'),
+    include_directories('payload/game/include'),
+    include_directories('payload/render/include'),
+    include_directories('payload/hooks/include'),
   ],
 )
 test('features-chams-draw-hook', features_chams_draw_hook_test,
   args : [meson.current_source_dir()],
 )
+
+# The desc cache's **concurrency probe** (T33). The scene system renders the
+# draw list in jobs on the tier0 thread pool, so two threads are inside the
+# draw detour at once, and the desc cache has to be safe for two writers: the
+# old protocol (three atomics, the desc published last) could leave a reader
+# with desc A and entity B, and the chams were decided on the wrong player.
+# The probe drives the **shipped** cache (`cs2::features::DescCache`) with
+# four threads and two descs that collide in one slot, and it must report
+# zero mismatches.
+features_chams_desc_cache_test = executable('features_chams_desc_cache_test',
+  files(
+    'payload/features/tests/test_chams_desc_cache.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/features/include'),
+    include_directories('payload/game/include'),
+    include_directories('payload/render/include'),
+    include_directories('payload/hooks/include'),
+  ],
+)
+test('features-chams-desc-cache', features_chams_desc_cache_test)
 
 # The material system's parameter-name hash and the chams' "is this entity one
 # of ours" decision. Both are pure (no engine, no Windows), so they are built
