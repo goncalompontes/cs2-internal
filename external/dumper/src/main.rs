@@ -82,6 +82,14 @@ struct Cli {
     #[arg(long)]
     resolve_offsets: bool,
 
+    /// Print the modules that have curated signatures (a JSON array) and exit.
+    ///
+    /// The list comes from the signature registry itself, so a signature added
+    /// for a new module shows up without an edit here. The offline offset
+    /// resolver (scripts/resolve-offsets-offline.py) drives it.
+    #[arg(long)]
+    list_signature_modules: bool,
+
     /// Read raw bytes at an address (hex) and print them as hex.
     #[arg(long)]
     read: Option<String>,
@@ -144,6 +152,17 @@ fn main() -> Result<()> {
         return Err(anyhow!(
             "--mcp (live analysis) requires a Unix host; it reads /proc"
         ));
+    }
+
+    // The modules that have curated signatures: printed and exited, like
+    // --exports. It needs neither a process nor a file — the list comes from
+    // the signature registry.
+    if cli.list_signature_modules {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&analysis::signature_modules())?
+        );
+        return Ok(());
     }
 
     // SDK generation from JSON dumps — no process required.
@@ -342,9 +361,13 @@ fn analyze(
             for off in &offsets {
                 println!("  {:<28} rva=0x{:x}", off.name, off.rva);
             }
-            for name in &missing {
-                eprintln!("  unresolved: {name}");
-            }
+        }
+        // The signatures that did **not** match go to stderr in *both* modes:
+        // the JSON mode is the one the calibration scripts use, and a
+        // signature that stopped matching has to be visible there too (the
+        // scripts report it as "unresolved: …").
+        for name in &missing {
+            eprintln!("  unresolved: {name}");
         }
     }
 
