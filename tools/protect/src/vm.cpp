@@ -281,10 +281,6 @@ class Lowerer {
     if (auto failure = lower_body()) {
       return failure;
     }
-    if (next_slot_ > k_max_slots) {
-      return VmFailure{VmRefusal::too_many_slots,
-                       "the function needs " + std::to_string(next_slot_) + " slots"};
-    }
     return std::nullopt;
   }
 
@@ -606,9 +602,22 @@ class Lowerer {
         }
       }
     }
-    if (next_slot_ > k_max_slots) {
-      return VmFailure{VmRefusal::too_many_slots,
-                       "the function needs " + std::to_string(next_slot_) + " slots"};
+    // The case values of a switch are not operands: LLVM keeps them in a
+    // side table of the instruction, so the walk above does not see them.
+    // They are values all the same, and the comparison of the switch needs
+    // a slot for each of them.
+    for (llvm::BasicBlock& block : function_) {
+      for (llvm::Instruction& instruction : block) {
+        const auto* switcher = llvm::dyn_cast<llvm::SwitchInst>(&instruction);
+        if (switcher == nullptr) {
+          continue;
+        }
+        for (const auto& entry : switcher->cases()) {
+          if (auto failure = materialize_constant(entry.getCaseValue())) {
+            return failure;
+          }
+        }
+      }
     }
     return std::nullopt;
   }
@@ -929,13 +938,18 @@ class Lowerer {
   /// its low bit: an operation that leaves a bit set above the low one would
   /// make the value of the `i1` something else. A comparison produces zero
   /// or one and needs no mask.
-  void mask_if_bool(llvm::Type* type, std::uint16_t slot) {
+  ///
+  /// The mask is not optional: a function whose budget is exhausted is
+  /// **refused**, never lowered with a missing mask (a fail-open would
+  /// compute a wrong value).
+  [[nodiscard]] auto mask_if_bool(llvm::Type* type, std::uint16_t slot)
+      -> std::optional<VmFailure> {
     if (!is_bool(type)) {
-      return;
+      return std::nullopt;
     }
     const auto one = allocate_slot();
     if (!one.has_value()) {
-      return;
+      return VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"};
     }
     VmInstruction constant;
     constant.opcode = VmOpcode::Const;
@@ -951,6 +965,7 @@ class Lowerer {
     mask.src1 = slot;
     mask.src2 = *one;
     emit(mask);
+    return std::nullopt;
   }
 
   [[nodiscard]] auto lower_binary(llvm::BinaryOperator& binary) -> std::optional<VmFailure> {
@@ -1037,18 +1052,26 @@ class Lowerer {
     // `sub 0, x` is a negation and `xor x, -1` is a complement: the ISA
     // has an opcode for each, and the interpreter does not have to work
     // out which one it is.
+    //
+    // The negation takes the *subtrahend*: `sub a, b` is `a - b`, so a
+    // `sub 0, x` negates `x` and not the zero.
     if (opcode == VmOpcode::Sub && is_zero(binary.getOperand(0)) &&
         !is_zero(binary.getOperand(1))) {
       code_.back().opcode = VmOpcode::Neg;
+      code_.back().src1 = code_.back().src2;
       code_.back().src2 = k_no_slot;
+      code_.back().flags = 0;  // the ISA defines no flag for a negation
     }
     if (opcode == VmOpcode::Xor && is_all_ones(binary.getOperand(1)) &&
         !is_all_ones(binary.getOperand(0))) {
       code_.back().opcode = VmOpcode::Not;
       code_.back().src2 = k_no_slot;
+      code_.back().flags = 0;  // the ISA defines no flag for a complement
     }
 
-    mask_if_bool(binary.getType(), *dst);
+    if (auto failure = mask_if_bool(binary.getType(), *dst)) {
+      return failure;
+    }
     return std::nullopt;
   }
 
@@ -1132,7 +1155,9 @@ class Lowerer {
       instruction.aux =
           static_cast<std::uint32_t>(*kind) | (static_cast<std::uint32_t>(source_width) << 8U);
       emit(instruction);
-      mask_if_bool(cast.getType(), *dst);
+      if (auto failure = mask_if_bool(cast.getType(), *dst)) {
+        return failure;
+      }
       return std::nullopt;
     }
 
@@ -1156,7 +1181,9 @@ class Lowerer {
         instruction.src1 = *src;
         instruction.aux = static_cast<std::uint32_t>(VmCast::trunc) | (8U << 8U);
         emit(instruction);
-        mask_if_bool(cast.getType(), *dst);
+        if (auto failure = mask_if_bool(cast.getType(), *dst)) {
+          return failure;
+        }
         return std::nullopt;
       }
       case llvm::Instruction::IntToPtr: {
@@ -1219,7 +1246,9 @@ class Lowerer {
     instruction.dst = *dst;
     instruction.src1 = *pointer;
     emit(instruction);
-    mask_if_bool(load.getType(), *dst);
+    if (auto failure = mask_if_bool(load.getType(), *dst)) {
+      return failure;
+    }
     return std::nullopt;
   }
 
@@ -1373,8 +1402,9 @@ class Lowerer {
       return VmFailure{VmRefusal::unsupported_instruction, "the call is an intrinsic"};
     }
 
-    // The arguments are pushed onto the argument stack, in order, and the
-    // call pops them.
+    // The arguments are pushed onto the argument stack, in the order of the
+    // call: the first argument of the call is the first one pushed, and
+    // the interpreter copies them out of the stack in that order.
     for (const llvm::Use& argument : call.args()) {
       const auto slot = slot_of(argument.get());
       if (!slot.has_value()) {
@@ -1410,6 +1440,14 @@ class Lowerer {
     instruction.imm = site.pool_index;
     instruction.aux = static_cast<std::uint32_t>(site.argument_count);
     emit(instruction);
+    // The x64 ABI returns an `i1` in the low byte of the register, and the
+    // other seven bits of the byte are undefined: the result is masked, so
+    // that the value of the `i1` is its low bit.
+    if (result.has_value()) {
+      if (auto failure = mask_if_bool(call.getType(), *result)) {
+        return failure;
+      }
+    }
     return std::nullopt;
   }
 
@@ -1422,22 +1460,33 @@ class Lowerer {
       if (!condition.has_value()) {
         return VmFailure{VmRefusal::unsupported_instruction, "the condition has no slot"};
       }
-      if (auto failure = emit_phi_copies(*branch.getSuccessor(0), *branch.getParent())) {
-        return failure;
-      }
+      // The moves of the PHIs of a successor belong to the **edge** that
+      // leads to it: the edge that is not taken must not perform them. The
+      // taken edge therefore gets a trampoline, and the fall-through keeps
+      // the moves of the other edge.
+      const auto taken = new_label();
       VmInstruction conditional;
       conditional.opcode = VmOpcode::BrIf;
       conditional.dst = k_no_slot;
       conditional.src1 = *condition;
-      fixups_.emplace_back(code_.size(), block_labels.at(branch.getSuccessor(0)));
+      fixups_.emplace_back(code_.size(), taken);
       code_.push_back(conditional);
 
+      // The fall-through: the edge to the second successor.
       if (auto failure = emit_phi_copies(*branch.getSuccessor(1), *branch.getParent())) {
         return failure;
       }
       branch_to(VmOpcode::Br, block_labels.at(branch.getSuccessor(1)));
+
+      // The taken edge: the trampoline.
+      place_label(taken);
+      if (auto failure = emit_phi_copies(*branch.getSuccessor(0), *branch.getParent())) {
+        return failure;
+      }
+      branch_to(VmOpcode::Br, block_labels.at(branch.getSuccessor(0)));
       return std::nullopt;
     }
+    // The unconditional branch has one edge, and the moves of it are on it.
     if (auto failure = emit_phi_copies(*branch.getSuccessor(0), *branch.getParent())) {
       return failure;
     }
@@ -1462,10 +1511,16 @@ class Lowerer {
 
     // A switch is a chain of comparisons: the value of the specification's
     // table says that it is not refused.
+    //
+    // The moves of the PHIs of a successor belong to the **edge** that
+    // leads to it, so every case gets a trampoline of its own: the moves of
+    // a case that is not taken are not performed.
+    std::vector<std::size_t> case_labels;
     for (const auto& entry : switcher.cases()) {
       const auto case_slot = slot_of(entry.getCaseValue());
       if (!case_slot.has_value()) {
-        return VmFailure{VmRefusal::unsupported_instruction, "a case of the switch has no slot"};
+        return VmFailure{VmRefusal::unsupported_instruction,
+                         "a case of the switch has no slot"};
       }
       const auto temporary = allocate_slot();
       if (!temporary.has_value()) {
@@ -1480,21 +1535,32 @@ class Lowerer {
       compare.aux = static_cast<std::uint32_t>(VmCompare::eq);
       emit(compare);
 
-      if (auto failure = emit_phi_copies(*entry.getCaseSuccessor(), *switcher.getParent())) {
-        return failure;
-      }
+      const auto case_label = new_label();
+      case_labels.push_back(case_label);
       VmInstruction conditional;
       conditional.opcode = VmOpcode::BrIf;
       conditional.dst = k_no_slot;
       conditional.src1 = *temporary;
-      fixups_.emplace_back(code_.size(), block_labels.at(entry.getCaseSuccessor()));
+      fixups_.emplace_back(code_.size(), case_label);
       code_.push_back(conditional);
     }
 
+    // The default: the edge that is taken when no case matches.
     if (auto failure = emit_phi_copies(*switcher.getDefaultDest(), *switcher.getParent())) {
       return failure;
     }
     branch_to(VmOpcode::Br, block_labels.at(switcher.getDefaultDest()));
+
+    // The trampolines: one per case.
+    std::size_t index = 0;
+    for (const auto& entry : switcher.cases()) {
+      place_label(case_labels[index]);
+      ++index;
+      if (auto failure = emit_phi_copies(*entry.getCaseSuccessor(), *switcher.getParent())) {
+        return failure;
+      }
+      branch_to(VmOpcode::Br, block_labels.at(entry.getCaseSuccessor()));
+    }
     return std::nullopt;
   }
 
@@ -1806,12 +1872,20 @@ auto canonical_opcode(std::uint8_t permuted, std::uint64_t a, std::uint64_t b) n
 auto opcode_permutation(std::uint64_t seed) noexcept -> std::pair<std::uint64_t, std::uint64_t> {
   std::uint64_t state = seed ^ 0x564D5045524D5554ULL;
   std::uint64_t a = splitmix64(state) % k_opcode_count;
-  if (a % 2 == 0) {
-    a = (a + 1) % k_opcode_count;
-  }
-  // The multiplier has to be coprime with the number of the opcodes, or the
-  // permutation would not be a permutation.
-  while (greatest_common_divisor(a, k_opcode_count) != 1) {
+  // The multiplier has to be **odd** and coprime with the number of the
+  // opcodes: the permutation is a permutation only if it is coprime, and
+  // the contract (the specification and the README) says it is odd. The
+  // walk below keeps both properties: `+1` makes an even multiplier odd,
+  // and `+2` keeps it odd while it looks for a coprime one. One is always
+  // odd and always coprime, so the walk terminates.
+  for (std::size_t step = 0; step < 2 * k_opcode_count; ++step) {
+    if (a % 2 == 0) {
+      a = (a + 1) % k_opcode_count;
+      continue;
+    }
+    if (greatest_common_divisor(a, k_opcode_count) == 1) {
+      break;
+    }
     a = (a + 2) % k_opcode_count;
     if (a == 0) {
       a = 1;
