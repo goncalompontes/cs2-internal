@@ -288,6 +288,8 @@ auto Service::handle(const std::string& line, std::string& response) noexcept ->
     do_bhop(arguments, out);
   } else if (command == "strafe") {
     do_strafe(arguments, out);
+  } else if (command == "antiaim") {
+    do_antiaim(arguments, out);
   } else if (command == "aim") {
     do_aim(arguments, out);
   } else if (command == "rage") {
@@ -776,6 +778,29 @@ auto Service::input_status() noexcept -> Json {
   result.set("strafe_deadzone_deg", Json::number(input_.strafe_deadzone_deg()));
   result.set("strafe_writes", Json::number(static_cast<double>(input_.strafe_writes())));
   result.set("strafe_raw_writes", Json::number(static_cast<double>(input_.strafe_raw_writes())));
+  // The anti-aim: what it wrote (or would write), the camera's own angles (the
+  // proof that the camera did **not** follow the fake ones), the re-based axes
+  // and the `move_crc` gate.
+  result.set("anti_aim", Json::boolean(input_.anti_aim()));
+  result.set("anti_aim_rebase", Json::boolean(input_.anti_aim_rebase_ok()));
+  result.set("anti_aim_acted", Json::boolean(input_.anti_aim_acted()));
+  result.set("anti_aim_reason", Json::number(static_cast<double>(input_.anti_aim_reason())));
+  result.set("anti_aim_fake_yaw", Json::number(input_.anti_aim_fake_yaw()));
+  result.set("anti_aim_fake_pitch", Json::number(input_.anti_aim_fake_pitch()));
+  result.set("anti_aim_camera_yaw", Json::number(input_.anti_aim_camera_yaw()));
+  result.set("anti_aim_camera_pitch", Json::number(input_.anti_aim_camera_pitch()));
+  result.set("anti_aim_forward", Json::number(input_.anti_aim_forward()));
+  result.set("anti_aim_left", Json::number(input_.anti_aim_left()));
+  result.set("anti_aim_basis_cos", Json::number(input_.anti_aim_basis_cos()));
+  result.set("anti_aim_yaw_offset", Json::number(input_.anti_aim_yaw_offset()));
+  result.set("anti_aim_pitch", Json::number(input_.anti_aim_pitch()));
+  result.set("anti_aim_jitter", Json::number(input_.anti_aim_jitter()));
+  result.set("anti_aim_side", Json::number(static_cast<double>(input_.anti_aim_side())));
+  result.set("anti_aim_writes", Json::number(static_cast<double>(input_.anti_aim_writes())));
+  result.set("anti_aim_rebase_applied",
+             Json::number(static_cast<double>(input_.anti_aim_rebase_applied())));
+  result.set("anti_aim_rebase_skipped",
+             Json::number(static_cast<double>(input_.anti_aim_rebase_skipped())));
   // The **outcome** and the **gate verdict**: the speed gained over the last
   // airtime (the number the operator asked for: "does it accelerate?") and
   // whether the engine applied the basis rotation (it does not when the server
@@ -1036,6 +1061,42 @@ void Service::do_strafe(const Json& args, Json& out) noexcept {
         static_cast<int>(number("subtick", static_cast<float>(input_.strafe_subticks()))));
   }
   input_.set_strafe(on);
+  set_ok(out, input_status());
+}
+
+void Service::do_antiaim(const Json& args, Json& out) noexcept {
+  input_.refresh();
+  bool on = true;
+  if (const Json* arg = args.find("on"); arg != nullptr && arg->is_bool()) {
+    on = arg->as_bool();
+  }
+  const auto number = [&](const char* key, float fallback) -> float {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
+                                                  : fallback;
+  };
+  // The desync offset (degrees, applied to the camera's yaw), the fake pitch
+  // (degrees, clamped to the engine's range), the per-command jitter (degrees)
+  // and the side (`0` automatic, `+1` left, `-1` right).
+  input_.set_anti_aim_config(number("yaw_offset", input_.anti_aim_yaw_offset()),
+                              number("pitch", input_.anti_aim_pitch()),
+                              number("jitter", input_.anti_aim_jitter()),
+                              static_cast<int>(number("side",
+                                                     static_cast<float>(input_.anti_aim_side()))));
+  // The `move_crc` gate: the movement re-base changes the command's move
+  // values, and the command's CRC is never written by the client — the
+  // engine's CRC routine over the move values was not found
+  // (`docs/re/angle-split.md` §5.4). The gate is **closed** by default and the
+  // anti-aim writes nothing while it is closed: the fake angles without the
+  // re-base rotate the movement's wish basis and break the operator's walk.
+  // `rebase: true` opens it for a test build — the operator has to know that
+  // the server may reject the modified movement.
+  bool rebase = input_.anti_aim_rebase_ok();
+  if (const Json* arg = args.find("rebase"); arg != nullptr) {
+    rebase = arg->is_bool() ? arg->as_bool() : arg->as_number() != 0.0;
+  }
+  input_.set_anti_aim_rebase(rebase);
+  input_.set_anti_aim(on);
   set_ok(out, input_status());
 }
 

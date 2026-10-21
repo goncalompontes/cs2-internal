@@ -405,9 +405,10 @@ class InputStatus(TypedDict, total=False):
     """The input backend's status block (``Service::input_status``).
 
     Seven commands answer with it (``input``, ``press``, ``release``, ``move``,
-    ``look``, ``bhop``, ``strafe``); it is ~90 keys wide and it grows with every
-    new probe, so it is ``total=False``: the client reads the fields it cares
-    about instead of the type demanding the whole block.
+    ``look``, ``bhop``, ``strafe``) and the **anti-aim** (``antiaim``) does too;
+    it is ~110 keys wide and it grows with every new probe, so it is
+    ``total=False``: the client reads the fields it cares about instead of the
+    type demanding the whole block.
     """
 
     backend: str
@@ -460,6 +461,28 @@ class InputStatus(TypedDict, total=False):
     strafe_deadzone_deg: float
     strafe_writes: int
     strafe_raw_writes: int
+    # The **anti-aim**: what it wrote (the fake yaw and pitch), the camera's
+    # own angles (the proof that the camera did not follow them), the re-based
+    # analog axes and the `move_crc` gate that holds the whole feature off
+    # until the command's CRC is settled (`docs/re/angle-split.md` §5.4).
+    anti_aim: bool
+    anti_aim_rebase: bool
+    anti_aim_acted: bool
+    anti_aim_reason: int
+    anti_aim_fake_yaw: float
+    anti_aim_fake_pitch: float
+    anti_aim_camera_yaw: float
+    anti_aim_camera_pitch: float
+    anti_aim_forward: float
+    anti_aim_left: float
+    anti_aim_basis_cos: float
+    anti_aim_yaw_offset: float
+    anti_aim_pitch: float
+    anti_aim_jitter: float
+    anti_aim_side: int
+    anti_aim_writes: int
+    anti_aim_rebase_applied: int
+    anti_aim_rebase_skipped: int
     # The auto-strafe's **outcome** (the speed gained over the last airtime) and
     # its **gate verdict** (did the engine apply the requested basis rotation?
     # `docs/re/strafing.md` §"The gate").
