@@ -25,6 +25,9 @@ struct SettingsPatch;
 
 #if defined(_WIN32)
 #include <windows.h>
+
+#include "cs2/core/handle.hpp"
+#include "cs2/core/win_handle.hpp"
 #endif
 
 namespace cs2::features {
@@ -121,9 +124,11 @@ class ModelPublisher {
   SettingsSink settings_sink_ = nullptr;
   void* settings_sink_context_ = nullptr;
 #if defined(_WIN32)
-  void* mapping_ = nullptr;  // HANDLE
-  void* shared_ = nullptr;   // wire::Shared*
-  void* thread_ = nullptr;   // HANDLE
+  // The segment's file mapping and the publisher's thread. Both are owned by
+  // the RAII wrapper, so they are released on every path.
+  core::ScopedHandle<void*, core::KernelHandlePolicy> mapping_{};
+  void* shared_ = nullptr;  // wire::Shared*
+  core::ScopedHandle<void*, core::KernelHandlePolicy> thread_{};
   // The settings block's publish/adopt protocol (the change latch lives here,
   // not in a global: ADR-0010).
   SettingsProtocol protocol_;

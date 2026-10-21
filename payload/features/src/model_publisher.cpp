@@ -5,6 +5,7 @@
 #include <cstring>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <variant>
 
 #include "cs2/diag/watchdog.hpp"
@@ -289,26 +290,31 @@ auto ModelPublisher::map() noexcept -> bool {
     }
     shm_path = path_buffer;
   }
-  HANDLE file =
-      CreateFileA(shm_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                  nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE) {
+  core::ScopedHandle<void*, core::KernelHandlePolicy> mapping;
+  {
+    // The file and the mapping are owned by their wrappers, so every path out
+    // of this block releases them.
+    core::ScopedHandle<void*, core::KernelHandlePolicy> file(
+        CreateFileA(shm_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!file.valid()) {
+      return false;
+    }
+    SetFilePointer(static_cast<HANDLE>(file.get()), static_cast<LONG>(sizeof(wire::Shared)),
+                   nullptr, FILE_BEGIN);
+    SetEndOfFile(static_cast<HANDLE>(file.get()));
+    mapping.reset(CreateFileMappingA(static_cast<HANDLE>(file.get()), nullptr, PAGE_READWRITE, 0,
+                                     static_cast<DWORD>(sizeof(wire::Shared)), nullptr));
+  }  // the file is released here, as before
+  if (!mapping.valid()) {
     return false;
   }
-  SetFilePointer(file, static_cast<LONG>(sizeof(wire::Shared)), nullptr, FILE_BEGIN);
-  SetEndOfFile(file);
-  HANDLE mapping = CreateFileMappingA(file, nullptr, PAGE_READWRITE, 0,
-                                      static_cast<DWORD>(sizeof(wire::Shared)), nullptr);
-  CloseHandle(file);
-  if (mapping == nullptr) {
-    return false;
-  }
-  void* view = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(wire::Shared));
+  void* view = MapViewOfFile(static_cast<HANDLE>(mapping.get()), FILE_MAP_ALL_ACCESS, 0, 0,
+                             sizeof(wire::Shared));
   if (view == nullptr) {
-    CloseHandle(mapping);
-    return false;
+    return false;  // the mapping is released by its wrapper
   }
-  mapping_ = mapping;
+  mapping_ = std::move(mapping);
   shared_ = view;
   auto* shared = static_cast<wire::Shared*>(view);
   if (!wire::segment_is_compatible(shared->magic, shared->version)) {
@@ -353,25 +359,21 @@ auto ModelPublisher::start() noexcept -> bool {
     running_.store(false);
     return false;
   }
-  thread_ = thread;
+  thread_.reset(thread);
   return true;
 }
 
 void ModelPublisher::stop() noexcept {
   running_.store(false);
-  if (thread_ != nullptr) {
-    WaitForSingleObject(static_cast<HANDLE>(thread_), 2000);
-    CloseHandle(static_cast<HANDLE>(thread_));
-    thread_ = nullptr;
+  if (thread_.valid()) {
+    WaitForSingleObject(static_cast<HANDLE>(thread_.get()), 2000);
   }
+  thread_.reset();
   if (shared_ != nullptr) {
     UnmapViewOfFile(shared_);
     shared_ = nullptr;
   }
-  if (mapping_ != nullptr) {
-    CloseHandle(static_cast<HANDLE>(mapping_));
-    mapping_ = nullptr;
-  }
+  mapping_.reset();
 }
 
 #else
