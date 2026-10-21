@@ -250,10 +250,9 @@ void record_selection(llvm::Module& module, const SelectionResult& result) {
   llvm::NamedMDNode* cross = module.getOrInsertNamedMetadata(k_cross_metadata);
   for (const CrossModuleMatch& match : result.cross_matches) {
     llvm::MDNode* node = llvm::MDNode::get(
-        context,
-        llvm::ArrayRef<llvm::Metadata*>{llvm::MDString::get(context, match.pattern),
-                                        llvm::MDString::get(context, match.symbol),
-                                        llvm::MDString::get(context, match.qualified)});
+        context, llvm::ArrayRef<llvm::Metadata*>{llvm::MDString::get(context, match.pattern),
+                                                 llvm::MDString::get(context, match.symbol),
+                                                 llvm::MDString::get(context, match.qualified)});
     cross->addOperand(node);
   }
 }

@@ -326,8 +326,7 @@ void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& 
   // The seed of the module: the key of the container and the opcode
   // permutation come from it, so the operator needs it next to the
   // verdicts.
-  llvm::errs() << "[cs2-protect] " << tag << ": vm seed="
-               << module_seed(config, module_id) << "\n";
+  llvm::errs() << "[cs2-protect] " << tag << ": vm seed=" << module_seed(config, module_id) << "\n";
 
   for (const VmFunction& function : functions) {
     llvm::errs() << "[cs2-protect] " << tag << ": vm " << function.symbol;
@@ -337,8 +336,7 @@ void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& 
     if (function.virtualizable) {
       llvm::errs() << " virtualizable"
                    << " slots=" << function.slots << " locals=" << function.local_cells
-                   << " frame=" << function.frame_bytes
-                   << " bytecode=" << function.bytecode_bytes
+                   << " frame=" << function.frame_bytes << " bytecode=" << function.bytecode_bytes
                    << " instructions=" << function.instructions << " calls=" << function.calls;
     } else {
       llvm::errs() << " refused reason=" << to_string(function.failure.reason);

@@ -83,8 +83,8 @@ struct PolicyMatch {
 /// needs no entry, and a *definition* is not a declaration: the entry names
 /// the call of another translation unit, not the function itself.
 struct CrossModuleMatch {
-  std::string pattern;   ///< the glob of the entry.
-  std::string symbol;    ///< the mangled symbol of the declaration.
+  std::string pattern;    ///< the glob of the entry.
+  std::string symbol;     ///< the mangled symbol of the declaration.
   std::string qualified;  ///< the demangled qualified name of the declaration.
 };
 

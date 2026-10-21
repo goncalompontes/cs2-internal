@@ -75,8 +75,7 @@ enum class CallSkipReason : std::uint8_t {
 /// a relocatable pointer to the external symbol. Every other rule still
 /// applies, and the rules are the ones of `skip_reason` -- a second copy of
 /// them would drift.
-[[nodiscard]] auto skip_reason_routed(const llvm::CallBase& call)
-    -> std::optional<CallSkipReason>;
+[[nodiscard]] auto skip_reason_routed(const llvm::CallBase& call) -> std::optional<CallSkipReason>;
 
 /// The state of a `cross_module` entry in one module.
 enum class CrossState : std::uint8_t {
@@ -93,7 +92,7 @@ struct CrossEntry {
   std::string symbol;   ///< the mangled symbol of the declaration it named
                         ///< ("" when the entry matched nothing).
   CrossState state{CrossState::unmatched};
-  std::string reason;   ///< the skip reason of the blocked call ("" otherwise).
+  std::string reason;  ///< the skip reason of the blocked call ("" otherwise).
 };
 
 /// A cross-TU callee that stayed direct, and the reason it stayed.
@@ -130,8 +129,8 @@ struct RecordedEntry {
 
 /// A `cross_module` entry that named a declaration in the module.
 struct RecordedCross {
-  std::string pattern;   ///< the glob of the entry.
-  std::string symbol;    ///< the mangled symbol of the declaration.
+  std::string pattern;    ///< the glob of the entry.
+  std::string symbol;     ///< the mangled symbol of the declaration.
   std::string qualified;  ///< the demangled qualified name of the declaration.
 };
 
@@ -152,7 +151,7 @@ struct FunctionTransform {
   std::string symbol;
   std::string qualified;
   std::size_t rewritten{0};
-  std::size_t cross{0};  ///< the rewrites that were cross-TU (routed).
+  std::size_t cross{0};                      ///< the rewrites that were cross-TU (routed).
   std::vector<CallSkipReason> skipped;       ///< one per skipped call.
   std::vector<std::string> skipped_callees;  ///< the callee of each skipped call.
 };

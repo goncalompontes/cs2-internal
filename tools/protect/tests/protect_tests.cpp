@@ -150,8 +150,7 @@ void test_qualified_name() {
 
 /// A module built from a piece of IR.
 [[nodiscard]] auto build_module_from(llvm::LLVMContext& context, std::string_view ir,
-                                     std::string_view identifier)
-    -> std::unique_ptr<llvm::Module> {
+                                     std::string_view identifier) -> std::unique_ptr<llvm::Module> {
   llvm::SMDiagnostic error;
   auto module = llvm::parseAssemblyString(ir, error, context);
   if (module == nullptr) {
@@ -597,8 +596,7 @@ void test_level_gate_two_entries() {
 /// The declaration has no body in this module: at the IR level it is the
 /// same thing as an import, and the policy's `cross_module` list is what
 /// tells the two apart.
-[[nodiscard]] auto build_cross_module(llvm::LLVMContext& context)
-    -> std::unique_ptr<llvm::Module> {
+[[nodiscard]] auto build_cross_module(llvm::LLVMContext& context) -> std::unique_ptr<llvm::Module> {
   static constexpr std::string_view k_ir = R"(
 declare i32 @external_target(i32 %x)
 
@@ -680,8 +678,7 @@ void test_cross_module_policy() {
   }
 
   // An entry that is not a string.
-  auto not_a_string =
-      cs2::protect::parse_policy_text(R"({"cross_module": [42]})");
+  auto not_a_string = cs2::protect::parse_policy_text(R"({"cross_module": [42]})");
   check(!not_a_string.has_value(), "a cross_module entry that is not a string is rejected");
   if (!not_a_string.has_value()) {
     check_equal(not_a_string.error().message, "a 'cross_module' entry must be a string",
@@ -743,7 +740,7 @@ void test_transform_cross_module() {
   // object writer turns it into a relocatable pointer to the external
   // symbol.
   llvm::GlobalVariable* table = module->getGlobalVariable("cs2.protect.table",
-                                                           /*AllowLocal=*/true);
+                                                          /*AllowLocal=*/true);
   check(table != nullptr, "the table global exists");
   if (table != nullptr) {
     const auto elements = elements_of(table->getInitializer());
