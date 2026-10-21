@@ -110,6 +110,12 @@ number is **not** what appears in the bytecode — see §3.6.
 >
 > The header's last word is `local_cells` (the number of cells the locals
 > take), not `reserved`.
+>
+> **The frame must be 8-byte aligned.** The cells are 64-bit and a local is a
+> byte offset into the arena, so the interpreter has to provide that
+> alignment — and only that: a local that needs more than 8 bytes of
+> alignment is refused (`local_variable`), so the frame's alignment is the
+> only one the interpreter must provide.
 
 
 ### 3.3 The widths, and `nsw`/`nuw`
@@ -298,6 +304,16 @@ The refusal reasons (one enum, one `to_string`, in `vm.hpp`):
 | `local_variable` | a local (`alloca`) that does not fit in the frame's value region, whose size is not constant, or that needs more than 8 bytes of alignment (§3.2) |
 | `vanished` | the function did not survive from the selection phase to this phase: the optimiser removed it. It is reported like T19's `vanished`, so the operator can tell "not selected" from "selected and deleted" |
 | `unsupported_instruction` | **the catch-all**: any IR instruction the lowering does not model. The lowering must have a default branch that refuses. |
+
+> **The order of the table above is not the order the code reports.** The
+> **call** rules are T19's: variadic callee, indirect parameter, musttail,
+> indirect call (the table above lists the indirect call first — the
+> implementation follows the transform's, and the README documents it).
+> **`local_variable` and `vanished` come last**: `local_variable` from the
+> *lowering*, after every gate check has passed, and `vanished` from the
+> phase boundary. One order, one copy: the gate's reasons first, then the
+> lowering's (`too_many_slots`, `unsupported_instruction`,
+> `unsupported_type`).
 
 Two of these are **calls**, and the reasoning matters:
 
