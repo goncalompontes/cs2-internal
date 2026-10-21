@@ -293,7 +293,7 @@ def check_dispatch_targets(image: PeImage, sites: list[DispatchSite],
 
     total = 0
     for site in sites:
-        found: Coverage | None = matched.get(site.table) if site.table is not None else None
+        found = entry_of_site(image, site, coverage)
         if found is None:
             raise Failure(
                 f"the dispatch at 0x{site.address:x} has no coverage: the image and the "
@@ -317,6 +317,111 @@ def check_dispatch_targets(image: PeImage, sites: list[DispatchSite],
     return total
 
 
+def entry_of_site(image: PeImage, site: DispatchSite, coverage: list[Coverage]) -> Coverage | None:
+    """The coverage entry of the module a dispatch belongs to.
+
+    The module is identified by the key the dispatch reads: the three key
+    constants are the ones of the module, and they are the only ones that
+    differ from module to module.
+    """
+    for entry in coverage:
+        if entry.table_size == 0 or not entry.key_parts:
+            continue
+        if not site_reads(image, site, entry.mix_multiplier):
+            continue
+        if not site_reads(image, site, entry.mix_xor):
+            continue
+        if not all(site_reads(image, site, part) for part in entry.key_parts):
+            continue
+        return entry
+    return None
+
+
+def mixed_key(entry: Coverage) -> int:
+    """The mixed key of a module: what the call site xors the descriptor with."""
+    key = 0
+    for part in entry.key_parts:
+        key ^= part
+    return mix64(key)
+
+
+def tables_of(image: PeImage, entry: Coverage, slot: int) -> list[int]:
+    """The tables of the module of a coverage entry.
+
+    The table of the transform is a constant array of `table_size` function
+    pointers in the read-only data, and the descriptor of the module follows
+    it: the descriptor holds the encrypted indices of the rewritten call
+    sites, and the slot the dispatch reads is one of them. The linker may
+    leave a gap between the two, so the descriptor is looked for in the
+    slots that follow the table.
+
+    The table is found by its **content** and not by the register the
+    dispatch calls through: the register allocation is the backend's
+    business, and a linear scan of the disassembly does not model the
+    control flow (a table loaded in a loop head is used by a dispatch that
+    the scan reaches by another path, and a tail jump copies the table's
+    address into another register).
+    """
+    data = image.section_of(".rdata")
+    if data is None:
+        return []
+    mixed = mixed_key(entry)
+    candidates: list[int] = []
+    run: int | None = None
+    for offset in range(0, data.raw_size - 7, 8):
+        rva = data.virtual_address + offset
+        if image.is_code_address(image.u64_at_rva(rva)):
+            if run is None:
+                run = rva
+            continue
+        if run is None:
+            continue
+        if (rva - run) // 8 == entry.table_size:
+            descriptor = descriptor_after(image, rva, entry, mixed, slot)
+            if descriptor is not None:
+                candidates.append(run)
+        run = None
+    return candidates
+
+
+def descriptor_after(image: PeImage, table_end: int, entry: Coverage, mixed: int,
+                     slot: int) -> int | None:
+    """The descriptor of the module that follows a table, or None.
+
+    The descriptor is a run of `descriptor_size` slots whose values decode
+    to valid indices of the table, and the slot the dispatch reads is one of
+    them. The linker may leave a gap between the table and the descriptor,
+    so the slots that follow the table are tried in turn.
+    """
+    for gap in range(0, 8):
+        start = table_end + 8 * gap
+        if start > slot:
+            break
+        if not start <= slot < start + 8 * entry.descriptor_size:
+            continue
+        if descriptor_at(image, start, entry, mixed):
+            return start
+    return None
+
+
+def descriptor_at(image: PeImage, base: int, entry: Coverage, mixed: int) -> bool:
+    """Whether the slots at `base` are the descriptor of the module.
+
+    Every slot of the descriptor holds an encrypted index, and the index is
+    inside the table: `value ^ mixed < table_size`.
+    """
+    if entry.descriptor_size <= 0:
+        return False
+    for index in range(entry.descriptor_size):
+        try:
+            value = image.u64_at_rva(base + 8 * index)
+        except Failure:
+            return False
+        if (value ^ mixed) >= entry.table_size:
+            return False
+    return True
+
+
 def resolve_site(image: PeImage, site: DispatchSite, entry: Coverage) -> int | None:
     """The address the dispatch at a site calls, or None when it does not decode.
 
@@ -324,13 +429,7 @@ def resolve_site(image: PeImage, site: DispatchSite, entry: Coverage) -> int | N
     three key constants, the mixer is the one of the plugin, and the index
     selects the entry of the table.
     """
-    key = 0
-    for part in entry.key_parts:
-        key ^= part
-    mixed = mix64(key)
-
-    if site.table is None:
-        return None
+    mixed = mixed_key(entry)
 
     # The descriptor: the reference whose value decodes to an index of the
     # table.
@@ -350,10 +449,12 @@ def resolve_site(image: PeImage, site: DispatchSite, entry: Coverage) -> int | N
     index = image.u64_at_rva(descriptor) ^ mixed
     if index >= entry.table_size:
         return None
-    try:
-        return image.u64_at_rva(site.table + 8 * index)
-    except Failure:
-        return None
+    for table in tables_of(image, entry, descriptor):
+        try:
+            return image.u64_at_rva(table + 8 * index)
+        except Failure:
+            continue
+    return None
 
 
 def reported_rewrites(coverage: list[Coverage]) -> int:

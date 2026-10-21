@@ -631,6 +631,32 @@ entry:
   return build_module_from(context, k_ir, "variadic-cross.obj");
 }
 
+/// A module with a caller that calls a **declaration** through an EH edge.
+///
+/// The call is an `invoke`: the call may throw, and the landing pad catches
+/// it. The rewrite replaces the callee and leaves the EH edges alone.
+[[nodiscard]] auto build_invoke_cross_module(llvm::LLVMContext& context)
+    -> std::unique_ptr<llvm::Module> {
+  static constexpr std::string_view k_ir = R"(
+declare i32 @__gxx_personality_v0(...)
+declare i32 @external_target(i32 %x)
+
+define i32 @caller(i32 %x) personality ptr @__gxx_personality_v0 {
+entry:
+  %a = invoke i32 @external_target(i32 %x) to label %cont unwind label %lpad
+
+cont:
+  ret i32 %a
+
+lpad:
+  %e = landingpad { ptr, i32 }
+          cleanup
+  ret i32 0
+}
+)";
+  return build_module_from(context, k_ir, "invoke-cross.obj");
+}
+
 /// The policy reader accepts a `cross_module` list, and rejects a malformed
 /// one as a *reported* error.
 void test_cross_module_policy() {
@@ -830,8 +856,51 @@ void test_transform_cross_module_blocked() {
   check(result.cross.direct.size() == 1, "the direct callee is recorded");
 }
 
-/// The virtualizer's analysis -------------------------------------------------
+/// A cross-TU callee that is called through an EH edge is routed too: the
+/// landing pad and the unwind edge stay, and only the callee becomes a
+/// value.
+void test_transform_cross_module_invoke() {
+  llvm::LLVMContext context;
+  const auto module = build_invoke_cross_module(context);
+  if (module == nullptr) {
+    return;
+  }
 
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  policy.cross_module.push_back("external_target");
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  check(selection.cross_matches.size() == 1, "the cross_module entry named the declaration");
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+  check(result.functions[0].rewritten == 1, "the invoke is rewritten");
+  check(result.functions[0].cross == 1, "the rewrite is counted as a cross-TU one");
+  check(result.functions[0].skipped.empty(), "no call is skipped");
+
+  llvm::Function* caller = module->getFunction("caller");
+  check(caller != nullptr, "the caller is still there");
+  if (caller == nullptr) {
+    return;
+  }
+  const auto calls = calls_of(*caller);
+  check(calls.size() == 1, "the caller still makes one call");
+  check(calls.size() == 1 && calls[0]->getCalledFunction() == nullptr, "the invoke is indirect");
+  check(calls.size() == 1 && llvm::isa<llvm::InvokeInst>(calls[0]),
+        "the call is still an invoke: the EH edge is not modelled away");
+  check(caller->getPersonalityFn() != nullptr, "the personality function is still there");
+  std::size_t blocks = 0;
+  for (const llvm::BasicBlock& block : *caller) {
+    (void)block;
+    ++blocks;
+  }
+  check(blocks == 3, "the landing pad is still there");
+}
+
+/// The virtualizer's analysis -------------------------------------------------
 /// The analysis of a function, with a fixed seed.
 ///
 /// The seed is fixed so that the test does not depend on the build: the
@@ -1481,6 +1550,7 @@ auto main() -> int {
   test_transform_cross_module();
   test_transform_cross_module_not_named();
   test_transform_cross_module_blocked();
+  test_transform_cross_module_invoke();
   test_vm_virtualizable();
   test_vm_parallel_copy();
   test_vm_flags();

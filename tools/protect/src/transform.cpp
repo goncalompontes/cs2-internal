@@ -123,11 +123,16 @@ void permute(std::vector<llvm::Function*>& callees, std::uint64_t seed) {
       return CallSkipReason::external_callee;
     }
     // The declaration is one the policy named: it has no code in this module
-    // either, but the caller routes it through its own table. The rules that
-    // do not depend on the callee's code still apply.
-    if (llvm::isa<llvm::InvokeInst>(call)) {
-      return CallSkipReason::invoke;
-    }
+    // either, but the caller routes it through its own table.
+    //
+    // The `invoke` rule does not hold here either. The rule exists because
+    // the pass does not model the EH edges, and the rewrite does not model
+    // them either: it replaces the *callee* and leaves the landing pad and
+    // the unwind edge exactly as they are. The parent's measurement of the
+    // tree counted the cross-TU calls that are EH edges among the ordinary
+    // ones (the rule order reported them as `external_callee`, so the
+    // measurement could not tell them apart), and the cross-TU graph cannot
+    // be closed while they stay direct.
     if (callee->hasFnAttribute(llvm::Attribute::OptimizeNone)) {
       return CallSkipReason::optnone_callee;
     }
@@ -340,7 +345,7 @@ auto transform_module(llvm::Module& module, const Config& config,
 
   // The call sites that are rewritten, and the callees they name.
   struct Site {
-    llvm::CallInst* call{nullptr};
+    llvm::CallBase* call{nullptr};
     llvm::Function* callee{nullptr};
     std::size_t function{0};  ///< the index of the caller in `result.functions`.
     std::size_t slot{0};
@@ -393,8 +398,11 @@ auto transform_module(llvm::Module& module, const Config& config,
           }
           continue;
         }
-        auto* direct_call = llvm::dyn_cast<llvm::CallInst>(call);
-        if (direct_call == nullptr) {
+        if (!llvm::isa<llvm::CallInst>(call) && !cross) {
+          // Only a plain `call` is rewritten, unless the callee is a
+          // declaration the policy named: an `invoke` to it keeps its
+          // landing pad and its unwind edge, and only the callee becomes a
+          // value.
           continue;
         }
         if (callee == nullptr) {
@@ -403,7 +411,7 @@ auto transform_module(llvm::Module& module, const Config& config,
         if (std::find(callees.begin(), callees.end(), callee) == callees.end()) {
           callees.push_back(callee);
         }
-        sites.push_back(Site{direct_call, callee, function_index, 0, cross});
+        sites.push_back(Site{call, callee, function_index, 0, cross});
       }
     }
     result.functions.push_back(std::move(transform));
