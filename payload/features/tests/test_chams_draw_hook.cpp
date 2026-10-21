@@ -52,11 +52,13 @@
 // `scripts/release.sh` builds and every `assert` would be compiled out — a
 // test that only bites in the debug build is not a test).
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -65,6 +67,7 @@
 #include <thread>
 #include <vector>
 
+#include "cs2/features/chams.hpp"
 #include "cs2/features/guard_scope.hpp"
 #include "cs2/features/hook_target.hpp"
 #include "cs2/features/recursion_guard.hpp"
@@ -484,6 +487,11 @@ void test_the_tree_holds_one_guard(const std::filesystem::path& features) {
 // the caller's buffer — a heap allocation on the render thread, every frame.
 // The sibling providers (`Service::rage_status`, `movement_status`) write
 // straight into the caller's fixed buffer, and so does this one now.
+//
+// The **formatting** is a pure function in the header (`chams_status`), so a
+// host test can drive it with the counters at their maximum (the bound
+// below); the payload's own `status_line` only reads the counters and hands
+// them over.
 void test_the_status_line_does_not_allocate(const std::filesystem::path& base) {
   const std::string header =
       strip_comments(read_file(base / "include" / "cs2" / "features" / "chams.hpp"));
@@ -491,6 +499,9 @@ void test_the_status_line_does_not_allocate(const std::filesystem::path& base) {
          "the status line writes into the caller's buffer");
   expect(header.find("auto status_line() const -> std::string") == std::string::npos,
          "the status line does not return a string");
+  expect(header.find("std::snprintf") != std::string::npos,
+         "the status line is written with snprintf");
+  expect(!contains_word(header, "std::string"), "the status line allocates nothing");
 
   const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
   const std::size_t at = source.find("Chams::status_line");
@@ -499,7 +510,6 @@ void test_the_status_line_does_not_allocate(const std::filesystem::path& base) {
     return;
   }
   const std::string body = source.substr(at, source.size() - at);
-  expect(body.find("snprintf") != std::string::npos, "the status line is written with snprintf");
   expect(!contains_word(body, "std::string"), "the status line allocates nothing");
   // The counters the line shows are read through the accessors, so none of
   // them is dead code.
@@ -828,15 +838,22 @@ void test_the_refusal_is_counted(const std::filesystem::path& base) {
 
   // The counters are reported: the status line shows them. The format string
   // is a **string literal**, so this check reads the source as it is (the
-  // stripped source has the literals removed).
+  // stripped source has the literals removed). The literal lives in the
+  // header (the formatting is a pure function there), and the accessors are
+  // read in the source.
+  const std::string header = read_file(base / "include" / "cs2" / "features" / "chams.hpp");
+  // The **format literal**, not the prose: the comments name the fields too.
+  expect(header.find("rec=%llu") != std::string::npos,
+         "the status line shows the recursion breaks");
+  expect(header.find("pool=%llu") != std::string::npos,
+         "the status line shows the pool exhaustion");
+  expect(header.find("tdn=%llu") != std::string::npos, "the status line shows the teardown drops");
+
   const std::string raw = read_file(base / "src" / "chams.cpp");
   const std::size_t at = raw.find("Chams::status_line");
   expect(at != std::string::npos, "the status line is there");
   if (at != std::string::npos) {
     const std::string line = raw.substr(at, raw.size() - at);
-    expect(line.find("rec=") != std::string::npos, "the status line shows the recursion breaks");
-    expect(line.find("pool=") != std::string::npos, "the status line shows the pool exhaustion");
-    expect(line.find("tdn=") != std::string::npos, "the status line shows the teardown drops");
     const std::string stripped = strip_comments(line);
     expect(stripped.find("refused_recursion()") != std::string::npos,
            "the status line reads the recursion counter");
@@ -845,6 +862,101 @@ void test_the_refusal_is_counted(const std::filesystem::path& base) {
     expect(stripped.find("refused_teardown()") != std::string::npos,
            "the status line reads the teardown counter");
   }
+}
+
+// The desc cache's **give-ups** have to be visible.
+//
+// The counter exists to tell the operator that the cache is giving up: while
+// it climbs, the draw path pays two engine reads per *primitive* instead of
+// per *model*, which is the exact cost the cache exists to remove. A counter
+// that is measured and never reported is dead code — and the review's finding
+// was exactly that: the accessor had no caller in the payload.
+void test_the_cache_health_is_reported(const std::filesystem::path& base) {
+  const std::string header = read_file(base / "include" / "cs2" / "features" / "chams.hpp");
+  // The **format literal**, not the prose: the comments name the field too.
+  expect(header.find("tdn=%llu gu=%llu") != std::string::npos,
+         "the status line shows the cache's give-ups");
+
+  const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
+  const std::size_t at = source.find("Chams::status_line");
+  expect(at != std::string::npos, "the status line is there");
+  if (at == std::string::npos) {
+    return;
+  }
+  const std::string body = source.substr(at, source.size() - at);
+  expect(body.find("cache_give_ups()") != std::string::npos,
+         "the status line reads the cache's give-up counter");
+}
+
+// The status line has to fit the overlay's **192-byte** HUD buffer, and the
+// bound is a rule: the counters are 64-bit, so the worst case is every one
+// of them at its maximum. The bound used to be a comment — and the comment's
+// numbers were character counts, not bytes with the NUL — so it is checked
+// here instead, over **every** state the hook can report.
+void test_the_status_line_fits_the_hud_buffer() {
+  constexpr std::size_t HUD_BUFFER = 192;
+  const cs2::features::chams_status::Counters worst{
+      .seen = UINT64_MAX,
+      .drawn = UINT64_MAX,
+      .skipped = UINT64_MAX,
+      .recursion = UINT64_MAX,
+      .exhausted = UINT64_MAX,
+      .teardown = UINT64_MAX,
+      .give_ups = UINT64_MAX,
+  };
+  const std::vector<cs2::features::hook_target::Status> states = {
+      cs2::features::hook_target::Status::idle,
+      cs2::features::hook_target::Status::pending,
+      cs2::features::hook_target::Status::accepted,
+      cs2::features::hook_target::Status::installed,
+      cs2::features::hook_target::Status::no_offset,
+      cs2::features::hook_target::Status::no_module,
+      cs2::features::hook_target::Status::outside_module,
+      cs2::features::hook_target::Status::unreadable,
+      cs2::features::hook_target::Status::mismatch,
+      cs2::features::hook_target::Status::refused,
+  };
+  std::size_t longest = 0;
+  for (const auto status : states) {
+    char buffer[HUD_BUFFER] = {};
+    const std::string_view state = cs2::features::hook_target::describe(status);
+    expect(cs2::features::chams_status::format(state, worst, buffer, sizeof(buffer)),
+           "the worst-case status line fits the 192-byte HUD buffer");
+    // The line and its NUL have to fit: the buffer is 192 **bytes**.
+    expect(std::strlen(buffer) + 1 <= HUD_BUFFER,
+           "the worst-case status line fits the 192-byte HUD buffer with its NUL");
+    longest = std::max(longest, std::strlen(buffer));
+    // The fallback shape drops the **derived** `skip` field, but it keeps the
+    // numbers the operator cannot compute for themselves.
+    const std::string line(buffer);
+    expect(line.find("gu=") != std::string::npos,
+           "the fallback status line still shows the cache's give-ups");
+  }
+  std::printf("the worst-case status line: %zu characters (%zu with the NUL)\n", longest,
+              longest + 1);
+
+  // The normal shape: every counter is on the line.
+  const cs2::features::chams_status::Counters normal{
+      .seen = 1234,
+      .drawn = 56,
+      .skipped = 1178,
+      .recursion = 0,
+      .exhausted = 0,
+      .teardown = 0,
+      .give_ups = 7,
+  };
+  char buffer[HUD_BUFFER] = {};
+  expect(cs2::features::chams_status::format("installed", normal, buffer, sizeof(buffer)),
+         "the normal status line fits the 192-byte HUD buffer");
+  const std::string line(buffer);
+  expect(line.find("hook=installed") != std::string::npos, "the line shows the hook's state");
+  expect(line.find("seen=1234") != std::string::npos, "the line shows the draws seen");
+  expect(line.find("chams=56") != std::string::npos, "the line shows the draws chamsed");
+  expect(line.find("skip=1178") != std::string::npos, "the line shows the draws skipped");
+  expect(line.find("rec=0") != std::string::npos, "the line shows the recursion breaks");
+  expect(line.find("pool=0") != std::string::npos, "the line shows the pool exhaustion");
+  expect(line.find("tdn=0") != std::string::npos, "the line shows the teardown drops");
+  expect(line.find("gu=7") != std::string::npos, "the line shows the cache's give-ups");
 }
 
 }  // namespace
@@ -882,6 +994,8 @@ auto main(int argc, char** argv) -> int {
   test_the_pool_holds_the_concurrent_jobs();
   test_the_chams_use_the_draw_pool(features);
   test_the_refusal_is_counted(features);
+  test_the_cache_health_is_reported(features);
+  test_the_status_line_fits_the_hud_buffer();
 
   if (failures != 0) {
     std::printf("features-chams-draw-hook: %d failed check(s)\n", failures);

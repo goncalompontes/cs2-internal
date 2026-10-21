@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <string>
 #include <string_view>
 
@@ -260,24 +259,10 @@ void __fastcall draw_primitive_detour(void* desc, void* render_context, void* me
                   deferred, stats, layer);
 }
 
-// The state's short form: the description up to its parenthesis, and at most
-// `max_length` characters.
-//
-// The sentence behind the parenthesis is the **log's** business (the refusal
-// is logged in full when it happens); the HUD's line has to hold the
-// counters too, and the counters are what the operator reads.
-[[nodiscard]] auto short_state(std::string_view state, std::size_t max_length) noexcept
-    -> std::string_view {
-  const std::size_t parenthesis = state.find('(');
-  std::size_t length = parenthesis == std::string_view::npos ? state.size() : parenthesis;
-  if (length > max_length) {
-    length = max_length;
-  }
-  while (length > 0 && (state[length - 1] == ' ' || state[length - 1] == '\t')) {
-    --length;
-  }
-  return state.substr(0, length);
-}
+// The state's short form moved to `chams_status::short_state`
+// (`cs2/features/chams.hpp`): the line's formatting is a pure function, so a
+// host test can drive it with the counters at their 64-bit maximum and check
+// that the line still fits the overlay's 192-byte buffer.
 
 }  // namespace
 
@@ -462,9 +447,10 @@ void Chams::on_draw(void* desc, void* render_context, void* mesh_primitive, cons
   }
   // Every draw that reaches the feature's decision is **seen**: the counter
   // answers "how many draws did the hook decide about", and
-  // `seen == drawn + skipped` always. A draw that was **dropped** (the
-  // guard refused it, or the hook was torn down) never reaches the decision,
-  // so it is counted as a refusal instead.
+  // `seen == drawn + skipped` holds at every point in time but for the two
+  // instructions between `seen_++` and the paired increment. A draw that was
+  // **dropped** (the guard refused it, or the hook was torn down) never
+  // reaches the decision, so it is counted as a refusal instead.
   seen_.fetch_add(1, std::memory_order_relaxed);
   // The cheapest way out: with the feature off the draw is forwarded
   // untouched, without touching the engine at all.
@@ -587,9 +573,10 @@ void Chams::on_draw(void* desc, void* render_context, void* mesh_primitive, cons
   // design cannot do that, because the material is never made global.)
   //
   // The counter is moved **before** the call, exactly like the skip paths'
-  // counters: that is what makes `seen == drawn + skipped` hold at *every*
-  // observation and not only between two draws. A reader that caught the
-  // draw in flight used to see seen=1, drawn=0, skipped=0.
+  // counters: that is what makes `seen == drawn + skipped` hold at every
+  // point in time and not only between two draws. A reader that caught the
+  // draw in flight used to see seen=1, drawn=0, skipped=0. The window that
+  // is left is the two instructions between `seen_++` and this increment.
   drawn_.fetch_add(1, std::memory_order_relaxed);
   original(desc, render_context, mesh_primitive, reinterpret_cast<const void*>(override_material),
            material_mode, draw_values, deferred, stats, layer);
@@ -787,48 +774,26 @@ void Chams::report(hook_target::Status status, std::string_view message) noexcep
 }
 
 auto Chams::status_line(char* out, std::size_t size) const noexcept -> bool {
-  if (out == nullptr || size == 0) {
-    return false;
-  }
   // The line is built on the game's render thread, once per frame: it is
   // written straight into the caller's buffer, with no `std::string` and no
   // heap allocation. The description is a `string_view`, so it is printed
   // with a precision (`%.*s`) instead of being copied into a temporary.
-  const std::string_view state = hook_target::describe(hook_status());
-  const int written = std::snprintf(
-      out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu rec=%llu pool=%llu tdn=%llu",
-      static_cast<int>(state.size()), state.data(), static_cast<unsigned long long>(seen()),
-      static_cast<unsigned long long>(drawn()), static_cast<unsigned long long>(skipped()),
-      static_cast<unsigned long long>(refused_recursion()),
-      static_cast<unsigned long long>(refused_exhausted()),
-      static_cast<unsigned long long>(refused_teardown()));
-  if (written >= 0 && static_cast<std::size_t>(written) < size) {
-    return true;
-  }
-  // The line did not fit. The **state** is the only field that can give
-  // room: the counters are what the operator reads (a climbing `pool` means
-  // the chams are eating the scene), so they are the last to go. The state
-  // is cut short and the line is written again.
   //
-  // The bound: the caller's buffer is 192 bytes (the overlay's HUD line),
-  // and the longest line the counters can produce — the counters at their
-  // 64-bit maximum and the longest state — is 220 bytes. The cut brings it
-  // to 183. The overflow needs 10^19 draws (three hundred thousand years at
-  // a million draws a second), so in practice the operator sees the full
-  // state.
-  const std::string_view short_view = short_state(state, 24);
-  const int retry = std::snprintf(
-      out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu rec=%llu pool=%llu tdn=%llu",
-      static_cast<int>(short_view.size()), short_view.data(),
-      static_cast<unsigned long long>(seen()), static_cast<unsigned long long>(drawn()),
-      static_cast<unsigned long long>(skipped()),
-      static_cast<unsigned long long>(refused_recursion()),
-      static_cast<unsigned long long>(refused_exhausted()),
-      static_cast<unsigned long long>(refused_teardown()));
-  // `snprintf` returns the length the line would have had: a length that does
-  // not fit means the line was truncated, and the caller is better off
-  // knowing than showing half a status.
-  return retry >= 0 && static_cast<std::size_t>(retry) < size;
+  // The **give-ups** are on the line: the counter is the desc cache's
+  // health, and a counter the operator cannot see is a counter they cannot
+  // use. The periodic `[state]` log line carries this line verbatim, so the
+  // operator reads it there — the difference between two `[state]` lines is
+  // the cache's health over that window.
+  const chams_status::Counters counters{
+      .seen = seen(),
+      .drawn = drawn(),
+      .skipped = skipped(),
+      .recursion = refused_recursion(),
+      .exhausted = refused_exhausted(),
+      .teardown = refused_teardown(),
+      .give_ups = cache_give_ups(),
+  };
+  return chams_status::format(hook_target::describe(hook_status()), counters, out, size);
 }
 
 }  // namespace cs2::features

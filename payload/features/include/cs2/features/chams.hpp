@@ -55,6 +55,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <string_view>
 
@@ -248,6 +249,11 @@ class DescCache {
   // It is zero in the quiet case (the writer holds the slot for a handful of
   // stores, so the first retry normally succeeds) and it climbs under
   // sustained contention.
+  //
+  // It is **reported**: the status line shows it as `gu=` (see
+  // `chams_status` below), because the counter exists to tell the operator
+  // that the cache is giving up — and a counter nobody can see is a counter
+  // nobody reads.
   [[nodiscard]] auto give_ups() const noexcept -> std::uint64_t {
     return give_ups_.load(std::memory_order_relaxed);
   }
@@ -350,6 +356,118 @@ class DescCache {
   mutable std::atomic<std::uint64_t> give_ups_{0};
 };
 
+// The chams' **status line**: the numbers the operator reads.
+//
+// The line is built on the game's render thread, once per frame, and it is
+// written straight into the caller's buffer: it must not allocate, and it
+// must fit the overlay's 192-byte HUD buffer.
+//
+// The formatting is a **pure function** of the state and the counters, so a
+// host test can drive it with the counters at their 64-bit maximum and check
+// that the line still fits. The bound used to be a comment, and a comment is
+// not a bound: it is a number nobody re-checks when the next counter is
+// added.
+//
+// **Two shapes.** The full one, and a fallback for the case where the
+// counters are at their 64-bit maximum (which needs 10^19 draws). The
+// fallback cuts the state short and drops the **derived** `skip` field — it
+// is exactly `seen - chams`, so the line still carries the information — and
+// keeps the numbers the operator cannot compute: the three refusal causes
+// and the cache's give-ups.
+namespace chams_status {
+
+// The counters the line shows.
+struct Counters {
+  // The draws that reached the feature's decision.
+  std::uint64_t seen = 0;
+  // The draws that were re-drawn with the chams' material.
+  std::uint64_t drawn = 0;
+  // The draws that were forwarded untouched.
+  std::uint64_t skipped = 0;
+  // The draws the guard refused because this thread was already inside.
+  std::uint64_t recursion = 0;
+  // The draws the guard refused because its pool was exhausted.
+  std::uint64_t exhausted = 0;
+  // The draws that arrived while the hook was being torn down.
+  std::uint64_t teardown = 0;
+  // The desc cache's **give-ups**: the lookups that gave up on a slot that
+  // never settled, so the draw path paid two engine reads per *primitive*
+  // instead of per *model*.
+  std::uint64_t give_ups = 0;
+};
+
+// How much of the state the fallback keeps.
+inline constexpr std::size_t STATE_CUT = 24;
+
+// The state's short form: the description up to its parenthesis, and at most
+// `max_length` characters.
+//
+// The sentence behind the parenthesis is the **log's** business (the refusal
+// is logged in full when it happens); the HUD's line has to hold the counters
+// too, and the counters are what the operator reads.
+[[nodiscard]] inline auto short_state(std::string_view state, std::size_t max_length) noexcept
+    -> std::string_view {
+  const std::size_t parenthesis = state.find('(');
+  std::size_t length = parenthesis == std::string_view::npos ? state.size() : parenthesis;
+  if (length > max_length) {
+    length = max_length;
+  }
+  while (length > 0 && (state[length - 1] == ' ' || state[length - 1] == '\t')) {
+    --length;
+  }
+  return state.substr(0, length);
+}
+
+// The line.
+//
+// Returns false when the buffer cannot hold the line (it was truncated).
+[[nodiscard]] inline auto format(std::string_view state, const Counters& counters, char* out,
+                                 std::size_t size) noexcept -> bool {
+  if (out == nullptr || size == 0) {
+    return false;
+  }
+  // The full shape: the state, and every counter.
+  const int written = std::snprintf(
+      out, size, "hook=%.*s seen=%llu chams=%llu skip=%llu rec=%llu pool=%llu tdn=%llu gu=%llu",
+      static_cast<int>(state.size()), state.data(), static_cast<unsigned long long>(counters.seen),
+      static_cast<unsigned long long>(counters.drawn),
+      static_cast<unsigned long long>(counters.skipped),
+      static_cast<unsigned long long>(counters.recursion),
+      static_cast<unsigned long long>(counters.exhausted),
+      static_cast<unsigned long long>(counters.teardown),
+      static_cast<unsigned long long>(counters.give_ups));
+  if (written >= 0 && static_cast<std::size_t>(written) < size) {
+    return true;
+  }
+  // The line did not fit. The **state** and the **derived** `skip` are the
+  // fields that give room: the counters are what the operator reads (a
+  // climbing `pool` means the chams are eating the scene), and the cache's
+  // give-ups are the cache's health.
+  //
+  // The bound: the caller's buffer is 192 bytes (the overlay's HUD line).
+  // The full shape is 243 characters at its worst (the seven counters at
+  // their 64-bit maximum and the longest state), and this fallback is 181 —
+  // 182 with the NUL. The full shape is only used when it fits, so the line
+  // never exceeds 191 characters (192 with the NUL): it fits the buffer by
+  // construction, and with the states the hook reports the longest line is
+  // 187 characters (188 with the NUL).
+  const std::string_view cut = short_state(state, STATE_CUT);
+  const int retry = std::snprintf(
+      out, size, "hook=%.*s seen=%llu chams=%llu rec=%llu pool=%llu tdn=%llu gu=%llu",
+      static_cast<int>(cut.size()), cut.data(), static_cast<unsigned long long>(counters.seen),
+      static_cast<unsigned long long>(counters.drawn),
+      static_cast<unsigned long long>(counters.recursion),
+      static_cast<unsigned long long>(counters.exhausted),
+      static_cast<unsigned long long>(counters.teardown),
+      static_cast<unsigned long long>(counters.give_ups));
+  // `snprintf` returns the length the line would have had: a length that does
+  // not fit means the line was truncated, and the caller is better off
+  // knowing than showing half a status.
+  return retry >= 0 && static_cast<std::size_t>(retry) < size;
+}
+
+}  // namespace chams_status
+
 class Chams {
  public:
   Chams() = default;
@@ -434,6 +552,16 @@ class Chams {
   [[nodiscard]] auto refused_teardown() const noexcept -> std::uint64_t {
     return refused_teardown_.load(std::memory_order_relaxed);
   }
+  // The desc cache's **give-ups**: the lookups that gave up on a slot that
+  // never settled.
+  //
+  // This is the cache's health: while it climbs, the draw path pays two
+  // engine reads per *primitive* instead of per *model*, which is the exact
+  // cost the cache exists to remove. It is reported in the status line
+  // (`gu=`).
+  [[nodiscard]] auto cache_give_ups() const noexcept -> std::uint64_t {
+    return desc_cache_.give_ups();
+  }
   [[nodiscard]] auto original() const noexcept -> void* {
     return hook_.original();
   }
@@ -459,11 +587,17 @@ class Chams {
 
   // The one-line status the payload's status block and the overlay's chams
   // line show: the hook's state, the draws seen, the draws chamsed, the
-  // draws skipped and the draws the feature refused.
+  // draws skipped, the draws the feature refused and the desc cache's
+  // give-ups.
   //
   // It is written into the caller's buffer and **never allocates**: the line
   // is built on the game's render thread, once per frame, and a heap
   // allocation there is a heap allocation in the game's frame budget.
+  //
+  // The line is the overlay's **and** the log's: the periodic `[state]` line
+  // carries it verbatim, so the operator reads the give-ups there — the
+  // difference between two `[state]` lines is the cache's health over that
+  // window.
   //
   // Returns false when the buffer cannot hold the line (it was truncated).
   [[nodiscard]] auto status_line(char* out, std::size_t size) const noexcept -> bool;
@@ -573,11 +707,13 @@ class Chams {
   std::atomic<hook_target::Status> reported_status_{hook_target::Status::idle};
   // The counters: every draw that reached the decision, the draws re-drawn
   // with the chams' material and the draws forwarded untouched. `seen ==
-  // drawn + skipped` holds at **every** instant — the draw's counter is
-  // moved before the call into the original, exactly like the skip paths' —
-  // so a reader that catches a draw in flight does not see the relation
-  // broken. (A reader that reads the three counters one after another can
-  // still see a torn combination: the counters are not read as one snapshot.)
+  // drawn + skipped` holds at every point in time **except** the few
+  // instructions between `seen_++` and the paired `drawn_++`/`skipped_++` —
+  // the draw's counter is moved before the call into the original, exactly
+  // like the skip paths', so the window is two instructions wide and not the
+  // whole draw. (A reader that reads the three counters one after another
+  // can still see a torn combination: the counters are not read as one
+  // snapshot.)
   //
   // They are **not** reset: the reset was three separate stores on the
   // payload's thread while the render threads were incrementing the same
