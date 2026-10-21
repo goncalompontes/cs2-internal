@@ -518,6 +518,7 @@ if python.found()
     ['registry', 'test_registry'],
     ['mcp', 'test_mcp'],
     ['settings-table', 'test_settings_table'],
+    ['sdk-generator', 'test_sdk_generator'],
   ]
   foreach suite : scenario_suites
     test('scenario-' + suite[0], python,
