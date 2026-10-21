@@ -24,7 +24,7 @@ plugin reads the **installed**
 `node scripts/install.mjs --config` copies it there. Editing the source alone
 changes nothing until the install runs again.
 
-The installed copy is a **build of the source repository**, not the source
+The installed copy is a **copy of the source repository**, not the source
 itself: `node scripts/install.mjs` copies `orchestration\` to
 `<config>\orchestration\` and `plugins\orchestration.ts` to
 `<config>\plugins\orchestration.ts`; `--config` installs the project
@@ -51,13 +51,13 @@ runtime as `tools.orchestrate.*`.
 | tool | what it does |
 |---|---|
 | `plan({name, spec \| spec_file, base?, project?, sparse?, no_seed?})` | creates the task's worktree on `<prefix><name>` off the integration tip, seeds it (shared assets, shared dependencies, build directories **outside** the worktree), writes the spec into it, and returns the **implementer's prompt** |
-| `verify({task?, groups?, skip?, project?})` | runs the project's verify loop in a worktree - what the implementer and the fixer use to check their own work before anyone reviews it |
+| `verify({task, groups?, skip?, project?})` | runs the project's verify loop in a worktree - what the implementer and the fixer use to check their own work before anyone reviews it. The task is named on purpose, and the schema **requires** it: a call without one is rejected before the tool runs, so a verify can never land on the integration tree by accident |
 | `review({commit, task?, base?, spec_file?, focus?, shared?, project?})` | points a review worktree at the commit and returns the **reviewer's prompt** (hostile by construction); the report is written to a fixed path, so the verdict can be read back before the merge |
 | `fix({task? \| branch?, findings?, report?, project?})` | takes the review's findings back to the implementer's worktree and returns the **fixer's prompt** |
 | `merge({branch, message?, task?, skip?, allow_unreviewed?, project?})` | merges the task branch into the integration branch - but only after the verify loop passes on the **merged tree** |
 | `status({project?})` | the task board: ahead, behind, dirty, merged, reviewed, disk usage |
 | `size({project?, task?})` | what makes the worktrees big, and what to do about it; one task, or all of them |
-| `cleanup({task?, merged_only?, apply?, prune_branches?, remove_builds?, project?})` | removes the worktrees that are done with - safely (see [the junction guard](#the-junction-hazard-and-the-guard)) |
+| `cleanup({task?, merged_only?, scratch?, apply?, prune_branches?, remove_builds?, force?, project?})` | removes the worktrees that are done with - safely (see [the junction guard](#the-junction-hazard-and-the-guard)) |
 
 ## The project configuration
 
@@ -99,10 +99,14 @@ reads them: without them the generation writes **empty** SDK headers and the
 payload builds against an empty SDK - a green build against nothing. The
 plugin's configuration lists `calibration` as a shared asset, next to the
 vendored Vulkan headers, but this repository tracks
-`calibration/.gitignore` and `calibration/README.md`, so the directory is
-already in every worktree and the seed leaves a directory that is already
-there alone instead of linking it. **Check that the worktree's `calibration\`
-is the shared copy before trusting a green build.**
+`calibration/.gitignore` and `calibration/README.md`, so a **plain** directory
+is in every worktree. The seed **replaces** it: a tracked directory in the way
+is removed and the shared copy is linked in its place, because the shared copy
+holds the same tracked files plus the generated ones. The worktree's
+`calibration\` **is** the shared copy. **Check that before trusting a green
+build** - a worktree whose `calibration\` is a plain directory again is a
+worktree the SDK generation reads nothing from, and the build is a green
+against nothing.
 
 **The merge verifies before it commits.** It does not commit first and verify
 afterwards: the merge is staged with `--no-ff --no-commit`, the verify loop
@@ -111,7 +115,10 @@ conflict or a red verify loop aborts the merge and leaves the integration tree
 exactly as it was.
 
 The merge also **refuses** a branch that was never reviewed, or one whose
-review said **DO NOT SHIP**, unless `allow_unreviewed: true` is passed.
+review said **DO NOT SHIP**, unless `allow_unreviewed: true` is passed. A
+branch that moved **after** its review is not refused: the **older** review
+still counts, and the merge goes ahead with a warning that the review is of an
+older commit.
 
 ## The worktrees stay small
 
@@ -187,7 +194,19 @@ So the plugin:
 
 `orchestrate.cleanup` is the tool that removes worktrees, and it unlinks
 before it removes. A cleanup that only **reports** - `apply` not set - changes
-nothing. `test/links.test.ts` in the plugin's repository is the test that
+nothing. A worktree with uncommitted changes to a **tracked** file is skipped
+unless `force: true` is passed: the cleanup refuses to throw work away.
+
+**What `merged_only` selects, and what it does not.** A worktree is "merged"
+when its branch is an ancestor of the integration branch. A **detached** review
+worktree has no branch at all, so it is never "merged" and `merged_only: true`
+never selects it - `scratch: true` is what selects the review worktrees, and
+they hold no work (a review produces a report, not a commit). A branch that is
+**not** an ancestor of the integration branch is not selected either, however
+old it looks: those worktrees hold unmerged work. Run the cleanup **without**
+`apply` first and read the list before anything is removed.
+
+`test/links.test.ts` in the plugin's repository is the test that
 holds the line: it creates a junction, unlinks it, and asserts that the
 target's content is still there.
 
