@@ -659,8 +659,11 @@ void check_the_widths(const cs2::protect::VmFunction& function, const std::strin
       case cs2::protect::VmOpcode::BrIf:
       case cs2::protect::VmOpcode::Arg:
       case cs2::protect::VmOpcode::Pop:
-      case cs2::protect::VmOpcode::Pool:
         expect(instruction.width == 8, where + " produces no value: the width must be 8, and not " +
+                                           std::to_string(instruction.width));
+        break;
+      case cs2::protect::VmOpcode::Pool:
+        expect(instruction.width == 8, where + " yields a pointer: the width must be 8, and not " +
                                            std::to_string(instruction.width));
         break;
       case cs2::protect::VmOpcode::MemCpy:
