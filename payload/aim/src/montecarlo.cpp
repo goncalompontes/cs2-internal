@@ -187,8 +187,20 @@ constexpr int MAX_TRACKED_TARGETS = 32;
     // The engine's damage model: the weapon's damage, the hitgroup's multiplier and
     // the range falloff over the distance the bullet travelled (`range_falloff`,
     // `cs2/aim/field.hpp`).
-    sample.damage +=
+    const float pellet_damage =
         input.weapon.damage * hit->multiplier * range_falloff(input.weapon.range_modifier, nearest);
+    sample.damage += pellet_damage;
+    // The **per-pellet attribution**: the damage belongs to **this** pellet's
+    // target, not to the target of the nearest hit. A sample that hit two targets
+    // used to give the second one's damage to the first (the review's M2 bug, one
+    // level down), so the can-kill key compared one target's health with the sum
+    // of two targets' damage.
+    if (sample.pellets_hit < MAX_PELLETS) {
+      const auto slot = static_cast<std::size_t>(sample.pellets_hit);
+      sample.pellet_damage[slot] = pellet_damage;
+      sample.pellet_target[slot] = hit->target;
+      ++sample.pellets_hit;
+    }
     if (!have_nearest || nearest < sample.distance) {
       have_nearest = true;
       sample.distance = nearest;
@@ -335,6 +347,14 @@ auto sample_seed(const SeedContext& context, const Vec2& aim, int index, int sam
 }
 
 auto hitbox_valid(const Hitbox& hitbox) noexcept -> bool {
+  // The **damage multiplier** is checked with the geometry: a NaN one makes every
+  // damage product a NaN, and every comparison against a NaN is false — so the
+  // selection rule kept the first candidate regardless of its quality and returned
+  // a NaN verdict with no error (the review's G1). The multiplier is a number the
+  // solver multiplies with, so it has to be a number.
+  if (!std::isfinite(hitbox.multiplier)) {
+    return false;
+  }
   if (hitbox.is_capsule) {
     // A capsule is a segment thickened by its radius: both the endpoints and the
     // radius must be finite, and the radius must be positive (the span code uses
@@ -427,10 +447,18 @@ auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
     }
     ++chance.hits;
     damage_total += sample->damage;
-    for (std::size_t slot = 0; slot < input.targets.size(); ++slot) {
-      if (input.targets[slot].index == sample->target) {
-        damage_by_target[slot] += sample->damage;
-        break;
+    // The **per-pellet** attribution: every pellet that hit credited the target it
+    // hit, with the damage it did there. The sample's whole damage used to be
+    // credited to the target of the nearest hit, so a multi-pellet shot that hit two
+    // targets gave the second one's damage to the first (the review's M2 bug, one
+    // level down).
+    for (int pellet = 0; pellet < sample->pellets_hit; ++pellet) {
+      const auto pellet_slot = static_cast<std::size_t>(pellet);
+      for (std::size_t slot = 0; slot < input.targets.size(); ++slot) {
+        if (input.targets[slot].index == sample->pellet_target[pellet_slot]) {
+          damage_by_target[slot] += sample->pellet_damage[pellet_slot];
+          break;
+        }
       }
     }
     if (!have_nearest || sample->distance < nearest ||
