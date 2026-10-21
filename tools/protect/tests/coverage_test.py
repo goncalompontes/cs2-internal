@@ -34,6 +34,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import check_policy  # noqa: E402
+import check_payload  # noqa: E402
+from check_payload import check_cross_module_entries, check_direct_callees  # noqa: E402
 from protect_checks import Coverage, Failure, PeImage, read_coverage  # noqa: E402
 
 
@@ -318,6 +320,122 @@ def run_check_policy(policy: Path, coverage: Path) -> int:
         return check_policy.main(["--policy", str(policy), "--coverage", str(coverage)])
 
 
+def expect_failure(action, *args) -> None:
+    """The action has to fail: the rule it holds is the one under test."""
+    try:
+        action(*args)
+    except Failure:
+        return
+    raise TestFailure(f"{action.__name__} did not fail")
+
+
+def expect_success(action, *args) -> None:
+    """The action must not fail."""
+    try:
+        action(*args)
+    except Failure as error:
+        raise TestFailure(f"{action.__name__} failed: {error}")
+
+
+def check_the_payload_rules(root: Path) -> None:
+    """The two payload-level rules of the cross-module routing.
+
+    They are the rules the acceptance of the task rests on, and they are
+    pure functions of the coverage and of the payload's own symbol set:
+
+    * a `cross_module` entry that names a symbol the payload does not
+      define is **stale** -- the function is gone, and the entry protects
+      nothing;
+    * a protected function may not call the payload's own code **directly**.
+      The `sret` edges are the only exception: this task does not narrow
+      the `sret` rule.
+
+    The test drives them with the coverage a plugin would write, so that a
+    rule that rots (a rule that is neutered, or one that stops reading the
+    coverage) fails the suite instead of passing silently.
+    """
+    tree = root / "rules-tree"
+    (tree / "payload").mkdir(parents=True)
+    source = tree / "payload" / "solver.cpp"
+    source.write_text("int main() { return 0; }\n", encoding="utf-8")
+    # A second module: the coverage of one module is the evidence of that
+    # module, and the rules have to decide per (module, symbol).
+    other = tree / "payload" / "field.cpp"
+    other.write_text("int main() { return 0; }\n", encoding="utf-8")
+
+    policy = root / "rules-policy.json"
+    policy.write_text(
+        '{"protect": ["cs2::aim::solve"], "cross_module": ["cs2::aim::own"]}\n',
+        encoding="utf-8",
+    )
+    policy_digest = digest_of(policy.read_bytes())
+
+    coverage = root / "rules-coverage"
+    coverage.mkdir()
+
+    #: The symbols the payload's own libraries define.
+    payload = {"?own@aim@cs2@@YAXXZ", "?sret@aim@cs2@@YAXXZ"}
+
+    def with_cross(name: str, symbol: str) -> list[Coverage]:
+        """The coverage of one module, with a `cross_module` match."""
+        target = coverage / name
+        write_coverage(target, policy_digest, source, 7,
+                       cross=f"cross matched cs2::aim::own {symbol}\n")
+        return [Coverage(target)]
+
+    def with_direct(name: str, symbol: str, reason: str,
+                    module: Path = source) -> list[Coverage]:
+        """The coverage of one module, with a callee that stayed direct."""
+        target = coverage / name
+        write_coverage(target, policy_digest, module, 7,
+                       direct=f"direct {symbol} {reason}\n")
+        return [Coverage(target)]
+
+    # A `cross_module` entry that names a symbol the payload does not
+    # define is stale: the build has to fail.
+    expect_failure(check_cross_module_entries,
+                   with_cross("0x1.cov", "?gone@aim@cs2@@YAXXZ"), payload)
+    # The entry that names a symbol the payload does define passes.
+    expect_success(check_cross_module_entries,
+                   with_cross("0x2.cov", "?own@aim@cs2@@YAXXZ"), payload)
+
+    # A protected function that calls the payload's own code directly is a
+    # failure -- the callee is the payload's own code.
+    expect_failure(check_direct_callees,
+                   with_direct("0x3.cov", "?own@aim@cs2@@YAXXZ", "external_callee"), payload)
+    # The `sret` edges are excepted: the rule is not narrowed by this task.
+    expect_success(check_direct_callees,
+                   with_direct("0x4.cov", "?sret@aim@cs2@@YAXXZ", "indirect_parameter"), payload)
+    # A callee the payload does not own is an import or a CRT symbol: it is
+    # left alone, and the check says how many it left alone.
+    excepted, left_alone = check_direct_callees(
+        with_direct("0x5.cov", "?atan2f", "external_callee"), payload)
+    check(excepted == 0, f"the check excepted {excepted} callees, not 0")
+    check(left_alone == 1, f"the check left {left_alone} callees alone, not 1")
+
+    # The advice names the reason: a callee that the routing cannot route
+    # is not fixed by adding it to the `cross_module` list.
+    try:
+        check_direct_callees(
+            with_direct("0x6.cov", "?own@aim@cs2@@YAXXZ", "variadic_callee"), payload)
+    except Failure as error:
+        message = str(error)
+        check("variadic_callee" in message,
+              f"the advice does not name the reason of the refusal: {message}")
+        check("cannot bypass" in message,
+              f"the advice does not say that the routing cannot bypass the reason: {message}")
+    else:
+        raise TestFailure("a variadic callee did not fail the check")
+
+    # The exception is decided per (module, symbol): a symbol that one
+    # module excepts and another module refuses is a failure, whatever the
+    # order the coverage files are read in.
+    both = (with_direct("0x7.cov", "?own@aim@cs2@@YAXXZ", "indirect_parameter")
+            + with_direct("0x8.cov", "?own@aim@cs2@@YAXXZ", "external_callee", other))
+    expect_failure(check_direct_callees, both, payload)
+    expect_failure(check_direct_callees, list(reversed(both)), payload)
+
+
 def check_the_cross_module_rule(root: Path) -> None:
     """A `cross_module` entry that did not route every call fails the build.
 
@@ -370,6 +488,7 @@ def main() -> int:
         try:
             check_the_readers(root)
             check_the_cross_module_rule(root)
+            check_the_payload_rules(root)
         finally:
             shutil.rmtree(root, ignore_errors=True)
     except TestFailure as error:

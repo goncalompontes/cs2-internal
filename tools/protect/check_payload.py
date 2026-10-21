@@ -23,7 +23,11 @@ through an encrypted descriptor. The image has to survive that:
     payload's own libraries define (read with the SDK's `llvm-nm`);
   * every `cross_module` entry of the policy names a symbol the payload
     defines: an entry that names a symbol that is gone is a stale entry,
-    and it protects nothing.
+    and it protects nothing;
+  * the direct calls the payload's own objects still make to the
+    `cross_module` symbols are **counted**: the routing rewrites the calls
+    of the protected functions only, and the calls of the other functions
+    stay direct. The count is a measurement, not a rule.
 
 The last two are the ones that catch the dangerous failures. The key is a
 compile-time key, so the whole dispatch is a compile-time constant, and a
@@ -93,6 +97,20 @@ BASE_RELOCATION_DIRECTORY = 5
 #: `sret` parameter, and the call stays direct. The check names those
 #: callees instead of failing on them.
 SRET_REASON = "indirect_parameter"
+
+#: The reasons a `cross_module` entry cannot route a callee.
+#:
+#: The routing replaces the callee of a call with a value read from the
+#: table of the caller. It cannot reproduce a variadic call, a tail call or
+#: a call to an `optnone` function, so a callee with one of those
+#: properties stays direct -- and no `cross_module` entry will ever route
+#: it. The advice the check gives has to say so: an advice that says "add
+#: it to the list" sends the operator in a circle.
+UNROUTABLE_REASONS = {
+    "variadic_callee": "the callee is variadic",
+    "musttail": "the call is a tail call",
+    "optnone_callee": "the callee is `optnone`",
+}
 
 #: A symbol of a `llvm-nm` listing: "0000000000000000 T ?solve@aim@cs2@@…".
 NM_SYMBOL = re.compile(r"^(?:[0-9a-fA-F]+)?\s+(?P<type>[A-Za-z])\s+(?P<name>\S+)\s*$")
@@ -363,7 +381,16 @@ def tables_of(image: PeImage, entry: Coverage, slot: int) -> list[int]:
     business, and a linear scan of the disassembly does not model the
     control flow (a table loaded in a loop head is used by a dispatch that
     the scan reaches by another path, and a tail jump copies the table's
-    address into another register).
+    address into another register). It is the **fallback** of the check:
+    the register the dispatch calls through is tracked back to the `leaq`
+    that loaded it, and that table is the module's own table (see
+    `resolve_site`).
+
+    A run of code addresses in the read-only data may be **longer** than the
+    table: the linker may put two tables next to each other, or a global
+    that holds a code address right after the table. Every start of the
+    table inside the run is therefore tried, and the descriptor that
+    follows it decides which one it is.
     """
     data = image.section_of(".rdata")
     if data is None:
@@ -379,10 +406,12 @@ def tables_of(image: PeImage, entry: Coverage, slot: int) -> list[int]:
             continue
         if run is None:
             continue
-        if (rva - run) // 8 == entry.table_size:
-            descriptor = descriptor_after(image, rva, entry, mixed, slot)
+        for start in range(run, rva, 8):
+            if start + 8 * entry.table_size > rva:
+                break
+            descriptor = descriptor_after(image, start + 8 * entry.table_size, entry, mixed, slot)
             if descriptor is not None:
-                candidates.append(run)
+                candidates.append(start)
         run = None
     return candidates
 
@@ -452,6 +481,19 @@ def resolve_site(image: PeImage, site: DispatchSite, entry: Coverage) -> int | N
     index = image.u64_at_rva(descriptor) ^ mixed
     if index >= entry.table_size:
         return None
+
+    # The **tracked** table is the primary source: the register the dispatch
+    # calls through was loaded with the address of the table of the module,
+    # and the dispatch reads *that* table. The link between the dispatch and
+    # its own table is what the content scan gives up, and the scan is only
+    # the fallback for the sites where the tracking failed (the backend may
+    # copy the address of the table into another register, and then the
+    # `leaq` the tracking looks for is not there).
+    if site.table is not None:
+        try:
+            return image.u64_at_rva(site.table + 8 * index)
+        except Failure:
+            pass
     for table in tables_of(image, entry, descriptor):
         try:
             return image.u64_at_rva(table + 8 * index)
@@ -506,6 +548,122 @@ def library_symbols(nm: Path, directory: Path) -> set[str]:
     return symbols
 
 
+#: The header of a relocation block of `llvm-objdump -r`:
+#: "RELOCATION RECORDS FOR [.text]:".
+RELOCATION_SECTION = re.compile(r"^RELOCATION RECORDS FOR \[(?P<section>[^\]]+)\]:\s*$")
+
+#: A relocation of `llvm-objdump -r`:
+#: "0000000000000088 IMAGE_REL_AMD64_REL32    ??2@YAPEAX_K@Z".
+RELOCATION = re.compile(
+    r"^(?P<offset>[0-9a-fA-F]{16})\s+(?P<kind>IMAGE_REL_AMD64_\w+)\s+(?P<symbol>\S+)\s*$"
+)
+
+#: The relocation of a direct call (and of a direct jump) on x64.
+IMAGE_REL_AMD64_REL32 = "IMAGE_REL_AMD64_REL32"
+
+#: How many objects are read in one `objdump` call. The command line has a
+#: limit, and one call per object would cost a process per file.
+OBJECT_BATCH = 40
+
+
+def direct_calls(objdump: Path, directory: Path, symbols: set[str]) -> dict[str, int]:
+    """The direct calls the payload's own objects still make to the symbols.
+
+    The scan is at the **object** level: a linked image has no relocation
+    left for an internal call, so the object file is the only place where
+    the direct edges are still visible. A REL32 relocation in `.text`
+    against a symbol of the list is a direct call (or a direct jump) to it.
+
+    The count is a **measurement**, not a rule: the pass rewrites the calls
+    of the *selected* functions, and the calls the other functions make are
+    still direct. The number is what the operator needs to know what the
+    routing hides and what it does not.
+    """
+    if not symbols:
+        return {}
+    objects = sorted(directory.rglob("*.obj"))
+    if not objects:
+        return {}
+    counts: dict[str, int] = {}
+    for batch in _batched(objects, OBJECT_BATCH):
+        section = ""
+        for line in _relocations(objdump, batch).splitlines():
+            header = RELOCATION_SECTION.match(line)
+            if header is not None:
+                section = header.group("section")
+                continue
+            if section != ".text":
+                continue
+            matched = RELOCATION.match(line)
+            if matched is None:
+                continue
+            if matched.group("kind") != IMAGE_REL_AMD64_REL32:
+                continue
+            symbol = matched.group("symbol")
+            if symbol not in symbols:
+                continue
+            counts[symbol] = counts.get(symbol, 0) + 1
+    return counts
+
+
+def _batched(items: list[Path], size: int) -> list[list[Path]]:
+    """The items in batches of `size`."""
+    return [items[index:index + size] for index in range(0, len(items), size)]
+
+
+def _relocations(objdump: Path, objects: list[Path]) -> str:
+    """The relocations of the objects, as `llvm-objdump -r` prints them.
+
+    Only the `.text` section is asked for: the relocations of the other
+    sections are the data's, and there are many more of them.
+    """
+    command = [str(objdump), "-r", "--section=.text"]
+    completed = subprocess.run([*command, *[str(item) for item in objects]],
+                               capture_output=True, text=True)
+    if completed.returncode == 0:
+        return completed.stdout
+    # An objdump that does not know the `--section` flag: the section is in
+    # the output anyway, and the reader skips the ones that are not `.text`.
+    completed = subprocess.run([str(objdump), "-r", *[str(item) for item in objects]],
+                               capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise Failure(
+            f"objdump failed on the objects of '{objects[0].parent}':\n{completed.stderr}"
+        )
+    return completed.stdout
+
+
+def report_direct_calls(coverage: list[Coverage], objdump: Path, directory: Path) -> int:
+    """The direct calls the image still makes to the `cross_module` symbols.
+
+    The `cross_module` list is the operator's declaration of "these cross-TU
+    edges must not be readable", and the routing rewrites the calls of the
+    **protected** functions. The *same* symbols are still called directly by
+    the functions the pass does not protect, and those edges are still in
+    the image.
+
+    The check counts them and prints the number: the routing's claim is
+    about the edges of the protected functions, and the operator has to see
+    what is left. The count is a measurement, not a rule -- the direct
+    calls of the unprotected functions are the payload's business, and the
+    task does not ask the pass to rewrite them.
+    """
+    symbols = {symbol for entry in coverage for _pattern, symbol in entry.cross_symbols()}
+    if not symbols:
+        return 0
+    counts = direct_calls(objdump, directory, symbols)
+    total = sum(counts.values())
+    if not total:
+        return 0
+    names = ", ".join(f"{symbol} ({count})" for symbol, count in sorted(counts.items()))
+    print(
+        f"check_payload: {total} direct calls to a cross_module symbol are still in the "
+        f"payload's own objects: {names}. The pass rewrites the calls of the protected "
+        "functions only: the calls of the functions it does not protect stay direct"
+    )
+    return total
+
+
 def check_cross_module_entries(coverage: list[Coverage], symbols: set[str]) -> None:
     """Every `cross_module` entry has to name a symbol the payload defines.
 
@@ -542,33 +700,51 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
     rule, so a callee that returns a big aggregate keeps its direct call.
     The check names those callees instead of failing on them.
 
+    The exception is decided per **(module, symbol)** pair, not per symbol:
+    the coverage of one module is the evidence of that module, and two
+    modules may disagree about a callee. A symbol that one module excepts
+    and another module refuses for another reason is a failure, whatever
+    the order the coverage files are read in.
+
     The number of the calls it left alone is returned too: the operator
     sees the CRT's symbols that the image still calls directly.
     """
-    direct: dict[str, str] = {}
+    # The reason is a property of the (module, callee) pair.
+    reasons: dict[tuple[str, str], str] = {}
     for entry in coverage:
+        module = entry.module or entry.path.name
         for symbol, reason in entry.direct_callees().items():
-            direct.setdefault(symbol, reason)
+            reasons[(module, symbol)] = reason
+
+    # The reasons of one symbol, over every module that mentions it.
+    per_symbol: dict[str, list[str]] = {}
+    for (_module, symbol), reason in reasons.items():
+        per_symbol.setdefault(symbol, []).append(reason)
 
     failures: list[tuple[str, str]] = []
     excepted: list[str] = []
     left_alone = 0
-    for symbol, reason in sorted(direct.items()):
+    for symbol in sorted(per_symbol):
+        module_reasons = per_symbol[symbol]
         if symbol not in symbols:
             # An import or a CRT symbol the payload does not own: it names
             # no aim function, and it is left alone.
             left_alone += 1
             continue
-        if reason == SRET_REASON:
-            excepted.append(symbol)
+        # The reasons are sorted, so the one that is named does not depend
+        # on the order the coverage files were read in.
+        refused = sorted({reason for reason in module_reasons if reason != SRET_REASON})
+        if refused:
+            failures.append((symbol, refused[0]))
             continue
-        failures.append((symbol, reason))
+        excepted.append(symbol)
 
     if failures:
         names = ", ".join(f"{symbol} ({reason})" for symbol, reason in failures)
+        advice = " ".join(advice_for(reason) for _symbol, reason in failures)
         raise Failure(
             f"{len(failures)} cross-TU callees that a protected function calls directly are "
-            f"the payload's own code: {names}. Add them to the policy's `cross_module` list"
+            f"the payload's own code: {names}. {advice}"
         )
     if excepted:
         print(
@@ -576,6 +752,31 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
             "`sret` rule (this task does not narrow it): " + ", ".join(excepted)
         )
     return len(excepted), left_alone
+
+
+def advice_for(reason: str) -> str:
+    """What the operator has to do about a callee that stayed direct.
+
+    The advice depends on the reason, because the reasons are not the same
+    kind of thing:
+
+    * a callee the policy does not name is refused with `external_callee`,
+      and the `cross_module` list routes it -- the operator has to add it;
+    * a callee the policy **does** name may still stay direct, because the
+      routing cannot reproduce a variadic call, a tail call or a call to an
+      `optnone` function. No `cross_module` entry will ever route it, and
+      an advice that says "add it to the list" sends the operator in a
+      circle.
+    """
+    if reason in UNROUTABLE_REASONS:
+        return (
+            f"The routing cannot bypass `{reason}` ({UNROUTABLE_REASONS[reason]}): the edge "
+            "stays direct, and no `cross_module` entry will route it."
+        )
+    return (
+        "A callee that is not in the policy's `cross_module` list is refused with "
+        "`external_callee`, and the list routes it: add it to the list."
+    )
 
 
 # --- The protected strings ---------------------------------------------------
@@ -1081,6 +1282,13 @@ def main(argv: list[str]) -> int:
                 f"{excepted} cross-TU callees stay direct because of the `sret` rule, and "
                 f"{left_alone} direct calls name a symbol the payload does not own"
             )
+
+            # What the routing does **not** hide: the same symbols are still
+            # called directly by the functions the pass does not protect. The
+            # count is a measurement, not a rule, and the operator has to see
+            # it: the `cross_module` list is about the edges of the protected
+            # functions.
+            report_direct_calls(files, args.objdump, build_directory)
 
             check_protected_strings(protected, unprotected, files, policy)
         else:
