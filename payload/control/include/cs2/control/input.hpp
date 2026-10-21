@@ -635,7 +635,15 @@ class Input {
   // corrected), how many skips (a re-apply that was refused because the
   // capture was not fresh), and the **aim yaw** — the server's value against
   // the client's predicted one — which is the divergence the animfix removes.
-  void set_animfix(bool on) noexcept { animfix_enabled_.store(on); }
+  void set_animfix(bool on) noexcept {
+    animfix_enabled_.store(on);
+    if (!on) {
+      // "Acted" is the last anim tick's verdict, and the apply only runs
+      // while the feature is on — without this the status would keep
+      // reporting "acted" from the last enabled frame.
+      animfix_acted_.store(false);
+    }
+  }
   [[nodiscard]] bool animfix() const noexcept { return animfix_enabled_.load(); }
   // True when both hooks (the codec and the anim tick) are installed.
   [[nodiscard]] bool animfix_ready() const noexcept {

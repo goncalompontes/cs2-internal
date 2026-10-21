@@ -537,6 +537,7 @@ if python.found()
     ['settings', 'test_settings'],
     ['heatmap', 'test_heatmap'],
     ['anti-aim', 'test_anti_aim'],
+    ['animfix', 'test_animfix'],
     ['registry', 'test_registry'],
     ['mcp', 'test_mcp'],
     ['settings-table', 'test_settings_table'],
