@@ -290,11 +290,11 @@ auto ModelPublisher::map() noexcept -> bool {
     }
     shm_path = path_buffer;
   }
-  core::ScopedHandle<void*, core::KernelHandlePolicy> mapping;
+  core::ScopedKernelHandle mapping;
   {
     // The file and the mapping are owned by their wrappers, so every path out
     // of this block releases them.
-    core::ScopedHandle<void*, core::KernelHandlePolicy> file(
+    core::ScopedKernelHandle file(
         CreateFileA(shm_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                     nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
     if (!file.valid()) {

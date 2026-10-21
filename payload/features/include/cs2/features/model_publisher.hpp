@@ -126,9 +126,9 @@ class ModelPublisher {
 #if defined(_WIN32)
   // The segment's file mapping and the publisher's thread. Both are owned by
   // the RAII wrapper, so they are released on every path.
-  core::ScopedHandle<void*, core::KernelHandlePolicy> mapping_{};
+  core::ScopedKernelHandle mapping_{};
   void* shared_ = nullptr;  // wire::Shared*
-  core::ScopedHandle<void*, core::KernelHandlePolicy> thread_{};
+  core::ScopedKernelHandle thread_{};
   // The settings block's publish/adopt protocol (the change latch lives here,
   // not in a global: ADR-0010).
   SettingsProtocol protocol_;

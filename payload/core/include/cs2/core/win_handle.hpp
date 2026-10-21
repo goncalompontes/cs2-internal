@@ -17,6 +17,8 @@
 
 #include <windows.h>
 
+#include "cs2/core/handle.hpp"
+
 namespace cs2::core {
 
 // A Win32 kernel handle, stored opaquely.
@@ -32,5 +34,9 @@ struct KernelHandlePolicy {
     CloseHandle(static_cast<HANDLE>(handle));
   }
 };
+
+// A kernel handle owned by the wrapper: the common case in this tree (files,
+// pipes, threads and file mappings).
+using ScopedKernelHandle = ScopedHandle<KernelHandle, KernelHandlePolicy>;
 
 }  // namespace cs2::core

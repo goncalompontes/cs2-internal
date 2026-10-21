@@ -94,7 +94,7 @@ void log_thread(const THREADENTRY32& entry) noexcept {
   // The handle is owned by the wrapper: it is released on every path out of
   // this function. The wrapper allocates nothing, so this stays usable from
   // the crash handler's cold path.
-  core::ScopedHandle<void*, core::KernelHandlePolicy> thread(
+  core::ScopedKernelHandle thread(
       OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE,
                  entry.th32ThreadID));
   if (!thread.valid()) {
@@ -119,7 +119,7 @@ void report_freeze(unsigned long long stalled_ms) noexcept {
   text += ')';
   cs2::game::append_log(text.view());
 
-  core::ScopedHandle<void*, core::KernelHandlePolicy> snapshot(
+  core::ScopedKernelHandle snapshot(
       CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0));
   if (!snapshot.valid()) {
     return;
