@@ -2935,11 +2935,13 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
     payload.set("mc_seed", Json::string(std::string(seed_source_name(
         static_cast<int>(result.monte_carlo->seed_source)))));
   }
-  if (result.monte_carlo_refusal.has_value()) {
-    payload.set("mc_refusal",
-                Json::string(std::string(aim::to_string(*result.monte_carlo_refusal))));
-    payload.set("mc_fallback", Json::boolean(true));
-  }
+  // The refusal is always reported (empty when there was none), so a fallback
+  // to another objective is never silent.
+  payload.set("mc_refusal",
+              Json::string(result.monte_carlo_refusal.has_value()
+                               ? std::string(aim::to_string(*result.monte_carlo_refusal))
+                               : std::string()));
+  payload.set("mc_fallback", Json::boolean(result.monte_carlo_refusal.has_value()));
 
   // Raw model hitboxes (validation for the exact-hitbox path).
   Json hitboxes = Json::array();
