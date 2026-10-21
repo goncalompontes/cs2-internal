@@ -157,6 +157,36 @@ void test_the_scope_releases_the_guard_on_every_path() {
   expect(scope.entered(), "the thread is not permanently refused");
 }
 
+// The owner is refused even when a **lower** slot has been freed while it was
+// inside.
+//
+// The guard asks "am I already inside?" over **every** slot before it claims
+// one. A single-pass guard that claims the first free slot would let the
+// owner back in through that lower slot, and the recursion would run until
+// the stack overflowed (0xc00000fd) and took the renderer with it.
+//
+// The case is driven here: another owner takes the first slot, this owner
+// takes the next one, the other owner leaves (the first slot is free again)
+// and this owner is still inside.
+void test_the_owner_is_refused_through_a_freed_slot() {
+  RecursionGuard guard;
+  const OwnerId owner = owner_token();
+  const OwnerId other = owner_token() ^ 0x5a5aU;
+  expect(other != owner, "the two owners are different");
+  expect(guard.try_enter(other), "the other owner enters");
+  {
+    Scope mine(guard, owner);
+    expect(mine.entered(), "the owner enters while the other owner holds a slot");
+    // The other owner leaves: its slot is free, and this owner is still
+    // inside.
+    guard.leave(other);
+    Scope recursion(guard, owner);
+    expect(!recursion.entered(), "the owner is refused through the freed slot");
+    expect(guard.depth(owner) == 1, "the refusal does not change the depth");
+  }
+  expect(guard.depth(owner) == 0, "the owner is released");
+}
+
 // **The major finding.** Another thread's call is **not** refused: the scene
 // system draws the scene's primitives in jobs on the tier0 thread pool, and
 // a shared counter would drop the other job's draw.
@@ -472,6 +502,7 @@ auto main(int argc, char** argv) -> int {
   test_the_same_thread_is_refused_the_second_time();
   test_the_guard_is_reusable_after_leaving();
   test_the_scope_releases_the_guard_on_every_path();
+  test_the_owner_is_refused_through_a_freed_slot();
   test_another_thread_is_not_refused();
   test_the_old_process_wide_design_would_have_dropped_the_draw();
   test_many_threads_at_once();

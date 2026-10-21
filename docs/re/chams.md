@@ -605,6 +605,12 @@ a second one appears):
 * the state is one 64-bit word per slot (owner in the high half, depth in
   the low half), so a claim and a release are one compare-exchange: no lock,
   no allocation, no `thread_local`;
+* the guard asks **"am I already inside?" over every slot first**, and only
+  then claims a free one. A single-pass guard that claims the first free
+  slot lets the owner back in through that slot when a lower one has been
+  freed meanwhile, and the recursion then runs until the stack overflows
+  (0xc00000fd) and takes the renderer with it. The host test drives that
+  case (`test_the_owner_is_refused_through_a_freed_slot`);
 * the guard is held **across** the trampoline call — that is the recursion
   it exists to break, so a guard released before the call would protect
   nothing — and it is released on **every** path. The holder
