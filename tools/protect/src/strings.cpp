@@ -129,9 +129,15 @@ constexpr std::string_view k_salt_proof_text = "cs2.protect.salt.proof";
 /// one the payload is built with) gives it `linkonce_odr` linkage, so that
 /// the linker can fold the identical strings of two translation units. The
 /// ODR-safe linkages are therefore accepted as well: the literal is deleted
-/// and replaced by a private blob, and every translation unit that uses the
-/// string protects it as well, so no reference to the deleted symbol is left
-/// behind.
+/// and replaced by a private blob.
+///
+/// That is an **assumption**, not a guarantee: every translation unit that
+/// uses the string has to be built with the plugin and with the same policy.
+/// A translation unit that is not keeps its reference to the deleted symbol,
+/// and the link fails with an unresolved external -- a loud failure, but
+/// the build's, not the pass's. The same assumption is why a literal that
+/// is protected in one module and refused in another is still in the image:
+/// the refused module keeps its copy, and the linker keeps the COMDAT.
 [[nodiscard]] auto is_protectable_linkage(const llvm::GlobalVariable& literal) -> bool {
   return literal.hasPrivateLinkage() || literal.hasInternalLinkage() ||
          literal.hasLinkOnceODRLinkage() || literal.hasWeakODRLinkage();
