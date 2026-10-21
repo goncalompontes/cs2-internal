@@ -597,8 +597,8 @@ The repository's own rule for this class of guard
 So the guard is now the **shared, per-owner** one
 (`payload/features/include/cs2/features/recursion_guard.hpp`, taken from the
 third-person camera's task — the tree holds exactly one implementation of
-it, and the host test `payload/features/tests/test_chams_guard.cpp` fails if
-a second one appears):
+it, and the host test `payload/features/tests/test_chams_draw_hook.cpp` (the
+Meson test `features-chams-draw-hook`) fails if a second one appears):
 
 * the owner is the **OS thread id** (`GetCurrentThreadId()`), so a call from
   another thread is never mistaken for a recursion — it is drawn;
@@ -690,6 +690,225 @@ exploitable — but the strict form is the same length and has no hole.
 |---|---|
 | `payload/features/include/cs2/features/recursion_guard.hpp` | the shared, per-owner guard (taken from the third-person camera's task) |
 | `payload/features/include/cs2/features/guard_scope.hpp` | the holder: entered in the constructor, released in the destructor |
-| `payload/features/tests/test_chams_guard.cpp` | another thread's call is not refused; the scope releases on every path; the tree holds one implementation |
+| `payload/features/tests/test_chams_draw_hook.cpp` (the Meson test `features-chams-draw-hook`) | another thread's call is not refused; the scope releases on every path; the tree holds one implementation |
 | `payload/features/tests/test_chams_target.cpp` | the refusal latch follows the switch, and the refusal is reported again after a re-enable |
 | `payload/features/include/cs2/features/hook_target.hpp` | the pure rules: `may_attempt_install`, `refusal_after_switch`, `must_report` |
+
+---
+
+## 10. The desc cache is safe for two writers (T33)
+
+§9.1 made the guard **per owner**, so two jobs of the tier0 thread pool can
+be inside the draw detour at the same time. That is the guard's whole
+purpose — it refuses a *recursion*, never another job's draw — but it means
+the draw path has **two writers**, and everything it shares has to be safe
+for two.
+
+### 10.1 The protocol that was replaced, and why it was unsafe
+
+The desc cache published its entry with **three separate atomics**, the desc
+last:
+
+```cpp
+entry.entity.store(entity, std::memory_order_relaxed);
+entry.view_model.store(view_model ? 1 : 0, std::memory_order_relaxed);
+entry.desc.store(desc_address, std::memory_order_release);
+```
+
+and read it with an acquire on the desc and relaxed loads on the rest:
+
+```cpp
+if (entry.desc.load(std::memory_order_acquire) == desc_address) {
+  entity = entry.entity.load(std::memory_order_relaxed);
+  view_model = entry.view_model.load(std::memory_order_relaxed) != 0;
+}
+```
+
+That is a protocol that is safe for **one** writer and not for two. Every
+field has its own modification order, so:
+
+* writer A stores `entity=A`;
+* writer B stores `entity=B`;
+* writer A stores `desc=A` (release).
+
+A reader loads `desc` (acquire) and sees `A`; the acquire synchronises with
+A's release, so A's `entity` store is visible. **But** the reader's `entity`
+load is relaxed, and `entity`'s modification order now has B **after** A — so
+the reader may legally observe `entity=B`.
+
+**The result is desc A with entity B**: the chams are decided on the **wrong
+player** (the CT's model chamsed, the T not). The slot is direct mapped
+(`(desc >> 4) & 63`, 64 slots, 16-byte granularity, no probe and no tag), so
+two descs in one slot are the routine case, not an exotic one.
+
+The invalidation was a second race on its own: the cache's stamp was a plain
+`std::uint64_t` written by both render threads, and the clear (64 relaxed
+stores of `desc = 0`) could be **silently undone** by a publisher that was
+mid-publish.
+
+### 10.2 The protocol now: a per-slot seqlock, with the generation inside it
+
+Every slot carries a **sequence word**: odd while a writer is inside the
+slot, even when the entry is stable.
+
+* the **writer** claims the slot by taking the sequence from even to odd (one
+  compare-exchange, `acq_rel`), writes the entry as one unit, and publishes
+  the even sequence again behind a **release fence**;
+* the **reader** takes the sequence (acquire), reads the entry, and takes the
+  sequence again behind an **acquire fence**: if it changed, or if it was odd,
+  the entry it read is not the entry it is looking at, and it retries (a
+  bounded number of times — a writer never blocks a reader, and the reader
+  never allocates).
+
+The entry's own fields are **relaxed**: the sequence is what makes them
+consistent, and the writer's release fence is what publishes them. The
+compare-exchange is `acq_rel` so the claim is visible **before** the entry's
+writes (a reader that sees the odd sequence cannot see the entry first) and
+the entry's writes stay **below** the claim.
+
+The **generation is part of the protocol**. Every entry records the frame
+stamp it was filled for, and the reader only accepts an entry that belongs to
+the current generation. That is what makes the invalidation safe: the
+invalidation **is** the generation, so there is no clear to undo, and a
+publisher that was mid-publish when the frame advanced publishes an entry of
+the *older* generation, which the reader rejects. The cache's own stamp
+member (`desc_cache_stamp_`) is gone — it was the plain, racy mirror of the
+frame stamp, and the generation now travels **with** the entry.
+
+The slot index is unchanged: the collision rate is a property of the scene
+system's desc addresses and not of the protocol.
+
+### 10.3 The probe, and its numbers
+
+The probe is the reviewer's: **four threads, two descs colliding in one
+slot**, driving the **shipped** cache (`cs2::features::DescCache`) — not a
+copy of it. It reports the mismatches it sees (a reader that pairs desc A
+with entity B).
+
+| The protocol | Mismatches | The test |
+|---|---|---|
+| the pre-fix one (three atomics, the desc last) | **132** | **fails** (`the cache never pairs two writes`) |
+| the seqlock | **0** | passes |
+
+The old protocol is also reproduced **inside the test** as the control, and
+the number it reports varies with the run (61, 63, 127, 202, 24 394 …): the
+race is a race, and how often it bites depends on the machine. The number is
+printed, not asserted — a race that does not manifest in one run must not
+fail the suite. The proof that the probe bites is the run against the
+pre-fix protocol in a scratch copy of the tree, whose number is in the
+task's report.
+
+### 10.4 The guard fails **closed** on the draw path
+
+The shared guard's fail-open rationale is the **camera's**: refusing a call
+that is not a recursion would drop a camera update. For the draw path the
+arithmetic is the other way round.
+
+Under fail-open the calling thread is **not recorded in any slot**. So when
+the trampoline comes back on that thread, the guard's first pass does not
+find it — the recursion is **not broken**, and it runs until the stack
+overflows (`0xc00000fd`) and takes the renderer with it. A **refusal** drops
+**one primitive**: a bounded, visible cost.
+
+The policy is therefore **per instance** (`RecursionGuard::Policy`), and the
+default is the camera's (`fail_open`), so the third-person camera's
+behaviour does not change: `camera_guard_{}` is built with the default and
+the chams' `draw_guard_` with `Policy::fail_closed`.
+
+A refusal is now **counted** and reported: the refusal path returned before
+`on_draw`, so it moved no counter at all and a dropped primitive was
+invisible. The status line grew a field:
+
+```
+hook=installed seen=1234 chams=56 skip=1178 refused=0
+```
+
+* `seen` — the draws that reached the feature's **decision**;
+* `chams` — the draws that were re-drawn with the chams' material;
+* `skip` — the draws that were forwarded untouched;
+* `refused` — the draws the feature **dropped**: the ones the guard refused
+  and the ones that arrived while the hook was being torn down.
+
+`seen == chams + skip` holds by construction: a dropped draw never reaches
+the decision, so it is not in `seen` at all.
+
+### 10.5 The counters are not reset
+
+The reset was three separate relaxed stores on the payload's thread while the
+render threads were `fetch_add`ing the same counters, so a `seen` that
+landed between two of the stores left `seen == chams + skip` broken (an
+off-by-one that never healed) for the width of the reset window. The reset
+is **gone**: the operator reads the difference between two `[state]` lines
+(`docs/known-issues.md` §11.1, item 3). A reset that is atomic with respect
+to the increments would need the counters to carry their own epoch and be
+re-based with a compare-exchange on the draw path — a lot of machinery for a
+number nobody reads absolutely.
+
+### 10.6 The trampoline's lifetime
+
+`InlineHook::uninstall()` used to **free** the trampoline and **then** null
+the pointer:
+
+```cpp
+std::memcpy(target_, saved_, patched_size_);
+free_executable(trampoline_, trampoline_size_);   // freed here
+trampoline_ = nullptr;                            // nulled here
+```
+
+A detour that had already read `trampoline_` held a **dangling** pointer and
+called **freed executable memory**. The order is now the mirror of the
+install's:
+
+1. `installed_` → `false` (release): no new caller proceeds;
+2. `trampoline_` → `nullptr` (release): the null is published **before** the
+   trampoline's pages are released, so a detour that enters from here on
+   finds `original() == nullptr` and drops the call;
+3. the target is un-patched: no new detour enters at all;
+4. the trampoline is **retired**, not freed.
+
+Step 4 is what closes the window for a detour that was **already inside**
+when the uninstall happened: the retired trampoline's pages stay mapped, so
+the call it makes is a call into live memory. The pages are released when the
+`InlineHook` itself is destroyed — the point where the feature is torn down
+and no detour can be inside it any more. The cost is a bounded leak: **one
+retired trampoline per uninstall** (for the chams: one per switch-off of the
+feature), and each is a few dozen bytes of code in one page.
+
+The one sentence: **no thread can execute freed trampoline memory, because
+the trampoline's pages are never unmapped while the hook is alive — the null
+is published before the teardown and the retired trampoline stays mapped
+until the hook is destroyed.**
+
+### 10.7 What is still open
+
+1. **The live run.** No live run was possible: the agent session is session
+   0, with no GPU and no interactive desktop. The detour has still never run
+   against the real draw, so the **number** of jobs that overlap in one frame
+   is still not measured.
+2. **The animfix's comment** in `payload/control/src/input.cpp` still says
+   that the hook's publication "is a plain pointer store, which is atomic on
+   x86". It is not any more: the trampoline is published with an **atomic
+   release store**. That file is outside this task's ownership, so the
+   comment is left as it is and is reported with the task.
+3. **The camera's own `g_active`** (`payload/features/thirdperson.cpp`) is a
+   plain pointer with the same shape as the chams' was. It is outside this
+   task's ownership (the camera's behaviour must not change), so it is
+   reported, not fixed.
+4. **The other `g_active`s** — the present hook's (`game_present_hook.cpp`)
+   and the input's (`control/src/input.cpp`) — are the same shape. The
+   present hook runs on the game's own present thread and the input's on the
+   game's tick, so the exposure is smaller, but it is the same exposure.
+
+### 10.8 The evidence index for this section
+
+| Where | What it proves |
+|---|---|
+| `payload/features/include/cs2/features/chams.hpp` | the desc cache: the per-slot seqlock, the generation inside the entry, the fail-closed guard, the `refused` counter |
+| `payload/features/src/chams.cpp` | the publish and read protocol, the atomic `g_active`, the counted refusal, the status line |
+| `payload/features/include/cs2/features/recursion_guard.hpp` | the per-instance policy: `fail_open` (the camera's default) and `fail_closed` (the draw path's) |
+| `payload/hooks/include/cs2/hooks/inline.hpp` | the atomic `trampoline_` / `installed_`, the retired trampolines |
+| `payload/hooks/src/inline.cpp` | the publication order on install and on uninstall, and the deferred free |
+| `payload/features/tests/test_chams_desc_cache.cpp` | the concurrency probe: four threads, two descs in one slot, **zero** mismatches |
+| `payload/features/tests/test_chams_draw_hook.cpp` | the latch clear's **wiring** (H3), the guard's scope **order** (H6), the fail-closed policy, the counted refusal |
+| `payload/hooks/tests/test_inline.cpp` | the trampoline's lifetime: an uninstall while the detour is inside does not free the memory it calls |
+
