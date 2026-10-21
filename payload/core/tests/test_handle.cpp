@@ -252,8 +252,8 @@ auto main() -> int {
   }  // nothing owned, nothing asked
   {
     // A policy that *can* work is asked, and the handle is adopted.
-    PoisonedHandle handle(5, PoisonedPolicy{[&poisoned_closed](int) { ++poisoned_closed; },
-                                             [](int handle) { return handle > 0; }});
+    const PoisonedHandle handle(5, PoisonedPolicy{[&poisoned_closed](int) { ++poisoned_closed; },
+                                                   [](int handle) { return handle > 0; }});
     assert(handle.valid());
     assert(handle.get() == 5);
     assert(poisoned_closed == 0);
