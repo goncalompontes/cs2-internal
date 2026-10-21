@@ -559,6 +559,7 @@ if python.found()
     ['settings-table', 'test_settings_table'],
     ['sdk-generator', 'test_sdk_generator'],
     ['clang-tidy-fix', 'test_clang_tidy_fix'],
+    ['resolve-offsets-offline', 'test_resolve_offsets_offline'],
   ]
   foreach suite : scenario_suites
     test('scenario-' + suite[0], python,

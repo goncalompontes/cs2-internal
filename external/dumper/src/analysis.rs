@@ -3,6 +3,8 @@
 //! This is the seam between the raw scanner and the generated SDK consumed by
 //! the C++ payload. It starts small and grows as analysis progresses.
 
+use std::collections::BTreeMap;
+
 use crate::pattern::{Pattern, Signature};
 use serde::{Deserialize, Serialize};
 
@@ -370,6 +372,44 @@ pub fn known_signatures() -> Vec<Signature> {
     ]
 }
 
+/// The modules that have curated signatures, sorted and de-duplicated.
+///
+/// Derived from [`known_signatures`] itself, so a signature added for a new
+/// module (the chams' `scenesystem.dll`) shows up here with no edit anywhere
+/// else: the offline offset resolver asks the dumper for this list and works
+/// through it.
+pub fn signature_modules() -> Vec<String> {
+    let mut modules: Vec<String> = known_signatures()
+        .iter()
+        .map(|signature| signature.module.clone())
+        .collect();
+    modules.sort();
+    modules.dedup();
+    modules
+}
+
+/// How many curated signatures the registry holds, per module.
+///
+/// The offline offset resolver compares the number of signatures a module
+/// resolved (plus the number that did **not**) against this count: a module
+/// that was not really scanned - a wrong file, a module name that does not
+/// match - shows up as a shortfall instead of a silent success.
+pub fn signature_counts() -> BTreeMap<String, usize> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for signature in known_signatures() {
+        *counts.entry(signature.module.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// How many curated signatures the registry holds for one module.
+pub fn signature_count(module: &str) -> usize {
+    known_signatures()
+        .iter()
+        .filter(|signature| signature.module == module)
+        .count()
+}
+
 /// Resolve every curated signature that targets `module` against a mapped
 /// module image. A signature that does not match is reported as absent so a
 /// build that moved or dropped a global is visible rather than silent.
@@ -394,4 +434,57 @@ pub fn resolve_known(module: &str, bytes: &[u8], base: usize) -> (Vec<Offset>, V
         }
     }
     (resolved, missing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// The modules the curated signatures name. The offline offset resolver
+    /// asks the dumper for this list and works through it, so the modules the
+    /// payload's offsets live in have to be in it.
+    #[test]
+    fn signature_modules_name_the_curated_modules() {
+        let modules = signature_modules();
+        assert!(
+            modules.contains(&"client.dll".to_string()),
+            "client.dll has curated signatures: {modules:?}"
+        );
+        assert!(
+            modules.contains(&"engine2.dll".to_string()),
+            "engine2.dll has curated signatures: {modules:?}"
+        );
+    }
+
+    /// The list is **derived** from the registry, so it cannot drift from it:
+    /// a signature added for a new module (the chams' `scenesystem.dll`)
+    /// shows up without an edit here.
+    #[test]
+    fn signature_modules_match_the_registry() {
+        let from_registry: Vec<String> = known_signatures()
+            .iter()
+            .map(|signature| signature.module.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(signature_modules(), from_registry);
+    }
+
+    /// The counts agree with the registry: they add up to the number of
+    /// signatures, and every module the list names has at least one.
+    #[test]
+    fn signature_counts_match_the_registry() {
+        let counts = signature_counts();
+        let total: usize = counts.values().sum();
+        assert_eq!(total, known_signatures().len());
+        assert_eq!(
+            counts.keys().cloned().collect::<Vec<String>>(),
+            signature_modules()
+        );
+        for (module, count) in &counts {
+            assert!(*count > 0, "{module} has curated signatures");
+            assert_eq!(*count, signature_count(module));
+        }
+    }
 }

@@ -44,6 +44,7 @@ REA, headless). Findings are recorded per subsystem.
 - [`bullet-trace.md`](bullet-trace.md) — the engine's own bullet trace: `FX_FireBullets`, the filter mask `0x1c300b`, `TraceLineIntervals`, the penetration loop
 - [`penetration.md`](penetration.md) — the penetration / damage model: the per-surface `HandleBulletPenetration` loss, the CS2 trace-advance cap
 - [`animfix.md`](animfix.md) — the animation pipeline (AG2): the anim state, the graph inputs, the bone writer, the hitbox link and the animfix hook points
+- [`offsets.md`](offsets.md) — the curated offsets, resolved **offline** (from the module files, no game): the method and the measurement
 
 > Addresses are absolute VAs for the module as loaded at its PE image base
 > (`client.dll`/`engine2.dll`/`schemasystem.dll` → `0x180000000`).
@@ -242,6 +243,14 @@ The payload must never hard-code an RVA (ADR-0012).
 3. Regenerate the SDK: `scripts/calibrate-live.py` (live dumps, now covers
    `engine2.dll` too) or the dumper's `--file` mode for offline dumps; the
    payload consumes `payload/sdk/offsets.hpp` via `find_offset("name")`.
+   The offsets alone do **not** need the game:
+   `python scripts/resolve-offsets-offline.py` refreshes
+   `calibration/offsets.json` from the module files on disk (see
+   [`offsets.md`](offsets.md)); the interfaces and the schema still need the
+   live calibration. The offline refresh **refuses** to write a dump that
+   lost a signature - a signature that stops matching is named
+   (`unresolved: <name>`) and the run exits non-zero with the previous dump
+   untouched (`--allow-unresolved` writes the degraded dump on purpose).
 4. Write the findings into `docs/re/<module>.md`: VA **and** RVA, what produces
    the value, the invariant that proves it's the right object, and the
    anchor → steps → address recipe for the next build. The doc is the

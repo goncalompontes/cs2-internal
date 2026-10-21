@@ -41,11 +41,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG = REPO_ROOT / "pyproject.toml"
 
 #: What is checked by default: the whole scenario package, and the Python of
-#: the protection pass (the policy checker and the plugin build script).
+#: the protection pass (the policy checker and the plugin build script) and
+#: of the offline offset resolver.
 PACKAGE = "scripts/scenario"
 TARGETS = [
     PACKAGE,
     "scripts/build-protect-plugin.py",
+    "scripts/resolve-offsets-offline.py",
     "tools/protect",
 ]
 

@@ -399,6 +399,55 @@ Logs (Medium-integrity process writes here, not `C:\`):
 
 ---
 
+## 11a. Refresh the offsets without the game
+
+The **offsets** (`calibration/offsets.json`) do not need a running game: the
+dumper resolves the very same curated signatures from the module's file on
+disk that the live calibration resolves in the process' memory. So a new
+signature becomes usable without launching CS2.
+
+```powershell
+# 1. Build the dumper (if it is not built yet).
+cargo build --release --manifest-path external/dumper/Cargo.toml
+
+# 2. Resolve the curated signatures from the module files and write the dump.
+#    The game directory is discovered from the Steam library folders
+#    (libraryfolders.vdf) - pass --game-dir if the game lives elsewhere.
+python scripts\resolve-offsets-offline.py
+
+# 3. Compare with the existing dump and write nothing (this is the CI mode).
+python scripts\resolve-offsets-offline.py --check
+
+# 4. Render the SDK headers and rebuild the payload.
+python scripts/gen-sdk.py calibration payload/sdk
+meson compile -C build-payload
+```
+
+**Verify:**
+
+```powershell
+python scripts\resolve-offsets-offline.py --check   # "no difference", exit 0
+```
+
+A signature that does **not** match on the installed build is **named** on
+stderr (`unresolved: <name>`) and `--check` exits non-zero — a signature that
+silently stops matching is an offset the payload cannot resolve, so it must
+be visible.
+
+The **write** is refused in the same situation: the dump is not written, the
+exit code is 1 and the previous dump stays untouched. A dump that lost an
+offset is a dump the payload cannot use — the operator sees the missing
+signature by name instead of a success message and a dead feature.
+`--allow-unresolved` writes the degraded dump anyway, on purpose (the run
+says `DEGRADED` and names the signatures it left out).
+
+> The **interfaces** and the **schema** (`calibration/interfaces.json`,
+> `calibration/schema.json`, `calibration/schema_system.json`) come from the
+> live process and still need §11's live calibration. The offline refresh
+> leaves them untouched.
+
+---
+
 ## 12. Static RE: Ghidra + JDK + REA
 
 Read `docs/re/README.md` first — it is the agent playbook (the
@@ -488,6 +537,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\preflight-windows.ps
 meson test -C build                                                                 # 4/4
 Test-Path build-payload\payload.dll, build-injector\injector.exe, build-overlay\cs2_overlay_layer.dll
 cargo test --manifest-path external/dumper/Cargo.toml                               # dumper fixtures
+python scripts\resolve-offsets-offline.py --check                                    # offsets match the installed build
 schtasks /query /tn CS2Launch                                                       # exists
 rea doctor                                                                          # ghidra healthy
 python scripts/run-scenario.py --list                                               # scenarios enumerate
@@ -510,6 +560,7 @@ overlay and confirm the HUD/ESP renders — the Vulkan layer's log should show
 | Game starts but no window / "no GPU available" | launched from session 0. Start it via `CS2Launch` (§7). |
 | `injector.exe` "not built" on second run | Defender quarantined it (§9). |
 | `ping` shows `events_ready/input_ready/state_ready = false`, or an `exec` crashes the game | SDK is stale after a CS2 update → re-run §11 steps 3–5. |
+| The payload cannot find an offset (`find_offset` fails) | the dump is stale → `python scripts\resolve-offsets-offline.py` (§11a). The offsets need no game; the interfaces and the schema still do (§11). |
 | `run-scenario.py` "dumper not built" | `cargo build --release --manifest-path external/dumper/Cargo.toml`. |
 | Client reaches a random/foreign pipe server | you injected twice → kill + relaunch, inject once. |
 | `meson setup` picks the wrong compiler | configure inside a **vcvars64** shell with `CC=CXX=clang-cl`; delete the `build-*/` dir first. |

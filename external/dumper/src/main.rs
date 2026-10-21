@@ -45,9 +45,13 @@ struct Cli {
     #[arg(long)]
     pattern: Option<String>,
 
-    /// Module to scan / inspect (default client.dll).
-    #[arg(long, default_value = "client.dll")]
-    module: String,
+    /// Module to scan / inspect.
+    ///
+    /// In the file mode it names the module the curated signatures are
+    /// looked up under (default: the file's own name); in the live mode it
+    /// names the module in the process (default: client.dll).
+    #[arg(long)]
+    module: Option<String>,
 
     /// List the module's exported names (e.g. to find CreateInterface registrations).
     #[arg(long)]
@@ -81,6 +85,24 @@ struct Cli {
     /// module (see docs/re/client-dll.md) and print the RVAs.
     #[arg(long)]
     resolve_offsets: bool,
+
+    /// Print the modules that have curated signatures (a JSON array) and exit.
+    ///
+    /// The list comes from the signature registry itself, so a signature added
+    /// for a new module shows up without an edit here. The offline offset
+    /// resolver (scripts/resolve-offsets-offline.py) drives it.
+    #[arg(long)]
+    list_signature_modules: bool,
+
+    /// Print how many curated signatures the registry holds per module (a
+    /// JSON object) and exit.
+    ///
+    /// The offline offset resolver compares the number of signatures a module
+    /// resolved against this count, so a module that was not really scanned
+    /// (a wrong file, a module name that does not match) is a shortfall and
+    /// not a silent success.
+    #[arg(long)]
+    list_signature_counts: bool,
 
     /// Read raw bytes at an address (hex) and print them as hex.
     #[arg(long)]
@@ -119,6 +141,9 @@ struct Cli {
     mcp: bool,
 }
 
+/// The module the live mode looks at when --module is not given.
+const DEFAULT_MODULE: &str = "client.dll";
+
 /// Common interfaces used as discovery seeds.
 const DEFAULT_INTERFACE_SEEDS: &[&str] = &[
     "SchemaSystem_001",
@@ -146,6 +171,27 @@ fn main() -> Result<()> {
         ));
     }
 
+    // The modules that have curated signatures: printed and exited (unlike
+    // --exports, which is handled inside analyze()). It needs neither a
+    // process nor a file — the list comes from the signature registry.
+    if cli.list_signature_modules {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&analysis::signature_modules())?
+        );
+        return Ok(());
+    }
+
+    // How many curated signatures the registry holds per module: the
+    // cross-check the offline offset resolver does against a resolution.
+    if cli.list_signature_counts {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&analysis::signature_counts())?
+        );
+        return Ok(());
+    }
+
     // SDK generation from JSON dumps — no process required.
     if let Some(dir) = &cli.gen {
         return generate_sdk(&cli, dir);
@@ -156,18 +202,37 @@ fn main() -> Result<()> {
         let bytes = std::fs::read(path).with_context(|| format!("reading {path}"))?;
         let info = pe::parse_image(&bytes).with_context(|| format!("parsing PE {path}"))?;
         let base = info.image_base as usize;
-        let name = std::path::Path::new(path)
+        let file_name = std::path::Path::new(path)
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_else(|| path.clone());
+        // The module the curated signatures are looked up under: the file's
+        // own name, unless --module names one. A name that does not match
+        // the file is an **error**: it would otherwise resolve nothing at
+        // all and say so quietly. Without --module the file's name is
+        // matched against the registry (case-insensitively), so a file that
+        // is spelled "Client.dll" still resolves the registry's
+        // "client.dll" signatures.
+        let module = match cli.module.as_deref() {
+            Some(name) if !name.eq_ignore_ascii_case(&file_name) => {
+                return Err(anyhow!(
+                    "--module {name:?} does not match the file's name {file_name:?}"
+                ));
+            }
+            Some(name) => name.to_string(),
+            None => analysis::signature_modules()
+                .into_iter()
+                .find(|known| known.eq_ignore_ascii_case(&file_name))
+                .unwrap_or(file_name.clone()),
+        };
         println!(
-            "file {name} — image_base=0x{base:x} size_of_image=0x{:x} ({} exports)",
+            "file {file_name} — image_base=0x{base:x} size_of_image=0x{:x} ({} exports)",
             info.size_of_image,
             info.exports.len()
         );
         // Map to RVA addressing so stored pointers match RVAs.
         let mapped = pe::map_file_to_rva(&bytes, &info);
-        return analyze(&cli, &name, &mapped, base, Some(&info));
+        return analyze(&cli, &module, &mapped, base, Some(&info));
     }
 
     // Live process mode: attach to the target and read it in-process. Under
@@ -228,9 +293,10 @@ fn main() -> Result<()> {
     }
 
     if cli.pattern.is_some() || cli.exports || cli.interfaces || cli.resolve_offsets {
+        let wanted = cli.module.as_deref().unwrap_or(DEFAULT_MODULE);
         let module = mem
-            .module_by_name(&cli.module)
-            .ok_or_else(|| anyhow!("module {:?} not found", cli.module))?;
+            .module_by_name(wanted)
+            .ok_or_else(|| anyhow!("module {:?} not found", wanted))?;
         let bytes = live::read_module_image(&mem, module.base, module.size);
         let info = pe::parse_image(&bytes).ok();
         return analyze(&cli, &module.name, &bytes, module.base, info.as_ref());
@@ -335,6 +401,13 @@ fn analyze(
 
     if cli.resolve_offsets {
         let (offsets, missing) = analysis::resolve_known(module_name, bytes, base);
+        // What was looked at, and how much of it there is. The offline
+        // resolver compares "resolved + unresolved" against the registry's
+        // count, so a module that was not really scanned (a wrong file, a
+        // name that does not match) is a shortfall and not a silent
+        // success.
+        eprintln!("  module: {module_name}");
+        eprintln!("  signatures: {}", analysis::signature_count(module_name));
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&offsets)?);
         } else {
@@ -342,9 +415,13 @@ fn analyze(
             for off in &offsets {
                 println!("  {:<28} rva=0x{:x}", off.name, off.rva);
             }
-            for name in &missing {
-                eprintln!("  unresolved: {name}");
-            }
+        }
+        // The signatures that did **not** match go to stderr in *both* modes:
+        // the JSON mode is the one the calibration scripts use, and a
+        // signature that stopped matching has to be visible there too (the
+        // scripts report it as "unresolved: …").
+        for name in &missing {
+            eprintln!("  unresolved: {name}");
         }
     }
 
