@@ -26,6 +26,27 @@ wins** — it is the later and the narrower statement.
 | **Delivers** | the string selection (a policy section), the fail-closed eligibility gate, the **encryption** of the selected literals, the **runtime key derivation**, the **decode** emitted into the using function, the payload's publication of its image base, the report and the coverage, and the tests that prove the plaintext is gone and the behaviour is unchanged |
 | **Does not deliver** | a runtime-derived key for the **call descriptors** (T19's cipher keeps its build-time key — say so in the README), the **integrity check** (T22), the **per-build polymorphism** of the rest of the image (T24) |
 
+> **MEASURED (2026-10-21, after the reviews): the strings do not leave the
+> image.** The pass deletes the literal's own symbol and the decode is
+> correct, but the MSVC ABI merges a literal with a longer literal that
+> **ends with it** (`movement_thirdperson_fov` holds `thirdperson_fov` at
+> offset 9), so the deleted literal's **bytes** survive inside the longer
+> one. A scan at **every offset** finds **every** protected literal still in
+> the shipped DLL — 858 plaintext occurrences survive against 952 in the
+> unprotected one.
+>
+> So the honest statement of this task is: **the mechanism works, the
+> protection does not.** The deliverable is the mechanism, the measurement
+> that shows the truth, and the knowledge of *why* — which is what the next
+> task (the strings leaving the image) needs. **The check must never print
+> a number it did not measure**, and the README must publish the truth.
+>
+> The two causes, and they are different:
+> 1. **the tail merging** — the bytes survive inside a longer literal;
+> 2. **the payload's own data model** — `constexpr SETTING_TABLE` pins the
+>    feature keys into a global initializer, and a literal that **any**
+>    module refuses survives the link (`linkonce_odr`).
+
 **This task changes the shipped image.** The protected strings must be
 **absent** from it. That is the whole point, and it is checkable.
 
@@ -276,8 +297,12 @@ For every selected literal, in the transform phase:
    folded GEP or a bitcast) — the pass must handle that case, because that is
    how a literal reaches a `std::string_view` construction.
 5. **Emit the decode**: the `alloca` in the entry block of the using
-   function, and the `call @cs2.protect.strdecode` immediately before the
-   first use in that function.
+   function, and the `call @cs2.protect.strdecode` at the **top of the
+   nearest common dominator** of the blocks that hold the uses — so the
+   decode dominates every use and is never emitted after one. (The first
+   version of this spec said "immediately before the first use"; that is
+   wrong, because `Instruction::comesBefore` is only defined **within one
+   basic block**, and across blocks it silently picks the wrong use.)
 6. **Report**: the literal's length, the number of uses, the number of
    functions, the verdict.
 
