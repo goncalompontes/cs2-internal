@@ -36,12 +36,28 @@ tools/protect/
     selection.hpp/.cpp  which functions are protected
     report.hpp/.cpp     what the pass reports, and the coverage file
     transform.hpp/.cpp  the call encryption
+    cipher.hpp/.cpp     the cipher the transform and the virtualizer share
+    vm.hpp              the front end of the virtualizer: the ISA, the frame,
+                        the budgets and the refusal reasons
+    vm_internal.hpp     what the three front-end files share: the type and
+                        the width model
+    vm_gate.cpp         the eligibility gate
+    vm_lower.cpp        the lowering: the IR of a function to the bytecode
+    vm_encode.cpp       the encoder: the container, the encryption and the
+                        per-build opcode permutation
+    isa.def             the instruction set of the virtual machine: the one
+                        source of truth for the opcode numbers
   tests/
     protect_tests.cpp   the plugin's own tests (CTest)
+    vm_values_test.cpp  the values the bytecode computes: the container is
+                        decrypted and executed in an interpreter written from
+                        the contract
     ir_test.py          the shape of the rewritten IR
     diff_test.py        the differential test: the same fixture, with and without
     coverage_test.py    the readers of the coverage: a malformed file is reported,
                         the coverage of another tree is not counted
+    vm_ir_test.py       the front end of the virtualizer: the verdict of every
+                        function, and the proof that the analysis is read-only
 ```
 
 ---
@@ -110,8 +126,26 @@ Visual Studio, `…\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe`.)
 
 They cover the policy reader (a malformed policy is a *reported* error,
 never a crash), the qualified name, the selection (an entry that named a
-function that cannot be protected is *blocked*, not matched) and the
-coverage file (two modules with different identifiers write two files).
+function that cannot be protected is *blocked*, not matched), the
+coverage file (two modules with different identifiers write two files),
+the front end of the virtualizer (the eligibility, the lowering, the
+parallel copy of a PHI, the flags of the arithmetic and the refusal
+reasons), the **values** the bytecode computes (the container is
+decrypted with the keystream of the contract and executed in an
+interpreter written from the contract) and the IR of the analysis (the
+verdict of every function of a fixture, and the proof that the analysis
+does not touch the IR).
+
+There are **six** tests:
+
+```
+  1/6 Test #1: protect-tests ....................   Passed
+  2/6 Test #2: protect-ir-test ..................   Passed
+  3/6 Test #3: protect-diff-test ................   Passed
+  4/6 Test #4: protect-coverage-test ............   Passed
+  5/6 Test #5: protect-vm-values-test ...........   Passed
+  6/6 Test #6: protect-vm-ir-test ...............   Passed
+```
 
 ## 3. Enabling it in the payload build
 
@@ -341,10 +375,26 @@ skipped and why (`not_annotated`, `denied`, `optnone`, `always_inline`,
 its callee), the state of every policy entry (`matched`, `blocked`,
 `unimplemented`, `vanished`, `unmatched`), and a summary line per module.
 
+The analysis of the virtualizer has a line of its own (§14):
+
+```
+[cs2-protect] solver.cpp: vm ?solve@aim@cs2@@YA?AUSolveResult@12@… (cs2::aim::solve) refused reason=eh_pad detail=the function has an EH edge
+[cs2-protect] solver.cpp: vm ?newest@RecordRing@aim@cs2@@QEBAPEBURecord@23@XZ (cs2::aim::RecordRing::newest) virtualizable slots=7 frame=3072 bytecode=392 instructions=15 calls=2
+```
+
+* `virtualizable` — the function could be virtualized, and the numbers say
+  what it would cost: the slots, the frame, the bytecode, the instructions
+  and the calls.
+* `refused reason=… detail=…` — the function cannot be virtualized, and the
+  reason says why. The gate fails **closed**: a function that fails one
+  check is left completely untouched.
+
 ## 8. What the pass does **not** do
 
 * It does not **virtualize** anything. The `virtualized` level is T20; a
-  policy that asks for it fails the build (see §10).
+  policy that asks for it fails the build (see §10). What it does is
+  **analyse**: it says whether a function *could* be virtualized, and what
+  it would cost (§14).
 * It does not touch the calls of a function that is not selected, and it
   does not touch a call it cannot rewrite (§10).
 * It runs from `-O1` up. At `-O0` the driver uses its O0 pipeline, which
@@ -441,7 +491,7 @@ before the optimiser runs, so the pass has **two** extension points:
 | phase | extension point | module flag | job |
 |---|---|---|---|
 | selection | `registerPipelineStartEPCallback` | `cs2.protect.selected` | select the functions, mark them `noinline`, record the selection |
-| transform | `registerOptimizerLastEPCallback` | `cs2.protect.transformed` | rewrite the calls |
+| transform | `registerOptimizerLastEPCallback` | `cs2.protect.transformed` | analyse the selected functions for the virtualizer (§14), rewrite the calls |
 
 The flags are **per phase**: one flag would make the late phase bail out,
 because the early phase would have set it. They are module flags with the
@@ -464,6 +514,13 @@ fixture:
 
 ```
 opt.exe -load-pass-plugin=Cs2Protect.dll -passes=cs2-protect -S fixture.ll
+```
+
+and the analysis of the virtualizer alone, under the name
+`cs2-protect-vm` (§14.9):
+
+```
+opt.exe -load-pass-plugin=Cs2Protect.dll -passes=cs2-protect-vm -S fixture.ll
 ```
 
 ### 10.2 The table, the descriptor and the key
@@ -795,3 +852,470 @@ changes the callers as well.
   the **same length**: a path of a different length shifts the layout of
   the image, and the `.text` section is then genuinely different. The tool
   says so instead of pretending the two images are comparable.
+
+## 14. The front end of the virtualizer
+
+The `virtualized` level (T20) moves the body of a function into an
+interpreter. This section documents the **front end** of that: the
+instruction set, the frame, the budgets, the eligibility gate and the
+encoder. The interpreter and the rewrite of the function are the next
+task; they read this section (and `src/isa.def`) for the contract.
+
+What the front end does today:
+
+* it **decides** whether a selected function can be virtualized, and says
+  why when it cannot (one reason per function);
+* it **lowers** the optimised IR of the function to the bytecode of the
+  virtual machine;
+* it **encodes** that bytecode (encrypted, with a per-build opcode
+  permutation) and reports its size.
+
+What it does **not** do: it does not change the function. The analysis is
+**read-only**: the module comes out of it byte for byte the way it went
+in, and the `vm_ir_test.py` test proves it. The image of a protected build
+is therefore the image of today: the same 37 encrypted dispatches, the
+same import table, the same exports.
+
+### 14.1 The instruction set
+
+The opcodes live in **one** file, `src/isa.def`, written as an X-macro
+list, and every side that needs a number includes it: the encoder of this
+task and the dispatcher of the interpreter. A hand-written copy of the
+table in two places is a table that drifts, and the drift is a silently
+wrong bytecode.
+
+```
+CS2_VM_OPCODE(Const,  0, "dst = imm, extended to the width")
+CS2_VM_OPCODE(Move,  1, "dst = src1, truncated to the width")
+CS2_VM_OPCODE(Add,   2, "dst = src1 + src2, at the width")
+...
+CS2_VM_OPCODE(Pool, 30, "dst = the pool entry imm (a relocatable pointer)")
+```
+
+The number in the file is the **canonical** number: it is dense, it is
+0-based, and it is what the interpreter's switch uses. The number that
+appears in the bytecode is the **permuted** one (§14.5), so the canonical
+number never appears in the image.
+
+| opcode | operands | meaning |
+|---|---|---|
+| `Const` | dst, imm | dst = imm (extended to the width) |
+| `Move` | dst, src1 | dst = src1 (truncated to the width) |
+| `Add` `Sub` `Mul` `And` `Or` `Xor` | dst, src1, src2 | the arithmetic, at the width |
+| `SDiv` `UDiv` `SRem` `URem` | dst, src1, src2 | the division, at the width |
+| `Shl` `LShr` `AShr` | dst, src1, src2 | the shift amount is masked to `width * 8 - 1` (the **width is in bytes**, so the mask is 7, 15, 31 or 63) |
+| `Neg` `Not` | dst, src1 | the negation and the complement, at the width |
+| `Cmp` | dst, src1, src2, aux | dst = 1 if the comparison holds, else 0 |
+| `Cast` | dst, src1, aux | zext / sext / trunc / bitcast |
+| `Load` | dst, src1, aux | dst = *(iN*)src1 |
+| `Store` | src1, src2, aux | *(iN*)src1 = src2 |
+| `Gep` | dst, src1, imm | dst = src1 + imm (a **signed** byte offset) |
+| `Br` | aux | pc = the instruction index in aux |
+| `BrIf` | src1, aux | if src1 != 0, pc = the instruction index in aux |
+| `Arg` | src1 | push src1 onto the argument stack |
+| `Pop` | dst | dst = the top of the argument stack, popped |
+| `Call` | dst, imm, aux | dst = the result, imm = the pool index, aux = the argument count. The arguments are the **top** `aux` cells of the argument stack, and they are in the order of the call: the **first argument of the call is the first one pushed** |
+| `Ret` | src1 | return src1 |
+| `MemCpy` | src1, src2, imm | copies a **constant** number of bytes |
+| `MemSet` | src1, src2, imm | sets a **constant** number of bytes |
+| `Pool` | dst, imm | dst = the pool entry imm (a relocatable pointer) |
+| `Alloca` | dst, imm | dst = the address of the frame's local at the byte offset `imm` |
+
+Three of the opcodes are **not** in the specification's table, and all
+three are there because the table cannot express what the lowering has
+to express:
+
+* **`Pop`** — the parallel copy of a PHI pushes every source and pops
+  every destination in the reverse order (§14.3), and the argument stack
+  is the only stack the frame has. Without a pop, the copy would have to
+  be a *sequential* copy, and a sequential copy breaks a swapping
+  back-edge (the classic `a, b = b, a`).
+* **`Pool`** — the bytecode may hold **indices and relative offsets
+  only**, never an absolute address: the payload is manually mapped and
+  the mapper applies the relocations. The address of a global is
+  therefore not in the bytecode; the **pool** holds it, and the pool is a
+  relocatable global (the linker emits the DIR64 fixups for its
+  entries). The `Call` opcode uses the same pool for the callees: one
+  entry per call site, and the bytecode holds the index. The pool holds
+  the **data** pointers as well (the address of a global), and the
+  opcode tells the two apart.
+* **`Alloca`** — a local variable is a **byte offset into the frame
+  arena** (T20 §2.3), and the frame is an arena. The opcode carries the
+  offset, so the bytecode holds a relative offset and never an address;
+  the interpreter adds the base of the frame to it, and the local is
+  then real memory, like every other pointer of the virtual machine.
+
+A `switch` is lowered to a chain of `Cmp` + `BrIf`. It is not refused.
+
+**The width of each opcode** (§14.2) is part of the contract, and it is
+never 0:
+
+* the opcodes that produce a **value** carry the width of that value:
+  the width of the IR type of the operation (`Const`, `Move`, the
+  arithmetic, `Cmp`, `Cast`, `Load`, `Store`, `Gep`, `Pool`, `Alloca`),
+  and the width of the return type of the callee (`Call`);
+* the opcodes that produce **no** value carry the width of a cell of
+  the frame (**8**): `Br`, `BrIf`, `Arg`, `Pop`, and the `Call` of a
+  function that returns nothing (the uniform signature returns a
+  64-bit value);
+* `MemCpy` and `MemSet` are **byte-wise** and carry **1** (their length
+  is in `imm`);
+* the `Ret` carries the width of the **value it returns**, and 8 for a
+  function that returns nothing.
+
+### 14.2 The encoding
+
+Every instruction is a fixed **24 bytes**:
+
+```
+u8 opcode | u8 width | u8 flags | u8 pad | u16 dst | u16 src1 | u16 src2 | u16 src3 | u32 aux | u64 imm
+```
+
+* `opcode` is the permuted opcode (§14.5);
+* `width` is the width of the operation, in bytes (**1, 2, 4 or 8 — never
+  0**). It is the width of the value the instruction **produces** (§14.1):
+  an instruction that produces no value carries the width of a cell of
+  the frame (**8**), except `MemCpy` and `MemSet`, which are byte-wise
+  and carry **1**. The `Ret` carries the width of the returned value, and
+  8 for a function that returns nothing. **A width of 0 is not a legal
+  value**: an interpreter written against this contract truncates its
+  result to the width, and a width of 0 would truncate it to nothing — it
+  would return 0 from every function and load a null pointer for every
+  global;
+* `flags` carries `nsw` (bit 0), `nuw` (bit 1) and `exact` (bit 2). The
+  flags are **carried**, never dropped: dropping `nsw` turns undefined
+  behaviour into a defined wrap;
+* `dst`, `src1`, `src2` and `src3` are **slot indices**; `0xFFFF` means
+  "no slot" (the budget is 256 slots, so the value cannot be one);
+* `aux` carries the sub-opcode: the kind of a comparison, the kind and
+  the source width of a cast, the target of a branch, the size of a
+  memory access;
+* `imm` carries the immediate, and the index of the pool for `Call` and
+  `Pool`.
+
+The container has a **32 byte header** in front of the stream:
+
+```
+u32 magic          'C','S','2','V'
+u32 version        1
+u32 slot_count     the number of value slots
+u32 arg_slots      the size of the argument-stack region
+u32 call_slots     the size of the call-scratch region
+u32 instruction_count
+u32 flags          bit 0: the container is encrypted, bit 1: the opcodes are permuted
+u32 local_cells    the number of cells the locals take
+```
+
+The header is the **contract** between the encoder and the interpreter:
+the interpreter reads the layout of the frame out of it instead of
+assuming it.
+
+### 14.3 The frame
+
+The frame is a flat array of 64-bit cells, and it is a **constant**: the
+rewritten function (the next task) allocates exactly this, so the
+interpreter's frame is always the same shape and the slot indices are
+absolute.
+
+```
+[0, slot_count)                  the value slots        (256 cells at most)
+[slot_count, +local_cells)       the locals            (the arena above the value slots)
+[slot_count + local_cells, +arg_slots)         the argument stack     (64 cells)
+[slot_count + local_cells + arg_slots, +call)  the call scratch       (64 cells)
+```
+
+**384 cells, 3072 bytes.** The specification's §6 table says 2560 bytes,
+and its formula lists the three regions; 2560 is the size of the *two*
+regions (256 value cells and 64 argument cells) and leaves no room for
+the call scratch that §3.2 names. The front end therefore uses the
+three regions the layout describes, and the report says 3072.
+
+* the **value slots** hold the values: one slot per SSA value, plus the
+  slots of the constants, of the globals and of the temporaries the
+  lowering needs;
+* the **locals** are the cells above the value slots: a local variable
+  is a byte offset into the frame arena (T20 §2.3), and the arena is
+  the frame. The value region holds 256 cells at most, so a function
+  whose locals do not fit is **refused** (`local_variable`);
+* the **argument stack** holds the values that were pushed for a call
+  (`Arg`), and the values of a parallel copy (`Arg` and `Pop`). The
+  pushes and the pops are balanced, so the stack is empty at every
+  statement boundary, and the deepest stack is a call with the most
+  arguments or a parallel copy with the most moves;
+* the **call scratch** holds the arguments of the call in flight: the
+  interpreter copies them out of the argument stack and hands them to
+  the thunk of the call site (§14.6).
+
+**The width model.** A slot holds a 64-bit value, and the IR's integers
+are *signless*: the value of an `i32` is stored **zero-extended**, and a
+signed operation re-interprets the low 32 bits as signed (which is what
+`sext` does). Every operation truncates its result to the width of the
+operation, so an `i32` addition is an `i32` addition: widening it to
+`i64` would change the result on overflow.
+
+An `i1` lives in a byte, and the value of an `i1` is its low bit, so the
+lowering masks every operation whose result is an `i1` (a comparison
+produces zero or one and needs no mask).
+
+**The frame is 8-byte aligned.** The cells are 64 bits wide, and a local
+is a byte offset into the frame (§14.1), so the base of the frame has to
+be a multiple of eight: that is the alignment of a cell, and it is the
+alignment every local may ask for. A local that needs more than eight
+bytes of alignment is **refused** (`local_variable`), so the frame's
+alignment is the only alignment the interpreter has to provide.
+
+### 14.4 The budgets
+
+| budget | value | on overflow |
+|---|---|---|
+| value slots per function | 256 | refused (`too_many_slots`) |
+| call arguments | 64 | refused (`too_many_arguments`) |
+| frame size | 384 cells = 3072 bytes | fixed |
+
+A function that needs more is **refused**, not truncated: a truncated
+function is a miscompile.
+
+### 14.5 The encryption and the permutation
+
+The bytecode is encrypted with a **per-build key**, derived from the
+module seed the way T19 derives its key (`splitmix64` over the module
+seed) and split across **three** constants, so that no single constant
+in the image is the key. The cipher is a counter-mode stream: the word
+at the offset *n* is the mixer of the key and of *n*, and the byte is
+one of its eight. The interpreter decrypts **on fetch**, so the blob
+stays read-only and the interpreter is re-entrant.
+
+The whole container is encrypted, the header included: an analyst reads
+nothing but noise. The header is what the interpreter reads *after* it
+has decrypted it, so there is nothing to gain from leaving it in the
+clear.
+
+**The keystream, exactly.** The word at the byte offset `n` is
+
+```
+mix64(key + (n / 8) * 0x9E3779B97F4A7C15)
+```
+
+and the byte at the offset `n` is its `(n % 8)`-th byte, little
+endian. The mixer is
+
+```
+mix64(v) = rotl((v * 0x9E3779B97F4A7C15) ^ 0xBF58476D1CE4E5B9, 31)
+```
+
+and the key is the xor of the **three** parts of the key, mixed: the
+parts come from `splitmix64` over the module seed, a part that is zero
+becomes one, and two equal parts are redrawn (they would cancel each
+other in the xor). The interpreter decrypts **on fetch**, so the blob
+stays read-only and the interpreter is re-entrant.
+
+The **opcode permutation** is `p(x) = (x * k_a + k_b) mod N`, with `k_a`
+odd and coprime with the number of the opcodes and `k_b` from the module
+seed. The encoder emits `p(x)`; the interpreter maps the fetched byte
+back with `p^-1`. The canonical number never appears in the image, and
+the dispatch table of the interpreter does not have the same shape in
+two builds.
+
+**What the key buys, and what it does not.** This is a **build key**,
+not a runtime key: it stops a scanner from grepping for the key, and it
+makes the blob different in two builds. It does **not** buy anything
+against an analyst who recognises the mixer (they recover the key in
+minutes), and it does not survive a dump of the running process: the
+bytecode is in memory, in the clear, while the interpreter runs. A
+**runtime** key — one that is derived when the process starts and that
+the image never holds — is a later task's job.
+
+### 14.6 The calls
+
+The interpreter cannot call a function with an arbitrary signature (the
+IR has no way to build a call with a dynamic signature, and there is no
+`libffi` in a freestanding payload). The interpreter therefore calls
+through a **uniform signature**, and a **per-call-site thunk** adapts
+the real callee to it:
+
+```
+the interpreter:   u64 thunk(u64* scratch)      // scratch[0..n-1] are the arguments
+the thunk:         loads the arguments out of the scratch array with the
+                   right types, calls the real callee, stores the result
+```
+
+The front end records, per call site, the **symbol of the callee** and
+the **types of its arguments and of its return value**, so that the
+thunk can be emitted. A callee that returns a struct is refused, and a
+callee that returns nothing returns zero.
+
+**The order of the arguments is pinned by the contract.** The lowering
+pushes the arguments of the call onto the argument stack **in the order
+of the call**: the first argument of the call is the first one pushed.
+The interpreter copies the **top** `aux` cells of the argument stack into
+the scratch **in the order they were pushed** — so `scratch[0]` is the
+first argument of the call — and it pops them. The stack pops last in,
+first out, so an interpreter that popped the arguments and wrote them
+into the scratch in the order it popped them would hand the callee its
+arguments **reversed**: the contract says which way it is, because the
+two halves of the virtual machine are written by two different tasks.
+
+A call that returns an `i1` is **masked** by the lowering: the x64 ABI
+defines the low bit of the byte and leaves the other seven undefined, so
+the value of the `i1` is its low bit and nothing else.
+
+### 14.7 The eligibility gate
+
+The gate fails **closed**: a function that cannot be lowered completely is
+left completely untouched, and the reason is reported. There is no "best
+effort" path — a half-lowered function computes garbage, and in a
+manually mapped payload with no exception tables that kills the game.
+
+The gate's checks run first, and the first one that holds is the reason
+that is reported. The table below is the **order of the code**: the
+gate's checks, and then the reasons that come from the lowering. The two
+budget checks are the exception: the argument count is raised in the
+call scan and the slot count when the allocator runs out, so a function
+that exceeds **both** is reported as `too_many_arguments`.
+
+The reasons that come from the **lowering** (`too_many_slots`,
+`unsupported_instruction`, `unsupported_type` and `local_variable`) can
+only be reported after **every** gate check has passed: the gate looks at
+the function, and the lowering looks at its instructions.
+`local_variable` is the last one of the table, because the locals are
+placed after the whole body is lowered — the value slots above them are
+only known at the end.
+
+| reason | refused because |
+|---|---|
+| `eh_pad` | the function has an EH pad, an `invoke`, a `landingpad` or a `resume`: the interpreter cannot model unwinding |
+| `variadic_function` | the function itself is variadic |
+| `variadic_callee` | it calls a variadic callee: the indirect call cannot reproduce the variadic ABI |
+| `indirect_parameter` | a callee has a `byval` / `sret` / `inalloca` / `preallocated` parameter: Windows x64 rejects these in an indirect signature |
+| `musttail` | the tail-call contract does not survive the rewrite |
+| `indirect_call` | it makes an indirect call: there is no relocatable address for the pool |
+| `volatile_access` | a volatile access: the ordering guarantees are not modelled |
+| `atomic_access` | an atomic access: the ordering guarantees are not modelled |
+| `dynamic_memcpy` | a `memcpy` / `memset` with a **non-constant** length: it would lower to a CRT call |
+| `unsupported_type` | a float, a vector, an aggregate or an integer of more than 64 bits: this task handles integers of at most 64 bits and pointers only |
+| `address_taken` | the address of the function is taken (`&F`): the rewrite changes what the address means |
+| `too_many_arguments` | a call needs more arguments than the budget |
+| `recursion` | the function calls itself: the frame would multiply by the recursion depth |
+| `virtualized_callee` | the function calls a function that is itself selected at the `virtualized` level: the interpreter would have to call into another interpreter |
+| `too_many_slots` | the function needs more slots than the budget |
+| `unsupported_instruction` | the catch-all: an IR instruction the lowering does not model. The lowering has a default branch that refuses. |
+| `vanished` | the function did not survive to this phase: there is nothing to virtualize. The transform reports the same thing the same way. |
+| `local_variable` | the function has a local variable that the frame cannot hold: the locals are the cells above the value slots, and a local that does not fit (or one that needs more than eight bytes of alignment, or one whose size is not constant) is refused |
+
+The rules of the transform (§10.4) are **reused**, not written twice:
+the variadic callee, the indirect parameter, the `musttail` call and the
+indirect call are the same rules, and the same reasons. The gate calls
+the transform's `skip_reason` (`src/transform.hpp`) and maps its reasons
+onto the virtual machine's, so the two phases cannot drift apart. The
+**order** is the transform's order — the variadic callee, the indirect
+parameter, the `musttail` call and the indirect call — and the table
+above lists them in that order too. (The specification's §4 table still
+lists the indirect call before the indirect parameter: the table there
+and the order of the code disagree, and the code is the one that is
+right — the two phases have to agree.)
+
+What the lowering models: the integer and pointer arithmetic, the
+comparisons, the conversions, the loads and the stores, the `getelementptr`
+(both the constant and the variable indices), the branches, the `switch`,
+the `select` (a branch), the `phi` (a parallel copy, §14.3), the
+`freeze`, the `alloca` (a byte offset into the frame arena, §14.3), the
+`memcpy` and the `memset` with a constant length, the calls, the
+`ret` and the `unreachable` (a `Ret` of zero: the original is undefined
+behaviour, and what matters is that the interpreter **stops** — the ISA
+has no "stop" opcode, and the `Ret` is what stops it). What it refuses:
+the floats, the aggregates, a local that the frame cannot hold
+(`local_variable`), the `memmove` (it may copy overlapping ranges), the
+atomic and the volatile accesses, and everything else.
+
+**The moves of a PHI belong to the edge.** A PHI becomes edge
+assignments (§14.3): the predecessor performs the moves of the
+successor's PHIs **before its branch, on the edge that leads to the
+successor**. The taken edge of a conditional branch therefore gets a
+trampoline, and every case of a `switch` gets one of its own: the moves
+of an edge that is not taken are not performed. A copy that runs on the
+wrong edge is observable — a back edge that swaps two values would swap
+them even when the loop is left.
+
+### 14.8 What the analysis says about the payload
+
+The analysis runs for **every** selected function, whatever its level,
+and it is in the report (§7) and in the coverage (§9). The coverage
+gains a `vm` line per function:
+
+```
+vm ?newest@RecordRing@aim@cs2@@QEBAPEBURecord@23@XZ verdict=virtualizable slots=12 locals=0 frame=3072 bytecode=392 instructions=15 calls=0
+vm ?solve@aim@cs2@@YA?AUSolveResult@12@… verdict=refused reason=eh_pad detail=the_function_has_an_EH_edge slots=0 locals=0 frame=3072 bytecode=0 instructions=0 calls=0
+```
+
+The section is **new**: a coverage file of an older build has no `vm`
+line, and a reader that does not know the section still reads the file.
+
+With the policy of `tools/protect/policy.local.json` (the six
+`cs2::aim::*` functions), the verdict of every function is:
+
+| function | verdict | why |
+|---|---|---|
+| `cs2::aim::solve` | refused | `eh_pad` (the function has an EH edge) |
+| `cs2::aim::solve_backtrack` | refused | `eh_pad` |
+| `cs2::aim::occlude_polygon` | refused | `eh_pad` |
+| `cs2::aim::project_capsule` | refused | `eh_pad` |
+| `cs2::aim::DamageField::hit_probability` | refused | `unsupported_type` (the return type is a `float`) |
+| `cs2::aim::penetration_survival` | refused | `unsupported_type` (the return type is a `float`) |
+
+**None of them is virtualizable, and that is the honest answer**: the
+aim maths is a float pipeline, and the virtual machine of this task
+handles integers and pointers only. The numbers the operator needs are
+therefore the numbers of the *refusals*, and the first thing to do
+before the next task is to widen the machine (the floats) or to narrow
+the ambition (the integer helpers).
+
+The gate is not empty, though. The numbers below are **measured**: they
+come from a protected payload build with the policy
+`{"protect": ["cs2::aim::*"]}`, and they are the `vm` lines of that
+build's coverage. The analysis runs for every *selected* function, so
+the population is the 278 functions the policy selects (the aim module's
+own functions and the standard library's templates that they pull in).
+**56 of them are virtualizable and 222 are refused**:
+
+| reason | refused |
+|---|---|
+| `unsupported_type` | 97 |
+| `unsupported_instruction` | 46 |
+| `eh_pad` | 45 |
+| `indirect_parameter` | 12 |
+| `dynamic_memcpy` | 9 |
+| `indirect_call` | 6 |
+| `local_variable` | 4 |
+| `recursion` | 2 |
+| `vanished` | 1 |
+
+and the admitted ones are the small integer helpers:
+`cs2::aim::RecordRing::newest` (12 slots, 392 bytes of bytecode, 15
+instructions), `cs2::aim::RecordRing::oldest` (10 slots, 344 bytes, 13
+instructions), `cs2::aim::RecordRing::trim` (32 slots, 2024 bytes, 83
+instructions, 2 calls), `cs2::aim::UniformRandomStream::random_int` (66
+slots, 2600 bytes, 107 instructions) and the destructors and the
+accessors of the aim types.
+
+**The figures that were here before** (2490 functions of the module, 1878
+admitted and 612 refused) were measured **before** the fix round, over a
+*different* population: every function of the module, not the selected
+ones. They are not comparable with the table above, and they are not
+reproduced here.
+
+### 14.9 Where the analysis runs
+
+The analysis runs in the **transform phase** (the optimizer last), and
+it runs **before** the call encryption: the transform rewrites the calls
+of a selected function into indirect dispatches, and an indirect call is
+a refusal, so the analysis has to see the calls the source had.
+
+It is also reachable by the name `cs2-protect-vm`, which runs the
+analysis and **nothing else**:
+
+```
+opt.exe -load-pass-plugin=Cs2Protect.dll -passes=cs2-protect-vm -S fixture.ll
+```
+
+That pipeline is what the IR test uses to prove that the analysis is
+read-only: the module comes out of it byte for byte the way it went in.

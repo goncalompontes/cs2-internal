@@ -32,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import check_policy  # noqa: E402
-from protect_checks import Failure, PeImage, read_coverage  # noqa: E402
+from protect_checks import Coverage, Failure, PeImage, read_coverage  # noqa: E402
 
 
 class TestFailure(Exception):
@@ -50,8 +50,14 @@ def digest_of(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest().upper()
 
 
-def write_coverage(path: Path, policy_digest: str, source: Path, rewritten: int) -> None:
-    """Writes a coverage file the way the plugin writes it."""
+def write_coverage(path: Path, policy_digest: str, source: Path, rewritten: int,
+                   vm: str | None = None) -> None:
+    """Writes a coverage file the way the plugin writes it.
+
+    The `vm` line is the verdict of the virtualizer's analysis. It is
+    optional: a coverage file of an older build has none, and a reader that
+    does not know the section still reads the file.
+    """
     body = (
         f"policy-sha256 {policy_digest}\n"
         f"module {source.name}\n"
@@ -62,6 +68,8 @@ def write_coverage(path: Path, policy_digest: str, source: Path, rewritten: int)
         "entry matched cs2::aim::solve\n"
         f"fn ?solve rewritten={rewritten} skipped=0\n"
     )
+    if vm is not None:
+        body += vm
     path.write_text(body + f"content-sha256 {digest_of(body.encode('utf-8'))}\n",
                     encoding="utf-8")
 
@@ -91,8 +99,11 @@ def check_the_readers(root: Path) -> None:
     policy_digest = digest_of(policy.read_bytes())
 
     # The coverage of this build.
-    write_coverage(coverage / "0x1.cov", policy_digest, tree / "payload" / "solver.cpp", 7)
-    # The coverage of another worktree that shares the policy.
+    write_coverage(coverage / "0x1.cov", policy_digest, tree / "payload" / "solver.cpp", 7,
+                   "vm ?solve verdict=virtualizable slots=42 frame=3072 bytecode=268 "
+                   "instructions=57 calls=17\n")
+    # The coverage of another worktree that shares the policy. It has no
+    # `vm` line: it is the coverage of an older build.
     write_coverage(coverage / "0x2.cov", policy_digest, other, 3)
     # A file whose count is not a number.
     (coverage / "0x3.cov").write_text(
@@ -138,6 +149,22 @@ def check_the_readers(root: Path) -> None:
         all(entry.path.name != "0x3.cov" for entry in read.files),
         "a malformed file was counted",
     )
+
+    # The verdict of the virtualizer's analysis is in the coverage, and it
+    # is read.
+    verdict = read.files[0].vm.get("?solve")
+    check(verdict is not None, "the reader did not read the verdict of the virtualizer")
+    assert verdict is not None
+    check(verdict.get("verdict") == "virtualizable", "the verdict is not the one that was written")
+    check(verdict.get("slots") == "42", "the slot count is not the one that was written")
+    check(verdict.get("bytecode") == "268", "the bytecode size is not the one that was written")
+
+    # A coverage file of an older build has no `vm` line: the reader still
+    # reads it, and it is not malformed.
+    old = Coverage(coverage / "0x2.cov")
+    check(not old.malformed, f"a coverage file without a vm section is malformed: {old.malformed}")
+    check(old.intact, "a coverage file without a vm section is not intact")
+    check(old.vm == {}, "a coverage file without a vm section has verdicts")
 
     # The policy checker reads the same directory, and its pruning must not
     # choke on the malformed files either.

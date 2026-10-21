@@ -185,6 +185,25 @@ class SelectPass : public llvm::PassInfoMixin<SelectPass> {
   }
 };
 
+/// The symbols of the recorded functions, and the ones that are selected at
+/// the virtualized level.
+///
+/// The second list is what the analysis refuses a call to: a virtualized
+/// function that calls another virtualized function would make the
+/// interpreter call into another interpreter.
+[[nodiscard]] auto analysis_symbols(const cs2::protect::RecordedSelection& selection)
+    -> std::pair<std::vector<std::string>, std::vector<std::string>> {
+  std::vector<std::string> symbols;
+  std::vector<std::string> virtualized;
+  for (const cs2::protect::RecordedFunction& function : selection.functions) {
+    symbols.push_back(function.symbol);
+    if (function.level == cs2::protect::ProtectionLevel::virtualized) {
+      virtualized.push_back(function.symbol);
+    }
+  }
+  return {symbols, virtualized};
+}
+
 /// The phase that rewrites the calls of the selected functions.
 class TransformPass : public llvm::PassInfoMixin<TransformPass> {
  public:
@@ -209,6 +228,15 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
       return llvm::PreservedAnalyses::all();
     }
 
+    // The analysis of the virtualizer runs *before* the transform. The
+    // transform rewrites the calls of the selected functions into indirect
+    // dispatches, and an indirect call is a refusal (there is no
+    // relocatable address for the pool), so the analysis has to see the
+    // calls the source had.
+    const auto [symbols, virtualized] = analysis_symbols(selection);
+    const auto vm = cs2::protect::analyze_module(module, settings, symbols, virtualized);
+    cs2::protect::write_vm_report(module, vm, settings);
+
     const cs2::protect::TransformResult result =
         cs2::protect::transform_module(module, settings, selection);
 
@@ -231,8 +259,9 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     protect.mix_multiplier = result.mix_multiplier;
     protect.mix_xor = result.mix_xor;
     protect.key_parts.assign(result.key_parts.begin(), result.key_parts.end());
-    if (const auto error =
-            cs2::protect::write_coverage(settings, module, entries, functions, protect)) {
+    const auto vm_coverage = cs2::protect::coverage_vm(vm);
+    if (const auto error = cs2::protect::write_coverage(settings, module, entries, functions,
+                                                        protect, vm_coverage)) {
       llvm::errs() << "[cs2-protect] " << *error << "\n";
       llvm::report_fatal_error("cs2-protect: the coverage could not be written",
                                /*gen_crash_diag=*/false);
@@ -240,6 +269,48 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
 
     // The pass changes the code, so the analyses are not preserved.
     return llvm::PreservedAnalyses::none();
+  }
+};
+
+/// The phase that analyses the selected functions for the virtualizer.
+///
+/// The analysis is **read-only**: it decides whether a function could be
+/// virtualized, lowers it to the bytecode of the virtual machine and
+/// encodes that bytecode, and it changes nothing in the module. The
+/// rewrite is the next task; this one only produces the verdict, so that
+/// the operator knows what the virtualized form would cost before paying
+/// for the 5-50x.
+///
+/// The pass is reachable by the name `cs2-protect-vm`, and it is what the
+/// IR test uses to prove that the analysis does not touch the IR: the
+/// module comes out of it byte for byte the way it went in.
+class VmAnalysisPass : public llvm::PassInfoMixin<VmAnalysisPass> {
+ public:
+  /// The pass must run even when the optimisation pipeline would drop it:
+  /// a build that "protects" nothing has to say so.
+  static bool isRequired() {
+    return true;
+  }
+
+  llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager&) {
+    const cs2::protect::Config settings = configuration();
+
+    const cs2::protect::SelectionResult selection =
+        cs2::protect::select_functions(module, settings);
+    std::vector<std::string> symbols;
+    std::vector<std::string> virtualized;
+    for (const cs2::protect::Selection& selected : selection.selected) {
+      symbols.push_back(selected.symbol);
+      if (selected.level == cs2::protect::ProtectionLevel::virtualized) {
+        virtualized.push_back(selected.symbol);
+      }
+    }
+
+    const auto functions = cs2::protect::analyze_module(module, settings, symbols, virtualized);
+    cs2::protect::write_vm_report(module, functions, settings);
+
+    // The module is untouched: the analysis is a verdict, not a rewrite.
+    return llvm::PreservedAnalyses::all();
   }
 };
 
@@ -274,6 +345,12 @@ extern "C" CS2_PROTECT_EXPORT ::llvm::PassPluginLibraryInfo llvmGetPassPluginInf
             builder.registerPipelineParsingCallback(
                 [](llvm::StringRef name, llvm::ModulePassManager& manager,
                    llvm::ArrayRef<llvm::PassBuilder::PipelineElement>) {
+                  if (name == "cs2-protect-vm") {
+                    // The analysis of the virtualizer alone, and nothing
+                    // else: the module comes out of it unchanged.
+                    manager.addPass(VmAnalysisPass());
+                    return true;
+                  }
                   if (name != "cs2-protect") {
                     return false;
                   }

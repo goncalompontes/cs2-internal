@@ -23,6 +23,10 @@ add_library(Cs2Protect SHARED
   src/selection.cpp
   src/report.cpp
   src/transform.cpp
+  src/cipher.cpp
+  src/vm_gate.cpp
+  src/vm_lower.cpp
+  src/vm_encode.cpp
 )
 
 # --- The DIA SDK ------------------------------------------------------------
@@ -125,6 +129,10 @@ add_executable(cs2-protect-tests
   src/selection.cpp
   src/report.cpp
   src/transform.cpp
+  src/cipher.cpp
+  src/vm_gate.cpp
+  src/vm_lower.cpp
+  src/vm_encode.cpp
 )
 target_compile_features(cs2-protect-tests PRIVATE ${CS2_PROTECT_CXX_STANDARD})
 target_include_directories(cs2-protect-tests SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
@@ -134,6 +142,32 @@ target_compile_options(cs2-protect-tests PRIVATE ${LLVM_DEFINITIONS_LIST})
 target_compile_options(cs2-protect-tests PRIVATE ${CS2_PROTECT_COMPILE_OPTIONS})
 target_link_libraries(cs2-protect-tests PRIVATE ${LLVM_LIBS_FIXED})
 add_test(NAME protect-tests COMMAND cs2-protect-tests)
+
+# The value-level test of the front end: the unit test above checks the
+# *shape* of the bytecode, and this one checks the *values*. It reads the
+# container, decrypts it with the keystream of the contract and executes
+# the bytecode in an interpreter written from the documented contract, so
+# a disagreement between the encoder and the contract is a real
+# disagreement.
+add_executable(cs2-protect-vm-values-test
+  tests/vm_values_test.cpp
+  src/config.cpp
+  src/selection.cpp
+  src/report.cpp
+  src/transform.cpp
+  src/cipher.cpp
+  src/vm_gate.cpp
+  src/vm_lower.cpp
+  src/vm_encode.cpp
+)
+target_compile_features(cs2-protect-vm-values-test PRIVATE ${CS2_PROTECT_CXX_STANDARD})
+target_include_directories(cs2-protect-vm-values-test SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_include_directories(cs2-protect-vm-values-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(cs2-protect-vm-values-test PRIVATE ${LLVM_DEFINITIONS})
+target_compile_options(cs2-protect-vm-values-test PRIVATE ${LLVM_DEFINITIONS_LIST})
+target_compile_options(cs2-protect-vm-values-test PRIVATE ${CS2_PROTECT_COMPILE_OPTIONS})
+target_link_libraries(cs2-protect-vm-values-test PRIVATE ${LLVM_LIBS_FIXED})
+add_test(NAME protect-vm-values-test COMMAND cs2-protect-vm-values-test)
 
 # --- The IR-level test and the differential test -----------------------------
 # The pass rewrites calls, so a mistake shows up as a *wrong call target*,
@@ -173,3 +207,17 @@ add_test(NAME protect-diff-test
 # skipped (it would count every rewrite twice).
 add_test(NAME protect-coverage-test
   COMMAND ${CS2_PROTECT_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/coverage_test.py)
+
+# The front end of the virtualizer: the analysis is read-only, so the test
+# proves that the module comes out of it unchanged, and that the report and
+# the coverage carry the verdict of every function of the fixture.
+add_test(NAME protect-vm-ir-test
+  COMMAND ${CS2_PROTECT_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/vm_ir_test.py
+          --opt ${LLVM_TOOLS_BINARY_DIR}/opt.exe
+          --clang-cl ${LLVM_TOOLS_BINARY_DIR}/clang-cl.exe
+          --plugin $<TARGET_FILE:Cs2Protect>
+          --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/vm.ll
+          --source ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/vm_fixture.cpp
+          --policy ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/vm.policy.json
+          --production-policy ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/vm_production.policy.json
+          --work ${CMAKE_CURRENT_BINARY_DIR}/vm-ir-test)
