@@ -1,0 +1,94 @@
+# The project's continuous integration.
+#
+# It runs the verify loop that docs/style-guide.md §7 and the handoff notes
+# prescribe, on a Windows runner:
+#
+#   * the host build (meson) and the host test suite,
+#   * the Windows payload, overlay and injector builds (clang-cl),
+#   * the Python suite (the scenario harness),
+#   * the type gate (mypy),
+#   * the style gate (the clang-tidy sweep's check mode).
+#
+# WHAT IT DOES NOT COVER (deliberately -- see docs/quality-pass.md):
+#   * the live game: a CI runner has no GPU and no interactive session, so
+#     nothing here exercises the payload in CS2. The live checks stay manual
+#     (docs/windows-validation.md).
+#   * the protection pass: `-Dprotect=true` needs the LLVM pass plugin and a
+#     policy file, which are not in the tree.
+#   * the Vulkan layer's runtime behaviour: the layer is only compiled here.
+#   * the injector against a real target: the injector's own test aids
+#     (a benign victim, a trivial DLL) are built, not run against a target.
+#
+# The compiler is clang-cl -- the compiler the payload is built with -- and it
+# is the configuration this repository is verified with locally.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build and test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # The MSVC environment: the toolchain (the CRT, the Windows SDK) and
+      # `lib.exe` come from it, and clang-cl needs its include and lib paths.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: the build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install meson ninja mypy
+
+      - name: the compiler (clang-cl) and the LLVM tools
+        run: |
+          "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "CC=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CXX=clang-cl" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: the host build
+        run: meson setup build .
+
+      - name: the host build
+        run: meson compile -C build
+
+      - name: the host tests
+        run: meson test -C build
+
+      - name: the payload build
+        run: meson setup build-payload payload
+
+      - name: the payload build
+        run: meson compile -C build-payload
+
+      - name: the overlay build
+        run: meson setup build-overlay overlay
+
+      - name: the overlay build
+        run: meson compile -C build-overlay
+
+      - name: the injector build
+        run: meson setup build-injector injector
+
+      - name: the injector build
+        run: meson compile -C build-injector
+
+      - name: the Python suite
+        run: python -m unittest discover -s scripts/scenario/tests -t scripts
+
+      - name: the type gate
+        run: python scripts/typecheck.py
+
+      - name: the style gate
+        run: python scripts/clang-tidy-fix.py --check
