@@ -1561,39 +1561,20 @@ void Input::animfix_capture(void* controller) noexcept {
     return;  // another entity's controller
   }
   std::array<float, animfix::k_tracked_slot_count> values{};
-  std::array<animfix::Target, animfix::k_tracked_slot_count> targets{};
   for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
     const animfix::Slot slot = animfix::k_tracked_slots[i];
-    const std::size_t offset = animfix::slot_offset(slot);
-    if (!cs2::game::read(local + offset, values[i])) {
+    if (!cs2::game::read(local + animfix::slot_offset(slot), values[i])) {
       return;
     }
-    std::uintptr_t node = 0;
-    if (!cs2::game::read(local + offset + animfix::slot_node_offset(slot), node)) {
-      return;
-    }
-    std::int16_t index = 0;
-    if (!cs2::game::read(local + offset + animfix::slot_index_offset(slot), index)) {
-      return;
-    }
-    targets[i] = animfix::Target{node, index};
-  }
-  if (!animfix::targets_are_distinct(targets)) {
-    // Two slots that share a graph parameter would collide: one of them would
-    // silently never be corrected. Refuse the controller instead.
-    animfix_targets_valid_.store(false);
-    return;
   }
   const std::uint64_t now = animfix_now_ms();
   {
     const std::lock_guard<std::mutex> lock(animfix_mutex_);
-    animfix_targets_ = targets;
     animfix::store(animfix_capture_, local, values, now);
     // The server's snapshot rate: the animfix's staleness bound is measured
     // against it (see `animfix::snapshot_bound_ms`).
     animfix::observe_decode(animfix_clock_, now);
   }
-  animfix_targets_valid_.store(true);
   animfix_captures_.fetch_add(1);
   animfix_snapshot_interval_.store(animfix::snapshot_interval_ms(animfix_clock_));
   animfix_server_yaw_.store(values[animfix::slot_position(animfix::Slot::aim_yaw)]);
@@ -1609,9 +1590,6 @@ void Input::animfix_capture(void* controller) noexcept {
 // evidence that the feature does something.
 void Input::animfix_apply() noexcept {
   animfix_acted_.store(false);
-  if (!animfix_targets_valid_.load()) {
-    return;
-  }
   // The write goes to the graph parameters of the **live** controller, so the
   // capture must belong to it: a local pawn that died and respawned has a new
   // controller, and the old one (with its AG2 instance) is freed. Writing
@@ -1619,11 +1597,36 @@ void Input::animfix_apply() noexcept {
   // freed memory — a corruption, which is worse than a fault.
   const std::uintptr_t controller = animfix_controller();
   const std::uint64_t now = animfix_now_ms();
+  // The write targets are read from the **live** controller, not from the
+  // capture: the AG2 instance inside it is a separate object, and it can be
+  // re-created (an anim-graph restart, a model change) while the controller
+  // survives - the captured `(node, index)` pairs would then dangle and the
+  // write would land in freed memory. Reading them here also means the write
+  // can only happen into a controller that answers a read right now.
   std::array<animfix::Target, animfix::k_tracked_slot_count> targets{};
+  for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
+    const animfix::Slot slot = animfix::k_tracked_slots[i];
+    const std::size_t offset = animfix::slot_offset(slot);
+    std::uintptr_t node = 0;
+    if (!cs2::game::read(controller + offset + animfix::slot_node_offset(slot), node)) {
+      return;
+    }
+    std::int16_t index = 0;
+    if (!cs2::game::read(controller + offset + animfix::slot_index_offset(slot), index)) {
+      return;
+    }
+    targets[i] = animfix::Target{node, index};
+  }
+  if (!animfix::targets_are_distinct(targets)) {
+    // Two slots that share a graph parameter would collide: one of them would
+    // silently never be corrected. Refuse the controller instead.
+    count_animfix_refusal(animfix::Refusal::controller);
+    animfix_skips_.fetch_add(1);
+    return;
+  }
   std::uint64_t bound = 0;
   {
     const std::lock_guard<std::mutex> lock(animfix_mutex_);
-    targets = animfix_targets_;
     bound = animfix::snapshot_bound_ms(animfix_clock_);
   }
   bool corrected = false;

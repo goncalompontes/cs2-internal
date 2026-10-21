@@ -1391,12 +1391,10 @@ class Input {
   mutable std::mutex animfix_mutex_{};
   animfix::Capture animfix_capture_{};
   animfix::SnapshotClock animfix_clock_{};
-  std::array<animfix::Target, animfix::k_tracked_slot_count> animfix_targets_{};
   std::string animfix_status_{
       "the animfix's hooks are not installed yet (they are installed on the game's "
       "first command)"};
   std::atomic<bool> animfix_enabled_{false};
-  std::atomic<bool> animfix_targets_valid_{false};
   std::atomic<bool> animfix_data_valid_{false};
   std::atomic<std::uint64_t> animfix_captures_{0};
   std::atomic<std::uint64_t> animfix_applies_{0};
