@@ -498,7 +498,7 @@ under the gated groups, and the gated groups are clean.**
 | | before | after |
 |---|---|---|
 | the host suite (`meson test -C build`) | 42 tests | **44** (`core-handle`, `scenario-clang-tidy-fix`) |
-| the Python suite (`unittest discover`) | 387 tests | **400** (13 new: the sweep's check mode) |
+| the Python suite (`unittest discover`) | 387 tests | **404** (17 new: the sweep's check mode) |
 | mypy (`scripts/typecheck.py`) | 0 errors, 51 files | **0 errors, 52 files** |
 | the four builds | all compile | all compile |
 
@@ -542,6 +542,14 @@ the whole point of this pass:
    does depend on it: clang-cl comes from the runner image's LLVM, which is
    not pinned (the workflow's header says so, and records the image's
    facts).
+   **The whole workflow was also run on a fresh checkout** (`git archive
+   HEAD`: no build directories, no `external/Vulkan-Headers`, no generated
+   SDK headers, no calibration dumps, no prebuilt dumper). Every step was
+   green: the host build (which builds the Rust dumper from source and
+   writes *empty* SDK headers), 44/44 host tests, the payload build (the
+   cross file, `/MT`, and a `payload.dll` that imports no CRT), the Vulkan
+   clone and the overlay build, the injector build, the Python suite (404),
+   the type gate, and the style gate with the pinned clang-tidy.
 3. **The SDK the payload is built against.** The SDK headers
    (`payload/sdk/*.hpp`) are generated from the calibration dumps, and the
    dumps are git-ignored: they come from a live calibration against a
