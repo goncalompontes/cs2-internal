@@ -216,6 +216,83 @@ auto main() -> int {
     behind.capsule = sphere(Vec3{.x = -10.0F, .y = 0.0F, .z = 0.0F}, 1.0F);
     expect(!cs2::aim::ray_hitbox(Vec3{}, along, behind).has_value(),
            "a hitbox behind the eye does not hit");
+
+    // **Degenerate geometry is rejected, not turned into a hit** (the review's M5).
+    // A NaN in a half-extent used to degenerate the box into an unbounded solid: the
+    // slab clamp compares against a NaN, and every comparison with a NaN is false.
+    Hitbox nan_box;
+    nan_box.is_capsule = false;
+    nan_box.box = cs2::aim::aabb_obb(Vec3{.x = 100.0F, .y = -1.0F, .z = -1.0F},
+                                      Vec3{.x = 102.0F, .y = 1.0F, .z = 1.0F});
+    nan_box.box.half.x = std::nanf("");
+    expect(!cs2::aim::hitbox_valid(nan_box), "a NaN half-extent is not a well-formed solid");
+    expect(!cs2::aim::ray_hitbox(Vec3{}, along, nan_box).has_value(),
+           "an oriented box with a NaN half-extent does not hit");
+
+    // A negative radius behaves as a positive one in the span code (`radius *
+    // radius`), so it has to be rejected at the hit test.
+    Hitbox negative;
+    negative.is_capsule = true;
+    negative.capsule = sphere(Vec3{.x = 10.0F, .y = 0.0F, .z = 0.0F}, -1.0F);
+    expect(!cs2::aim::hitbox_valid(negative), "a negative radius is not a capsule");
+    expect(!cs2::aim::ray_hitbox(Vec3{}, along, negative).has_value(),
+           "a capsule with a negative radius does not hit");
+
+    // A zero radius and a zero-size box are degenerate too.
+    Hitbox zero_radius;
+    zero_radius.is_capsule = true;
+    zero_radius.capsule = sphere(Vec3{.x = 10.0F, .y = 0.0F, .z = 0.0F}, 0.0F);
+    expect(!cs2::aim::ray_hitbox(Vec3{}, along, zero_radius).has_value(),
+           "a capsule with a zero radius does not hit");
+    Hitbox zero_box;
+    zero_box.is_capsule = false;
+    zero_box.box = cs2::aim::aabb_obb(Vec3{.x = 10.0F, .y = 0.0F, .z = 0.0F},
+                                      Vec3{.x = 10.0F, .y = 0.0F, .z = 0.0F});
+    expect(!cs2::aim::ray_hitbox(Vec3{}, along, zero_box).has_value(),
+           "a zero-size oriented box does not hit");
+  }
+
+  // --- 4b. a corrupt hitbox cannot poison a verdict -------------------------
+  {
+    // The reviewer's measured failure: one OBB with a NaN half-extent in the list
+    // made the whole hit chance 1.000 (the corrupt box "hit" at distance 0 and won
+    // every nearest-hit contest), where the clean set gives 0.453.
+    Hitbox good;
+    good.is_capsule = true;
+    good.capsule = sphere(Vec3{.x = 100.0F, .y = 0.0F, .z = 0.0F}, 2.0F);
+    good.multiplier = 1.0F;
+    good.target = 1;
+    good.group = cs2::aim::HITGROUP_CHEST;
+
+    Hitbox corrupt = good;
+    corrupt.is_capsule = false;
+    corrupt.target = 2;
+    corrupt.box = cs2::aim::aabb_obb(Vec3{.x = 100.0F, .y = -1.0F, .z = -1.0F},
+                                      Vec3{.x = 102.0F, .y = 1.0F, .z = 1.0F});
+    corrupt.box.half.x = std::nanf("");
+
+    MonteCarloInput input;
+    input.weapon.damage = 35.0F;
+    input.weapon.range_modifier = 0.91F;
+    input.kernel = SpreadKernel{.spread = 0.05F, .inaccuracy = 0.0F, .pellets = 1};
+    input.samples = 64;
+
+    const std::vector<Hitbox> clean{good};
+    input.hitboxes = clean;
+    const auto clean_chance = cs2::aim::evaluate_hit_chance(input, Vec2{});
+    expect(clean_chance.has_value(), "the clean scene evaluates");
+    expect(near(clean_chance->probability, 0.453F, 0.02F),
+           "the clean scene's hit chance is the measured one");
+
+    const std::vector<Hitbox> poisoned{good, corrupt};
+    input.hitboxes = poisoned;
+    const auto poisoned_chance = cs2::aim::evaluate_hit_chance(input, Vec2{});
+    expect(!poisoned_chance.has_value(), "a scene with a corrupt hitbox is refused");
+    expect(!poisoned_chance.has_value() &&
+               poisoned_chance.error() == cs2::aim::MonteCarloError::invalid_geometry,
+           "the refusal names the corrupt geometry");
+    const auto poisoned_sample = cs2::aim::evaluate_sample(input, Vec2{}, 1234);
+    expect(!poisoned_sample.has_value(), "a sample of a corrupt scene is refused too");
   }
 
   // --- 5. the nearest hit wins ----------------------------------------------

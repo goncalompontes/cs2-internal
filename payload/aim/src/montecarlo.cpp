@@ -67,6 +67,98 @@ constexpr int MAX_TRACKED_TARGETS = 32;
   return std::nullopt;
 }
 
+// Whether the vector's components are all finite.
+[[nodiscard]] auto finite(const Vec3& value) noexcept -> bool {
+  return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+// Whether the half-extents are positive **and** finite. A NaN fails the comparison
+// (every comparison with a NaN is false), an inf fails the finiteness test.
+[[nodiscard]] auto positive_finite(const Vec3& value) noexcept -> bool {
+  return value.x > 0.0F && value.y > 0.0F && value.z > 0.0F && std::isfinite(value.x) &&
+         std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+// The hit test, with the hitbox's geometry already checked (`hitbox_valid`). The
+// validated path is the hot one: the scene's geometry is checked once per
+// evaluation, not once per ray.
+[[nodiscard]] auto ray_hitbox_checked(const Vec3& eye, const Vec3& direction,
+                                      const Hitbox& hitbox) noexcept -> std::optional<float> {
+  const auto span = hitbox.is_capsule ? ray_capsule_span(eye, direction, hitbox.capsule.a,
+                                                         hitbox.capsule.b, hitbox.capsule.radius)
+                                      : ray_obb_span(eye, direction, hitbox.box);
+  if (!span.has_value()) {
+    return std::nullopt;
+  }
+  return span->entry;
+}
+
+// Whether every hitbox of the scene is a well-formed solid.
+[[nodiscard]] auto geometry_valid(const MonteCarloInput& input) noexcept -> bool {
+  for (const Hitbox& hitbox : input.hitboxes) {
+    if (!hitbox_valid(hitbox)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The sample evaluation, with the weapon's pattern and the scene's geometry already
+// checked. The hit test is the **checked** one: the geometry does not change
+// between the samples of an evaluation, so it is validated once per evaluation and
+// not once per ray.
+[[nodiscard]] auto evaluate_sample_checked(const MonteCarloInput& input, const Vec2& aim,
+                                           std::int32_t seed) noexcept -> Sample {
+  Sample sample{};
+  std::array<Vec2, MAX_PELLETS> offsets{};
+  const int pellets = draw_pellet_offsets(seed, input.kernel, std::span<Vec2>{offsets});
+  if (pellets <= 0) {
+    return sample;
+  }
+  sample.offset = offsets[0];
+  // The chart's local metric at the aim's pitch: a true angular offset of `r` radians
+  // spans `r` in the chart's `v` (pitch) but `r / cos(v)` in its `u` (yaw)
+  // (`yaw_scale`, `cs2/aim/geometry.hpp`). The tangent displacement is therefore
+  // `(offset.x · yaw_scale, offset.y)` in chart coordinates.
+  const float scale = yaw_scale(aim.y);
+  bool have_nearest = false;
+  for (int pellet = 0; pellet < pellets; ++pellet) {
+    const Vec2 offset = offsets[static_cast<std::size_t>(pellet)];
+    const Vec2 point{.x = aim.x + offset.x * scale, .y = aim.y + offset.y};
+    const Vec3 direction = input.basis.unproject(point);
+    // The **nearest** hit wins: the hitboxes overlap, so the sum of their hits would
+    // double-count and the best-value hit would ignore the geometry.
+    const Hitbox* hit = nullptr;
+    float nearest = 0.0F;
+    for (const Hitbox& hitbox : input.hitboxes) {
+      const auto distance = ray_hitbox_checked(input.eye, direction, hitbox);
+      if (!distance.has_value()) {
+        continue;
+      }
+      if (hit == nullptr || *distance < nearest) {
+        nearest = *distance;
+        hit = &hitbox;
+      }
+    }
+    if (hit == nullptr) {
+      continue;
+    }
+    sample.hit = true;
+    // The engine's damage model: the weapon's damage, the hitgroup's multiplier and
+    // the range falloff over the distance the bullet travelled (`range_falloff`,
+    // `cs2/aim/field.hpp`).
+    sample.damage +=
+        input.weapon.damage * hit->multiplier * range_falloff(input.weapon.range_modifier, nearest);
+    if (!have_nearest || nearest < sample.distance) {
+      have_nearest = true;
+      sample.distance = nearest;
+      sample.target = hit->target;
+      sample.hitgroup = hit->group;
+    }
+  }
+  return sample;
+}
+
 // Whether the candidate beats the incumbent under the lexicographic rule.
 [[nodiscard]] auto better(const HitChance& candidate, bool candidate_kills, const HitChance& best,
                           bool best_kills) noexcept -> bool {
@@ -104,6 +196,8 @@ auto to_string(MonteCarloError error) noexcept -> const char* {
       return "no_candidates";
     case MonteCarloError::too_many_targets:
       return "too_many_targets";
+    case MonteCarloError::invalid_geometry:
+      return "invalid_geometry";
   }
   return "unknown";
 }
@@ -176,15 +270,30 @@ auto sample_seed(const SeedContext& context, const Vec2& aim, int index, int sam
   return md5_pseudo_random(angle_seed_hash(probe_yaw, probe_pitch, context.tick));
 }
 
+auto hitbox_valid(const Hitbox& hitbox) noexcept -> bool {
+  if (hitbox.is_capsule) {
+    // A capsule is a segment thickened by its radius: both the endpoints and the
+    // radius must be finite, and the radius must be positive (the span code uses
+    // `radius * radius`, so a negative radius would behave as a positive one).
+    return finite(hitbox.capsule.a) && finite(hitbox.capsule.b) &&
+           hitbox.capsule.radius > 0.0F && std::isfinite(hitbox.capsule.radius);
+  }
+  // An oriented box: a finite centre, finite unit axes and positive half-extents
+  // (a zero half-extent is a degenerate box, and a NaN one is not a solid at all).
+  return finite(hitbox.box.center) && positive_finite(hitbox.box.half) &&
+         finite(hitbox.box.axis_x) && finite(hitbox.box.axis_y) && finite(hitbox.box.axis_z);
+}
+
 auto ray_hitbox(const Vec3& eye, const Vec3& direction, const Hitbox& hitbox) noexcept
     -> std::optional<float> {
-  const auto span = hitbox.is_capsule ? ray_capsule_span(eye, direction, hitbox.capsule.a,
-                                                         hitbox.capsule.b, hitbox.capsule.radius)
-                                      : ray_obb_span(eye, direction, hitbox.box);
-  if (!span.has_value()) {
+  // A degenerate hitbox is **rejected**, not turned into a hit: the slab clamp
+  // compares against a NaN (and every comparison with a NaN is false), so a NaN
+  // half-extent used to degenerate the box into an unbounded solid — a hit at
+  // distance 0, and a silent 100 % hit chance on a target that cannot be hit.
+  if (!hitbox_valid(hitbox)) {
     return std::nullopt;
   }
-  return span->entry;
+  return ray_hitbox_checked(eye, direction, hitbox);
 }
 
 auto evaluate_sample(const MonteCarloInput& input, const Vec2& aim, std::int32_t seed) noexcept
@@ -195,54 +304,13 @@ auto evaluate_sample(const MonteCarloInput& input, const Vec2& aim, std::int32_t
   if (!pattern_supported(input.weapon)) {
     return std::unexpected(MonteCarloError::unsupported_pattern);
   }
-  Sample sample{};
-  std::array<Vec2, MAX_PELLETS> offsets{};
-  const int pellets = draw_pellet_offsets(seed, input.kernel, std::span<Vec2>{offsets});
-  if (pellets <= 0) {
-    return sample;
+  // The geometry is checked **once**, before the samples are drawn: a hitbox that
+  // is not a well-formed solid is refused, not silently skipped and not turned
+  // into a hit.
+  if (!geometry_valid(input)) {
+    return std::unexpected(MonteCarloError::invalid_geometry);
   }
-  sample.offset = offsets[0];
-  // The chart's local metric at the aim's pitch: a true angular offset of `r` radians
-  // spans `r` in the chart's `v` (pitch) but `r / cos(v)` in its `u` (yaw)
-  // (`yaw_scale`, `cs2/aim/geometry.hpp`). The tangent displacement is therefore
-  // `(offset.x · yaw_scale, offset.y)` in chart coordinates.
-  const float scale = yaw_scale(aim.y);
-  bool have_nearest = false;
-  for (int pellet = 0; pellet < pellets; ++pellet) {
-    const Vec2 offset = offsets[static_cast<std::size_t>(pellet)];
-    const Vec2 point{.x = aim.x + offset.x * scale, .y = aim.y + offset.y};
-    const Vec3 direction = input.basis.unproject(point);
-    // The **nearest** hit wins: the hitboxes overlap, so the sum of their hits would
-    // double-count and the best-value hit would ignore the geometry.
-    const Hitbox* hit = nullptr;
-    float nearest = 0.0F;
-    for (const Hitbox& hitbox : input.hitboxes) {
-      const auto distance = ray_hitbox(input.eye, direction, hitbox);
-      if (!distance.has_value()) {
-        continue;
-      }
-      if (hit == nullptr || *distance < nearest) {
-        nearest = *distance;
-        hit = &hitbox;
-      }
-    }
-    if (hit == nullptr) {
-      continue;
-    }
-    sample.hit = true;
-    // The engine's damage model: the weapon's damage, the hitgroup's multiplier and
-    // the range falloff over the distance the bullet travelled (`range_falloff`,
-    // `cs2/aim/field.hpp`).
-    sample.damage +=
-        input.weapon.damage * hit->multiplier * range_falloff(input.weapon.range_modifier, nearest);
-    if (!have_nearest || nearest < sample.distance) {
-      have_nearest = true;
-      sample.distance = nearest;
-      sample.target = hit->target;
-      sample.hitgroup = hit->group;
-    }
-  }
-  return sample;
+  return evaluate_sample_checked(input, aim, seed);
 }
 
 auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
@@ -265,6 +333,12 @@ auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
   if (input.targets.size() > static_cast<std::size_t>(MAX_TRACKED_TARGETS)) {
     return std::unexpected(MonteCarloError::too_many_targets);
   }
+  // The geometry is checked **once**, before the samples are drawn: a hitbox that
+  // is not a well-formed solid is refused, not silently skipped and not turned
+  // into a hit.
+  if (!geometry_valid(input)) {
+    return std::unexpected(MonteCarloError::invalid_geometry);
+  }
 
   HitChance chance{};
   chance.samples = input.samples;
@@ -280,26 +354,23 @@ auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
   bool have_nearest = false;
   for (int index = 0; index < input.samples; ++index) {
     const std::int32_t seed = sample_seed(input.seed, aim, index, input.samples);
-    const auto sample = evaluate_sample(input, aim, seed);
-    if (!sample.has_value()) {
-      return std::unexpected(sample.error());
-    }
-    if (!sample->hit) {
+    const Sample sample = evaluate_sample_checked(input, aim, seed);
+    if (!sample.hit) {
       continue;
     }
     ++chance.hits;
-    damage_total += sample->damage;
+    damage_total += sample.damage;
     for (std::size_t slot = 0; slot < input.targets.size(); ++slot) {
-      if (input.targets[slot].index == sample->target) {
-        damage_by_target[slot] += sample->damage;
+      if (input.targets[slot].index == sample.target) {
+        damage_by_target[slot] += sample.damage;
         break;
       }
     }
-    if (!have_nearest || sample->distance < nearest) {
+    if (!have_nearest || sample.distance < nearest) {
       have_nearest = true;
-      nearest = sample->distance;
-      chance.target = sample->target;
-      chance.hitgroup = sample->hitgroup;
+      nearest = sample.distance;
+      chance.target = sample.target;
+      chance.hitgroup = sample.hitgroup;
     }
   }
   chance.probability = static_cast<float>(chance.hits) / static_cast<float>(input.samples);

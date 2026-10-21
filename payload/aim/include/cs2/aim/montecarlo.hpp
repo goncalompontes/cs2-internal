@@ -52,6 +52,7 @@ enum class MonteCarloError : std::uint8_t {
   unsupported_pattern,  ///< the weapon's pellet pattern is not modelled
   no_candidates,        ///< the candidate set is empty
   too_many_targets,     ///< more candidate targets than `MAX_TRACKED_TARGETS`
+  invalid_geometry,     ///< a hitbox is not a well-formed solid (NaN, inf, degenerate)
 };
 
 [[nodiscard]] auto to_string(MonteCarloError error) noexcept -> const char*;
@@ -219,6 +220,25 @@ struct HitChance {
 
 // --- The hit test ------------------------------------------------------------------
 
+// Whether the hitbox is a **well-formed solid**: every component finite, and the
+// shape not degenerate (a capsule's radius positive, an oriented box's half-extents
+// positive).
+//
+// **Why the hit test validates and the span helpers do not.** The span arithmetic
+// (`cs2/aim/ray_span.hpp`) is shared with the occluders, whose behaviour must not
+// change, and it answers a different question — *"where does the ray lie inside
+// this solid?"* — which is ill-posed for a solid that does not exist: the slab
+// clamp compares against a NaN, and a comparison with a NaN is **false**, so a NaN
+// half-extent was swallowed and the box degenerated into an unbounded solid (a hit
+// at distance 0, and a silent 100 % hit chance on a target that cannot be hit — the
+// review's M5). The hitbox is where the geometry is *interpreted*, so that is where
+// it is validated.
+//
+// A caller that reads hitboxes from the game (`payload/aim/src/reader.cpp`, which
+// does not validate the shape it reads) can filter with this before building the
+// input; the solver refuses a scene that still holds one.
+[[nodiscard]] auto hitbox_valid(const Hitbox& hitbox) noexcept -> bool;
+
 // The distance from the eye to the **nearest** point of `hitbox` on the ray
 // `eye + t·direction` (unit `direction`), or nullopt when the ray misses the hitbox
 // or the hitbox lies entirely behind the eye.
@@ -226,6 +246,9 @@ struct HitChance {
 // Exact: the hitbox is a capsule (the real studio hitbox, `docs/re/aim.md`) or an
 // oriented box, and the span arithmetic is the same exact convex arithmetic the
 // occluders use (`cs2/aim/ray_span.hpp`).
+//
+// **A degenerate hitbox is rejected** (nullopt), never turned into a hit: a NaN or
+// an inf is not a solid, and a zero or negative radius is not a capsule.
 [[nodiscard]] auto ray_hitbox(const Vec3& eye, const Vec3& direction, const Hitbox& hitbox) noexcept
     -> std::optional<float>;
 
@@ -273,6 +296,10 @@ struct CandidateBudget {
 // silently substituted for a shotgun's (`docs/orchestration/spec-t34-montecarlo.md`
 // §2.2). The error channel is what makes that guarantee checkable — a caller that
 // ignores the error still has no number.
+//
+// A scene whose hitboxes are **not well-formed solids** is refused the same way
+// (`MonteCarloError::invalid_geometry`): the geometry is checked once, before the
+// samples are drawn.
 [[nodiscard]] auto evaluate_sample(const MonteCarloInput& input, const Vec2& aim,
                                    std::int32_t seed) noexcept
     -> std::expected<Sample, MonteCarloError>;
@@ -286,6 +313,9 @@ struct CandidateBudget {
 // **An unmodelled weapon's pattern is refused** (`MonteCarloError::unsupported_pattern`),
 // exactly as `evaluate_sample` refuses it: this entry point is the cheap, natural
 // one for the next task to call, so it must not be the one that leaks a number.
+//
+// **A scene with a degenerate hitbox is refused** (`MonteCarloError::invalid_geometry`)
+// for the same reason: the geometry is checked once, before the samples are drawn.
 [[nodiscard]] auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
     -> std::expected<HitChance, MonteCarloError>;
 

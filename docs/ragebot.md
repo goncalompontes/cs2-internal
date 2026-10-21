@@ -694,6 +694,28 @@ A multi-pellet weapon's sample **hits when any of its pellets hits** (the union,
 not the sum — `docs/research/aim-objective-math.md` §6); the sample's damage is the
 sum over the pellets that hit (the engine's per-pellet damage).
 
+**A degenerate hitbox is rejected, not turned into a hit.** The slab test clamps the
+interval with comparisons, and *every comparison against a NaN is false* — so a NaN
+half-extent used to swallow the clamp and degenerate the box into an unbounded
+solid: the hit landed at distance **0**, won every nearest-hit contest, and the
+solver reported a **100 % hit chance** on a target that cannot be hit (the review's
+M5). The hit test now validates the shape (`hitbox_valid`: every component finite,
+a positive radius, positive half-extents), and a scene that still holds one is
+**refused** with `MonteCarloError::invalid_geometry` rather than scored without it.
+
+> The validation lives in the **hit test**, not in the span helpers: the span
+> arithmetic is shared with the occluders, whose behaviour must not change, and it
+> answers a different question — *"where does the ray lie inside this solid?"* —
+> which is ill-posed for a solid that does not exist. The hitbox is where the
+> geometry is interpreted, so that is where it is checked. The check runs **once
+> per evaluation**, not once per ray.
+>
+> `payload/aim/src/reader.cpp` (not this module's file) reads `m_flShapeRadius`
+> raw and only rejects a non-positive radius for the *non-capsule* shape, so a
+> capsule with `radius <= 0` does reach the solver today. The next task (the live
+> wiring) must filter the reader's hitboxes with `hitbox_valid` — the solver now
+> refuses them rather than pretending they are solid.
+
 ### 13.4 The seed policies — the open question, made a parameter
 
 The engine's seed is **not settled** (`docs/known-issues.md` §11.2): the repo's own
