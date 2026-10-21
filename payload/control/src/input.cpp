@@ -138,10 +138,10 @@ constexpr std::size_t k_services_button_offset = 0x58;  // CInButtonState word 0
 // `C_CSPlayerPawn::m_pAimPunchServices` -> `m_predictableBaseAngle` (QAngle, degrees):
 // the recoil punch the shot inherits, subtracted for recoil compensation.
 constexpr std::size_t k_pawn_aim_punch_offset = 0x1598;
-constexpr std::size_t k_aim_punch_angle_offset = 0x50;               // m_predictableBaseAngle
+constexpr std::size_t k_aim_punch_angle_offset = 0x50;                // m_predictableBaseAngle
 constexpr std::size_t k_aim_punch_angle_offset_unpredictable = 0xa4;  // m_unpredictableBaseAngle
-constexpr std::size_t k_cmd_number_offset = 0x8;        // CUserCmd::nSequenceNumber
-constexpr std::size_t k_base_client_tick_offset = 0x54;  // CBaseUserCmdPB::client_tick
+constexpr std::size_t k_cmd_number_offset = 0x8;                      // CUserCmd::nSequenceNumber
+constexpr std::size_t k_base_client_tick_offset = 0x54;               // CBaseUserCmdPB::client_tick
 // Sub-tick placement: the press pair sits a few grid steps past the recorded
 // contact, inside the engine's half-tick window; the grid is 1/64.
 constexpr float k_subtick_grid = 1.0F / 64.0F;
@@ -182,7 +182,8 @@ using reset_prediction_command_fn = void(__fastcall*)(void* self);
 }
 
 // Read-only probe of a 3-float move vector at `address` (engine units).
-[[nodiscard]] auto read_move_sample(std::uintptr_t address) noexcept -> MoveSample {  MoveSample sample;
+[[nodiscard]] auto read_move_sample(std::uintptr_t address) noexcept -> MoveSample {
+  MoveSample sample;
   float values[3] = {0.0F, 0.0F, 0.0F};
   if (address == 0 || !cs2::game::read(address, values)) {
     return sample;
@@ -317,13 +318,12 @@ void Input::write_silent_angles(void* cmd, float pitch, float yaw, float roll) n
 //
 // This is the **one** place that field is written: the `look` control command
 // and the anti-aim share it.
-auto Input::write_command_angles(std::uint8_t* base, float pitch, float yaw,
-                                  float roll) noexcept -> bool {
+auto Input::write_command_angles(std::uint8_t* base, float pitch, float yaw, float roll) noexcept
+    -> bool {
   if (base == nullptr) {
     return false;
   }
-  if (!writable(reinterpret_cast<std::uintptr_t>(base),
-                k_base_viewangles_offset + sizeof(void*))) {
+  if (!writable(reinterpret_cast<std::uintptr_t>(base), k_base_viewangles_offset + sizeof(void*))) {
     return false;
   }
   const auto angles = *reinterpret_cast<std::uintptr_t*>(base + k_base_viewangles_offset);
@@ -357,15 +357,14 @@ auto Input::write_command_angles(std::uint8_t* base, float pitch, float yaw,
 //
 // Returns false when the wish carries no move button at all — there is
 // nothing to write.
-auto Input::write_move_axes(std::uint8_t* base, void* cmd, float forward,
-                             float left) noexcept -> bool {
+auto Input::write_move_axes(std::uint8_t* base, void* cmd, float forward, float left) noexcept
+    -> bool {
   if (base == nullptr) {
     return false;
   }
   constexpr std::uint64_t move_bits =
       button::k_forward | button::k_back | button::k_moveleft | button::k_moveright;
-  const std::uint64_t held =
-      cs2::control::engine_move_buttons(forward, left, k_move_epsilon);
+  const std::uint64_t held = cs2::control::engine_move_buttons(forward, left, k_move_epsilon);
   if ((held & move_bits) == 0) {
     return false;  // nothing to write
   }
@@ -384,21 +383,18 @@ auto Input::write_move_axes(std::uint8_t* base, void* cmd, float forward,
       raw[2] = 0.0F;
     }
   }
-  if (cmd != nullptr &&
-      writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_buttons_offset,
-               sizeof(std::uint64_t))) {
-    auto* legacy = reinterpret_cast<std::uint64_t*>(static_cast<std::uint8_t*>(cmd) +
-                                                   k_cmd_buttons_offset);
+  if (cmd != nullptr && writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_buttons_offset,
+                                 sizeof(std::uint64_t))) {
+    auto* legacy =
+        reinterpret_cast<std::uint64_t*>(static_cast<std::uint8_t*>(cmd) + k_cmd_buttons_offset);
     *legacy = (*legacy & ~move_bits) | held;
   }
   // The `buttons_pb` pointer lives in the command's base — read it **inside**
   // the guard, so an unmapped base cannot fault the game thread.
   if (writable(reinterpret_cast<std::uintptr_t>(base), k_base_buttons_pb_offset + 8)) {
-    const auto buttons_pb =
-        *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
+    const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
     if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
-      auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb +
-                                                     k_buttonstate_values_offset);
+      auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
       state[0] = (state[0] & ~move_bits) | held;
       state[1] = (state[1] & ~move_bits) | held;
       *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
@@ -415,11 +411,9 @@ auto Input::write_move_axes(std::uint8_t* base, void* cmd, float forward,
 // runs more than once"). This is the content-based guard that keeps the write
 // to **once per command** without any state of its own: a write that failed
 // left the old angles in place, and the next call writes again.
-auto Input::command_angles_are(std::uint8_t* base, float pitch, float yaw) const noexcept
-    -> bool {
+auto Input::command_angles_are(std::uint8_t* base, float pitch, float yaw) const noexcept -> bool {
   if (base == nullptr ||
-      !writable(reinterpret_cast<std::uintptr_t>(base),
-                k_base_viewangles_offset + sizeof(void*))) {
+      !writable(reinterpret_cast<std::uintptr_t>(base), k_base_viewangles_offset + sizeof(void*))) {
     return false;
   }
   const auto angles = *reinterpret_cast<std::uintptr_t*>(base + k_base_viewangles_offset);
@@ -473,8 +467,7 @@ void Input::anti_aim_tick(void* cmd, std::uint8_t* base) noexcept {
   // and never writes them — the camera reads the same field, so a write here
   // would drag the operator's view onto the fake angles.
   float camera[3] = {0.0F, 0.0F, 0.0F};
-  if (ccsgo_input_ == 0 ||
-      !cs2::game::read(ccsgo_input_ + k_input_view_angles_offset, camera)) {
+  if (ccsgo_input_ == 0 || !cs2::game::read(ccsgo_input_ + k_input_view_angles_offset, camera)) {
     anti_aim_reason_.store(k_anti_aim_reason_no_camera);
     return;
   }
@@ -488,16 +481,14 @@ void Input::anti_aim_tick(void* cmd, std::uint8_t* base) noexcept {
   // offset, so the two writes of a tick (the slot-5 builder and the slot-25
   // finaliser) agree and the write stays idempotent.
   std::uint32_t number = 0;
-  if (cmd != nullptr &&
-      writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_number_offset,
-               sizeof(std::uint32_t))) {
+  if (cmd != nullptr && writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_number_offset,
+                                 sizeof(std::uint32_t))) {
     number = *reinterpret_cast<const std::uint32_t*>(static_cast<std::uint8_t*>(cmd) +
-                                                      k_cmd_number_offset);
+                                                     k_cmd_number_offset);
   }
   const auto side = static_cast<anti_aim::Side>(anti_aim_side_.load());
-  const float fake =
-      anti_aim::fake_yaw(camera_angles.yaw, anti_aim_yaw_offset_.load(), side,
-                         anti_aim_seed_, number, anti_aim_jitter_.load());
+  const float fake = anti_aim::fake_yaw(camera_angles.yaw, anti_aim_yaw_offset_.load(), side,
+                                        anti_aim_seed_, number, anti_aim_jitter_.load());
   const float pitch = anti_aim::clamp_pitch(anti_aim_pitch_.load());
   anti_aim_fake_yaw_.store(fake);
   anti_aim_fake_pitch_.store(pitch);
@@ -528,8 +519,8 @@ void Input::anti_aim_tick(void* cmd, std::uint8_t* base) noexcept {
   // The **delivered** axes: a member of the engine's discrete set, chosen so
   // the walk direction stays as close to the camera's as the set allows. The
   // cost is reported: the direction error and the walk-speed factor.
-  const auto delivery = anti_aim::deliver_axes(
-      camera_angles, anti_aim::Angles{pitch, fake, 0.0F}, current);
+  const auto delivery =
+      anti_aim::deliver_axes(camera_angles, anti_aim::Angles{pitch, fake, 0.0F}, current);
   anti_aim_forward_.store(delivery.axes.forward);
   anti_aim_left_.store(delivery.axes.left);
   anti_aim_direction_error_.store(delivery.direction_error_deg);
@@ -662,8 +653,7 @@ void Input::rage_tick(std::uint8_t* cmd, const std::uint64_t* buttons) noexcept 
   // `CInButtonStatePB` so the sub-tick records agree with the legacy mask. A changed
   // word is needed for the engine to see a fresh press edge (zoom/reload act on the
   // edge), exactly as the attack does.
-  const auto base =
-      *reinterpret_cast<std::uintptr_t*>(cmd + k_cmd_pb_offset + k_pb_base_offset);
+  const auto base = *reinterpret_cast<std::uintptr_t*>(cmd + k_cmd_pb_offset + k_pb_base_offset);
   const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
   std::uint64_t extra = *buttons & button::k_attack;
   if (rage_scope_.load()) {
@@ -859,8 +849,8 @@ void Input::strafe_tick(void* base, void* cmd) noexcept {
   const StrafeIntent intent = intent_from_buttons(buttons);
   strafe_intent_f_.store(intent.forward);
   strafe_intent_l_.store(intent.right);
-  const bool legacy = mode == static_cast<int>(StrafeMode::camera_relative) ||
-                      strafe_ignore_keys_.load();
+  const bool legacy =
+      mode == static_cast<int>(StrafeMode::camera_relative) || strafe_ignore_keys_.load();
   constexpr std::uint64_t side_bits = button::k_moveleft | button::k_moveright;
   if (legacy && (buttons & side_bits) != 0) {
     strafe_reason_.store(7);
@@ -1037,8 +1027,7 @@ void Input::strafe_judge_steer(float vel_yaw, int side, float written_rotation) 
     // whose effect this turn measures) and the side it pushed the wish on: the
     // current tick's request has not been written yet, and the rotation that
     // was written may have been clamped by the gate's limit.
-    switch (classify_steer(strafe_vel_yaw_last_.load(), vel_yaw,
-                           strafe_side_sample_.load(),
+    switch (classify_steer(strafe_vel_yaw_last_.load(), vel_yaw, strafe_side_sample_.load(),
                            strafe_rot_sample_.load())) {
       case SteerVerdict::followed:
         strafe_steered_ticks_.fetch_add(1);
@@ -1238,9 +1227,8 @@ auto Input::simulate_landing(void* cmd, int ticks, int& landed_tick, float& land
     if (!cs2::game::read(reinterpret_cast<std::uintptr_t>(&vtable[k_run_command_slot]), run) ||
         !cs2::game::read(reinterpret_cast<std::uintptr_t>(&vtable[k_set_prediction_command_slot]),
                          set_pred) ||
-        !cs2::game::read(
-            reinterpret_cast<std::uintptr_t>(&vtable[k_reset_prediction_command_slot]),
-            reset_pred) ||
+        !cs2::game::read(reinterpret_cast<std::uintptr_t>(&vtable[k_reset_prediction_command_slot]),
+                         reset_pred) ||
         run == nullptr || set_pred == nullptr || reset_pred == nullptr) {
       return false;
     }
@@ -1294,8 +1282,7 @@ auto Input::simulate_landing(void* cmd, int ticks, int& landed_tick, float& land
   // The landing recorded before the simulation (so a stale landing is not read
   // as a fresh one), and the controller tick base `RunCommand` advances.
   int before_tick = 0;
-  (void)cs2::game::read(svc + k_modern_jump_offset + k_modern_jump_landed_tick_offset,
-                        before_tick);
+  (void)cs2::game::read(svc + k_modern_jump_offset + k_modern_jump_landed_tick_offset, before_tick);
   std::uintptr_t controller = 0;
   int base_tick = 0;
   if (client_base_ != 0 && controllers_rva_ != 0) {
@@ -1523,21 +1510,33 @@ void __fastcall Input::animfix_codec_detour(void* dst, void* src, void* schema) 
   input->animfix_capture(dst);
 }
 
-void __fastcall Input::animfix_anim_tick_detour(void* self, int client_tick) noexcept {
+void __fastcall Input::animfix_anim_tick_detour(void* self, int client_tick_flag) noexcept {
   Input* input = g_active;
   if (input == nullptr) {
     return;
   }
-  // The correction goes in **before** the original: the AG2 evaluation (and
-  // with it the pose) happens inside it, so the graph is evaluated from the
-  // server's values.
-  if (input->animfix_enabled_.load()) {
+  // The driver runs **two** variants - the client tick and (in a listen
+  // server) the server tick - and the flag says which: the engine picks its
+  // VProf scope by it ("AnimGraph Server Tick" when the flag is 0, "AnimGraph
+  // Client Tick" otherwise).
+  //
+  // The correction is for the **local player's client-side graph**, so it
+  // is written on the client tick only: the server tick evaluates the
+  // server's own copies of the entities, which the animfix never writes to.
+  // (And the correction is re-applied on *every* client anim tick while the
+  // capture is fresh, so the server's value stays in the graph between the
+  // decodes - a consume-once rule would leave the client's prediction in
+  // the graph for the later anim ticks of the same tick, and the pose would
+  // oscillate at the server's tick rate.)
+  if (client_tick_flag != 0 && input->animfix_enabled_.load()) {
     input->animfix_apply();
   }
-  // `client_tick` is a **flag** (0 = the server tick, otherwise the client
-  // tick), not a tick count: the function picks its VProf scope by it.
-  reinterpret_cast<animfix_anim_tick_fn>(input->animfix_anim_tick_hook_.original())(self,
-                                                                                   client_tick);
+  input->animfix_anim_ticks_.fetch_add(1);
+  if (client_tick_flag != 0) {
+    input->animfix_client_ticks_.fetch_add(1);
+  }
+  reinterpret_cast<animfix_anim_tick_fn>(input->animfix_anim_tick_hook_.original())(
+      self, client_tick_flag);
 }
 
 auto Input::animfix_controller() const noexcept -> std::uintptr_t {
@@ -1596,7 +1595,7 @@ void Input::animfix_capture(void* controller) noexcept {
   }
   animfix_targets_valid_.store(true);
   animfix_captures_.fetch_add(1);
-  animfix_snapshot_interval_.store(animfix_clock_.average_ms);
+  animfix_snapshot_interval_.store(animfix::snapshot_interval_ms(animfix_clock_));
   animfix_server_yaw_.store(values[animfix::slot_position(animfix::Slot::aim_yaw)]);
 }
 
@@ -1636,10 +1635,12 @@ void Input::animfix_apply() noexcept {
       const animfix::Decision decision =
           animfix::decide(animfix_capture_, slot, now, bound, controller);
       if (!decision.reapply) {
+        // One refusal per anim tick: the capture-level reasons (no capture,
+        // aged out, the controller changed) hold for every slot, so counting
+        // them per slot would multiply them by the number of slots.
         count_animfix_refusal(decision.refusal);
-        continue;
+        break;
       }
-      animfix::mark_applied(animfix_capture_, slot);
       server = animfix_capture_.values[animfix::slot_position(slot)];
     }
     // The graph parameter's address: node -> the parameter array -> the
@@ -1660,7 +1661,12 @@ void Input::animfix_apply() noexcept {
     if (!cs2::game::read(value_address, current)) {
       continue;
     }
-    if (slot == animfix::Slot::aim_yaw) {
+    if (slot == animfix::Slot::aim_yaw && current != server) {
+      // The value in the graph is the **client's own prediction** - it
+      // differs from the server's. (When it does not differ, the graph
+      // holds the animfix's own correction, or the two agree; either way
+      // there is no divergence to report, and the last observed one is
+      // kept.)
       animfix_predicted_yaw_.store(current);
       // Both numbers are known now: the server's aim yaw (from the capture)
       // and the client's predicted one (the value the graph held). Until
@@ -1697,9 +1703,6 @@ void Input::count_animfix_refusal(animfix::Refusal refusal) noexcept {
       break;
     case animfix::Refusal::stale:
       animfix_skip_stale_.fetch_add(1);
-      break;
-    case animfix::Refusal::already_applied:
-      animfix_skip_applied_.fetch_add(1);
       break;
     case animfix::Refusal::controller:
       animfix_skip_controller_.fetch_add(1);
@@ -1771,9 +1774,9 @@ void Input::animfix_install() noexcept {
     return;
   }
   if (!animfix_anim_tick_hook_.installed()) {
-    const auto error = animfix_anim_tick_hook_.install(
-        reinterpret_cast<void*>(module.base + anim_tick->rva),
-        reinterpret_cast<void*>(&Input::animfix_anim_tick_detour));
+    const auto error =
+        animfix_anim_tick_hook_.install(reinterpret_cast<void*>(module.base + anim_tick->rva),
+                                        reinterpret_cast<void*>(&Input::animfix_anim_tick_detour));
     if (error.has_value()) {
       set_animfix_status(std::string("the anim tick is not hookable: ") +
                          cs2::hooks::to_string(*error));
@@ -1793,8 +1796,7 @@ void Input::animfix_install() noexcept {
     }
   }
   set_animfix_status("ok");
-  cs2::game::append_log(
-      "[cs2-payload] animfix: the graph codec and the anim tick are hooked");
+  cs2::game::append_log("[cs2-payload] animfix: the graph codec and the anim tick are hooked");
 }
 
 auto Input::current_cmd() noexcept -> void* {
@@ -1820,7 +1822,8 @@ auto Input::current_cmd() noexcept -> void* {
   }
   const auto sequence = *reinterpret_cast<std::uint32_t*>(array + k_user_cmd_array_sequence_offset);
   auto* cmd = static_cast<std::uint8_t*>(sequence_(reinterpret_cast<void*>(controller), sequence));
-  if (cmd == nullptr || !writable(reinterpret_cast<std::uintptr_t>(cmd), k_cmd_buttons_offset + 8)) {
+  if (cmd == nullptr ||
+      !writable(reinterpret_cast<std::uintptr_t>(cmd), k_cmd_buttons_offset + 8)) {
     return nullptr;
   }
   return cmd;
@@ -1835,8 +1838,8 @@ void Input::capture(void* cmd) noexcept {
   for (std::size_t i = 0; i < k_probe_words; ++i) {
     probe_[i].store(words[i], std::memory_order_relaxed);
   }
-  const auto base = *reinterpret_cast<std::uintptr_t*>(
-      static_cast<std::uint8_t*>(cmd) + k_cmd_pb_offset + k_pb_base_offset);
+  const auto base = *reinterpret_cast<std::uintptr_t*>(static_cast<std::uint8_t*>(cmd) +
+                                                       k_cmd_pb_offset + k_pb_base_offset);
   last_base_.store(base, std::memory_order_relaxed);
   if (writable(base, k_probe_base_words * sizeof(std::uint64_t))) {
     const auto* base_words = reinterpret_cast<const std::uint64_t*>(base);
@@ -1971,8 +1974,8 @@ auto Input::add_yaw_step(void* base, float yaw_delta, float when) noexcept -> vo
   return step;
 }
 
-auto Input::add_button_step(void* base, std::uint64_t button, bool pressed,
-                            float when) noexcept -> void* {
+auto Input::add_button_step(void* base, std::uint64_t button, bool pressed, float when) noexcept
+    -> void* {
   auto* step = static_cast<std::uint8_t*>(alloc_step(base));
   if (step == nullptr) {
     return nullptr;
@@ -2090,15 +2093,14 @@ void Input::bhop_tick(void* cmd, std::uint8_t* base, std::uint64_t buttons) noex
       // command early — its press stands at `offset/64` from the tick start.
       when = landed_frac == 0.0F
                  ? k_bhop_offset
-                 : std::clamp(contact + k_bhop_offset, contact + k_subtick_grid,
-                              k_bhop_last_when);
+                 : std::clamp(contact + k_bhop_offset, contact + k_subtick_grid, k_bhop_last_when);
       mode = 1;
     } else if (build > landed_tick + 1 && build <= landed_tick + 1 + k_bhop_catchup_ticks) {
       // B: the command is one or more ticks past the contact. A whole tick late
       // takes `DoJump`'s beta path (a hop, but the ground-slice clamp keeps the
       // speed loss); the catch-up window keeps the array from ever starving.
-      when = std::clamp(contact + k_bhop_offset + k_subtick_grid, k_bhop_first_when,
-                        k_bhop_last_when);
+      when =
+          std::clamp(contact + k_bhop_offset + k_subtick_grid, k_bhop_first_when, k_bhop_last_when);
       mode = 2;
     }
     if (when < k_bhop_first_when || when > k_bhop_last_when) {
@@ -2455,18 +2457,16 @@ void Input::apply(void* cmd) noexcept {
       move[2] = axes[2];
       *reinterpret_cast<std::uint32_t*>(base + k_base_has_bits_offset) |= k_base_move_bits;
 
-      constexpr std::uint64_t move_bits = button::k_forward | button::k_back |
-                                          button::k_moveleft | button::k_moveright;
+      constexpr std::uint64_t move_bits =
+          button::k_forward | button::k_back | button::k_moveleft | button::k_moveright;
       // The button bits follow the engine's convention — a positive side axis
       // is the player's LEFT (`cs2::control::engine_move_buttons`).
       const std::uint64_t held = *buttons & ~move_bits;
       *buttons = held | cs2::control::engine_move_buttons(move[0], move[1], k_move_epsilon);
 
-      const auto buttons_pb =
-          *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
+      const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
       if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
-        auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb +
-                                                       k_buttonstate_values_offset);
+        auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
         state[0] = (state[0] & ~move_bits) | (held & move_bits);  // buttonstate1: held
         state[1] = (state[1] & ~move_bits) | (held & move_bits);  // buttonstate2: changed
         *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
@@ -2571,9 +2571,8 @@ void Input::apply(void* cmd) noexcept {
   if (control && command_angles_enabled_.load()) {
     const auto base =
         *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset + k_pb_base_offset);
-    if (write_command_angles(reinterpret_cast<std::uint8_t*>(base),
-                             command_angle_pitch_.load(), command_angle_yaw_.load(),
-                             command_angle_roll_.load())) {
+    if (write_command_angles(reinterpret_cast<std::uint8_t*>(base), command_angle_pitch_.load(),
+                             command_angle_yaw_.load(), command_angle_roll_.load())) {
       command_angle_writes_.fetch_add(1);
     }
   }
@@ -2590,9 +2589,8 @@ void Input::apply(void* cmd) noexcept {
   //     frame, so those features keep working. It refuses to act where a
   //     composition is impossible (the strafe's sub-tick basis rotation, the
   //     `look` command's own angles) and says so in `anti_aim_reason`.
-  anti_aim_tick(cmd, reinterpret_cast<std::uint8_t*>(
-                          *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset +
-                                                            k_pb_base_offset)));
+  anti_aim_tick(cmd, reinterpret_cast<std::uint8_t*>(*reinterpret_cast<std::uintptr_t*>(
+                         bytes + k_cmd_pb_offset + k_pb_base_offset)));
 
   // 5. Sub-tick view angles: every `input_history` entry's `view_angles` (the
   //    silent-aim seam). The shot reads the entry at
@@ -2636,7 +2634,9 @@ void Input::refresh() noexcept {
   }
   struct ClaimReset {
     std::atomic<bool>& flag;
-    ~ClaimReset() { flag.store(false); }
+    ~ClaimReset() {
+      flag.store(false);
+    }
   } claim_reset{refresh_claimed_};
   const cs2::game::ModuleInfo module = cs2::game::find_module("client.dll");
   if (!module.valid()) {
@@ -2644,8 +2644,8 @@ void Input::refresh() noexcept {
   }
   const OffsetInfo* object_offset = find_offset("ccsgo_input");
   const OffsetInfo* move_offset = find_offset("create_move");
-  if (object_offset == nullptr || move_offset == nullptr ||
-      object_offset->module != "client.dll" || move_offset->module != "client.dll") {
+  if (object_offset == nullptr || move_offset == nullptr || object_offset->module != "client.dll" ||
+      move_offset->module != "client.dll") {
     return;
   }
   void* object = reinterpret_cast<void*>(module.base + object_offset->rva);

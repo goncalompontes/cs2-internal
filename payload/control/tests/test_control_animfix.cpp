@@ -264,35 +264,32 @@ void test_the_refusal_reasons_are_distinguishable() {
       capture, animfix::Slot::aim_yaw, 1000 + k_two_intervals_ms, k_interval_ms, k_controller);
   assert(!aged.reapply);
   assert(aged.refusal == animfix::Refusal::stale);
-  // A capture that was already re-applied for this slot.
-  animfix::mark_applied(capture, animfix::Slot::aim_yaw);
-  const animfix::Decision used =
-      animfix::decide(capture, animfix::Slot::aim_yaw, 1000, k_interval_ms, k_controller);
-  assert(!used.reapply);
-  assert(used.refusal == animfix::Refusal::already_applied);
-  // The other slot of the same capture is still pending.
-  assert(animfix::decide(capture, animfix::Slot::aim_pitch, 1000, k_interval_ms, k_controller)
-             .reapply);
 }
 
-// The specification's rule: a capture corrects a slot **at most once**, and
-// only a newer decode (a newer generation) can correct it again.
-void test_a_capture_is_consumed_once_per_slot() {
+// The capture is **not** consumed by a re-apply: it is re-applied on every
+// anim tick while it is fresh, so the server's value stays in the graph
+// between the decodes.
+//
+// A consume-once rule would leave the graph with the client's prediction for
+// every later anim tick of the same tick - the pose would oscillate between
+// the server's and the client's aim yaw at the server's tick rate - and in a
+// listen server whichever of the two driver variants ran first would consume
+// the capture, leaving the variant that evaluates the pose the player sees
+// with nothing to write.
+void test_a_fresh_capture_is_reapplied_on_every_tick() {
   animfix::Capture capture = captured_at(1000);
-  assert(
-      animfix::decide(capture, animfix::Slot::aim_yaw, 1000, k_interval_ms, k_controller).reapply);
-  animfix::mark_applied(capture, animfix::Slot::aim_yaw);
-  // The same capture, again: refused.
-  assert(
-      !animfix::decide(capture, animfix::Slot::aim_yaw, 1000, k_interval_ms, k_controller).reapply);
-  // The consumption is **per slot**: the other slots of the same capture are
-  // still pending.
-  assert(animfix::decide(capture, animfix::Slot::aim_pitch, 1000, k_interval_ms, k_controller)
-             .reapply);
-  // A **new** capture re-opens the slots.
-  animfix::store(capture, k_controller, server_values(43.0F), 1016);
-  assert(
-      animfix::decide(capture, animfix::Slot::aim_yaw, 1016, k_interval_ms, k_controller).reapply);
+  for (int tick = 0; tick < 4; ++tick) {
+    const animfix::Decision decision =
+        animfix::decide(capture, animfix::Slot::aim_yaw, 1000 + static_cast<std::uint64_t>(tick),
+                        k_interval_ms, k_controller);
+    assert(decision.reapply);
+  }
+  // And it stops when the capture ages out - that is the protection the
+  // specification's rule is for.
+  const animfix::Decision late = animfix::decide(
+      capture, animfix::Slot::aim_yaw, 1000 + 2 * k_interval_ms, k_interval_ms, k_controller);
+  assert(!late.reapply);
+  assert(late.refusal == animfix::Refusal::stale);
 }
 
 // The capture is a **copy**: the values the animfix hands back are the ones
@@ -549,7 +546,7 @@ auto main(int argc, char** argv) -> int {
   test_a_fresh_capture_is_reapplied();
   test_an_aged_out_capture_is_refused();
   test_the_refusal_reasons_are_distinguishable();
-  test_a_capture_is_consumed_once_per_slot();
+  test_a_fresh_capture_is_reapplied_on_every_tick();
   test_the_capture_keeps_its_own_copy();
   test_the_capture_must_belong_to_the_live_controller();
   test_only_the_animfixs_own_slots_are_recognised();

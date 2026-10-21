@@ -825,8 +825,7 @@ auto Service::input_status() noexcept -> Json {
   result.set("strafe_steered", Json::boolean(input_.strafe_steered()));
   result.set("strafe_steered_ticks",
              Json::number(static_cast<double>(input_.strafe_steered_ticks())));
-  result.set("strafe_ignored",
-             Json::number(static_cast<double>(input_.strafe_ignored())));
+  result.set("strafe_ignored", Json::number(static_cast<double>(input_.strafe_ignored())));
   result.set("strafe_turn", Json::number(input_.strafe_turn()));
   result.set("bhop_presses", Json::number(static_cast<double>(input_.bhop_presses())));
   result.set("bhop_writes", Json::number(static_cast<double>(input_.bhop_writes())));
@@ -864,10 +863,13 @@ auto Service::input_status() noexcept -> Json {
   // capture was already used" (the normal case).
   result.set("animfix_skip_no_capture",
              Json::number(static_cast<double>(input_.animfix_skip_no_capture())));
-  result.set("animfix_skip_stale",
-             Json::number(static_cast<double>(input_.animfix_skip_stale())));
-  result.set("animfix_skip_applied",
-             Json::number(static_cast<double>(input_.animfix_skip_applied())));
+  result.set("animfix_skip_stale", Json::number(static_cast<double>(input_.animfix_skip_stale())));
+  // The anim ticks the driver ran, and the client ones (the correction is
+  // written on the client tick: the server tick of a listen server evaluates
+  // the server's own copies of the entities).
+  result.set("animfix_anim_ticks", Json::number(static_cast<double>(input_.animfix_anim_ticks())));
+  result.set("animfix_client_ticks",
+             Json::number(static_cast<double>(input_.animfix_client_ticks())));
   result.set("animfix_skip_controller",
              Json::number(static_cast<double>(input_.animfix_skip_controller())));
   // The server's snapshot rate: the staleness bound is measured against it.
@@ -1150,11 +1152,10 @@ void Service::do_antiaim(const Json& args, Json& out) noexcept {
   // The desync offset (degrees, applied to the camera's yaw), the fake pitch
   // (degrees, clamped to the engine's range), the per-command jitter (degrees)
   // and the side (`0` automatic, `+1` left, `-1` right).
-  input_.set_anti_aim_config(number("yaw_offset", input_.anti_aim_yaw_offset()),
-                              number("pitch", input_.anti_aim_pitch()),
-                              number("jitter", input_.anti_aim_jitter()),
-                              static_cast<int>(number("side",
-                                                     static_cast<float>(input_.anti_aim_side()))));
+  input_.set_anti_aim_config(
+      number("yaw_offset", input_.anti_aim_yaw_offset()), number("pitch", input_.anti_aim_pitch()),
+      number("jitter", input_.anti_aim_jitter()),
+      static_cast<int>(number("side", static_cast<float>(input_.anti_aim_side()))));
   // The movement re-base: **on by default**. Turning it off leaves the fake
   // angles in place and the movement's wish basis follows them — a
   // diagnostic, not a mode to play in. The `move_crc` caveat is reported in
@@ -2352,9 +2353,8 @@ auto Service::movement_status(char* out, std::size_t size) const noexcept -> boo
   std::snprintf(out, size,
                 "strafe %s (%d slice%s, gain %+.0f u/s, steering %s%s, turn "
                 "%+.1f deg) bhop %s (presses %llu)",
-                strafe ? "on" : "off", subticks, subticks == 1 ? "" : "s",
-                input_.strafe_gain(), steering, ignored_note,
-                input_.strafe_turn(), bhop ? "on" : "off",
+                strafe ? "on" : "off", subticks, subticks == 1 ? "" : "s", input_.strafe_gain(),
+                steering, ignored_note, input_.strafe_turn(), bhop ? "on" : "off",
                 static_cast<unsigned long long>(input_.bhop_presses()));
   return true;
 }

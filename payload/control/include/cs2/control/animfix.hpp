@@ -290,7 +290,6 @@ inline void observe_decode(SnapshotClock& clock, std::uint64_t now_ms) noexcept 
 // accumulation and never a superseded one.
 struct Capture {
   std::array<float, k_tracked_slot_count> values{};
-  std::array<std::uint64_t, k_tracked_slot_count> applied{};
   std::uint64_t generation{0};
   std::uint64_t captured_at_ms{0};
   std::uintptr_t controller{0};
@@ -336,12 +335,11 @@ inline void store(Capture& capture, std::uintptr_t controller,
 // once-per-capture rule) — otherwise a feature that refuses everything
 // looks like a feature that is merely idle.
 enum class Refusal : std::size_t {
-  none = 0,         // the re-apply is allowed
-  no_capture,       // the codec has not run yet
-  stale,            // the capture aged out (the snapshots stopped)
-  already_applied,  // this capture was already re-applied for this slot
-  controller,       // the live controller is not the one the capture came from
-  not_tracked,      // the slot is not one of the animfix's own
+  none = 0,     // the re-apply is allowed
+  no_capture,   // the codec has not run yet
+  stale,        // the capture aged out (the snapshots stopped)
+  controller,   // the live controller is not the one the capture came from
+  not_tracked,  // the slot is not one of the animfix's own
 };
 
 // The decision for one slot.
@@ -352,19 +350,37 @@ struct Decision {
 
 // May the captured value for `slot` be re-applied now, and if not, why not?
 //
-// Four conditions, all required:
+// Three conditions, all required:
 //   * there is a capture at all (the codec has run at least once),
 //   * the capture belongs to the **live** controller (the pawn has not
-//     respawned since it was decoded),
+//     respawned since it was decoded), and
 //   * the capture is **not stale** (it is younger than the observed snapshot
-//     interval), and
-//   * the capture has **not been re-applied for this slot yet**.
+//     interval).
 //
-// The last one is the specification's rule: *"a captured value may only be
-// re-applied if it was captured **this** frame"*. A capture corrects a slot
-// at most once; only a newer decode (a newer generation) can correct it
-// again. That is what keeps a capture from being written over the client's
-// fresh prediction again and again.
+// **The capture is not consumed by a re-apply.** The specification's rule is
+// *"a captured value may only be re-applied if it was captured **this**
+// frame"*; the reason for the rule is that a stale value must not be written
+// over a fresh prediction, and the **staleness bound** is what enforces
+// that: a capture older than the snapshot interval may have been superseded
+// by a snapshot that has not arrived, so it is refused.
+//
+// The capture is re-applied on **every** anim tick while it is fresh, and
+// that is deliberate:
+//
+//   * the engine writes the graph's parameters on the **command** path (the
+//     prediction), and the graph is evaluated on the **anim** path. A capture
+//     that is consumed by the first anim tick would leave the graph with the
+//     client's prediction for every later anim tick of the same tick - and
+//     the pose would oscillate between the server's and the client's aim yaw
+//     at the server's tick rate: the classic animfix jitter.
+//   * the engine runs **two** variants of the driver (the client tick and the
+//     server tick of a listen server). With a consume-once rule, whichever
+//     variant ran first would consume the capture, and the other one - the
+//     one that evaluates the pose the player sees - would find nothing.
+//
+// Re-applying the same fresh capture is idempotent (it writes the same
+// value), so the server's value simply **stays** in the graph between the
+// decodes.
 [[nodiscard]] inline auto decide(const Capture& capture, Slot slot, std::uint64_t now_ms,
                                  std::uint64_t max_age_ms, std::uintptr_t controller) noexcept
     -> Decision {
@@ -381,26 +397,12 @@ struct Decision {
     decision.refusal = Refusal::stale;
     return decision;
   }
-  const std::size_t position = slot_position(slot);
-  if (position >= k_tracked_slot_count) {
+  if (slot_position(slot) >= k_tracked_slot_count) {
     decision.refusal = Refusal::not_tracked;
-    return decision;
-  }
-  if (capture.applied[position] >= capture.generation) {
-    decision.refusal = Refusal::already_applied;
     return decision;
   }
   decision.reapply = true;
   return decision;
-}
-
-// Mark the slot as re-applied: the capture is now consumed for it.
-inline void mark_applied(Capture& capture, Slot slot) noexcept {
-  const std::size_t position = slot_position(slot);
-  if (position >= k_tracked_slot_count) {
-    return;
-  }
-  capture.applied[position] = capture.generation;
 }
 
 // --- the evidence ---------------------------------------------------------

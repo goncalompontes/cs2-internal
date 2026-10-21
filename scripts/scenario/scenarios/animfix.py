@@ -108,10 +108,9 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
         "skips_during_window": observed_skips,
         # The refusals, by reason — so "the codec has not run yet" is
         # distinguishable from "every capture aged out" (a stalled
-        # connection) and from "the capture was already used".
+        # connection).
         "skips_no_capture": int(final.get("animfix_skip_no_capture") or 0),
         "skips_stale": int(final.get("animfix_skip_stale") or 0),
-        "skips_applied": int(final.get("animfix_skip_applied") or 0),
         "skips_controller": int(final.get("animfix_skip_controller") or 0),
         # The server's snapshot rate: the staleness bound is measured
         # against it, so this is how old the server's values may be.
@@ -151,8 +150,8 @@ def run(game: Game, *, watch: float = WATCH, map_name: str = "de_dust2",
             "the animfix captured the server's values but never corrected the "
             f"graph (applies +{observed_applies}, skips +{observed_skips}, "
             f"no capture {result['skips_no_capture']}, aged out "
-            f"{result['skips_stale']}, already used {result['skips_applied']}, "
-            f"controller changed {result['skips_controller']}): {result}"
+            f"{result['skips_stale']}, controller changed "
+            f"{result['skips_controller']}): {result}"
         )
 
     rate = observed_applies / watch if watch > 0 else float(observed_applies)
