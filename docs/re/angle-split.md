@@ -70,7 +70,7 @@ All in `client.dll`. "slot" = the `CCSGOInput` vtable slot.
 | 5 | the per-frame *presented* snapshot → the **frame history**; called at the head of `create_move` (slot 25) | `FUN_180d055c0` — log string `"cl: ReadFrameInput - Presented data has no mod info"` | `0xd055c0` | appends one **frame-history** entry to `CCSGOInput + 0xbe0` (stride `0x60`): the render time `+0x00/+0x04`, the player time `+0x08/+0x0c`, the **view angles `+0x10/+0x14/+0x18`**, the frame index `+0x50`, the attack flag `+0x58`; the count is `CCSGOInput + 0xbd8`, the capacity `+0xbe8` |
 | 6 | the per-slot *presented* block (the source of stage 5) | `FUN_180b70640(input, slot)` | `0xb70640` | returns `input + 0x258 + slot * 0x928`; the **presented** angles are at block `+0x00` |
 | 7 | the silent channel, inside `create_move` (slot 25) | `FUN_180d02130` → `FUN_180cde100` → **`FUN_180cfa6b0(entry, pb, …)`** | `0xd02130` / `0xcde100` / **`0xcfa6b0`** | one `CSGOInputHistoryEntryPB` per frame-history entry: `pb + 0x18` = the `view_angles` `CMsgQAngle*` (x/y/z from `entry + 0x10/+0x14/+0x18`), `pb + 0x60/+0x64` = the time pair, `pb + 0x68/+0x6c` = the second pair; also the attack indices `pb + 0x3c/+0x40` |
-| 8 | the movement services, inside `OnPawnProcessCommand` | `CPlayer_MovementServices::OnPawnProcessCommand` = `FUN_180a70de0` → `UpdateInputState` = **`FUN_180a77390`** → `DoMovement::Subtick` = `FUN_180a65ae0` | `0xa70de0` / **`0xa77390`** / `0xa65ae0` | `ms + 0x1a0/0x1a4/0x1a8` = **the command's own `viewangles`** (pitch/yaw/roll); `DoMovement::Subtick` then applies the per-step `yaw_delta`/`pitch_delta` onto the `CMoveData` angles (`movedata + 0x14/+0x18`), gated by the movement-services vtable **+0x150** flag (`sv_subtick_movement_view_angles`) |
+| 8 | the movement services, inside `OnPawnProcessCommand` | `CPlayer_MovementServices::OnPawnProcessCommand` = `FUN_180a70de0` → `UpdateInputState` = **`FUN_180a77390`** → `DoMovement::Subtick` = `FUN_180a65ae0` | `0xa70de0` / **`0xa77390`** / `0xa65ae0` | `UpdateInputState` copies the **buttons** and the **command's move axes** (`base + 0x58/0x5c/0x60` → `ms + 0x1a0/0x1a4/0x1a8`) and the client tick (`base + 0x64` → `ms + 0x48`); the **angles** travel separately — `DoMovement::Subtick` copies the decoded per-step angles onto the `CMoveData`'s angles (`movedata + 0x14/+0x18`), gated by the movement-services vtable **+0x150** flag (`sv_subtick_movement_view_angles`) |
 | 9 | the pawn's think → the pawn's angles | `FUN_180b07590(pawn, flags)` — file `…\game\client\c_baseplayerpawn.cpp:0x171` | `0xb07590` | reads the live view angles, applies the **server's** view-angle correction (§3, row 9), writes the corrected angles back into `CCSGOInput + 0x688` **and** into `ms + 0x240`; stores the pawn's aim angles at `pawn + 0x1388` (the previous ones at `pawn + 0x13b4`) |
 | 10 | the eye-angle copy | `FUN_1808cb9b0(pawn)` | `0x8cb9b0` | `pawn + 0x3600` = **`m_angEyeAngles`** (from the pawn's `EyeAngles()` virtual, vtable **+0x570**) |
 | 11 | the camera | `FUN_180a64570(services, origin, angles, …)` = `CPlayer_CameraServices::CalcView` | `0xa64570` | the rendered view setup (origin + angles); the angle source is the live view angles |
@@ -119,7 +119,7 @@ server corrected them), `0xb8f6e0`, `0xbb0830`, `0xc75890`, `0xc76830`.
 | **the silent channel** | `cmd + 0x10 + 0x18` (`input_history`, rep `+0x28`, size `+0x20`); per entry `view_angles` at **`entry + 0x18`** | `FUN_180cfa6b0`: `lVar4 = *(u64*)(pb+0x18)` (allocated `FUN_1806723c0`), `x@+0x18, y@+0x1c, z@+0x20`; `pb+0x10 |= 1` (the field-2 has-bit) |
 | **the frame history** | array `CCSGOInput + 0xbe0`, count `+0xbd8`, capacity `+0xbe8`, **stride `0x60`** | `FUN_180d055c0` (the appender) and `FUN_180d02130` (the reader: `iVar7 * 0x60 + *(i64*)(input+0xbe0)`) |
 | **the pawn's `m_angEyeAngles`** | `C_CSPlayerPawn + 0x3600`, a netvar of type `CWrappedInterpolatedVar<QAngle>`, channel `qangle_precise` | the schema registration `FUN_180c56fe0`: `MOV dword ptr [RAX+0x10], 0x3600` next to `LEA RCX,[0x181c83610]` (`"m_angEyeAngles"`); the netvar registration `FUN_180c7fa90`: `MOV dword ptr [RSP+0x28], 0x3600`, `MOV dword ptr [RSP+0x20], 0x90`; the type string at `0x181c8d4b8` = `"CWrappedInterpolatedVar< QAngle >"`, the channel string at `0x181b29670` = `"qangle_precise"` |
-| **the movement services' angles** | `CPlayer_MovementServices + 0x1a0/0x1a4/0x1a8` (pitch/yaw/roll) and `+0x240` | `FUN_180a77390` (`UpdateInputState`) writes `ms+0x1a0 = angles[0]`, `ms+0x1a4 = angles[1]`, `ms+0x1a8 = angles[2]`; `FUN_180b07590` writes `ms+0x240` |
+| **the movement services' fields** | `CPlayer_MovementServices + 0x1a0/0x1a4/0x1a8` = the **command's move axes** (forward/left/up), `+0x240` = an angle triple, `+0x48` = the client tick | `FUN_180a77390` (`UpdateInputState`): `*(u32*)(ms+0x1a0) = base+0x58`, `*(u32*)(ms+0x1a4) = base+0x5c`, `*(u32*)(ms+0x1a8) = base+0x60` (the `CMsgQAngle` default instance `PTR_PTR_1821ffe90` is the fallback — the same `base + 0x40` test is used for the client tick at `base + 0x64` → `ms + 0x48`); `FUN_180b07590` writes `ms + 0x240` |
 | **the server's view-angle corrections** | `C_BasePlayerPawn + 0x1340` (count) / `+0x1348` (array, **stride `0x48`**), a netvar `CUtlVectorEmbeddedNetworkVar<ViewAngleServerChange_t, NetworkVar_m_ServerViewAngleChanges>`; per entry: `+0x30` a "fix" byte, `+0x34` the `QAngle`, `+0x40` the tick/index | the netvar registration `FUN_180457c40`: `MOV dword ptr [RSP+0x28], 0x1340`, `MOV dword ptr [RSP+0x20], 0x68`, `LEA RDX,[0x181b182c8]` (`"m_ServerViewAngleChanges"`); the reader `FUN_180931130`: `iVar1 = *(int*)(pawn+0x1340)`, `lVar3 = *(u64*)(pawn+0x1348) + i*0x48`, `if (param_3 < *(u32*)(lVar3+0x40))` → copy `*(u64*)(lVar3+0x34)` / `*(u32*)(lVar3+0x3c)` |
 | **the animation state** | `CCSPlayerAnimationState`: `m_flTurnOnSpotAngle +0x2c`, `m_flPreviousAimYaw +0x30`, `m_flPreviousHorizontalSpeed +0x34`; and `m_flAimPitchAngle` / `m_flAimYawAngle` (the offsets of the second registration are stack-relative and were **not** pinned) | the schema registration `FUN_18087d320` (`"CCSPlayerAnimationState"`): `MOV dword ptr [RAX+0x10], 0x30` next to `LEA RCX,[0x181c0c2d0]` (`"m_flPreviousAimYaw"`); the wider registration `FUN_1808d9740` lists `m_flAimPitchAngle` (`0x181c0ee58`), `m_flAimYawAngle` (`0x181c0ee70`), `m_flGroundTurnAngleOrVelocity`, `m_flLadderYaw`, `m_groundAction`, `m_airAction` |
 
@@ -167,48 +167,52 @@ They are **different fields of the same message**, filled from **different
 sources at different times** (the live angles now vs. the angles as of the
 last presented frame), so they can and do differ — and a payload can write
 them independently. The repo's payload already does exactly that
-(`payload/control/src/input.cpp`: `write_silent_angles()` writes the history
-entries, `set_command_angles()` writes `base + 0x40`).
+(`payload/control/src/input.cpp`: the `command_angles_enabled_` path writes
+`base + 0x40`, `write_silent_angles()` writes the history entries).
 
 ### 4.2 Which one the server uses for what
 
 **(a) The player's angles / the body yaw → the command's own `viewangles`.**
 
-The code that turns the command into the player's angles is
-`CPlayer_MovementServices::UpdateInputState` = `FUN_180a77390`
-(RVA `0xa77390`). Its vprof string is
-`"CPlayer_MovementServices::UpdateInputState"` and its source file is
+Two independent pieces of evidence:
+
+*Static.* The code that turns a command into the player's angles lives in
+`CPlayer_MovementServices` (`CPlayer_MovementServices::UpdateInputState` =
+`FUN_180a77390`, RVA `0xa77390`; `DoMovement::Subtick` = `FUN_180a65ae0`,
+RVA `0xa65ae0`). Its source file is
 `C:\buildworker\csgo_rel_win64\build\src\game\shared\player_movementservices.cpp`
-— **`game/shared/`**, i.e. the *same* translation unit the server links.
-It reads `cmd_base + 0x40` (the `viewangles` `CMsgQAngle*`) and stores
-pitch/yaw/roll into the movement services at `ms + 0x1a0 / 0x1a4 / 0x1a8`:
-
-```c
-ppuVar8 = (base + 0x40) ? (base + 0x40) : &PTR_PTR_1821ffe90;   // the default QAngle
-*(u32*)(ms + 0x1a0) = *(u32*)(ppuVar8 + 0x18);   // pitch
-*(u32*)(ms + 0x1a4) = *(u32*)((u64*)ppuVar8 + 0xb);  // yaw   (CMsgQAngle + 0x1c)
-*(u32*)(ms + 0x1a8) = *(u32*)(ppuVar8 + 0x20);   // roll
-```
-
-The per-sub-tick movement yaw is layered on top of *that*: in
-`DoMovement::Subtick` (`FUN_180a65ae0`, RVA `0xa65ae0`) the movement
-services' vtable **+0x150** flag (`sv_subtick_movement_view_angles`) decides
-whether the decoded per-step `yaw_delta`/`pitch_delta` are copied onto the
-`CMoveData` angles (`movedata + 0x14/+0x18`):
+— **`game/shared/`**, i.e. the *same* translation unit the server links, so
+what the client predicts is what the server simulates. `UpdateInputState`
+copies the **buttons** and the **command's move axes**
+(`base + 0x58/0x5c/0x60` → `ms + 0x1a0/0x1a4/0x1a8`) and the client tick
+(`base + 0x64` → `ms + 0x48`); the **angles** travel on their own path —
+`DoMovement::Subtick` copies the decoded per-step angles onto the
+`CMoveData`'s angles (`movedata + 0x14/+0x18`), and it is gated by the
+movement-services vtable **+0x150** flag (`sv_subtick_movement_view_angles`):
 
 ```c
 cVar7 = (*(code**)(*param_1 + 0x150))();          // the cvar gate
 if (cVar7) { movedata->angles[0] = step[0x18]; movedata->angles[1] = step[0x1c]; }
 ```
 
-So the **movement** basis (and hence the player's facing) is the command's
-own `viewangles`, optionally shifted per sub-tick.
+The per-step `yaw_delta`/`pitch_delta` are *deltas on the command's own
+`viewangles`*, so the movement's angle basis is the command's `viewangles`.
 
-*Confidence:* the **movement** basis is established directly from the shared
-code. The **body yaw** on the server follows from the same code path plus the
-client's own prediction (writing `base + 0x40` moved the local
-`m_angEyeAngles` 0 → 90, `docs/re/subtick.md`), but the server-side
-derivation was not read out of `server.dll` (§8.1).
+*Measured.* The repo's live probe (`docs/re/subtick.md`, 2026-10-15,
+`strafe-probe`) established the two channels' behaviour side by side:
+
+| write | steers the movement? | the local `m_angEyeAngles` |
+|---|---|---|
+| the command's own `viewangles` (`base + 0x40`) | **yes** (90° → the walk turned 90°) | **moves** (0 → 90) |
+| `input_history[i].view_angles` | no | unchanged (0 → 0) |
+
+So the command's own `viewangles` is the channel the **player** (body,
+movement basis) follows, and it is visible in the pawn's own eye angles.
+
+*Confidence:* the movement basis and the client's predicted eye angles are
+established. The **server-side** body-yaw derivation was not read out of
+`server.dll` (§8.1) — it is inferred from the shared code plus the
+measurement.
 
 **(b) The shot direction → the silent `input_history` channel.**
 
@@ -228,10 +232,12 @@ anti-aim needs.**
 `CWrappedInterpolatedVar<QAngle>` on the `qangle_precise` channel
 (`C_CSPlayerPawn + 0x3600`). The client's writer is `FUN_1808cb9b0`
 (`0x8cb9b0`), which copies the pawn's `EyeAngles()` into it — and, in the
-normal case, `EyeAngles()` *is* that field (`FUN_180c74ec0`). So on the
-client it is a **prediction** of the server's value, not an independent
-channel the client sends. (The netvar's *direction* was not established — see
-§8.)
+normal case, `EyeAngles()` *is* that field (`FUN_180c74ec0`). The
+interpolation of the netvar is `FUN_180c99ac0` (`0xc99ac0`), which blends
+between the angle sets stored at `pawn + 0x36a0` (stride `0xc`) by the
+render time. So on the client it is a **prediction / interpolation** of the
+server's value, not an independent channel the client sends. (The netvar's
+*direction* was not established — see §8.2.)
 
 **(d) The server can also correct the client's view angles.**
 
@@ -290,7 +296,7 @@ All the prologues below were read from `procedure_assembly`.
 | **W3** | **the live view angles** `CCSGOInput + 0x688` (the camera) | `FUN_180b80e70` | `0xb80e70` | many: the camera, the post-think, the spawn handler, the spectator console | 12 callers (see §2) | **no** — the prologue is `TEST EDX,EDX; JNZ rel8` → a relative branch | `void (__fastcall *)(CCSGOInput* input, int slot, const float* angles)` |
 | **W4** | the live view angles (the mouse) | `CCSGOInput` vtable **+0x100** | `0xb78350` | inside `create_move_input`, before W1 | — | **yes** as a **vtable** hook (the code prologue is behind a `JNZ`); the payload already hooks the vtable | `char (__fastcall *)(CCSGOInput* self, int slot, float dt, float* angles)` |
 | **W5** | the pawn's **`m_angEyeAngles`** (`pawn + 0x3600`) — the *animation* channel | `FUN_1808cb9b0` | `0x8cb9b0` | the pawn's eye-angle update (post-think / model update) | the netvar update (server) | **yes** — 15-byte prologue (already hooked by the payload) | `void (__fastcall *)(C_CSPlayerPawn* pawn)` |
-| **W6** | the movement services' angles (`ms + 0x1a0/0x1a4/0x1a8`) — the *local* copy of the body channel | `FUN_180a77390` (`UpdateInputState`) | `0xa77390` | inside `OnPawnProcessCommand` (the shared code) | — | **yes** — 15-byte prologue | `void (__fastcall *)(CPlayer_MovementServices* self, CBaseUserCmdPB* cmd_base)` — RCX = the movement services, RDX = the command's `base` |
+| **W6** | the movement services' **command move** + buttons (`ms + 0x1a0/0x1a4/0x1a8`, `ms + 0x48/0x70/0x78`) | `FUN_180a77390` (`UpdateInputState`) | `0xa77390` | inside `OnPawnProcessCommand` (the shared code) | — | **yes** — 15-byte prologue | `void (__fastcall *)(CPlayer_MovementServices* self, CUserCmd* cmd)` — RCX = the movement services, RDX = the command |
 | **W7** | the live view angles + `ms + 0x240` + `pawn + 0x1388` | `FUN_180b07590` (the pawn's post-think) | `0xb07590` | the pawn's think, after the movement | — | **yes** — 15-byte prologue (`MOV RAX,RSP; PUSH RBP; PUSH RDI; PUSH R15; LEA RBP,[RAX-0x5f]`). *T18b called this an 18-byte prologue and therefore "refused"; the relocator stops as soon as it has 14 bytes and 15 ≤ 16, so it is accepted.* | `void (__fastcall *)(C_BasePlayerPawn* pawn, uint flags)` |
 | **W8** | the **server's** view-angle correction (read) | `FUN_180931130` | `0x931130` | inside W7 | — | **yes** — 15-byte prologue | `uint64 (__fastcall *)(C_BasePlayerPawn* pawn, float* out_angles, uint tick, uint* out_idx)` |
 | **W9** | the rendered camera angles | `FUN_180a64570` (`CalcView`) | `0xa64570` | the render path | — | **yes** — 15-byte prologue (T18b's hook) | `void (__fastcall *)(CPlayer_CameraServices* self, void* origin, float* angles, …)` — the exact tail arguments were not pinned |
@@ -302,12 +308,13 @@ per simulated command; hooking it is the natural place to *win the race*
 against the engine's own write-back of the corrected angles.
 
 **The camera and the movement must not be disturbed.** W1 changes the
-command's own angles, which the *shared* movement code turns into the
-movement basis (`ms + 0x1a4`) — so a fake yaw written into W1 **does** rotate
-the movement basis. If the anti-aim wants the movement to keep following the
-camera, the fake angles must be written **after** the movement has consumed
-the command (i.e. W1 is fine for the *body* but the movement basis must be
-restored, or the per-step `yaw_delta` mechanism used instead).
+command's own angles — the channel the **player** follows: measured, it steers
+the movement by exactly the written delta and it moves the pawn's own
+`m_angEyeAngles`. So a fake yaw written into W1 **does** rotate the movement
+basis. If the anti-aim wants the movement to keep following the camera, the
+fake angles must be written **after** the movement has consumed the command
+(W1 is fine for the *body*, but the movement basis has to be restored
+afterwards, or the per-step `yaw_delta` mechanism used instead).
 
 ---
 
@@ -350,11 +357,11 @@ restored, or the per-step `yaw_delta` mechanism used instead).
    inline hook on **`FUN_180b85d70` (RVA `0xb85d70`)** —
    `void __fastcall (CUserCmd* cmd, const float* angles)` — hooked *around*
    the original so the fake angles are what the engine writes.
-   *Risk:* this is the channel the shared movement code turns into the
-   movement basis (`ms + 0x1a4`, `UpdateInputState` `0xa77390`), so a 180°
-   fake rotates the walk. The movement must therefore be re-based (or the
-   per-sub-tick `yaw_delta` used) to keep the player's controls on the
-   camera.
+   *Risk:* this is the channel the **player** follows — measured, writing it
+   steers the movement by exactly the written delta and moves the pawn's own
+   `m_angEyeAngles`. So a 180° fake rotates the walk basis. The movement
+   must therefore be re-based (or the per-sub-tick `yaw_delta` used) to keep
+   the player's controls on the camera.
 2. **Leave the silent channel alone for the body**, and use it only for the
    shot: `input_history[i].view_angles` at entry `+0x18`
    (`CMsgQAngle` x/y/z `+0x18/+0x1c/+0x20`, has-bit `0x1` in `entry + 0x10`).
@@ -450,7 +457,8 @@ restored, or the per-step `yaw_delta` mechanism used instead).
 | the frame history | the log string `"cl: ReadFrameInput - Presented data has no mod info"` → `FUN_180d055c0` |
 | the command's own angles | the writer `FUN_180b85d70` (the only caller of the `base + 0x40` store) |
 | the silent channel | the writer `FUN_180cfa6b0` (called from `create_move` slot 25) |
-| the movement's angle source | the vprof string `"CPlayer_MovementServices::UpdateInputState"` (`0x181c3b3d0`) → `FUN_180a77390` |
+| the movement's command-move / button source | the vprof string `"CPlayer_MovementServices::UpdateInputState"` (`0x181c3b3d0`) → `FUN_180a77390` |
+| the movement's **angle** basis | the vprof string `"CPlayer_MovementServices::DoMovement::Subtick"` (`0x181c3b528`) → `FUN_180a65ae0`; the *decoder* that turns the command's `subtick_moves` into the per-slice array (and accumulates `yaw_delta` onto the command's `viewangles`) is the movement services' vtable **+0x138** — **not re-derived here** |
 | the movement's sub-tick yaw | the vprof string `"CPlayer_MovementServices::DoMovement::Subtick"` (`0x181c3b528`) → `FUN_180a65ae0` |
 | the pawn's post-think | the assert file string `…\game\client\c_baseplayerpawn.cpp` → `FUN_180b07590` |
 | the pawn's eye angles | the schema name `"m_angEyeAngles"` (`0x181c83610`) → the schema registration `FUN_180c56fe0` (the offset is the `MOV dword ptr [RAX+0x10], <offset>` next to the name `LEA`) |
