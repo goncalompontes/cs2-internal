@@ -1,0 +1,1871 @@
+#include "vm.hpp"
+
+#include <algorithm>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Operator.h"
+#include "llvm/Support/Casting.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include "selection.hpp"
+
+namespace cs2::protect {
+
+namespace {
+
+// --- The types -----------------------------------------------------------------
+
+/// The width of a type in bytes, or 0 when the virtual machine does not model
+/// the type.
+///
+/// The widths of the ISA are 1, 2, 4 and 8 bytes, so an integer of 8, 16, 32
+/// or 64 bits is modelled and nothing else is. An `i1` lives in a byte: the
+/// value of an `i1` is its low bit, and the lowering masks every operation
+/// whose result is an `i1` (see `mask_if_bool`).
+[[nodiscard]] auto width_of(llvm::Type* type) -> std::uint8_t {
+  if (type->isIntegerTy()) {
+    switch (type->getIntegerBitWidth()) {
+      case 1:
+      case 8:
+        return 1;
+      case 16:
+        return 2;
+      case 32:
+        return 4;
+      case 64:
+        return 8;
+      default:
+        return 0;
+    }
+  }
+  if (type->isPointerTy()) {
+    // Only the default address space: the manual mapper knows one address
+    // space, and a pointer into another one is not a pointer it can map.
+    if (llvm::cast<llvm::PointerType>(type)->getAddressSpace() != 0) {
+      return 0;
+    }
+    return 8;
+  }
+  return 0;
+}
+
+/// Whether the virtual machine models the type.
+[[nodiscard]] auto supported_type(llvm::Type* type) -> bool {
+  return width_of(type) != 0;
+}
+
+/// Whether the virtual machine models the type as the type of a *result*.
+///
+/// A function that returns nothing is modelled: the interpreter returns
+/// zero.
+[[nodiscard]] auto supported_result_type(llvm::Type* type) -> bool {
+  return type->isVoidTy() || supported_type(type);
+}
+
+/// Whether the type is an `i1`.
+[[nodiscard]] auto is_bool(llvm::Type* type) -> bool {
+  return type->isIntegerTy() && type->getIntegerBitWidth() == 1;
+}
+
+// --- The checks ----------------------------------------------------------------
+
+/// Whether the function has an EH edge.
+///
+/// The interpreter cannot model unwinding: the frame is a flat array of
+/// cells, and there is no place to put a landing pad.
+[[nodiscard]] auto has_eh(const llvm::Function& function) -> bool {
+  for (const llvm::BasicBlock& block : function) {
+    for (const llvm::Instruction& instruction : block) {
+      if (llvm::isa<llvm::InvokeInst>(instruction) ||
+          llvm::isa<llvm::LandingPadInst>(instruction) ||
+          llvm::isa<llvm::CatchSwitchInst>(instruction) ||
+          llvm::isa<llvm::CleanupReturnInst>(instruction) ||
+          llvm::isa<llvm::CatchReturnInst>(instruction) ||
+          llvm::isa<llvm::ResumeInst>(instruction)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/// The calls of a function, in order.
+[[nodiscard]] auto calls_of(llvm::Function& function) -> std::vector<llvm::CallBase*> {
+  std::vector<llvm::CallBase*> calls;
+  for (llvm::BasicBlock& block : function) {
+    for (llvm::Instruction& instruction : block) {
+      if (auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+        calls.push_back(call);
+      }
+    }
+  }
+  return calls;
+}
+
+/// Whether the callee has a parameter that an indirect signature cannot
+/// carry: Windows x64 rejects `byval`, `sret`, `inalloca` and `preallocated`
+/// in an indirect call.
+[[nodiscard]] auto has_indirect_parameter(const llvm::Function& callee) -> bool {
+  for (const llvm::Argument& argument : callee.args()) {
+    if (argument.hasByValAttr() || argument.hasStructRetAttr() || argument.hasInAllocaAttr() ||
+        argument.hasPreallocatedAttr()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// Whether the address of the function is taken.
+///
+/// A rewrite changes what the address of the function means: the address
+/// would be the address of the thunk, and every user of the address would
+/// reach the interpreter.
+[[nodiscard]] auto address_taken(const llvm::Function& function) -> bool {
+  for (const llvm::User* user : function.users()) {
+    const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
+    if (call != nullptr && call->getCalledFunction() == &function) {
+      continue;  // a direct call is not the address
+    }
+    return true;
+  }
+  return false;
+}
+
+/// The length of a `memcpy` or a `memset`, when it is a constant.
+[[nodiscard]] auto constant_length(const llvm::CallBase& call) -> std::optional<std::uint64_t> {
+  const auto* intrinsic = llvm::dyn_cast<llvm::MemIntrinsic>(&call);
+  if (intrinsic == nullptr) {
+    return std::nullopt;
+  }
+  const auto* length = llvm::dyn_cast<llvm::ConstantInt>(intrinsic->getLength());
+  if (length == nullptr) {
+    return std::nullopt;
+  }
+  return length->getZExtValue();
+}
+
+/// The comparison kind of an `icmp`.
+[[nodiscard]] auto compare_kind(llvm::CmpInst::Predicate predicate) -> std::optional<VmCompare> {
+  switch (predicate) {
+    case llvm::CmpInst::ICMP_EQ:
+      return VmCompare::eq;
+    case llvm::CmpInst::ICMP_NE:
+      return VmCompare::ne;
+    case llvm::CmpInst::ICMP_UGT:
+      return VmCompare::ugt;
+    case llvm::CmpInst::ICMP_UGE:
+      return VmCompare::uge;
+    case llvm::CmpInst::ICMP_ULT:
+      return VmCompare::ult;
+    case llvm::CmpInst::ICMP_ULE:
+      return VmCompare::ule;
+    case llvm::CmpInst::ICMP_SGT:
+      return VmCompare::sgt;
+    case llvm::CmpInst::ICMP_SGE:
+      return VmCompare::sge;
+    case llvm::CmpInst::ICMP_SLT:
+      return VmCompare::slt;
+    case llvm::CmpInst::ICMP_SLE:
+      return VmCompare::sle;
+    default:
+      return std::nullopt;
+  }
+}
+
+/// The cast kind of a conversion.
+[[nodiscard]] auto cast_kind(unsigned opcode) -> std::optional<VmCast> {
+  switch (opcode) {
+    case llvm::Instruction::ZExt:
+      return VmCast::zext;
+    case llvm::Instruction::SExt:
+      return VmCast::sext;
+    case llvm::Instruction::Trunc:
+      return VmCast::trunc;
+    case llvm::Instruction::BitCast:
+      return VmCast::bitcast;
+    default:
+      return std::nullopt;
+  }
+}
+
+/// The greatest common divisor, for the permutation's multiplier.
+[[nodiscard]] auto greatest_common_divisor(std::uint64_t left, std::uint64_t right) noexcept
+    -> std::uint64_t {
+  while (right != 0) {
+    const std::uint64_t rest = left % right;
+    left = right;
+    right = rest;
+  }
+  return left;
+}
+
+/// The inverse of a number modulo another, with the extended Euclidean
+/// algorithm.
+[[nodiscard]] auto modular_inverse(std::uint64_t value, std::uint64_t modulus) noexcept
+    -> std::uint64_t {
+  std::int64_t old_remainder = static_cast<std::int64_t>(value % modulus);
+  std::int64_t remainder = static_cast<std::int64_t>(modulus);
+  std::int64_t old_coefficient = 1;
+  std::int64_t coefficient = 0;
+  while (remainder != 0) {
+    const std::int64_t quotient = old_remainder / remainder;
+    const std::int64_t rest = old_remainder - quotient * remainder;
+    old_remainder = remainder;
+    remainder = rest;
+    const std::int64_t next = old_coefficient - quotient * coefficient;
+    old_coefficient = coefficient;
+    coefficient = next;
+  }
+  std::int64_t inverse = old_coefficient % static_cast<std::int64_t>(modulus);
+  if (inverse < 0) {
+    inverse += static_cast<std::int64_t>(modulus);
+  }
+  return static_cast<std::uint64_t>(inverse);
+}
+
+/// Writes a little-endian value into a buffer.
+template <typename T>
+void write_le(std::vector<std::uint8_t>& buffer, std::size_t offset, T value) {
+  for (std::size_t index = 0; index < sizeof(T); ++index) {
+    buffer[offset + index] = static_cast<std::uint8_t>((value >> (8U * index)) & 0xFFU);
+  }
+}
+
+/// The keystream of the container: the byte at the offset `position`.
+///
+/// The cipher is a counter-mode stream: the word at the position is the
+/// mixer of the key and of the position, and the byte is one of its eight.
+/// The interpreter decrypts on fetch, so the blob stays read-only and the
+/// interpreter is re-entrant.
+[[nodiscard]] auto keystream_byte(std::uint64_t key, std::size_t position) noexcept
+    -> std::uint8_t {
+  const std::uint64_t word = position / 8U;
+  const std::uint64_t mixed = mix64(key + word * k_mix_multiplier);
+  return static_cast<std::uint8_t>((mixed >> (8U * (position % 8U))) & 0xFFU);
+}
+
+// --- The lowerer ----------------------------------------------------------------
+
+/// The lowerer of one function.
+///
+/// The lowerer turns the optimised IR of a function into the instruction
+/// stream of the virtual machine. It never changes the function: the rewrite
+/// is the next task, and this one only produces a verdict.
+class Lowerer {
+ public:
+  Lowerer(llvm::Function& function, const VmOptions& options)
+      : function_(function), options_(options), data_layout_(function.getParent()->getDataLayout()) {}
+
+  /// Lowers the function. An empty optional means that the function was
+  /// lowered; otherwise the optional holds the refusal.
+  [[nodiscard]] auto run() -> std::optional<VmFailure> {
+    if (auto failure = check_function()) {
+      return failure;
+    }
+    if (auto failure = assign_slots()) {
+      return failure;
+    }
+    if (auto failure = lower_body()) {
+      return failure;
+    }
+    if (next_slot_ > k_max_slots) {
+      return VmFailure{VmRefusal::too_many_slots,
+                       "the function needs " + std::to_string(next_slot_) + " slots"};
+    }
+    return std::nullopt;
+  }
+
+  /// The instructions of the lowered function.
+  [[nodiscard]] auto code() const -> const std::vector<VmInstruction>& { return code_; }
+
+  /// The number of slots the function uses.
+  [[nodiscard]] auto slot_count() const -> std::size_t { return next_slot_; }
+
+  /// The entries of the pool.
+  [[nodiscard]] auto pool() const -> const std::vector<VmPoolEntry>& { return pool_; }
+
+  /// The call sites of the function.
+  [[nodiscard]] auto call_sites() const -> const std::vector<VmCallSite>& { return call_sites_; }
+
+ private:
+  // --- the state ---
+
+  llvm::Function& function_;
+  const VmOptions& options_;
+  const llvm::DataLayout& data_layout_;
+
+  std::vector<VmInstruction> code_;
+  std::vector<VmInstruction> prologue_;
+  llvm::DenseMap<const llvm::Value*, std::uint16_t> value_slots_;
+  llvm::DenseMap<const llvm::Constant*, std::uint16_t> constant_slots_;
+  std::vector<VmPoolEntry> pool_;
+  std::vector<VmCallSite> call_sites_;
+  std::size_t next_slot_{0};
+
+  /// The labels the branches point at. A label is an index into this table;
+  /// the table is filled at the end, because a branch may point forward.
+  std::vector<std::optional<std::size_t>> labels_;
+  /// The branches that point at a label: (the instruction, the label).
+  std::vector<std::pair<std::size_t, std::size_t>> fixups_;
+
+  // --- the helpers ---
+
+  [[nodiscard]] auto new_label() -> std::size_t {
+    labels_.push_back(std::nullopt);
+    return labels_.size() - 1;
+  }
+
+  void place_label(std::size_t label) { labels_[label] = code_.size(); }
+
+  void emit(VmInstruction instruction) { code_.push_back(instruction); }
+
+  void branch_to(VmOpcode opcode, std::size_t label) {
+    VmInstruction instruction;
+    instruction.opcode = opcode;
+    instruction.dst = k_no_slot;
+    fixups_.emplace_back(code_.size(), label);
+    code_.push_back(instruction);
+  }
+
+  /// Allocates a slot, or fails when the budget is exhausted.
+  [[nodiscard]] auto allocate_slot() -> std::optional<std::uint16_t> {
+    if (next_slot_ >= k_max_slots) {
+      return std::nullopt;
+    }
+    return static_cast<std::uint16_t>(next_slot_++);
+  }
+
+  /// The slot of a value.
+  [[nodiscard]] auto slot_of(const llvm::Value* value) -> std::optional<std::uint16_t> {
+    if (const auto* constant = llvm::dyn_cast<llvm::Constant>(value)) {
+      const auto found = constant_slots_.find(constant);
+      if (found == constant_slots_.end()) {
+        return std::nullopt;
+      }
+      return found->second;
+    }
+    const auto found = value_slots_.find(value);
+    if (found == value_slots_.end()) {
+      return std::nullopt;
+    }
+    return found->second;
+  }
+
+  /// Whether the symbol is one of the functions that are themselves selected
+  /// at the `virtualized` level.
+  [[nodiscard]] auto is_virtualized(llvm::StringRef symbol) const -> bool {
+    for (const std::string& name : options_.virtualized_symbols) {
+      if (name == symbol) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// The name of a type, for the call sites.
+  [[nodiscard]] auto type_name(llvm::Type* type) const -> std::string {
+    std::string name;
+    llvm::raw_string_ostream stream(name);
+    type->print(stream);
+    return stream.str();
+  }
+
+  // --- the checks ---
+
+  /// The eligibility gate.
+  ///
+  /// The checks run in the order of the specification's table, and the first
+  /// one that holds is the reason that is reported: one reason per function,
+  /// and a function that fails one is left completely untouched.
+  [[nodiscard]] auto check_function() -> std::optional<VmFailure> {
+    if (function_.isDeclaration()) {
+      return VmFailure{VmRefusal::unsupported_instruction, "the function has no body"};
+    }
+    if (has_eh(function_)) {
+      return VmFailure{VmRefusal::eh_pad, "the function has an EH edge"};
+    }
+    if (function_.isVarArg()) {
+      return VmFailure{VmRefusal::variadic_function, "the function is variadic"};
+    }
+
+    const std::vector<llvm::CallBase*> calls = calls_of(function_);
+    for (const llvm::CallBase* call : calls) {
+      const auto* callee = call->getCalledFunction();
+      if (callee == nullptr || callee->isIntrinsic()) {
+        continue;  // the indirect calls and the intrinsics are checked below
+      }
+      if (callee->isVarArg()) {
+        return VmFailure{VmRefusal::variadic_callee,
+                         "the callee '" + callee->getName().str() + "' is variadic"};
+      }
+    }
+    for (const llvm::CallBase* call : calls) {
+      if (call->getCalledFunction() == nullptr) {
+        return VmFailure{VmRefusal::indirect_call, "the call goes through a pointer"};
+      }
+    }
+    for (const llvm::CallBase* call : calls) {
+      const auto* callee = call->getCalledFunction();
+      if (callee != nullptr && !callee->isIntrinsic() && has_indirect_parameter(*callee)) {
+        return VmFailure{VmRefusal::indirect_parameter,
+                         "the callee '" + callee->getName().str() +
+                             "' has a byval, sret, inalloca or preallocated parameter"};
+      }
+    }
+    for (const llvm::CallBase* call : calls) {
+      if (call->isMustTailCall()) {
+        return VmFailure{VmRefusal::musttail, "the call is a musttail call"};
+      }
+    }
+
+    for (llvm::BasicBlock& block : function_) {
+      for (llvm::Instruction& instruction : block) {
+        if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction)) {
+          if (load->isAtomic()) {
+            return VmFailure{VmRefusal::atomic_access, "the load is atomic"};
+          }
+          if (load->isVolatile()) {
+            return VmFailure{VmRefusal::volatile_access, "the load is volatile"};
+          }
+        }
+        if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction)) {
+          if (store->isAtomic()) {
+            return VmFailure{VmRefusal::atomic_access, "the store is atomic"};
+          }
+          if (store->isVolatile()) {
+            return VmFailure{VmRefusal::volatile_access, "the store is volatile"};
+          }
+        }
+        if (llvm::isa<llvm::AtomicRMWInst>(instruction) ||
+            llvm::isa<llvm::AtomicCmpXchgInst>(instruction) ||
+            llvm::isa<llvm::FenceInst>(instruction)) {
+          return VmFailure{VmRefusal::atomic_access, "the instruction is atomic"};
+        }
+      }
+    }
+
+    for (const llvm::CallBase* call : calls) {
+      const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(call);
+      if (intrinsic == nullptr) {
+        continue;
+      }
+      const auto id = intrinsic->getIntrinsicID();
+      if (id != llvm::Intrinsic::memcpy && id != llvm::Intrinsic::memset) {
+        continue;
+      }
+      if (const auto* copy = llvm::dyn_cast<llvm::MemCpyInst>(intrinsic)) {
+        if (copy->isVolatile()) {
+          return VmFailure{VmRefusal::volatile_access, "the memcpy is volatile"};
+        }
+      }
+      if (const auto* set = llvm::dyn_cast<llvm::MemSetInst>(intrinsic)) {
+        if (set->isVolatile()) {
+          return VmFailure{VmRefusal::volatile_access, "the memset is volatile"};
+        }
+      }
+      if (!constant_length(*call).has_value()) {
+        return VmFailure{VmRefusal::dynamic_memcpy,
+                         "the length of the " +
+                             std::string(intrinsic->getCalledFunction()->getName()) +
+                             " is not a constant"};
+      }
+    }
+
+    if (!supported_result_type(function_.getReturnType())) {
+      return VmFailure{VmRefusal::unsupported_type,
+                       "the return type is not an integer of at most 64 bits nor a pointer"};
+    }
+    for (const llvm::Argument& argument : function_.args()) {
+      if (!supported_type(argument.getType())) {
+        return VmFailure{VmRefusal::unsupported_type,
+                         "the type of the argument '" + argument.getName().str() +
+                             "' is not an integer of at most 64 bits nor a pointer"};
+      }
+    }
+    for (const llvm::CallBase* call : calls) {
+      const auto* callee = call->getCalledFunction();
+      if (callee == nullptr || callee->isIntrinsic()) {
+        continue;
+      }
+      if (!supported_result_type(callee->getReturnType())) {
+        return VmFailure{VmRefusal::unsupported_type,
+                         "the callee '" + callee->getName().str() +
+                             "' returns something that is not an integer nor a pointer"};
+      }
+      for (const llvm::Argument& argument : callee->args()) {
+        if (!supported_type(argument.getType())) {
+          return VmFailure{VmRefusal::unsupported_type,
+                           "the callee '" + callee->getName().str() +
+                               "' takes a parameter that is not an integer nor a pointer"};
+        }
+      }
+    }
+
+    if (address_taken(function_)) {
+      return VmFailure{VmRefusal::address_taken, "the address of the function is taken"};
+    }
+
+    // The budgets. The argument count is the number of the arguments of a
+    // call; the slot count is the number of the values the function holds,
+    // and it is known once the slots are assigned.
+    for (const llvm::CallBase* call : calls) {
+      if (call->arg_size() > k_max_call_arguments) {
+        return VmFailure{VmRefusal::too_many_arguments,
+                         "a call has " + std::to_string(call->arg_size()) + " arguments"};
+      }
+    }
+
+    for (const llvm::CallBase* call : calls) {
+      if (call->getCalledFunction() == &function_) {
+        return VmFailure{VmRefusal::recursion, "the function calls itself"};
+      }
+    }
+    for (const llvm::CallBase* call : calls) {
+      const auto* callee = call->getCalledFunction();
+      if (callee != nullptr && is_virtualized(callee->getName())) {
+        return VmFailure{VmRefusal::virtualized_callee,
+                         "the callee '" + callee->getName().str() +
+                             "' is itself selected at the virtualized level"};
+      }
+    }
+
+    return std::nullopt;
+  }
+
+  // --- the slots ---
+
+  /// Assigns a slot to every value of the function, and materialises the
+  /// constants and the globals it refers to.
+  [[nodiscard]] auto assign_slots() -> std::optional<VmFailure> {
+    for (const llvm::Argument& argument : function_.args()) {
+      const auto slot = allocate_slot();
+      if (!slot.has_value()) {
+        return VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"};
+      }
+      value_slots_[&argument] = *slot;
+    }
+    for (llvm::BasicBlock& block : function_) {
+      for (llvm::Instruction& instruction : block) {
+        if (instruction.getType()->isVoidTy()) {
+          continue;
+        }
+        const auto slot = allocate_slot();
+        if (!slot.has_value()) {
+          return VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"};
+        }
+        value_slots_[&instruction] = *slot;
+      }
+    }
+    // The constants and the globals. The callee of a call is not one of
+    // them: a call gets an entry of the pool of its own.
+    for (llvm::BasicBlock& block : function_) {
+      for (llvm::Instruction& instruction : block) {
+        for (const llvm::Use& operand : instruction.operands()) {
+          const auto* value = operand.get();
+          if (llvm::isa<llvm::Instruction>(value) || llvm::isa<llvm::Argument>(value)) {
+            continue;
+          }
+          if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
+            if (call->getCalledOperand() == value) {
+              continue;
+            }
+          }
+          const auto* constant = llvm::dyn_cast<llvm::Constant>(value);
+          if (constant == nullptr) {
+            // An inline assembly: the lowering refuses it.
+            continue;
+          }
+          if (auto failure = materialize_constant(constant)) {
+            return failure;
+          }
+        }
+      }
+    }
+    if (next_slot_ > k_max_slots) {
+      return VmFailure{VmRefusal::too_many_slots,
+                       "the function needs " + std::to_string(next_slot_) + " slots"};
+    }
+    return std::nullopt;
+  }
+
+  /// Materialises a constant into a slot.
+  ///
+  /// A constant is materialised in the entry block, so that every path finds
+  /// it initialised. An `undef` (or a `poison`) is materialised as well: the
+  /// value of an `undef` may be read twice, and the two reads have to agree,
+  /// so the lowering freezes it into one slot.
+  [[nodiscard]] auto materialize_constant(const llvm::Constant* constant)
+      -> std::optional<VmFailure> {
+    if (constant_slots_.count(constant) != 0) {
+      return std::nullopt;
+    }
+    const auto slot = allocate_slot();
+    if (!slot.has_value()) {
+      return VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"};
+    }
+    constant_slots_[constant] = *slot;
+
+    VmInstruction instruction;
+    instruction.dst = *slot;
+
+    if (llvm::isa<llvm::UndefValue>(constant)) {
+      // The frozen `undef`: a fixed value, zero. An `undef` may be any
+      // value, and zero is one of them.
+      instruction.opcode = VmOpcode::Const;
+      instruction.width = width_of(constant->getType());
+      instruction.imm = 0;
+      prologue_.push_back(instruction);
+      return std::nullopt;
+    }
+    if (const auto* integer = llvm::dyn_cast<llvm::ConstantInt>(constant)) {
+      instruction.opcode = VmOpcode::Const;
+      instruction.width = width_of(integer->getType());
+      if (instruction.width == 0) {
+        return VmFailure{VmRefusal::unsupported_type, "the constant is too wide"};
+      }
+      instruction.imm = integer->getValue().zextOrTrunc(64).getZExtValue();
+      prologue_.push_back(instruction);
+      return std::nullopt;
+    }
+    if (llvm::isa<llvm::ConstantPointerNull>(constant)) {
+      // The null pointer: a value, not an address.
+      instruction.opcode = VmOpcode::Const;
+      instruction.width = 8;
+      instruction.imm = 0;
+      prologue_.push_back(instruction);
+      return std::nullopt;
+    }
+    if (const auto* global = llvm::dyn_cast<llvm::GlobalValue>(constant)) {
+      // The address of a global is a *relocatable* value: the bytecode may
+      // hold indices and relative offsets only, never an absolute address.
+      // The address therefore comes out of the pool, which the mapper
+      // relocates.
+      instruction.opcode = VmOpcode::Pool;
+      instruction.imm = pool_.size();
+      pool_.push_back(VmPoolEntry{global->getName().str(), false, global});
+      prologue_.push_back(instruction);
+      return std::nullopt;
+    }
+    if (const auto* expression = llvm::dyn_cast<llvm::ConstantExpr>(constant)) {
+      if (!is_relocatable_address(expression)) {
+        return VmFailure{VmRefusal::unsupported_type,
+                         "the constant is an absolute address: the bytecode may hold indices and "
+                         "relative offsets only"};
+      }
+      // A GEP of a global: the linker folds the offset into the
+      // relocation, so the expression itself is what the pool holds.
+      instruction.opcode = VmOpcode::Pool;
+      instruction.imm = pool_.size();
+      pool_.push_back(VmPoolEntry{constant_name(expression), false, expression});
+      prologue_.push_back(instruction);
+      return std::nullopt;
+    }
+    return VmFailure{VmRefusal::unsupported_type,
+                     "the constant is not an integer, a pointer or a global"};
+  }
+
+  /// Whether the constant is an address the linker relocates.
+  ///
+  /// The address of a global and the GEP of a global are relocatable: the
+  /// mapper applies the fixups and the address is right at run time. An
+  /// absolute address (a constant cast to a pointer) is not: the bytecode
+  /// may hold indices and relative offsets only.
+  [[nodiscard]] auto is_relocatable_address(const llvm::Constant* constant) const -> bool {
+    if (llvm::isa<llvm::GlobalValue>(constant)) {
+      return true;
+    }
+    const auto* expression = llvm::dyn_cast<llvm::ConstantExpr>(constant);
+    if (expression == nullptr) {
+      return false;
+    }
+    if (expression->getOpcode() == llvm::Instruction::GetElementPtr ||
+        expression->getOpcode() == llvm::Instruction::BitCast) {
+      return is_relocatable_address(expression->getOperand(0));
+    }
+    return false;
+  }
+
+  /// The name of a constant, for the report.
+  [[nodiscard]] auto constant_name(const llvm::Constant* constant) const -> std::string {
+    if (const auto* global = llvm::dyn_cast<llvm::GlobalValue>(constant)) {
+      return global->getName().str();
+    }
+    std::string name;
+    llvm::raw_string_ostream stream(name);
+    constant->print(stream);
+    return stream.str();
+  }
+
+  /// One index of a GEP.
+  struct GepIndex {
+    const llvm::Value* value{nullptr};  ///< the index itself.
+    std::uint64_t scale{0};             ///< the multiplier of the index, in bytes.
+    bool is_field{false};  ///< the index selects a field: the offset is the
+                           ///< offset of the field, not a multiple of it.
+  };
+
+  /// The type an index walks into.
+  ///
+  /// A struct is walked into by the *next* index (which selects a field),
+  /// an array and a vector by the index itself.
+  [[nodiscard]] auto element_type_of(llvm::Type* type) -> llvm::Type* {
+    if (const auto* array = llvm::dyn_cast<llvm::ArrayType>(type)) {
+      return array->getElementType();
+    }
+    if (const auto* vector = llvm::dyn_cast<llvm::VectorType>(type)) {
+      return vector->getElementType();
+    }
+    return type;
+  }
+
+  /// The scale of every index of a GEP, in bytes.
+  ///
+  /// The scale of the first index is the size of the source element type;
+  /// the scale of the others is the size of the element the index walks
+  /// into (the *offset* of the field, for a struct, because a struct has
+  /// padding -- and a field is selected, not multiplied).
+  [[nodiscard]] auto gep_indices(llvm::Type* source_type,
+                                 const std::vector<const llvm::Value*>& indices)
+      -> std::optional<std::vector<GepIndex>> {
+    std::vector<GepIndex> result;
+    llvm::Type* current = source_type;
+    for (std::size_t index = 0; index < indices.size(); ++index) {
+      const auto* value = indices[index];
+      GepIndex entry;
+      entry.value = value;
+      if (index == 0) {
+        entry.scale = alloc_size(current);
+        result.push_back(entry);
+        current = element_type_of(current);
+        continue;
+      }
+      if (const auto* array = llvm::dyn_cast<llvm::ArrayType>(current)) {
+        entry.scale = alloc_size(array->getElementType());
+        current = array->getElementType();
+      } else if (const auto* vector = llvm::dyn_cast<llvm::VectorType>(current)) {
+        const auto size = data_layout_.getTypeStoreSize(vector->getElementType());
+        if (size.isScalable()) {
+          return std::nullopt;
+        }
+        entry.scale = size.getFixedValue();
+        current = vector->getElementType();
+      } else if (auto* structure = llvm::dyn_cast<llvm::StructType>(current)) {
+        const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(value);
+        if (constant == nullptr) {
+          return std::nullopt;  // a variable index into a struct
+        }
+        const auto field = constant->getZExtValue();
+        if (field >= structure->getNumElements()) {
+          return std::nullopt;
+        }
+        entry.scale = data_layout_.getStructLayout(structure)->getElementOffset(field);
+        entry.is_field = true;
+        current = structure->getElementType(field);
+      } else {
+        // A pointer or a scalar: the index steps over it.
+        entry.scale = alloc_size(current);
+      }
+      result.push_back(entry);
+    }
+    return result;
+  }
+
+  [[nodiscard]] auto alloc_size(llvm::Type* type) -> std::uint64_t {
+    const auto size = data_layout_.getTypeAllocSize(type);
+    return size.isScalable() ? 0 : size.getFixedValue();
+  }
+
+  // --- the body ---
+
+  [[nodiscard]] auto lower_body() -> std::optional<VmFailure> {
+    llvm::BasicBlock& entry = function_.getEntryBlock();
+
+    // The labels of the blocks.
+    llvm::DenseMap<const llvm::BasicBlock*, std::size_t> block_labels;
+    for (llvm::BasicBlock& block : function_) {
+      block_labels[&block] = new_label();
+    }
+
+    // The prologue: the constants and the globals, in the entry block, so
+    // that every path finds them initialised.
+    place_label(block_labels[&entry]);
+    for (const VmInstruction& instruction : prologue_) {
+      code_.push_back(instruction);
+    }
+
+    for (llvm::BasicBlock& block : function_) {
+      if (&block != &entry) {
+        place_label(block_labels[&block]);
+      }
+      for (llvm::Instruction& instruction : block) {
+        if (auto failure = lower_instruction(instruction, block_labels)) {
+          return failure;
+        }
+      }
+    }
+
+    // The branches that point forward.
+    for (const auto& [instruction, label] : fixups_) {
+      const auto target = labels_[label];
+      if (!target.has_value()) {
+        return VmFailure{VmRefusal::unsupported_instruction, "a branch points at no block"};
+      }
+      code_[instruction].aux = static_cast<std::uint32_t>(*target);
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto lower_instruction(
+      llvm::Instruction& instruction,
+      const llvm::DenseMap<const llvm::BasicBlock*, std::size_t>& block_labels)
+      -> std::optional<VmFailure> {
+    if (auto* binary = llvm::dyn_cast<llvm::BinaryOperator>(&instruction)) {
+      return lower_binary(*binary);
+    }
+    if (auto* compare = llvm::dyn_cast<llvm::ICmpInst>(&instruction)) {
+      return lower_compare(*compare);
+    }
+    if (auto* cast = llvm::dyn_cast<llvm::CastInst>(&instruction)) {
+      return lower_cast(*cast);
+    }
+    if (auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction)) {
+      return lower_load(*load);
+    }
+    if (auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction)) {
+      return lower_store(*store);
+    }
+    if (auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&instruction)) {
+      return lower_gep(*gep);
+    }
+    if (auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&instruction)) {
+      // The intrinsics are checked before the calls: a `memcpy` is a call
+      // too, and it has an opcode of its own.
+      return lower_intrinsic(*intrinsic);
+    }
+    if (auto* call = llvm::dyn_cast<llvm::CallInst>(&instruction)) {
+      return lower_call(*call);
+    }
+    if (auto* branch = llvm::dyn_cast<llvm::BranchInst>(&instruction)) {
+      return lower_branch(*branch, block_labels);
+    }
+    if (auto* switcher = llvm::dyn_cast<llvm::SwitchInst>(&instruction)) {
+      return lower_switch(*switcher, block_labels);
+    }
+    if (auto* select = llvm::dyn_cast<llvm::SelectInst>(&instruction)) {
+      return lower_select(*select);
+    }
+    if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&instruction)) {
+      return lower_return(*ret);
+    }
+    if (auto* freeze = llvm::dyn_cast<llvm::FreezeInst>(&instruction)) {
+      return lower_freeze(*freeze);
+    }
+
+    if (llvm::isa<llvm::PHINode>(instruction)) {
+      // A PHI is an edge assignment: the moves are done by the predecessor,
+      // before its branch.
+      return std::nullopt;
+    }
+    if (llvm::isa<llvm::UnreachableInst>(instruction)) {
+      // The original is undefined behaviour, so any behaviour is allowed:
+      // the virtual machine returns zero.
+      VmInstruction zero;
+      zero.opcode = VmOpcode::Const;
+      zero.dst = k_no_slot;
+      zero.width = 8;
+      zero.imm = 0;
+      emit(zero);
+      return std::nullopt;
+    }
+    if (llvm::isa<llvm::AllocaInst>(instruction)) {
+      // The frame is a constant: there is no room for the locals of the
+      // function, and a frame that grows is not the frame the interpreter
+      // expects.
+      return VmFailure{VmRefusal::unsupported_instruction,
+                       "the function has an alloca: the frame has no room for the locals"};
+    }
+    if (llvm::isa<llvm::AtomicRMWInst>(instruction) ||
+        llvm::isa<llvm::AtomicCmpXchgInst>(instruction) ||
+        llvm::isa<llvm::FenceInst>(instruction)) {
+      return VmFailure{VmRefusal::atomic_access, "the instruction is atomic"};
+    }
+    if (llvm::isa<llvm::ExtractValueInst>(instruction) ||
+        llvm::isa<llvm::InsertValueInst>(instruction)) {
+      return VmFailure{VmRefusal::unsupported_type, "the instruction works on an aggregate"};
+    }
+    return VmFailure{VmRefusal::unsupported_instruction,
+                     "the instruction '" + std::string(instruction.getOpcodeName()) +
+                         "' is not modelled"};
+  }
+
+  /// Masks the result of an operation whose type is an `i1`.
+  ///
+  /// The width of the virtual machine is a byte, and the value of an `i1` is
+  /// its low bit: an operation that leaves a bit set above the low one would
+  /// make the value of the `i1` something else. A comparison produces zero
+  /// or one and needs no mask.
+  void mask_if_bool(llvm::Type* type, std::uint16_t slot) {
+    if (!is_bool(type)) {
+      return;
+    }
+    const auto one = allocate_slot();
+    if (!one.has_value()) {
+      return;
+    }
+    VmInstruction constant;
+    constant.opcode = VmOpcode::Const;
+    constant.width = 1;
+    constant.dst = *one;
+    constant.imm = 1;
+    emit(constant);
+
+    VmInstruction mask;
+    mask.opcode = VmOpcode::And;
+    mask.width = 1;
+    mask.dst = slot;
+    mask.src1 = slot;
+    mask.src2 = *one;
+    emit(mask);
+  }
+
+  [[nodiscard]] auto lower_binary(llvm::BinaryOperator& binary) -> std::optional<VmFailure> {
+    const auto width = width_of(binary.getType());
+    if (width == 0) {
+      return VmFailure{VmRefusal::unsupported_type,
+                       "the operand type is not an integer of at most 64 bits"};
+    }
+    const auto dst = slot_of(&binary);
+    const auto src1 = slot_of(binary.getOperand(0));
+    const auto src2 = slot_of(binary.getOperand(1));
+    if (!dst.has_value() || !src1.has_value() || !src2.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction,
+                       "an operand of the operation has no slot"};
+    }
+
+    VmOpcode opcode = VmOpcode::Const;
+    switch (binary.getOpcode()) {
+      case llvm::Instruction::Add:
+        opcode = VmOpcode::Add;
+        break;
+      case llvm::Instruction::Sub:
+        opcode = VmOpcode::Sub;
+        break;
+      case llvm::Instruction::Mul:
+        opcode = VmOpcode::Mul;
+        break;
+      case llvm::Instruction::And:
+        opcode = VmOpcode::And;
+        break;
+      case llvm::Instruction::Or:
+        opcode = VmOpcode::Or;
+        break;
+      case llvm::Instruction::Xor:
+        opcode = VmOpcode::Xor;
+        break;
+      case llvm::Instruction::UDiv:
+        opcode = VmOpcode::UDiv;
+        break;
+      case llvm::Instruction::SDiv:
+        opcode = VmOpcode::SDiv;
+        break;
+      case llvm::Instruction::URem:
+        opcode = VmOpcode::URem;
+        break;
+      case llvm::Instruction::SRem:
+        opcode = VmOpcode::SRem;
+        break;
+      case llvm::Instruction::Shl:
+        opcode = VmOpcode::Shl;
+        break;
+      case llvm::Instruction::LShr:
+        opcode = VmOpcode::LShr;
+        break;
+      case llvm::Instruction::AShr:
+        opcode = VmOpcode::AShr;
+        break;
+      default:
+        return VmFailure{VmRefusal::unsupported_instruction,
+                         "the operation '" + std::string(binary.getOpcodeName()) +
+                             "' is not modelled"};
+    }
+
+    std::uint8_t flags = 0;
+    if (binary.hasNoSignedWrap()) {
+      flags |= k_flag_nsw;
+    }
+    if (binary.hasNoUnsignedWrap()) {
+      flags |= k_flag_nuw;
+    }
+    if (binary.isExact()) {
+      flags |= k_flag_exact;
+    }
+
+    VmInstruction instruction;
+    instruction.opcode = opcode;
+    instruction.width = width;
+    instruction.flags = flags;
+    instruction.dst = *dst;
+    instruction.src1 = *src1;
+    instruction.src2 = *src2;
+    emit(instruction);
+
+    // `sub 0, x` is a negation and `xor x, -1` is a complement: the ISA
+    // has an opcode for each, and the interpreter does not have to work
+    // out which one it is.
+    if (opcode == VmOpcode::Sub && is_zero(binary.getOperand(0)) && !is_zero(binary.getOperand(1))) {
+      code_.back().opcode = VmOpcode::Neg;
+      code_.back().src2 = k_no_slot;
+    }
+    if (opcode == VmOpcode::Xor && is_all_ones(binary.getOperand(1)) &&
+        !is_all_ones(binary.getOperand(0))) {
+      code_.back().opcode = VmOpcode::Not;
+      code_.back().src2 = k_no_slot;
+    }
+
+    mask_if_bool(binary.getType(), *dst);
+    return std::nullopt;
+  }
+
+  /// Whether the value is the constant zero.
+  [[nodiscard]] auto is_zero(const llvm::Value* value) const -> bool {
+    const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(value);
+    return constant != nullptr && constant->isZero();
+  }
+
+  /// Whether the value is the constant of all ones of its width.
+  [[nodiscard]] auto is_all_ones(const llvm::Value* value) const -> bool {
+    const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(value);
+    if (constant == nullptr) {
+      return false;
+    }
+    return constant->getValue().isAllOnes();
+  }
+
+  [[nodiscard]] auto lower_compare(llvm::ICmpInst& compare) -> std::optional<VmFailure> {
+    llvm::Type* type = compare.getOperand(0)->getType();
+    std::uint8_t width = 0;
+    if (type->isIntegerTy()) {
+      width = width_of(type);
+    } else if (type->isPointerTy()) {
+      width = 8;
+    }
+    if (width == 0) {
+      return VmFailure{VmRefusal::unsupported_type,
+                       "the comparison is not on an integer or a pointer"};
+    }
+    const auto kind = compare_kind(compare.getPredicate());
+    if (!kind.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction,
+                       "the comparison '" + std::string(compare.getOpcodeName()) +
+                           "' is not modelled"};
+    }
+    const auto dst = slot_of(&compare);
+    const auto src1 = slot_of(compare.getOperand(0));
+    const auto src2 = slot_of(compare.getOperand(1));
+    if (!dst.has_value() || !src1.has_value() || !src2.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction,
+                       "an operand of the comparison has no slot"};
+    }
+    VmInstruction instruction;
+    instruction.opcode = VmOpcode::Cmp;
+    instruction.width = width;
+    instruction.dst = *dst;
+    instruction.src1 = *src1;
+    instruction.src2 = *src2;
+    instruction.aux = static_cast<std::uint32_t>(*kind);
+    emit(instruction);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto lower_cast(llvm::CastInst& cast) -> std::optional<VmFailure> {
+    const auto dst = slot_of(&cast);
+    const auto src = slot_of(cast.getOperand(0));
+    if (!dst.has_value() || !src.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction,
+                       "an operand of the conversion has no slot"};
+    }
+    const auto source_width = width_of(cast.getOperand(0)->getType());
+    const auto target_width = width_of(cast.getType());
+    if (source_width == 0 || target_width == 0) {
+      return VmFailure{VmRefusal::unsupported_type,
+                       "the conversion is not on an integer or a pointer"};
+    }
+
+    const auto kind = cast_kind(cast.getOpcode());
+    if (kind.has_value()) {
+      if (*kind == VmCast::bitcast && source_width != target_width) {
+        return VmFailure{VmRefusal::unsupported_type,
+                         "the bitcast changes the width: it is not a conversion the virtual "
+                         "machine models"};
+      }
+      VmInstruction instruction;
+      instruction.opcode = VmOpcode::Cast;
+      instruction.width = target_width;
+      instruction.dst = *dst;
+      instruction.src1 = *src;
+      instruction.aux = static_cast<std::uint32_t>(*kind) |
+                        (static_cast<std::uint32_t>(source_width) << 8U);
+      emit(instruction);
+      mask_if_bool(cast.getType(), *dst);
+      return std::nullopt;
+    }
+
+    switch (cast.getOpcode()) {
+      case llvm::Instruction::PtrToInt: {
+        if (target_width == 8) {
+          VmInstruction instruction;
+          instruction.opcode = VmOpcode::Cast;
+          instruction.width = 8;
+          instruction.dst = *dst;
+          instruction.src1 = *src;
+          instruction.aux = static_cast<std::uint32_t>(VmCast::bitcast) | (8U << 8U);
+          emit(instruction);
+          return std::nullopt;
+        }
+        // The low bytes of the pointer.
+        VmInstruction instruction;
+        instruction.opcode = VmOpcode::Cast;
+        instruction.width = target_width;
+        instruction.dst = *dst;
+        instruction.src1 = *src;
+        instruction.aux = static_cast<std::uint32_t>(VmCast::trunc) | (8U << 8U);
+        emit(instruction);
+        mask_if_bool(cast.getType(), *dst);
+        return std::nullopt;
+      }
+      case llvm::Instruction::IntToPtr: {
+        if (source_width == 8) {
+          VmInstruction instruction;
+          instruction.opcode = VmOpcode::Cast;
+          instruction.width = 8;
+          instruction.dst = *dst;
+          instruction.src1 = *src;
+          instruction.aux = static_cast<std::uint32_t>(VmCast::bitcast) | (8U << 8U);
+          emit(instruction);
+          return std::nullopt;
+        }
+        // The integer is widened to the width of a pointer, and the bits
+        // are then the bits of a pointer.
+        const auto wide = allocate_slot();
+        if (!wide.has_value()) {
+          return VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"};
+        }
+        VmInstruction extend;
+        extend.opcode = VmOpcode::Cast;
+        extend.width = 8;
+        extend.dst = *wide;
+        extend.src1 = *src;
+        extend.aux = static_cast<std::uint32_t>(VmCast::zext) |
+                     (static_cast<std::uint32_t>(source_width) << 8U);
+        emit(extend);
+
+        VmInstruction instruction;
+        instruction.opcode = VmOpcode::Cast;
+        instruction.width = 8;
+        instruction.dst = *dst;
+        instruction.src1 = *wide;
+        instruction.aux = static_cast<std::uint32_t>(VmCast::bitcast) | (8U << 8U);
+        emit(instruction);
+        return std::nullopt;
+      }
+      default:
+        return VmFailure{VmRefusal::unsupported_instruction,
+                         "the conversion '" + std::string(cast.getOpcodeName()) +
+                             "' is not modelled"};
+    }
+  }
+
+  [[nodiscard]] auto lower_load(llvm::LoadInst& load) -> std::optional<VmFailure> {
+    const auto width = width_of(load.getType());
+    if (width == 0) {
+      return VmFailure{VmRefusal::unsupported_type,
+                       "the loaded type is not an integer of at most 64 bits nor a pointer"};
+    }
+    const auto dst = slot_of(&load);
+    const auto pointer = slot_of(load.getPointerOperand());
+    if (!dst.has_value() || !pointer.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction, "an operand of the load has no slot"};
+    }
+    VmInstruction instruction;
+    instruction.opcode = VmOpcode::Load;
+    instruction.width = width;
+    instruction.aux = width;
+    instruction.dst = *dst;
+    instruction.src1 = *pointer;
+    emit(instruction);
+    mask_if_bool(load.getType(), *dst);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto lower_store(llvm::StoreInst& store) -> std::optional<VmFailure> {
+    const auto width = width_of(store.getValueOperand()->getType());
+    if (width == 0) {
+      return VmFailure{VmRefusal::unsupported_type,
+                       "the stored type is not an integer of at most 64 bits nor a pointer"};
+    }
+    const auto pointer = slot_of(store.getPointerOperand());
+    const auto value = slot_of(store.getValueOperand());
+    if (!pointer.has_value() || !value.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction, "an operand of the store has no slot"};
+    }
+    VmInstruction instruction;
+    instruction.opcode = VmOpcode::Store;
+    instruction.width = width;
+    instruction.aux = width;
+    instruction.dst = k_no_slot;
+    instruction.src1 = *pointer;
+    instruction.src2 = *value;
+    emit(instruction);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto lower_gep(llvm::GetElementPtrInst& gep) -> std::optional<VmFailure> {
+    if (!gep.getType()->isPointerTy()) {
+      return VmFailure{VmRefusal::unsupported_type, "the GEP does not yield a pointer"};
+    }
+    std::vector<const llvm::Value*> indices;
+    for (unsigned index = 0; index < gep.getNumIndices(); ++index) {
+      indices.push_back(gep.getOperand(index + 1));
+    }
+    const auto described = gep_indices(gep.getSourceElementType(), indices);
+    if (!described.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction, "the GEP is not modelled"};
+    }
+    const auto base = slot_of(gep.getPointerOperand());
+    const auto dst = slot_of(&gep);
+    if (!base.has_value() || !dst.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction, "an operand of the GEP has no slot"};
+    }
+
+    // The constant part in the offset.
+    std::int64_t offset = 0;
+    std::vector<std::pair<const llvm::Value*, std::uint64_t>> variable;
+    for (const GepIndex& index : *described) {
+      if (index.is_field) {
+        // A field is selected, not multiplied: the offset is the offset of
+        // the field.
+        offset += static_cast<std::int64_t>(index.scale);
+        continue;
+      }
+      const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(index.value);
+      if (constant != nullptr) {
+        offset += static_cast<std::int64_t>(constant->getSExtValue()) *
+                  static_cast<std::int64_t>(index.scale);
+        continue;
+      }
+      variable.emplace_back(index.value, index.scale);
+    }
+
+    // The address of the base, moved by the constant offset.
+    std::uint16_t accumulator = *base;
+    if (offset != 0) {
+      VmInstruction instruction;
+      instruction.opcode = VmOpcode::Gep;
+      instruction.width = 8;
+      instruction.dst = *dst;
+      instruction.src1 = *base;
+      instruction.imm = static_cast<std::uint64_t>(offset);
+      emit(instruction);
+      accumulator = *dst;
+    }
+
+    // The variable part: the index is widened to the width of a pointer,
+    // multiplied by the scale, and added to the address.
+    for (const auto& [value, scale] : variable) {
+      if (width_of(value->getType()) == 0) {
+        return VmFailure{VmRefusal::unsupported_type, "the index of the GEP is not an integer"};
+      }
+      const auto index_slot = slot_of(value);
+      if (!index_slot.has_value()) {
+        return VmFailure{VmRefusal::unsupported_instruction, "an index of the GEP has no slot"};
+      }
+      const auto scale_slot = allocate_slot();
+      if (!scale_slot.has_value()) {
+        return VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"};
+      }
+      // The scale is materialised here, and not in the prologue: the
+      // prologue holds the constants the *source* uses, and this one is
+      // the compiler's own.
+      VmInstruction scale_value;
+      scale_value.opcode = VmOpcode::Const;
+      scale_value.width = 8;
+      scale_value.dst = *scale_slot;
+      scale_value.imm = scale;
+      emit(scale_value);
+      const auto wide = allocate_slot();
+      const auto product = allocate_slot();
+      if (!wide.has_value() || !product.has_value()) {
+        return VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"};
+      }
+
+      // The index is signed, and it is widened before it is multiplied.
+      VmInstruction extend;
+      extend.opcode = VmOpcode::Cast;
+      extend.width = 8;
+      extend.dst = *wide;
+      extend.src1 = *index_slot;
+      extend.aux = static_cast<std::uint32_t>(VmCast::sext) |
+                   (static_cast<std::uint32_t>(width_of(value->getType())) << 8U);
+      emit(extend);
+
+      VmInstruction multiply;
+      multiply.opcode = VmOpcode::Mul;
+      multiply.width = 8;
+      multiply.dst = *product;
+      multiply.src1 = *wide;
+      multiply.src2 = *scale_slot;
+      emit(multiply);
+
+      VmInstruction add;
+      add.opcode = VmOpcode::Add;
+      add.width = 8;
+      add.dst = *dst;
+      add.src1 = accumulator;
+      add.src2 = *product;
+      emit(add);
+      accumulator = *dst;
+    }
+
+    if (offset == 0 && variable.empty()) {
+      // The GEP moves the address by nothing: the value is the base.
+      VmInstruction instruction;
+      instruction.opcode = VmOpcode::Move;
+      instruction.width = 8;
+      instruction.dst = *dst;
+      instruction.src1 = *base;
+      emit(instruction);
+    }
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto lower_call(llvm::CallInst& call) -> std::optional<VmFailure> {
+    const auto* callee = call.getCalledFunction();
+    if (callee == nullptr) {
+      return VmFailure{VmRefusal::indirect_call, "the call goes through a pointer"};
+    }
+    if (callee->isIntrinsic()) {
+      return VmFailure{VmRefusal::unsupported_instruction, "the call is an intrinsic"};
+    }
+
+    // The arguments are pushed onto the argument stack, in order, and the
+    // call pops them.
+    for (const llvm::Use& argument : call.args()) {
+      const auto slot = slot_of(argument.get());
+      if (!slot.has_value()) {
+        return VmFailure{VmRefusal::unsupported_instruction,
+                         "an argument of the call has no slot"};
+      }
+      VmInstruction push;
+      push.opcode = VmOpcode::Arg;
+      push.dst = k_no_slot;
+      push.src1 = *slot;
+      emit(push);
+    }
+
+    VmCallSite site;
+    site.callee = callee->getName().str();
+    site.argument_count = call.arg_size();
+    site.pool_index = pool_.size();
+    pool_.push_back(VmPoolEntry{site.callee, true, callee});
+    for (const llvm::Argument& argument : callee->args()) {
+      site.argument_types.push_back(type_name(argument.getType()));
+    }
+    site.return_type = type_name(callee->getReturnType());
+    call_sites_.push_back(site);
+
+    const auto result = slot_of(&call);
+    if (!call.getType()->isVoidTy() && !result.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction, "the result of the call has no slot"};
+    }
+
+    VmInstruction instruction;
+    instruction.opcode = VmOpcode::Call;
+    instruction.width = width_of(callee->getReturnType());
+    instruction.dst = result.value_or(k_no_slot);
+    instruction.imm = site.pool_index;
+    instruction.aux = static_cast<std::uint32_t>(site.argument_count);
+    emit(instruction);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto lower_branch(
+      llvm::BranchInst& branch,
+      const llvm::DenseMap<const llvm::BasicBlock*, std::size_t>& block_labels)
+      -> std::optional<VmFailure> {
+    if (branch.isConditional()) {
+      const auto condition = slot_of(branch.getCondition());
+      if (!condition.has_value()) {
+        return VmFailure{VmRefusal::unsupported_instruction, "the condition has no slot"};
+      }
+      if (auto failure = emit_phi_copies(*branch.getSuccessor(0), *branch.getParent())) {
+        return failure;
+      }
+      VmInstruction conditional;
+      conditional.opcode = VmOpcode::BrIf;
+      conditional.dst = k_no_slot;
+      conditional.src1 = *condition;
+      fixups_.emplace_back(code_.size(), block_labels.at(branch.getSuccessor(0)));
+      code_.push_back(conditional);
+
+      if (auto failure = emit_phi_copies(*branch.getSuccessor(1), *branch.getParent())) {
+        return failure;
+      }
+      branch_to(VmOpcode::Br, block_labels.at(branch.getSuccessor(1)));
+      return std::nullopt;
+    }
+    if (auto failure = emit_phi_copies(*branch.getSuccessor(0), *branch.getParent())) {
+      return failure;
+    }
+    branch_to(VmOpcode::Br, block_labels.at(branch.getSuccessor(0)));
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto lower_switch(
+      llvm::SwitchInst& switcher,
+      const llvm::DenseMap<const llvm::BasicBlock*, std::size_t>& block_labels)
+      -> std::optional<VmFailure> {
+    const auto value = slot_of(switcher.getCondition());
+    if (!value.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction,
+                       "the condition of the switch has no slot"};
+    }
+    const auto width = width_of(switcher.getCondition()->getType());
+    if (width == 0) {
+      return VmFailure{VmRefusal::unsupported_type,
+                       "the condition of the switch is not an integer"};
+    }
+
+    // A switch is a chain of comparisons: the value of the specification's
+    // table says that it is not refused.
+    for (const auto& entry : switcher.cases()) {
+      const auto case_slot = slot_of(entry.getCaseValue());
+      if (!case_slot.has_value()) {
+        return VmFailure{VmRefusal::unsupported_instruction, "a case of the switch has no slot"};
+      }
+      const auto temporary = allocate_slot();
+      if (!temporary.has_value()) {
+        return VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"};
+      }
+      VmInstruction compare;
+      compare.opcode = VmOpcode::Cmp;
+      compare.width = width;
+      compare.dst = *temporary;
+      compare.src1 = *value;
+      compare.src2 = *case_slot;
+      compare.aux = static_cast<std::uint32_t>(VmCompare::eq);
+      emit(compare);
+
+      if (auto failure = emit_phi_copies(*entry.getCaseSuccessor(), *switcher.getParent())) {
+        return failure;
+      }
+      VmInstruction conditional;
+      conditional.opcode = VmOpcode::BrIf;
+      conditional.dst = k_no_slot;
+      conditional.src1 = *temporary;
+      fixups_.emplace_back(code_.size(), block_labels.at(entry.getCaseSuccessor()));
+      code_.push_back(conditional);
+    }
+
+    if (auto failure = emit_phi_copies(*switcher.getDefaultDest(), *switcher.getParent())) {
+      return failure;
+    }
+    branch_to(VmOpcode::Br, block_labels.at(switcher.getDefaultDest()));
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto lower_select(llvm::SelectInst& select) -> std::optional<VmFailure> {
+    const auto condition = slot_of(select.getCondition());
+    const auto true_value = slot_of(select.getTrueValue());
+    const auto false_value = slot_of(select.getFalseValue());
+    const auto dst = slot_of(&select);
+    if (!condition.has_value() || !true_value.has_value() || !false_value.has_value() ||
+        !dst.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction, "an operand of the select has no slot"};
+    }
+
+    // The select is a branch: the value is written on the edge that is
+    // taken. The two edges meet again at the merge point.
+    const auto true_label = new_label();
+    const auto merge_label = new_label();
+
+    VmInstruction conditional;
+    conditional.opcode = VmOpcode::BrIf;
+    conditional.dst = k_no_slot;
+    conditional.src1 = *condition;
+    fixups_.emplace_back(code_.size(), true_label);
+    code_.push_back(conditional);
+
+    VmInstruction false_move;
+    false_move.opcode = VmOpcode::Move;
+    false_move.width = width_of(select.getType());
+    false_move.dst = *dst;
+    false_move.src1 = *false_value;
+    code_.push_back(false_move);
+
+    branch_to(VmOpcode::Br, merge_label);
+
+    place_label(true_label);
+    VmInstruction true_move;
+    true_move.opcode = VmOpcode::Move;
+    true_move.width = width_of(select.getType());
+    true_move.dst = *dst;
+    true_move.src1 = *true_value;
+    code_.push_back(true_move);
+
+    place_label(merge_label);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto lower_return(llvm::ReturnInst& ret) -> std::optional<VmFailure> {
+    std::uint16_t value = k_no_slot;
+    std::uint8_t width = 8;
+    if (ret.getNumOperands() == 0) {
+      // A function that returns nothing returns zero. The zero is
+      // materialised here, and not in the prologue: it belongs to this
+      // edge, and the prologue is emitted before the body.
+      const auto zero = allocate_slot();
+      if (!zero.has_value()) {
+        return VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"};
+      }
+      VmInstruction constant;
+      constant.opcode = VmOpcode::Const;
+      constant.width = 8;
+      constant.dst = *zero;
+      constant.imm = 0;
+      emit(constant);
+      value = *zero;
+    } else {
+      const auto slot = slot_of(ret.getOperand(0));
+      if (!slot.has_value()) {
+        return VmFailure{VmRefusal::unsupported_instruction, "the returned value has no slot"};
+      }
+      value = *slot;
+      width = width_of(ret.getType());
+    }
+    VmInstruction instruction;
+    instruction.opcode = VmOpcode::Ret;
+    instruction.width = width;
+    instruction.dst = k_no_slot;
+    instruction.src1 = value;
+    emit(instruction);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto lower_freeze(llvm::FreezeInst& freeze) -> std::optional<VmFailure> {
+    // Every value of the virtual machine already sits in a slot, and a slot
+    // holds one value: the freeze is a copy.
+    const auto dst = slot_of(&freeze);
+    const auto src = slot_of(freeze.getOperand(0));
+    if (!dst.has_value() || !src.has_value()) {
+      return VmFailure{VmRefusal::unsupported_instruction, "an operand of the freeze has no slot"};
+    }
+    VmInstruction instruction;
+    instruction.opcode = VmOpcode::Move;
+    instruction.width = width_of(freeze.getType());
+    instruction.dst = *dst;
+    instruction.src1 = *src;
+    emit(instruction);
+    return std::nullopt;
+  }
+
+  [[nodiscard]] auto lower_intrinsic(llvm::IntrinsicInst& intrinsic) -> std::optional<VmFailure> {
+    if (const auto* copy = llvm::dyn_cast<llvm::MemCpyInst>(&intrinsic)) {
+      if (copy->isVolatile()) {
+        return VmFailure{VmRefusal::volatile_access, "the memcpy is volatile"};
+      }
+      const auto length = constant_length(*copy);
+      if (!length.has_value()) {
+        return VmFailure{VmRefusal::dynamic_memcpy, "the length of the memcpy is not a constant"};
+      }
+      const auto destination = slot_of(copy->getRawDest());
+      const auto source = slot_of(copy->getRawSource());
+      if (!destination.has_value() || !source.has_value()) {
+        return VmFailure{VmRefusal::unsupported_instruction,
+                         "an operand of the memcpy has no slot"};
+      }
+      VmInstruction instruction;
+      instruction.opcode = VmOpcode::MemCpy;
+      instruction.dst = k_no_slot;
+      instruction.src1 = *destination;
+      instruction.src2 = *source;
+      instruction.imm = *length;
+      emit(instruction);
+      return std::nullopt;
+    }
+    if (const auto* set = llvm::dyn_cast<llvm::MemSetInst>(&intrinsic)) {
+      if (set->isVolatile()) {
+        return VmFailure{VmRefusal::volatile_access, "the memset is volatile"};
+      }
+      const auto length = constant_length(*set);
+      if (!length.has_value()) {
+        return VmFailure{VmRefusal::dynamic_memcpy, "the length of the memset is not a constant"};
+      }
+      const auto destination = slot_of(set->getRawDest());
+      const auto value = slot_of(set->getArgOperand(1));
+      if (!destination.has_value() || !value.has_value()) {
+        return VmFailure{VmRefusal::unsupported_instruction,
+                         "an operand of the memset has no slot"};
+      }
+      VmInstruction instruction;
+      instruction.opcode = VmOpcode::MemSet;
+      instruction.dst = k_no_slot;
+      instruction.src1 = *destination;
+      instruction.src2 = *value;
+      instruction.imm = *length;
+      emit(instruction);
+      return std::nullopt;
+    }
+    if (intrinsic.getIntrinsicID() == llvm::Intrinsic::memmove) {
+      return VmFailure{VmRefusal::unsupported_instruction,
+                       "the memmove may copy overlapping ranges: the virtual machine has no "
+                       "opcode for it"};
+    }
+
+    // The intrinsics that have no effect: the debug information, the
+    // lifetime markers, the assumptions and the alias scopes.
+    const std::string name = intrinsic.getName().str();
+    if (name.starts_with("llvm.dbg.") || name.starts_with("llvm.lifetime.") ||
+        name == "llvm.assume" || name == "llvm.experimental.noalias.scope.decl" ||
+        name == "llvm.launder.invariant.group" || name == "llvm.strip.invariant.group" ||
+        name == "llvm.prefetch") {
+      return std::nullopt;
+    }
+    return VmFailure{VmRefusal::unsupported_instruction,
+                     "the intrinsic '" + name + "' is not modelled"};
+  }
+
+  /// The moves of the PHIs of the successor, on the edge from the
+  /// predecessor.
+  ///
+  /// The moves are a *parallel* copy: every source is pushed onto the
+  /// argument stack, and every destination is popped in reverse order. A
+  /// sequential copy breaks a swapping back-edge (the classic `a, b = b, a`).
+  [[nodiscard]] auto emit_phi_copies(llvm::BasicBlock& successor, llvm::BasicBlock& predecessor)
+      -> std::optional<VmFailure> {
+    std::vector<llvm::PHINode*> phis;
+    for (llvm::PHINode& phi : successor.phis()) {
+      phis.push_back(&phi);
+    }
+    if (phis.empty()) {
+      return std::nullopt;
+    }
+    if (phis.size() > k_frame_argument_slots) {
+      return VmFailure{VmRefusal::too_many_slots,
+                       "the parallel copy needs " + std::to_string(phis.size()) +
+                           " cells of the argument stack"};
+    }
+    for (llvm::PHINode* phi : phis) {
+      const auto* incoming = phi->getIncomingValueForBlock(&predecessor);
+      if (incoming == nullptr) {
+        return VmFailure{VmRefusal::unsupported_instruction,
+                         "a phi of the successor has no value for the edge"};
+      }
+      const auto slot = slot_of(incoming);
+      if (!slot.has_value()) {
+        return VmFailure{VmRefusal::unsupported_instruction, "a value of the copy has no slot"};
+      }
+      VmInstruction push;
+      push.opcode = VmOpcode::Arg;
+      push.dst = k_no_slot;
+      push.src1 = *slot;
+      emit(push);
+    }
+    for (auto phi = phis.rbegin(); phi != phis.rend(); ++phi) {
+      const auto dst = slot_of(*phi);
+      if (!dst.has_value()) {
+        return VmFailure{VmRefusal::unsupported_instruction,
+                         "a destination of the copy has no slot"};
+      }
+      VmInstruction pop;
+      pop.opcode = VmOpcode::Pop;
+      pop.dst = *dst;
+      emit(pop);
+    }
+    return std::nullopt;
+  }
+};
+
+/// The container of a lowered function: the header, the instructions and the
+/// encryption.
+[[nodiscard]] auto encode(const std::vector<VmInstruction>& code, const VmHeader& header,
+                          std::uint64_t key, std::uint64_t perm_a, std::uint64_t perm_b)
+    -> std::vector<std::uint8_t> {
+  std::vector<std::uint8_t> buffer(k_header_bytes + code.size() * k_instruction_bytes, 0);
+
+  write_le<std::uint32_t>(buffer, 0, header.magic);
+  write_le<std::uint32_t>(buffer, 4, header.version);
+  write_le<std::uint32_t>(buffer, 8, header.slot_count);
+  write_le<std::uint32_t>(buffer, 12, header.arg_slots);
+  write_le<std::uint32_t>(buffer, 16, header.call_slots);
+  write_le<std::uint32_t>(buffer, 20, header.instruction_count);
+  write_le<std::uint32_t>(buffer, 24, header.flags);
+  write_le<std::uint32_t>(buffer, 28, header.reserved);
+
+  for (std::size_t index = 0; index < code.size(); ++index) {
+    const VmInstruction& instruction = code[index];
+    const auto offset = k_header_bytes + index * k_instruction_bytes;
+    buffer[offset] = permuted_opcode(instruction.opcode, perm_a, perm_b);
+    buffer[offset + 1] = instruction.width;
+    buffer[offset + 2] = instruction.flags;
+    buffer[offset + 3] = 0;
+    write_le<std::uint16_t>(buffer, offset + 4, instruction.dst);
+    write_le<std::uint16_t>(buffer, offset + 6, instruction.src1);
+    write_le<std::uint16_t>(buffer, offset + 8, instruction.src2);
+    write_le<std::uint16_t>(buffer, offset + 10, instruction.src3);
+    write_le<std::uint32_t>(buffer, offset + 12, instruction.aux);
+    write_le<std::uint64_t>(buffer, offset + 16, instruction.imm);
+  }
+
+  // The encryption: the whole container, the header included, so that an
+  // analyst reads nothing but noise.
+  for (std::size_t index = 0; index < buffer.size(); ++index) {
+    buffer[index] ^= keystream_byte(key, index);
+  }
+  return buffer;
+}
+
+}  // namespace
+
+auto to_string(VmRefusal reason) noexcept -> const char* {
+  switch (reason) {
+    case VmRefusal::eh_pad:
+      return "eh_pad";
+    case VmRefusal::variadic_function:
+      return "variadic_function";
+    case VmRefusal::variadic_callee:
+      return "variadic_callee";
+    case VmRefusal::indirect_call:
+      return "indirect_call";
+    case VmRefusal::indirect_parameter:
+      return "indirect_parameter";
+    case VmRefusal::musttail:
+      return "musttail";
+    case VmRefusal::volatile_access:
+      return "volatile_access";
+    case VmRefusal::atomic_access:
+      return "atomic_access";
+    case VmRefusal::dynamic_memcpy:
+      return "dynamic_memcpy";
+    case VmRefusal::unsupported_type:
+      return "unsupported_type";
+    case VmRefusal::address_taken:
+      return "address_taken";
+    case VmRefusal::too_many_slots:
+      return "too_many_slots";
+    case VmRefusal::too_many_arguments:
+      return "too_many_arguments";
+    case VmRefusal::recursion:
+      return "recursion";
+    case VmRefusal::virtualized_callee:
+      return "virtualized_callee";
+    case VmRefusal::unsupported_instruction:
+      return "unsupported_instruction";
+    default:
+      return "unknown";
+  }
+}
+
+auto permuted_opcode(VmOpcode opcode, std::uint64_t a, std::uint64_t b) noexcept -> std::uint8_t {
+  const auto number = static_cast<std::uint64_t>(opcode);
+  return static_cast<std::uint8_t>((number * a + b) % k_opcode_count);
+}
+
+auto canonical_opcode(std::uint8_t permuted, std::uint64_t a, std::uint64_t b) noexcept
+    -> VmOpcode {
+  const auto inverse = modular_inverse(a % k_opcode_count, k_opcode_count);
+  const auto value = static_cast<std::uint64_t>(permuted);
+  const auto number = ((value + k_opcode_count - (b % k_opcode_count)) * inverse) % k_opcode_count;
+  return static_cast<VmOpcode>(number);
+}
+
+auto opcode_permutation(std::uint64_t seed) noexcept -> std::pair<std::uint64_t, std::uint64_t> {
+  std::uint64_t state = seed ^ 0x564D5045524D5554ULL;
+  std::uint64_t a = splitmix64(state) % k_opcode_count;
+  if (a % 2 == 0) {
+    a = (a + 1) % k_opcode_count;
+  }
+  // The multiplier has to be coprime with the number of the opcodes, or the
+  // permutation would not be a permutation.
+  while (greatest_common_divisor(a, k_opcode_count) != 1) {
+    a = (a + 2) % k_opcode_count;
+    if (a == 0) {
+      a = 1;
+    }
+  }
+  const auto b = splitmix64(state) % k_opcode_count;
+  return {a, b};
+}
+
+auto analyze_function(llvm::Function& function, const VmOptions& options) -> VmFunction {
+  VmFunction result;
+  result.symbol = function.getName().str();
+  result.qualified = qualified_name(result.symbol);
+
+  const auto [perm_a, perm_b] = opcode_permutation(options.seed);
+  result.perm_a = perm_a;
+  result.perm_b = perm_b;
+  result.key_parts = key_parts(options.seed);
+  result.key = mix64(result.key_parts[0] ^ result.key_parts[1] ^ result.key_parts[2]);
+
+  Lowerer lowerer(function, options);
+  const auto failure = lowerer.run();
+  if (failure.has_value()) {
+    result.virtualizable = false;
+    result.failure = *failure;
+    result.frame_bytes = k_frame_bytes;
+    return result;
+  }
+
+  result.virtualizable = true;
+  result.slots = lowerer.slot_count();
+  result.instructions = lowerer.code().size();
+  result.calls = lowerer.call_sites().size();
+  result.pool = lowerer.pool();
+  result.call_sites = lowerer.call_sites();
+  result.code = lowerer.code();
+  result.frame_bytes = k_frame_bytes;
+
+  result.header.magic = k_vm_magic;
+  result.header.version = k_vm_version;
+  result.header.slot_count = static_cast<std::uint32_t>(result.slots);
+  result.header.arg_slots = static_cast<std::uint32_t>(k_frame_argument_slots);
+  result.header.call_slots = static_cast<std::uint32_t>(k_frame_call_slots);
+  result.header.instruction_count = static_cast<std::uint32_t>(result.instructions);
+  result.header.flags = k_vm_flag_encrypted | k_vm_flag_permuted;
+
+  result.blob = encode(result.code, result.header, result.key, perm_a, perm_b);
+  result.bytecode_bytes = result.blob.size();
+  return result;
+}
+
+auto analyze_module(llvm::Module& module, const Config& config,
+                     std::span<const std::string> symbols,
+                     std::span<const std::string> virtualized_symbols) -> std::vector<VmFunction> {
+  VmOptions options;
+  options.seed = module_seed(config, module.getSourceFileName());
+  options.virtualized_symbols = virtualized_symbols;
+
+  std::vector<VmFunction> result;
+  result.reserve(symbols.size());
+  for (const std::string& symbol : symbols) {
+    llvm::Function* function = module.getFunction(symbol);
+    if (function == nullptr) {
+      continue;  // the function did not survive to this phase
+    }
+    result.push_back(analyze_function(*function, options));
+  }
+  return result;
+}
+
+}  // namespace cs2::protect
