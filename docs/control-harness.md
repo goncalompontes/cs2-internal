@@ -646,12 +646,42 @@ python scripts/run-scenario.py bot-match      # 5 bots a side + practice convars
 ```
 
 `bot-match` (and `awaiting.ensure_bot_match`, or `game.ensure_bot_match(...)`
-from a scenario) loads the level, applies the practice convars
-(`PLAYGROUND_CONVARS`/`RESPAWN_CONVARS`: `mp_freezetime 0`, `mp_roundtime[_defuse]
-60`, respawn-on-death, `sv_infinite_ammo 2`, `mp_maxmoney`/`mp_startmoney`/
-`mp_afterroundmoney` 60000, a wide buy window), drives to a live round, adds
-`per_team` bots to each side (each add confirmed with `wait_for`), then freezes
-them (`bot_stop 1`). Knobs: `map_name`, `per_team`, `respawn`, `bot_stop`.
+from a scenario) sets the match up in a fixed **order** (2026-10-21):
+
+```
+load the map
+  → join the team            (the state machine's own `join_team` transition)
+  → the playground convars   (PLAYGROUND_CONVARS/RESPAWN_CONVARS)
+  → mp_restartgame 1         (the convars take effect on a fresh round)
+  → wait for the round to go live
+  → add the bots, bot_stop 1
+  → wait for the round to be live again
+  → return
+```
+
+The convars (`PLAYGROUND_CONVARS`/`RESPAWN_CONVARS`: `mp_freezetime 0`,
+`mp_roundtime[_defuse] 60`, respawn-on-death, `sv_infinite_ammo 2`,
+`mp_maxmoney`/`mp_startmoney`/`mp_afterroundmoney` 60000, a wide buy window)
+stay **before** the restart — otherwise the round's freezetime/roundtime and
+the respawn rules are the old ones — and the bots stay **after** the round
+went live. The team is joined **as early as the screen allows**, through the
+state machine's own transition (`screens.Machine.ensure_team`), so the
+`jointeam` line lives in one place.
+
+The scenario does not return while the round is still in a transition: the
+last act is a **bounded** wait for the round to be live again
+(`awaiting.wait_round_live`, the state machine's `LIVE` target plus the
+movability liveness gate). When it expires the scenario raises
+`SessionError` instead of returning a stale screen. The result says what
+happened: `map`, `players`, `teams`, `convars`, `local_name`, `local_alive`,
+`screen` (the screen the game is in when the scenario returns), `round` (the
+compact round state), `waited_s` (how long the final wait took) and
+`team_joined` (`"joined"` — the scenario's own `jointeam` — or `"auto"`, the
+server assigned the team).
+
+Knobs: `map_name`, `per_team`, `respawn`, `bot_stop`, `join_timeout` (the
+budget for the team join) and `final_timeout` (the budget for the final wait,
+120 s by default).
 
 ### Console-output capture (open)
 
