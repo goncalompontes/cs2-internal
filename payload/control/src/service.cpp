@@ -1095,7 +1095,15 @@ void Service::do_antiaim(const Json& args, Json& out) noexcept {
   if (const Json* arg = args.find("rebase"); arg != nullptr) {
     rebase = arg->is_bool() ? arg->as_bool() : arg->as_number() != 0.0;
   }
-  input_.set_anti_aim_rebase(rebase);
+  if (rebase != input_.anti_aim_rebase_ok()) {
+    input_.set_anti_aim_rebase(rebase);
+    if (rebase) {
+      cs2::game::append_log(
+          "[cs2-payload] anti-aim: the move_crc gate was OPENED — the command's CRC is "
+          "not recomputed, so the server may reject the modified movement "
+          "(docs/re/angle-split.md §5.4)");
+    }
+  }
   input_.set_anti_aim(on);
   set_ok(out, input_status());
 }
