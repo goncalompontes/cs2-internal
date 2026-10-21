@@ -360,7 +360,9 @@ class Input {
   /// the proof that it did not. They are sampled while the anti-aim runs (the
   /// feature is off: they stay at their last value).
   [[nodiscard]] float anti_aim_camera_yaw() const noexcept { return anti_aim_camera_yaw_.load(); }
-  [[nodiscard]] float anti_aim_camera_pitch() const noexcept { return anti_aim_camera_pitch_.load(); }
+  [[nodiscard]] float anti_aim_camera_pitch() const noexcept {
+    return anti_aim_camera_pitch_.load();
+  }
   /// The **delivered** analog axes — the members of the engine's discrete set
   /// (`{-1, 0, +1}`) the payload writes. These are the values the server acts
   /// on: `sv_quantize_movement_input` rounds the analog it receives, so the
