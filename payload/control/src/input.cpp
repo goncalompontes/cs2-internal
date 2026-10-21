@@ -1413,6 +1413,11 @@ void __fastcall Input::create_move_detour(void* self, int slot, void* cmd) noexc
   }
   // Let the game build/process the command, then override what it produced.
   if (input->original_ != nullptr) {
+    // The local animfix's two hooks (the graph codec and the anim tick) are
+    // installed **here**, on the game's thread: the inline hook's patch is not
+    // atomic, and patching a function the game may be executing right now can
+    // tear (see `Input::animfix_install`).
+    input->animfix_install();
     // The raw per-sub-tick angle history is the *source* the PB history is built
     // from, so a write for movement steering must land before the original.
     input->write_raw_angles();
@@ -1719,11 +1724,31 @@ void Input::set_animfix_status(std::string status) noexcept {
   animfix_status_ = std::move(status);
 }
 
+// The animfix's hooks are installed **on the game's thread** (from the
+// CreateMove detour), not from the control thread's `refresh()`.
+//
+// The inline hook patches the target with a 14-byte write that is not atomic
+// (`InlineHook::install` copies the jump in with a `memcpy`). A patch that
+// lands while another thread is *executing* the target can tear: the thread
+// would fetch a mixture of the old prologue and the new jump. The anim tick
+// is the client's tick - it runs on the main thread - so patching it from
+// the control thread would race with the main thread's own execution of it.
+//
+// The CreateMove detour also runs on the main thread, and it is *not* inside
+// the anim tick, so patching from there means no thread can be executing the
+// patched function: the window is a single write on the thread that owns
+// the function.
+//
+// (The residual: `InlineHook::original()` is read by the detour while the
+// installing thread wrote it. The hook engine publishes the trampoline
+// *before* it patches the target, precisely so the detour always finds it;
+// the write is a plain pointer store, which is atomic on x86.)
 void Input::animfix_install() noexcept {
   if (animfix_codec_hook_.installed() && animfix_anim_tick_hook_.installed()) {
     return;
   }
-  if (client_base_ == 0) {
+  const cs2::game::ModuleInfo module = cs2::game::find_module("client.dll");
+  if (!module.valid()) {
     set_animfix_status("the client module is not resolved yet");
     return;
   }
@@ -1747,7 +1772,7 @@ void Input::animfix_install() noexcept {
   }
   if (!animfix_anim_tick_hook_.installed()) {
     const auto error = animfix_anim_tick_hook_.install(
-        reinterpret_cast<void*>(client_base_ + anim_tick->rva),
+        reinterpret_cast<void*>(module.base + anim_tick->rva),
         reinterpret_cast<void*>(&Input::animfix_anim_tick_detour));
     if (error.has_value()) {
       set_animfix_status(std::string("the anim tick is not hookable: ") +
@@ -1758,7 +1783,7 @@ void Input::animfix_install() noexcept {
   }
   if (!animfix_codec_hook_.installed()) {
     const auto error =
-        animfix_codec_hook_.install(reinterpret_cast<void*>(client_base_ + codec->rva),
+        animfix_codec_hook_.install(reinterpret_cast<void*>(module.base + codec->rva),
                                     reinterpret_cast<void*>(&Input::animfix_codec_detour));
     if (error.has_value()) {
       set_animfix_status(std::string("the graph codec is not hookable: ") +
@@ -2701,8 +2726,6 @@ void Input::refresh() noexcept {
   }
   g_active = this;
   installed_ = true;
-  // The local animfix's two hooks (the graph codec and the parameter setter).
-  animfix_install();
   cs2::game::append_log("[cs2-payload] input: CCSGOInput::CreateMove hooked (slot " +
                         std::to_string(index) + ")");
 }

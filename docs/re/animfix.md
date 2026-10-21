@@ -1140,6 +1140,17 @@ counted (`animfix_skips`).
 Because the correction lands in the **same tick** as the decode, the bound
 can be tight: the capture is at most one tick old when it is used.
 
+**The hooks are installed on the game's thread.** The inline hook patches its
+target with a 14-byte write that is not atomic, and a patch that lands while
+another thread is *executing* the target can tear. The anim tick is the
+client's tick - it runs on the main thread - so the animfix installs its
+hooks from the CreateMove detour (also the main thread, and not inside the
+anim tick): no thread can be executing the patched function while it is
+patched. (The residual: `InlineHook::original()` is a plain pointer read on
+the detour's side; the hook engine publishes the trampoline *before* it
+patches the target, precisely so the detour always finds it, and the store
+itself is atomic on x86.)
+
 **The bone seam was not used.** `CSkeletonInstance::SetupBones` (`0xaa0f80`)
 would have been the wrong place for this fix: it runs on the AG2 job's
 **worker thread**, it would have to rewrite a **full `CTransform`** (position
