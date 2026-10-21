@@ -645,10 +645,15 @@ per pellet, sequential across the pellets:
 ```
 
 with the revolver's `r1 -> 1 - r1²` transform. The RNG and the seed derivation are
-the repo's own (`UniformRandomStream`, `md5_pseudo_random` — `cs2/aim/spread.hpp`);
-the sampler's assembly of the offsets is a second implementation of the recipe on
-purpose, so the host test's cross-check against `pellet_offsets` is a real
-comparison and not a tautology.
+the repo's own (`UniformRandomStream`, `md5_pseudo_random` — `cs2/aim/spread.hpp`).
+The sampler's assembly of the offsets is a **second implementation of the recipe,
+not a second RNG** — but it is the **same expression**, so the host test's
+cross-check against `pellet_offsets` is a **drift detector** (if one of the two is
+edited, the test fails), not an independent derivation of the engine's recipe. The
+test asserts the two are **bit-identical** (exact equality), so the claim is
+enforced rather than asserted; the recipe itself rests on the repo's RE
+(`docs/re/aim.md`), which `spread.hpp` still marks as unvalidated against the live
+engine.
 
 The offset is applied in the **(right, up) tangent frame** of the aim direction, and
 the chart's local metric carries it into the chart's coordinates: a true angular

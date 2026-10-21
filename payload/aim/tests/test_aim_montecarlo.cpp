@@ -126,8 +126,9 @@ auto main() -> int {
     // cross-check above, this pins the RNG's *value*.
     const SpreadKernel golden_kernel{.spread = 0.02F, .inaccuracy = 0.01F, .pellets = 1};
     std::vector<Vec2> golden(1);
-    const auto golden_count = cs2::aim::draw_pellet_offsets(cs2::aim::md5_pseudo_random(7U),
-                                                             golden_kernel, std::span<Vec2>{golden});
+    const auto golden_count =
+        cs2::aim::draw_pellet_offsets(cs2::aim::md5_pseudo_random(7U), golden_kernel,
+                                      std::span<Vec2>{golden});
     expect(golden_count.has_value() && *golden_count == 1, "the golden shot draws its pellet");
     expect(near(golden[0].x, 0.00568924F, 1e-6F) && near(golden[0].y, -0.00373996F, 1e-6F),
            "the golden offset is the engine's");
@@ -520,7 +521,8 @@ auto main() -> int {
     input.hitboxes = body_first;
     const auto second = cs2::aim::evaluate_hit_chance(input, Vec2{});
     expect(first.has_value() && second.has_value(), "the tied case evaluates");
-    expect(first->hitgroup == cs2::aim::HITGROUP_HEAD && second->hitgroup == cs2::aim::HITGROUP_HEAD,
+    expect(first->hitgroup == cs2::aim::HITGROUP_HEAD &&
+               second->hitgroup == cs2::aim::HITGROUP_HEAD,
            "the tie is broken by the hitgroup preference, not by the input order");
     expect(near(first->expected_damage, second->expected_damage, 1e-6F),
            "the tied case reports the same damage in both orders");
