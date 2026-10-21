@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 
+#include "cs2/control/prediction_copy.hpp"
 #include "cs2/game/log.hpp"
 #include "cs2/game/memory.hpp"
 #include "cs2/game/module.hpp"
@@ -73,6 +74,13 @@ auto velocity_offset() noexcept -> std::uint32_t {
          cs2::game::read_bytes(address + size - 1, &probe, 1);
 }
 
+// The prediction's writer: the movement object was probed with `writable()`
+// before the simulation, so putting the snapshot back is a plain copy.
+auto write_movement_services(std::uintptr_t address, const void* data, std::size_t count) noexcept
+    -> void {
+  std::memcpy(reinterpret_cast<void*>(address), data, count);
+}
+
 // `sv_quantize_movement_input` (on by default on Valve servers — UC 729264 /
 // 753644) rounds `forwardmove`/`leftmove` to integers, so only the nine
 // `{-1, 0, 1}²` move states survive. Snap a request into that set:
@@ -105,7 +113,6 @@ auto resolve_axes(float forward, float side, float up, bool quantize, float out[
 // slots the UC recipe calls (`RunCommand` 29, `SetPredictionCommand` 43,
 // `ResetPredictionCommand` 44).
 constexpr std::size_t k_movement_services_offset = 0x1330;  // C_BasePlayerPawn
-constexpr std::size_t k_movement_services_size = 0xfe0;     // CCSPlayer_MovementServices
 constexpr std::size_t k_modern_jump_offset = 0x6c8;
 constexpr std::size_t k_modern_jump_landed_tick_offset = 0x20;
 constexpr std::size_t k_modern_jump_landed_frac_offset = 0x24;
@@ -1210,7 +1217,7 @@ auto Input::simulate_landing(void* cmd, int ticks, int& landed_tick, float& land
   if (!cs2::game::read(pawn + k_movement_services_offset, svc) || svc == 0) {
     return false;
   }
-  if (!writable(svc, k_movement_services_size)) {
+  if (!writable(svc, cs2::control::prediction::MOVEMENT_SERVICES_SIZE)) {
     return false;
   }
 
@@ -1262,8 +1269,21 @@ auto Input::simulate_landing(void* cmd, int ticks, int& landed_tick, float& land
 
   // Snapshot the movement object (covers the modern-jump blob and every field
   // `RunCommand` mutates inside it) and the pawn's movement state.
-  thread_local std::array<std::byte, k_movement_services_size> svc_copy;
-  if (!cs2::game::read_bytes(svc, svc_copy.data(), svc_copy.size())) {
+  //
+  // The snapshot is a **plain local** of this call — never a `thread_local`.
+  // The payload is manually mapped, so the game's threads have no TLS block
+  // for the image: a `thread_local` copy resolved against a block that was
+  // never installed, the fault-safe reader answered "false", and the
+  // prediction was silently off (`docs/re/prediction.md` §"the TLS defect").
+  // The copy's lifetime is one prediction step, so the caller's frame is the
+  // right home for it: no per-thread storage, no lock, no shared state.
+  cs2::control::prediction::MovementServicesSnapshot svc_copy{};
+  if (!cs2::control::prediction::snapshot(svc, svc_copy, &cs2::game::read_bytes)) {
+    if (!predict_snapshot_failed_.exchange(true)) {
+      cs2::game::append_log(
+          "[cs2-payload] prediction: the movement services could not be read — the "
+          "prediction is off");
+    }
     return false;
   }
   std::uint32_t flags = 0;
@@ -1325,7 +1345,7 @@ auto Input::simulate_landing(void* cmd, int ticks, int& landed_tick, float& land
   }
 
   // Restore everything the simulation touched.
-  std::memcpy(reinterpret_cast<void*>(svc), svc_copy.data(), svc_copy.size());
+  cs2::control::prediction::restore(svc, svc_copy, &write_movement_services);
   std::memcpy(reinterpret_cast<void*>(pawn + k_pawn_flags_offset), &flags, sizeof(flags));
   std::memcpy(reinterpret_cast<void*>(pawn + k_pawn_velocity_offset), velocity, sizeof(velocity));
   if (scene != 0 && writable(scene, 8)) {
