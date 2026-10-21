@@ -377,6 +377,9 @@ class Coverage:
         self.malformed = ""
         self.reason = ""
         self.entries: dict[str, str] = {}
+        #: The literals of the string protection: the length and the digest
+        #: of the content, never the content itself.
+        self.strings: list[dict[str, object]] = []
 
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -411,6 +414,8 @@ class Coverage:
                         self.entries[pattern.strip()] = f"{state}:{reason.strip()}"
                     else:
                         self.entries[rest.strip()] = state.strip()
+                elif key == "str":
+                    self._read_str(value)
                 elif key == "content-sha256":
                     digest = value.strip().lower()
         except ValueError as error:
@@ -440,6 +445,35 @@ class Coverage:
                 self.mix_xor = int(number, 0)
             elif name == "key":
                 self.key_parts.append(int(number, 0))
+
+    def _read_str(self, value: str) -> None:
+        """A `str` line: one literal of the string protection.
+
+        The line carries the length and the digest of the content, never the
+        content: the coverage is a file, and a file holds the strings.
+        """
+        state, _, rest = value.partition(" ")
+        literal: dict[str, object] = {
+            "state": state.strip(),
+            "length": 0,
+            "sha256": "",
+            "uses": 0,
+            "functions": 0,
+            "reason": "",
+        }
+        for part in rest.split():
+            name, _, number = part.partition("=")
+            if name == "len":
+                literal["length"] = int(number)
+            elif name == "sha256":
+                literal["sha256"] = number.strip().upper()
+            elif name == "uses":
+                literal["uses"] = int(number)
+            elif name == "functions":
+                literal["functions"] = int(number)
+            elif name == "reason":
+                literal["reason"] = number.strip()
+        self.strings.append(literal)
 
     def _check_digest(self, lines: list[str], digest: str) -> bool:
         """Whether the file still is the one the plugin wrote.

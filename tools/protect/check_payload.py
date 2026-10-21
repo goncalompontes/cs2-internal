@@ -46,6 +46,8 @@ dispatch") are skipped, and the rest of the checks still run.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import struct
 import sys
@@ -339,6 +341,120 @@ def reported_rewrites(coverage: list[Coverage]) -> int:
     return sum(entry.rewritten for entry in coverage)
 
 
+# --- The protected strings ---------------------------------------------------
+
+
+def image_runs(data: bytes) -> list[bytes]:
+    """The NUL-terminated byte sequences of an image.
+
+    A string literal is a NUL-terminated sequence of bytes in the data of the
+    image, so splitting the image on the NUL bytes yields the candidates. A
+    literal that is not NUL-terminated is a *prefix* of one of them, which is
+    why the scan below hashes the prefixes as well.
+    """
+    return [part for part in data.split(b"\0") if part]
+
+
+def digest_matches(runs: list[bytes], length: int, digests: set[str]) -> bool:
+    """Whether one of the runs holds a sequence with one of the digests.
+
+    The digest is of the *content* of the literal, without the trailing NUL,
+    so the prefixes of the runs are hashed as well: a literal that is not
+    NUL-terminated is the prefix of a longer run.
+    """
+    for run in runs:
+        if len(run) < length:
+            continue
+        if hashlib.sha256(run[:length]).hexdigest().upper() in digests:
+            return True
+    return False
+
+
+def protected_literals(coverage: list[Coverage]) -> tuple[dict[int, set[str]], set[str]]:
+    """The digests of the literals the pass protected, and the refused ones.
+
+    The digests are grouped by length: a run is only hashed with the lengths
+    that are actually wanted.
+    """
+    by_length: dict[int, set[str]] = {}
+    refused: set[str] = set()
+    for entry in coverage:
+        for literal in entry.strings:
+            digest = str(literal.get("sha256", ""))
+            if not digest:
+                continue
+            if literal.get("state") == "protected":
+                length = int(literal.get("length", 0))
+                by_length.setdefault(length, set()).add(digest)
+            else:
+                refused.add(digest)
+    return by_length, refused
+
+
+def check_protected_strings(protected: PeImage, unprotected: PeImage | None,
+                             coverage: list[Coverage], policy: Path | None) -> int:
+    """The plaintext of the protected strings has to be out of the image.
+
+    The check is a byte scan: the coverage carries the length and the digest
+    of every protected literal (never the content), and the scan hashes the
+    candidates of the image and compares. A literal that is protected in one
+    module and **refused** in another is legitimately still in the image --
+    the gate does not half-protect -- and is reported instead of failing the
+    build.
+    """
+    by_length, refused = protected_literals(coverage)
+    if not by_length:
+        # The policy may select nothing, in which case there is nothing to
+        # check. A policy that selects strings and protected none is a
+        # failure: the protection silently did nothing.
+        selected = policy_selects_strings(policy)
+        check(
+            not selected,
+            "the policy selects strings, but no literal was protected: the protection did "
+            "nothing",
+        )
+        print("check_payload: no protected string in the coverage: the strings are not checked")
+        return 0
+
+    runs = image_runs(protected.data)
+    for length, digests in sorted(by_length.items()):
+        check(
+            not digest_matches(runs, length, digests),
+            f"the protected image still holds the plaintext of a protected string "
+            f"({length} bytes, sha256 {sorted(digests)[0][:12]}): the protection did nothing",
+        )
+    print(f"check_payload: {sum(len(digests) for digests in by_length.values())} protected "
+          "strings are absent from the protected image")
+
+    if unprotected is not None:
+        plain_runs = image_runs(unprotected.data)
+        for length, digests in sorted(by_length.items()):
+            check(
+                digest_matches(plain_runs, length, digests),
+                f"the unprotected image does not hold the plaintext of a protected string "
+                f"({length} bytes): the check would be vacuous",
+            )
+        print("check_payload: the unprotected image holds the protected strings")
+
+    for digest in sorted(refused & {d for digests in by_length.values() for d in digests}):
+        print(
+            f"check_payload: the string {digest[:12]} is protected in one module and refused "
+            "in another: it is legitimately still in the image"
+        )
+    return sum(len(digests) for digests in by_length.values())
+
+
+def policy_selects_strings(policy: Path | None) -> bool:
+    """Whether the policy's `strings` section selects anything."""
+    if policy is None or not policy.is_file():
+        return False
+    try:
+        document = json.loads(policy.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return False    strings = document.get("strings")
+    return isinstance(strings, list) and bool(strings)
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protected", type=Path, required=True)
@@ -432,8 +548,10 @@ def main(argv: list[str]) -> int:
             print(f"check_payload: the pass reported {expected} rewrites, and the image has them")
             resolved = check_dispatch_targets(protected, protected_sites, files)
             print(f"check_payload: {resolved} dispatches decode to a callee of the image")
+            check_protected_strings(protected, unprotected, files, policy)
         else:
             print("check_payload: no coverage given: the number of the rewrites is not checked")
+            check_protected_strings(protected, unprotected, [], policy)
     except Failure as error:
         print(f"check_payload: {error}", file=sys.stderr)
         return 1

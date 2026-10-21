@@ -4,6 +4,7 @@
 // ImGui debug HUD, which reads local-player/player state via `payload/game`.
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -760,9 +761,29 @@ void boot() {
 
 }  // namespace cs2::payload
 
+// The protection pass reads this: the instance handle is the payload's own
+// mapped image base -- a value that is not in the file and differs per
+// injection. It is the runtime half of the string key.
+//
+// The definition is here because there must be exactly one of it; the pass
+// declares it in every translation unit that decodes a string. The global is
+// zero-initialised (a static initialiser, so it is correct on disk), it is
+// writable in the mapped image (the injector maps the image
+// PAGE_EXECUTE_READWRITE), and it is not exported (no dllexport), so the
+// export table does not change.
+//
+// The definition exists in every build, protected or not: the pass only
+// *declares* it, so the unprotected build simply has one more global.
+extern "C" std::uint64_t cs2_protect_instance_base = 0;
+
 #if defined(_WIN32)
-BOOL WINAPI DllMain(HINSTANCE, DWORD reason, LPVOID) {
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
   if (reason == DLL_PROCESS_ATTACH) {
+    // The publication has to be the first thing that happens at attach: a
+    // string decoded before the base is published would decode with the base
+    // of zero -- a wrong behaviour, not a crash, so nothing else would
+    // notice it.
+    cs2_protect_instance_base = reinterpret_cast<std::uint64_t>(instance);
     cs2::payload::boot();
   }
   return TRUE;
