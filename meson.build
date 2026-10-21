@@ -38,6 +38,15 @@ subdir('payload/loader')
 # Hook engine (built natively here for its tests).
 subdir('payload/hooks')
 
+# The shared RAII handle (cs2/core/handle.hpp): the ownership rules are
+# platform-independent, so they have a host regression test (the Windows-only
+# sources that use the wrapper cannot be tested off-Windows).
+core_handle_test = executable('core_handle_test',
+  files('payload/core/tests/test_handle.cpp'),
+  include_directories : include_directories('payload/core/include'),
+)
+test('core-handle', core_handle_test)
+
 # World-to-screen projection math (header-only, platform-independent), built
 # natively so the matrix convention has a host regression test.
 game_matrix_test = executable('game_matrix_test', 'payload/game/tests/test_matrix.cpp',

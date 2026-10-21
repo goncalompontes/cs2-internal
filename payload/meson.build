@@ -147,6 +147,11 @@ endif
 
 subdir('loader')
 
+# The shared RAII handle (cs2/core/handle.hpp). It must come before the
+# modules that own an OS handle: they take its include directory (`core_inc`)
+# from here.
+subdir('core')
+
 # --- Generated SDK headers ------------------------------------------------
 # The payload consumes the generated SDK (payload/sdk). Generate it here too so
 # a standalone payload build works; scripts/gen-sdk.py uses the calibration
