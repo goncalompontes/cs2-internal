@@ -245,6 +245,7 @@ auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
 
   HitChance chance{};
   chance.samples = input.samples;
+  chance.source = input.seed.source;
   float damage_total = 0.0F;
   float nearest = 0.0F;
   bool have_nearest = false;

@@ -780,10 +780,13 @@ evaluations) were measured.
    cells.
 
 6. **§1.6's cost, measured on the saved 717-cell set.** The estimator's whole
-   search (32 candidates) costs p50/p95/p99 = **2.36 / 3.15 / 3.58 ms** at 64
-   samples, **4.75 / 5.33 / 5.61 ms** at 128 and **9.89 / 11.38 / 11.50 ms** at 256
-   — against the **15.6 ms** tick and the service's **12 ms** guard. The existing
-   cone objective on the same field measures **48.3 / 60.3 / 65.5 ms** here (the
-   published 34 ms is the same order). The sample-based objective is therefore
-   **4–20× cheaper** than the one it would replace, and 256 samples is the only
-   mode that does not fit the 12 ms guard with margin.
+   search (32 candidates) costs p50/p95/p99 = **2.4 / 3.1 / 3.2 ms** at 64 samples,
+   **4.8 / 5.7 / 6.1 ms** at 128 and **9.8 / 11.5 / 13.1 ms** at 256 — against
+   the **15.6 ms** tick and the service's **12 ms** guard. The measured spread over
+   five runs is p99 2.6–3.2 ms (64), 4.9–6.2 ms (128) and **11.6–15.9 ms
+   (256)**: the 256-sample mode straddles the tick and is over the guard, while 64
+   and 128 samples fit with room to spare. The existing cone objective on the same
+   field measures **48 / 60 / 62 ms** here (the published 34 ms is the same order).
+   The sample-based objective is therefore **4–20× cheaper** than the one it
+   would replace, and 256 samples is the only mode that does not fit the 12 ms
+   guard.

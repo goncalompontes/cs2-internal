@@ -242,6 +242,8 @@ auto main() -> int {
 
     const auto chance = cs2::aim::evaluate_hit_chance(input, Vec2{});
     expect(chance.has_value(), "the nearest-hit case evaluates");
+    expect(chance->source == SeedSource::sequence,
+           "the verdict reports the seed policy that produced it");
     expect(chance->target == 1, "the nearest hit's target wins over the best-value hit");
     expect(chance->hitgroup == cs2::aim::HITGROUP_CHEST,
            "the nearest hit's hitgroup wins over the best-value hit");
@@ -327,6 +329,21 @@ auto main() -> int {
     expect(probe != cs2::aim::sample_seed(grid, other, 0, 64),
            "the angle_grid policy varies with the aim");
     expect(probe != first, "the two policies differ");
+
+    // The verdict carries the policy that produced it.
+    Hitbox box;
+    box.is_capsule = true;
+    box.capsule = sphere(Vec3{.x = 100.0F, .y = 0.0F, .z = 0.0F}, 2.0F);
+    box.target = 5;
+    const std::vector<Hitbox> hitboxes{box};
+    MonteCarloInput input;
+    input.hitboxes = hitboxes;
+    input.kernel = SpreadKernel{.spread = 0.01F, .inaccuracy = 0.0F, .pellets = 1};
+    input.samples = 8;
+    input.seed = grid;
+    const auto verdict = cs2::aim::evaluate_hit_chance(input, aim);
+    expect(verdict.has_value(), "the angle_grid verdict evaluates");
+    expect(verdict->source == SeedSource::angle_grid, "the verdict reports the angle_grid policy");
 
     // The stand-in hash is a deterministic function of the angles and the tick.
     expect(cs2::aim::angle_seed_hash(0.1F, -0.05F, 42U) ==

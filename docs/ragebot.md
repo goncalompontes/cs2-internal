@@ -733,27 +733,28 @@ meson compile -C <build>
 
 Measured on this machine (the host build, `debugoptimized`; the 717-cell saved set,
 24 reconstructed hitboxes, a cone radius of 0.002 rad — the same σ the published
-`argmax_hit_probability` number uses):
+`argmax_hit_probability` number uses). The numbers are the median run of five; the
+run-to-run spread is quoted where it matters:
 
 | what | N=64 | N=128 | N=256 |
 |---|---|---|---|
-| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.070 / 0.096 / 0.099 ms | 0.141 / 0.190 / 0.198 ms | 0.283 / 0.370 / 0.394 ms |
-| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | **2.36 / 3.15 / 3.58 ms** | **4.75 / 5.33 / 5.61 ms** | **9.89 / 11.38 / 11.50 ms** |
+| `evaluate_hit_chance` (one candidate) — p50 / p95 / p99 | 0.07 / 0.10 / 0.12 ms | 0.14 / 0.19 / 0.23 ms | 0.29 / 0.38 / 0.39 ms |
+| `solve_montecarlo` (the whole search, 32 candidates) — p50 / p95 / p99 | **2.4 / 3.1 / 3.2 ms** | **4.8 / 5.7 / 6.1 ms** | **9.8 / 11.5 / 13.1 ms** |
 
 | the existing objective, on the same field | p50 | p95 | p99 |
 |---|---|---|---|
-| `argmax_hit_probability` (σ = 0.002) | 48.3 ms | 60.3 ms | 65.5 ms |
-| `hit_probability` (one evaluation) | 3.58 ms | 8.41 ms | 9.52 ms |
+| `argmax_hit_probability` (σ = 0.002) | 48 ms | 60 ms | 62 ms |
+| `hit_probability` (one evaluation) | 3.6 ms | 8.1 ms | 9.4 ms |
 
 One sample (one seed, one pellet, 24 hitboxes) costs **1.0 µs** (p50).
 
 **The verdict.** The Monte-Carlo search is **4–20× cheaper than the existing
 objective** on the same field. At 64 and 128 samples it fits the tick with room to
-spare (p99 3.6 ms and 5.6 ms against the 15.6 ms tick and the service's 12 ms
-guard); at **256 samples the p99 is 11.5 ms — inside the tick, but at the edge of the
-12 ms guard**, so the 256-sample mode does not fit the service's own budget with
-margin on this machine. The existing objective does **not** fit the tick at all
-(p50 48 ms).
+spare (p99 3.2 ms and 6.1 ms against the 15.6 ms tick and the service's 12 ms
+guard). At **256 samples the p99 is 11.6–15.9 ms across the five runs — it
+straddles the 15.6 ms tick and is over the 12 ms guard**, so the 256-sample mode
+does **not** fit the budget reliably on this machine. The existing objective does
+**not** fit the tick at all (p50 48 ms).
 
 The published figure for the existing objective is 34 ms (`docs/ragebot-perf.md`
 §3.9); the out-of-tree harness that produced it measures 29–50 ms on this machine

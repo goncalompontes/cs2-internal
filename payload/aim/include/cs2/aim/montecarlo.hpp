@@ -190,6 +190,10 @@ struct HitChance {
   int hits = 0;                  ///< how many of them hit
   int target = -1;               ///< the target of the nearest hit, -1 when nothing hit
   int hitgroup = 0;              ///< the hitgroup of the nearest hit
+  // Which seed policy produced the number. The two policies answer the ledger's
+  // question differently (§ the header's `SeedSource`), so a number that does not
+  // say which one it came from cannot be read.
+  SeedSource source = SeedSource::sequence;
 };
 
 // --- The hit test ------------------------------------------------------------------
