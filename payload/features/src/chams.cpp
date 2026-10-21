@@ -1,6 +1,5 @@
 #include "cs2/features/chams.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -132,11 +131,23 @@ inline constexpr std::uintptr_t k_render_component_view_models = 0x50;
 // The trampoline is the game's own prologue plus a jump back; if the prologue
 // were patched wrongly the trampoline would land **in this detour** again, and
 // the chain (detour -> original -> detour -> ...) would recurse until the stack
-// overflowed (0xc00000fd) and took the whole renderer with it. A thread-local
-// depth counter breaks the cycle: the re-entrant call returns without touching
-// the material, so the draw is dropped for that primitive instead of crashing
-// the game.
-thread_local int g_draw_depth = 0;
+// overflowed (0xc00000fd) and took the whole renderer with it. A depth counter
+// breaks the cycle: the re-entrant call returns without touching the material,
+// so the draw is dropped for that primitive instead of crashing the game.
+//
+// It is deliberately **not** `thread_local`. The payload is manually mapped and
+// its TLS block is not installed on the game's render thread; a thread-local
+// guard dereferenced a null TLS base (measured on the camera's detour: `read
+// addr=0x4` at the guard's load — the mapped image's TLS slot was 154, above
+// the 64 slots the module's TLS bootstrap supports). The draw and the original
+// it calls are synchronous on one thread, so a plain depth counter gives the
+// same protection. (The same fix is what the third-person camera's guard
+// needed; its code is another task's.)
+//
+// The counter is an atomic so the access is well defined even if the scene
+// system ever draws from a second thread; the ordering is relaxed because the
+// guard only has to be *seen* by the thread that re-enters.
+std::atomic<int> g_draw_depth{0};
 
 // Is the draw hook's **target** verified?
 //
@@ -172,7 +183,7 @@ thread_local int g_draw_depth = 0;
 void __fastcall draw_primitive_detour(void* desc, void* render_context, void* mesh_primitive,
                                       const void* material, const void* material_mode,
                                       void* draw_values, bool deferred, void* stats, void* layer) {
-  if (g_draw_depth > 0) {
+  if (g_draw_depth.load(std::memory_order_relaxed) > 0) {
     // The trampoline came back here: this is the recursion, and it is broken
     // here rather than a thousand frames later.
     return;
@@ -185,10 +196,10 @@ void __fastcall draw_primitive_detour(void* desc, void* render_context, void* me
     // draw is dropped for this frame rather than crashing the renderer.
     return;
   }
-  g_draw_depth = 1;
+  g_draw_depth.store(1, std::memory_order_relaxed);
   active->on_draw(desc, render_context, mesh_primitive, material, material_mode, draw_values,
                   deferred, stats, layer);
-  g_draw_depth = 0;
+  g_draw_depth.store(0, std::memory_order_relaxed);
 }
 
 }  // namespace
@@ -234,8 +245,8 @@ void Chams::configure(const Config::Visuals& visuals) noexcept {
   // and removed when they are turned off, so a disabled feature never patches
   // the renderer's code.
   if (visuals.chams) {
-    if (!hook_.installed() && hook_status_.load(std::memory_order_relaxed) ==
-                                  hook_target::Status::idle) {
+    if (!hook_.installed() &&
+        hook_status_.load(std::memory_order_relaxed) == hook_target::Status::idle) {
       // The chams have just been switched on: the state starts at "the
       // install is being attempted", and the log's latch is reset so a
       // refusal is reported again the next time the feature is used.
@@ -519,8 +530,7 @@ auto Chams::install() noexcept -> bool {
     // manually mapped without registered exception tables, so a bad address
     // must never fault.
     const auto target = scene.base + static_cast<std::uintptr_t>(offset->rva);
-    facts.prologue_read =
-        game::read_bytes(target, facts.prologue.data(), facts.prologue.size());
+    facts.prologue_read = game::read_bytes(target, facts.prologue.data(), facts.prologue.size());
     facts.prologue_length = facts.prologue_read ? facts.prologue.size() : 0;
   }
 
@@ -575,12 +585,10 @@ auto Chams::install() noexcept -> bool {
     g_active = nullptr;
     install_failed_.store(true, std::memory_order_relaxed);
     report(hook_target::Status::refused,
-           std::string("[cs2-features] chams: the draw hook failed: ") +
-               hooks::to_string(*error));
+           std::string("[cs2-features] chams: the draw hook failed: ") + hooks::to_string(*error));
     return false;
   }
-  report(hook_target::Status::installed,
-         "[cs2-features] chams: the scene system's draw is hooked");
+  report(hook_target::Status::installed, "[cs2-features] chams: the scene system's draw is hooked");
   return true;
 }
 

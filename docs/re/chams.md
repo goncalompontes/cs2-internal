@@ -508,6 +508,14 @@ test `payload/features/tests/test_chams_target.cpp` drives: the right
 prologue is accepted, a changed, a truncated or an unreadable one is refused,
 and a missing offset is refused.
 
+**The detour's re-entrancy guard is not a `thread_local`.** The payload is
+manually mapped and its TLS block is not installed on the game's threads, so
+a thread-local guard reads a null TLS base — the crash the camera's detour
+hit (`read addr=0x4`; the mapped image's TLS slot was 154, above the 64 slots
+the module's TLS bootstrap supports). The draw and the original it calls are
+synchronous on one thread, so a plain depth counter gives the same
+protection.
+
 ### 8.6 The lambda, for the record
 
 The lambda's type descriptor is at VA `0x180678360` (its name string at
