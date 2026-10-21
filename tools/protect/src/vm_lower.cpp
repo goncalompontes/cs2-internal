@@ -102,6 +102,9 @@ class Lowerer {
     if (auto failure = place_locals(); !failure.has_value()) {
       return std::unexpected(failure.error());
     }
+    if (auto failure = check_the_widths(); !failure.has_value()) {
+      return std::unexpected(failure.error());
+    }
     return {};
   }
 
@@ -728,6 +731,36 @@ class Lowerer {
   /// The locals are the cells above the value slots, so their byte offsets
   /// are only known when the lowering is over: the value slots above them
   /// are allocated as the lowering goes.
+  /// Checks the post-condition of the encoding: **no instruction may carry a
+  /// width of 0**.
+  ///
+  /// The width is the width of the value the instruction produces, and an
+  /// interpreter written against the contract truncates its result to it — a
+  /// width of 0 would truncate it to nothing. The width of every instruction
+  /// is therefore one of 1, 2, 4 or 8, and this check is what makes that
+  /// true **by construction** rather than by the care of each site that
+  /// sets a width: the field's default is 0, so a site that forgets to set
+  /// it is caught here instead of shipping a bytecode that returns 0 from
+  /// every function.
+  [[nodiscard]] auto check_the_widths() -> std::expected<void, VmFailure> {
+    for (std::size_t index = 0; index < code_.size(); ++index) {
+      const auto width = code_[index].width;
+      if (width == 1 || width == 2 || width == 4 || width == 8) {
+        continue;
+      }
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_instruction,
+                    "the instruction " + std::to_string(index) + " carries the width " +
+                        std::to_string(width) + ", and the contract allows only 1, 2, 4 or 8"});
+    }
+    return {};
+  }
+
+  /// Places the locals of the function in the frame arena.
+  ///
+  /// The locals are the cells above the value slots: the values and the
+  /// locals share the value region of the frame, and the byte offset of a
+  /// local is only known when the lowering is over.
   [[nodiscard]] auto place_locals() -> std::expected<void, VmFailure> {
     if (local_cells_ == 0) {
       return {};
