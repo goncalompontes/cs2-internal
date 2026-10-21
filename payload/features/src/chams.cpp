@@ -50,8 +50,8 @@ using DrawPrimitiveFn = void(__fastcall*)(void* desc, void* render_context, void
 // calibration dump carries (ADR-0012: no hard-coded RVA), and the bytes at
 // the resolved address are compared with the expected prologue before
 // anything is patched.
-inline constexpr std::string_view k_scene_module = "scenesystem.dll";
-inline constexpr std::string_view k_scene_draw_offset = "scene_draw_primitive";
+inline constexpr std::string_view SCENE_MODULE = "scenesystem.dll";
+inline constexpr std::string_view SCENE_DRAW_OFFSET = "scene_draw_primitive";
 
 // The scene object desc -> the entity that owns the model.
 //
@@ -502,8 +502,8 @@ auto Chams::install() noexcept -> bool {
   // (ADR-0012: no hard-coded RVA). The offset is **absent** when the
   // calibration dump predates the signature — the operator has to refresh it
   // with `scripts/calibrate-live.py` — and the chams then stay off and say so.
-  const cs2::sdk::OffsetInfo* offset = cs2::sdk::find_offset(k_scene_draw_offset);
-  const game::ModuleInfo scene = game::find_module(k_scene_module);
+  const cs2::sdk::OffsetInfo* offset = cs2::sdk::find_offset(SCENE_DRAW_OFFSET);
+  const game::ModuleInfo scene = game::find_module(SCENE_MODULE);
 
   hook_target::Facts facts;
   facts.offset_present = offset != nullptr;
@@ -525,7 +525,7 @@ auto Chams::install() noexcept -> bool {
   }
 
   const hook_target::Status verdict =
-      hook_target::decide(facts, hook_target::SCENE_DRAW_PROLOGUE, k_scene_module);
+      hook_target::decide(facts, hook_target::SCENE_DRAW_PROLOGUE, SCENE_MODULE);
   switch (verdict) {
     case hook_target::Status::no_offset:
       report(verdict,

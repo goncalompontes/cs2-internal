@@ -62,11 +62,9 @@ auto verdict(const target::Facts& facts) -> target::Status {
 
 // The happy path: everything checks out and the target may be patched.
 void test_accepts_the_right_prologue() {
-  expect(verdict(good_facts()) == target::Status::accepted,
-         "the right prologue is accepted");
+  expect(verdict(good_facts()) == target::Status::accepted, "the right prologue is accepted");
   // The prologue the RE measured is the one the constant carries.
-  expect(target::SCENE_DRAW_PROLOGUE[0] == 0x4C &&
-             target::SCENE_DRAW_PROLOGUE[19] == 0x57,
+  expect(target::SCENE_DRAW_PROLOGUE[0] == 0x4C && target::SCENE_DRAW_PROLOGUE[19] == 0x57,
          "the expected prologue is the measured one");
   expect(target::PROLOGUE_SIZE == 20, "the guard compares twenty bytes");
 }
@@ -76,8 +74,8 @@ void test_refuses_a_changed_prologue() {
   for (std::size_t index = 0; index < target::PROLOGUE_SIZE; ++index) {
     target::Facts facts = good_facts();
     facts.prologue[index] = static_cast<std::uint8_t>(facts.prologue[index] ^ 0x01);
-    const std::string what = "a prologue with byte " + std::to_string(index) +
-                             " changed is refused";
+    const std::string what =
+        "a prologue with byte " + std::to_string(index) + " changed is refused";
     expect(verdict(facts) == target::Status::mismatch, what.c_str());
   }
 }
@@ -86,11 +84,9 @@ void test_refuses_a_changed_prologue() {
 void test_refuses_a_truncated_prologue() {
   target::Facts facts = good_facts();
   facts.prologue_length = target::PROLOGUE_SIZE - 1;
-  expect(verdict(facts) == target::Status::unreadable,
-         "a truncated prologue is refused");
+  expect(verdict(facts) == target::Status::unreadable, "a truncated prologue is refused");
   facts.prologue_length = 0;
-  expect(verdict(facts) == target::Status::unreadable,
-         "a prologue of no bytes is refused");
+  expect(verdict(facts) == target::Status::unreadable, "a prologue of no bytes is refused");
 }
 
 // An empty read: the target could not be read at all.
@@ -117,8 +113,7 @@ void test_refuses_a_missing_offset() {
   // The offset belongs to another module: the RVA would be meaningless here.
   facts = good_facts();
   facts.offset_module = "client.dll";
-  expect(verdict(facts) == target::Status::no_offset,
-         "an offset from another module is refused");
+  expect(verdict(facts) == target::Status::no_offset, "an offset from another module is refused");
 }
 
 // The game is not up yet: the module is not loaded.
@@ -136,8 +131,7 @@ void test_refuses_without_the_module() {
 void test_refuses_an_address_outside_the_module() {
   target::Facts facts = good_facts();
   facts.rva = 0x978000;  // the first byte past the image
-  expect(verdict(facts) == target::Status::outside_module,
-         "an address past the module is refused");
+  expect(verdict(facts) == target::Status::outside_module, "an address past the module is refused");
 
   facts = good_facts();
   facts.rva = 0x977FF0;  // inside, but the prologue would run past the end
@@ -146,23 +140,21 @@ void test_refuses_an_address_outside_the_module() {
 
   facts = good_facts();
   facts.module_size = 0;
-  expect(verdict(facts) == target::Status::outside_module,
-         "a module of no size is refused");
+  expect(verdict(facts) == target::Status::outside_module, "a module of no size is refused");
 }
 
 // Every state has a description: the log and the overlay show it.
 void test_every_status_is_described() {
   const target::Status statuses[] = {
-      target::Status::idle,     target::Status::pending,   target::Status::accepted,
-      target::Status::installed, target::Status::no_offset, target::Status::no_module,
-      target::Status::outside_module, target::Status::unreadable,
-      target::Status::mismatch, target::Status::refused,
+      target::Status::idle,           target::Status::pending,    target::Status::accepted,
+      target::Status::installed,      target::Status::no_offset,  target::Status::no_module,
+      target::Status::outside_module, target::Status::unreadable, target::Status::mismatch,
+      target::Status::refused,
   };
   for (const target::Status status : statuses) {
     expect(!target::describe(status).empty(), "every status has a description");
   }
-  expect(target::describe(target::Status::installed) == "on",
-         "the installed status reads as on");
+  expect(target::describe(target::Status::installed) == "on", "the installed status reads as on");
 }
 
 }  // namespace

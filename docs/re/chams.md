@@ -316,3 +316,229 @@ Runtime cost:
 | `shaders/vfx/csgo_unlitgeneric_pc_50_features.vcs` | shaders_pc_dir.vpk | the `csgo_unlitgeneric` shader's parameter table (`g_vColorTint`, …) |
 | `materials/engine/singlecolor.vmat_c` | pak01_dir.vpk | the "single colour" material (the unlit shader, `g_tColor`) |
 | `materials/dev/player_visibility_datacolor.vmat_c` | pak01_dir.vpk | the engine's data-colour material (no float parameters) |
+
+---
+
+## 8. The draw hook's target — re-derived from the class's own RTTI
+
+> **Appended by task T26 (2026-10-21).** The sections above are the **material
+> system's**; this one is the **hook target** — the address the chams' draw
+> hook patches, how it was re-derived, and how it is now resolved and
+> verified.
+>
+> **The build this was measured on** — the live module on this machine:
+>
+> | what | value |
+> |---|---|
+> | the file | `F:\SteamLibrary\steamapps\common\Counter-Strike Global Offensive\game\bin\win64\scenesystem.dll` |
+> | sha256 | `040eb851fa7875523346b890f1ed6e158abc59e08bccbd8dc60539435277efa5` |
+> | PE timestamp | `0x6ACFCD4F` (1792003407) |
+> | image base | `0x180000000` |
+> | `SizeOfImage` | `0x978000` |
+
+### 8.1 What was wrong with the old target
+
+The address the hook patched was taken from the module's RTTI **lambda**
+types: the mangled name
+
+```
+.?AV<lambda_1>@?1??DrawPrimitive@CAnimatableSceneObjectDesc@@QEAAXPEAVIRenderContext@@PEAUCMeshDrawPrimitive_t@@PEBVIMaterial2@@PEAVIMaterialMode@@AEAUDrawValues_t@@_NAEAUSCeneSystemPerFrameStats_t@@PEAVIScSceneLayer@@@Z@
+```
+
+decodes to a **member** function (`Q` public, `E` 64-bit, `A` __cdecl, `A`
+near, `A` unqualified, `X` void, then `this` plus the eight arguments) — but
+the type it was taken from is the type of a **lambda**, and a lambda's
+`operator()` is **static**: it takes the eight arguments and has **no
+`this`**. The detour assumes the member function's shape, so patching the
+lambda's `operator()` shifts the whole argument list by one: the callee
+receives the material pointer where it expects the mesh pointer and
+dereferences it. That is the `0xc0000005` the live test produced, with the
+fault inside the renderer.
+
+The address was also **not verified**: the old guard asked only whether the
+address was inside the module (`scene.contains(target)`), which a stale RVA
+satisfies.
+
+### 8.2 The re-derivation — the class's own RTTI and vftable
+
+| what | address (VA) | RVA |
+|---|---|---|
+| the type descriptor's name string `.?AVCAnimatableSceneObjectDesc@@` | `0x18067C458` | `0x67C458` |
+| the **type descriptor** (the name is at +0x10) | `0x18067C448` | `0x67C448` |
+| the **complete object locator** | `0x180606DC0` | `0x606DC0` |
+| the class hierarchy descriptor | `0x180606CF0` | `0x606CF0` |
+| the pointer to the COL (the vftable's `[-1]` slot) — the **only** one in the module | `0x1805E5C88` | `0x5E5C88` |
+| ⇒ the **vftable** starts at | `0x1805E5C90` | **`0x5E5C90`** |
+
+This build's RTTI uses **32-bit RVA fields** inside the COL (`pTypeDescriptor`
+at +0x0C, `pClassDescriptor` at +0x10, `pSelf` at +0x14), which is why the COL
+is not the usual 8-byte-pointer shape. The vftable itself is a normal x64
+array of **8-byte** pointers.
+
+The vftable's first four slots:
+
+| slot | RVA | VA | what |
+|---|---|---|---|
+| 0 | `0x5E5C90` | `0x1800541D0` | `lea rax,[rip+0x591D59]; ret` — returns the class-name string (a `GetTypeName` virtual) |
+| 1 | `0x5E5C98` | `0x180059FC0` | the **batch** wrapper (see below) |
+| 2 | `0x5E5CA0` | `0x18001C240` | a three-byte `ret 0` stub |
+| 3 | `0x5E5CA8` | `0x18005B030` | a 1278-byte function |
+
+**Slot 1 is not `DrawPrimitive`.** `FUN_180059FC0` is the *batch* entry
+point: it takes a primitive, a **count**, and loops, calling the real draw
+once per primitive. It has **no static callers** — it is reached only through
+the vtable. Its own arguments are
+
+```
+(this, IRenderContext*, CMeshDrawPrimitive_t*, int count, const IMaterial2*,
+ const IMaterialMode*, CSceneSystemPerFrameStats_t*)
+```
+
+— the material is the **fifth** argument there, *not* the fourth. (A detour
+written for that shape would shift the arguments the same way the lambda's
+did.)
+
+### 8.3 The real draw
+
+`FUN_180059FC0` calls the real draw at `0x18005A465` (RVA `0x5A465`), and the
+callee is:
+
+> **`scenesystem.dll` RVA `0x580A0`** (VA `0x1800580A0`)
+
+It is a **nine-argument** member function, and its arguments are settled by
+its own body and by the call site:
+
+| register / stack | argument | how it was identified |
+|---|---|---|
+| `RCX` | `this` (the scene object desc) | it is passed to `FUN_18007D500(desc, …)`, which reads the desc's own fields (`+0x90` RWLock, `+0xD0` array count, `+0xD8` array) and names its own source file `scenesystem\sceneobjectdescs.cpp` |
+| `RDX` | `IRenderContext*` | the body calls `(**(code **)(*ctx + 0x498))(ctx)` |
+| `R8` | `CMeshDrawPrimitive_t*` | `FUN_18007D500(this, R8)` reads the primitive's 16-bit index at `+0x372A` |
+| **`R9`** | **`const IMaterial2*`** | the body calls `[R9 + 0x130]` and `[R9 + 0x4B8]` — the `IMaterial2` vtable; `+0x18` of it is the material's parameter count |
+| `[RSP+0x28]` | `const IMaterialMode*` | the body hashes parameters at `mode + 0x1F0` |
+| `[RSP+0x30]` | `DrawValues_t*` | — |
+| `[RSP+0x38]` | `bool` | read as a **byte** (`MOVZX EAX, byte ptr [RBP + 0x480]`) |
+| `[RSP+0x40]` | `CSceneSystemPerFrameStats_t*` | — |
+| `[RSP+0x48]` | `ISceneLayer*` | — |
+
+**This is exactly the signature the payload already has** — nine arguments,
+the material at **index 3** counting `this`:
+
+```c
+using DrawPrimitiveFn = void(__fastcall*)(void* desc, void* render_context, void* mesh_primitive,
+                                          const void* material, const void* material_mode,
+                                          void* draw_values, bool deferred, void* stats,
+                                          void* layer);
+```
+
+**The payload's detour was never wrong; only its target address was.** The
+detour and the typedef stay as they are.
+
+### 8.4 The prologue, and the signature that finds it
+
+```
+0x1800580A0: 4C 89 4C 24 20   MOV qword ptr [RSP + 0x20], R9
+0x1800580A5: 48 89 54 24 10   MOV qword ptr [RSP + 0x10], RDX
+0x1800580AA: 55               PUSH RBP
+0x1800580AB: 53               PUSH RBX
+0x1800580AC: 56               PUSH RSI
+0x1800580AD: 57               PUSH RDI
+0x1800580AE: 41 54            PUSH R12
+0x1800580B0: 41 55            PUSH R13
+0x1800580B2: 41 57            PUSH R15
+0x1800580B4: 48 8D AC 24 F0 FB FF FF   LEA RBP, [RSP - 0x410]
+0x1800580BC: 48 81 EC 10 05 00 00      SUB RSP, 0x510
+```
+
+* The first **14 bytes** (the two `MOV`s and the four `PUSH`es) contain **no
+  RIP-relative operand and no relative branch** → the repo's inline hook
+  (`payload/hooks/src/inline.cpp`) can displace them; the hook's jump is 14
+  bytes (`jmp [rip+0]` plus the 8-byte destination), so the displaced region
+  is exactly those 14 bytes.
+* The **20-byte** prologue occurs **exactly once** in `scenesystem.dll`.
+
+The uniqueness was measured on the live file with the dumper's own scanner
+(`cs2-dumper --file <scenesystem.dll> --pattern …`, which maps the file to
+RVA addressing):
+
+| the pattern | matches in `scenesystem.dll` |
+|---|---|
+| `4C 89 4C 24 20 48 89 54 24 10` (10 bytes) | 10 |
+| `4C 89 4C 24 20 48 89 54 24 10 55 53` (12 bytes) | **1** — at `+0x580A0` |
+| `… 56 57` (14 bytes) | **1** |
+| `… 41 54` (16 bytes) | **1** |
+| `… 41 55` (18 bytes) | **1** |
+| `… 41 57` (20 bytes) | **1** |
+
+The 20-byte prologue is the one the dumper's curated signature carries
+(`external/dumper/src/analysis.rs`):
+
+```rust
+sig("scenesystem.dll", "scene_draw_primitive",
+    "4C 89 4C 24 20 48 89 54 24 10 55 53 56 57 41 54 41 55 41 57", None, None)
+```
+
+and it resolves to the RVA above:
+
+```
+$ cs2-dumper --file scenesystem.dll --resolve-offsets --json
+[ { "name": "scene_draw_primitive", "module": "scenesystem.dll",
+    "rva": 360608, "source": "signature" } ]      # 360608 == 0x580A0
+```
+
+### 8.5 How the payload uses it
+
+ADR-0012 forbids a hard-coded RVA, and a hard-coded RVA is exactly what
+killed the game twice (the chams and the third-person camera). So the address
+is **resolved**, not asserted:
+
+1. `cs2::sdk::find_offset("scene_draw_primitive")` — the dumper's signature,
+   carried by the calibration dump into the generated SDK. A **missing** offset
+   means the dump predates the signature: the operator refreshes it with
+   `scripts/calibrate-live.py` (which now calibrates `scenesystem.dll` too).
+2. `game::find_module("scenesystem.dll")` — the module the offset belongs to.
+3. The **20 bytes at the resolved address** are read through the fault-safe
+   reader (`game::read_bytes` — the payload is manually mapped without
+   registered exception tables, so a bad address must never fault) and
+   compared with the prologue above.
+
+Only then is the entry patched. The rule itself is the pure function
+`cs2::features::hook_target::decide`
+(`payload/features/include/cs2/features/hook_target.hpp`), which the host
+test `payload/features/tests/test_chams_target.cpp` drives: the right
+prologue is accepted, a changed, a truncated or an unreadable one is refused,
+and a missing offset is refused.
+
+### 8.6 The lambda, for the record
+
+The lambda's type descriptor is at VA `0x180678360` (its name string at
+`0x180678370`), and it is the *lambda* type — not the member function. The
+lambda's `operator()` is a **separate static function**; hooking it is what
+broke the game. Nothing in the payload hooks a lambda.
+
+### 8.7 What is still open
+
+1. **The live run.** The calibration dump has to be refreshed
+   (`scripts/calibrate-live.py`, with the game running) before the
+   `scene_draw_primitive` offset exists; until it does, the chams stay off
+   with the reason *no offset* and nothing is patched.
+2. **The detour itself has never run against the real draw.** The address and
+   the signature are proven (§8.2–§8.4), but the substitution — the material
+   argument being swapped for the flat material — has not been observed in a
+   live game.
+3. **The nine arguments were read out of the body, not from a header.** There
+   is no PDB for the shipped module; the identification rests on the call
+   site and on the body's own uses of `R9` and the stack slots.
+
+### 8.8 The evidence index for this section
+
+| VA / RVA | Module | What it proves |
+|---|---|---|
+| `0x18067C448` / `0x67C448` | scenesystem | the type descriptor of `CAnimatableSceneObjectDesc` |
+| `0x180606DC0` / `0x606DC0` | scenesystem | the complete object locator |
+| `0x1805E5C88` / `0x5E5C88` | scenesystem | the vftable's `[-1]` slot — the only pointer to a COL in the module |
+| `0x1805E5C90` / `0x5E5C90` | scenesystem | the vftable |
+| `0x180059FC0` / `0x59FC0` | scenesystem | vftable slot 1 — the **batch** wrapper (not the draw) |
+| `0x18005A465` / `0x5A465` | scenesystem | the wrapper's call into the real draw |
+| `0x1800580A0` / `0x580A0` | scenesystem | the real `CAnimatableSceneObjectDesc::DrawPrimitive` |
+| `0x180678360` / `0x678360` | scenesystem | the **lambda**'s type descriptor — the wrong target |
+
