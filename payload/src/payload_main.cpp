@@ -6,7 +6,6 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -483,12 +482,9 @@ auto on_chams_status(void* context, char* out, std::size_t size) noexcept -> boo
   if (out == nullptr || size == 0 || !runtime->chams.enabled()) {
     return false;
   }
-  const std::string line = runtime->chams.status_line();
-  if (line.size() + 1 > size) {
-    return false;
-  }
-  std::memcpy(out, line.c_str(), line.size() + 1);
-  return true;
+  // The line is written straight into the caller's buffer: this runs on the
+  // game's render thread, once per frame, and it must not allocate there.
+  return runtime->chams.status_line(out, size);
 }
 
 // The overlay's hitbox visualiser asks the payload for a pawn's real studio

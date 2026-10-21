@@ -44,12 +44,13 @@
 // game down with an access violation.
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
-#include <string>
 #include <string_view>
 
 #include "cs2/features/esp.hpp"
 #include "cs2/features/hook_target.hpp"
+#include "cs2/features/recursion_guard.hpp"
 #include "cs2/game/material.hpp"
 #include "cs2/game/snapshot.hpp"
 #include "cs2/hooks/inline.hpp"
@@ -142,10 +143,28 @@ class Chams {
     return hook_status_.load(std::memory_order_relaxed);
   }
 
+  // The re-entrancy guard the draw detour holds.
+  //
+  // It is the **shared** guard (`cs2/features/recursion_guard.hpp`): a
+  // per-owner (per-thread) depth, so the scene system's other threads are
+  // never mistaken for a recursion, and no `thread_local` is read on a path
+  // the manually mapped payload has no TLS block for.
+  //
+  // The detour holds it in a `guard::Scope`, so it is released on every path.
+  [[nodiscard]] auto draw_guard() noexcept -> guard::RecursionGuard& {
+    return draw_guard_;
+  }
+
   // The one-line status the payload's status block and the overlay's chams
   // line show: the hook's state, the draws seen, the draws chamsed and the
   // draws skipped.
-  [[nodiscard]] auto status_line() const -> std::string;
+  //
+  // It is written into the caller's buffer and **never allocates**: the line
+  // is built on the game's render thread, once per frame, and a heap
+  // allocation there is a heap allocation in the game's frame budget.
+  //
+  // Returns false when the buffer cannot hold the line (it was truncated).
+  [[nodiscard]] auto status_line(char* out, std::size_t size) const noexcept -> bool;
 
  private:
   // The material the current mode uses (0 when none could be resolved).
@@ -185,6 +204,10 @@ class Chams {
   static constexpr int k_target_facts_shift = 47;
 
   hooks::InlineHook hook_;
+  // The draw detour's re-entrancy guard (the shared one). It belongs to the
+  // feature, not to the file scope: a detour has no context parameter, and
+  // the guard is state (ADR-0010).
+  guard::RecursionGuard draw_guard_{};
   game::MaterialSystem materials_{};
   // The material system's handle for the chams material: the draw takes the
   // material, the material system's parameter setter takes the handle.

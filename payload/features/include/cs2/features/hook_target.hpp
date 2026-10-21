@@ -106,7 +106,11 @@ enum class Status : std::uint8_t {
     case Status::accepted:
       return "accepted";
     case Status::installed:
-      return "on";
+      // "installed", not "on": the HUD's line reads `hook=<this>`, and "on"
+      // is what the *feature* being on reads like ("off" is the feature's
+      // own idle state). The hook's state and the feature's state are two
+      // different things, and the word has to tell them apart.
+      return "installed";
     case Status::no_offset:
       return "no offset (the calibration dump has no scene_draw_primitive)";
     case Status::no_module:
@@ -157,7 +161,7 @@ struct Facts {
   if (!facts.offset_present || facts.rva == 0) {
     return Status::no_offset;
   }
-  if (!facts.offset_module.empty() && facts.offset_module != expected_module) {
+  if (facts.offset_module != expected_module) {
     return Status::no_offset;
   }
   // 2. The module: the game may not be up yet.
@@ -181,6 +185,49 @@ struct Facts {
     }
   }
   return Status::accepted;
+}
+
+// --- The install's bookkeeping ----------------------------------------------
+//
+// The decision above says whether a target **may** be patched; the two rules
+// below say whether an attempt may be **made** at all, and what happens to
+// the refusal latch when the operator toggles the feature.
+//
+// They are pure for the same reason `decide` is: the host test has to be able
+// to fail on a broken rule.
+
+// Whether an install attempt may be made right now.
+//
+// The feature has to be on — a feature that is off must not patch the game's
+// code — and the last attempt must not have been refused: a refusal is
+// reported once (`game::append_log` opens, writes and closes a file per
+// call), and retrying it every frame would write a line per frame.
+[[nodiscard]] constexpr auto may_attempt_install(bool enabled, bool refused) noexcept -> bool {
+  return enabled && !refused;
+}
+
+// The refusal latch after the operator's switch.
+//
+// The latch stops a refused install from being retried (and re-reported) on
+// every frame, and it follows the switch: switching the feature **off**
+// clears it, so the next switch-on retries the install and the refusal is
+// reported again — which is what the log's own latch reset is for.
+//
+// A latch that survived the switch-off would be a lie: the HUD would say
+// "installing" forever while no install was ever attempted, and the reason
+// the hook is not installed would be gone.
+[[nodiscard]] constexpr auto refusal_after_switch(bool enabled, bool refused) noexcept -> bool {
+  return enabled && refused;
+}
+
+// Whether the log has to write a line for this state.
+//
+// The log is **latched**: a line is written only when the state *changes*.
+// The install path runs on the render thread and is retried every frame, so
+// a line per attempt wrote ~500 MB a day in the animfix (the same bug, the
+// same cost).
+[[nodiscard]] constexpr auto must_report(Status reported, Status status) noexcept -> bool {
+  return reported != status;
 }
 
 }  // namespace cs2::features::hook_target
