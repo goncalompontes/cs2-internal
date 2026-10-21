@@ -352,6 +352,36 @@ void test_the_camera_angles_are_only_read(const std::string& root) {
   assert(line.find("reinterpret_cast<float*>") == std::string::npos);
 }
 
+// The command's own `viewangles` must have **one** writer: the `look` control
+// command and the anti-aim share the field, so a second mechanism for it would
+// be two features fighting over the same three floats. The field's has-bit is
+// set by that one writer, so the bit is the marker.
+void test_the_command_angles_have_one_writer(const std::string& root) {
+  const std::string path = root + "/payload/control/src/input.cpp";
+  std::ifstream file(path);
+  assert(file.good());
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+  const std::string source = buffer.str();
+
+  std::size_t writers = 0;
+  for (std::size_t at = source.find("k_base_viewangles_bit"); at != std::string::npos;
+       at = source.find("k_base_viewangles_bit", at + 1)) {
+    ++writers;
+  }
+  assert(writers == 1);
+
+  // The shared writer exists and both callers use it.
+  assert(source.find("auto Input::write_command_angles(") != std::string::npos);
+  std::size_t calls = 0;
+  for (std::size_t at = source.find("write_command_angles("); at != std::string::npos;
+       at = source.find("write_command_angles(", at + 1)) {
+    ++calls;
+  }
+  // The definition, the `look` command's path and the anti-aim's path.
+  assert(calls >= 3);
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -367,6 +397,7 @@ auto main(int argc, char** argv) -> int {
   test_the_pitch_is_clamped_to_the_engine_range();
   test_the_quantized_axes_are_the_engines_discrete_set();
   test_the_camera_angles_are_only_read(argv[1]);
+  test_the_command_angles_have_one_writer(argv[1]);
   std::puts("control-anti-aim: ok");
   return 0;
 }
