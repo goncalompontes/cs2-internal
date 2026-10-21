@@ -154,10 +154,11 @@ the thunk:         loads the arguments out of the scratch array with the
                    right types, calls the real callee, stores the result
 ```
 
-- The **pool** is a global array of function pointers, one entry per call
-  site. It is a *relocatable* global (the mapper applies the DIR64
-  relocations), so it is **not** part of the encrypted bytecode: the bytecode
-  holds the **index** of the pool entry.
+- The **pool** is a global array of **pointers**, one entry per call site
+  **and** per global the bytecode needs. It is a *relocatable* global (the
+  mapper applies the DIR64 relocations), so it is **not** part of the
+  encrypted bytecode: the bytecode holds the **index** of the pool entry.
+  The `Pool` opcode yields the address the entry holds.
 - The thunk is emitted as IR by the pass (T20b), so it is freestanding: no
   CRT, no exceptions, no RTTI.
 - A callee that returns a **struct** is refused (§4). A callee that returns
@@ -181,7 +182,7 @@ u32 arg_slots      the size of the argument-stack region
 u32 call_slots     the size of the call-scratch region
 u32 instruction_count
 u32 flags
-u32 reserved
+u32 local_cells    the number of cells the locals take
 ```
 
 followed by the instruction stream.
@@ -189,10 +190,17 @@ followed by the instruction stream.
 - Every instruction is a **fixed 24 bytes**:
   `u8 opcode | u8 width | u8 flags | u8 pad | u16 dst | u16 src1 | u16 src2 |
   u16 src3 | u32 aux | u64 imm`.
-- `width` is the operand width in bytes (1, 2, 4, 8). `flags` carries
-  `nsw` (bit 0), `nuw` (bit 1) and `exact` (bit 2). `aux` carries the
-  sub-opcode (the comparison kind, the branch target as an instruction
-  index, the size of a memory access). `imm` carries the immediate.
+- `width` is the operand width in bytes (**1, 2, 4 or 8 — never 0**). It is
+  the width of the value the instruction **produces**; an instruction that
+  produces no value carries **8** (the frame's cell size), except
+  `MemCpy`/`MemSet`, which are **byte-wise** and carry **1** (their length
+  is in `imm`). `Ret` carries the width of the returned value, and 8 for a
+  `void` function. **A width of 0 is not a legal value**: an interpreter
+  written against this contract must never have to special-case it.
+- `flags` carries `nsw` (bit 0), `nuw` (bit 1) and `exact` (bit 2); `aux`
+  carries the sub-opcode (the comparison kind, the branch target as an
+  instruction index, the size of a memory access). `imm` carries the
+  immediate.
 - The bytecode is **encrypted** with a per-build key, derived from the module
   seed the same way T19 derives its key (`splitmix64` over the module seed),
   and split across **three** globals, so that no single constant in the image
@@ -306,6 +314,15 @@ Note that the existing `CallSkipReason` in `transform.hpp` already covers
 `intrinsic_callee`, `optnone_callee`, `invoke` and `indirect_callee`. The new
 gate must **reuse** that reasoning where it applies (do not write a second
 copy of the same rules), and extend it with the VM-specific ones.
+
+> **The order of the call rules is T19's**: variadic callee, indirect
+> parameter, musttail, indirect call. The table above lists them in a
+> different order — the implementation follows the transform's, and the
+> README documents the deviation. One order, one copy.
+>
+> **`local_variable` comes from the lowering, not from the gate** (§3.2), so
+> it can only be reported **after** every gate check has passed. The table
+> above lists it near the end for that reason.
 
 ## 5. What the pass does with the verdict, and what it does **not** do
 
