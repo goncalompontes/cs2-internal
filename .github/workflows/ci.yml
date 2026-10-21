@@ -72,10 +72,23 @@ jobs:
       - name: the payload build
         run: meson compile -C build-payload
 
-      - name: the overlay build
+      # The Vulkan headers are **git-ignored** (a large, non-redistributable
+      # download -- see .gitignore and docs/setup-windows.md §5), so
+      # `actions/checkout` cannot fetch them: the overlay's
+      # `include_directories('../external/Vulkan-Headers/include')` fails at
+      # *configure* time without them, and the whole job is red. The runner
+      # clones them here, exactly as docs/setup-windows.md §5 says a
+      # developer does. The tag is pinned: the gate must build the same
+      # headers every run.
+      - name: the Vulkan headers
+        run: |
+          git clone --depth 1 --branch vulkan-sdk-1.4.363.0 `
+            https://github.com/KhronosGroup/Vulkan-Headers external/Vulkan-Headers
+
+      - name: the overlay build (configure)
         run: meson setup build-overlay overlay
 
-      - name: the overlay build
+      - name: the overlay build (compile)
         run: meson compile -C build-overlay
 
       - name: the injector build
