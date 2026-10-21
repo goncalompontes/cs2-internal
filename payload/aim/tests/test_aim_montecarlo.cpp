@@ -5,6 +5,7 @@
 // `failures` counter (the project keeps `b_ndebug=false`, so a test that only bites
 // in the debug build is not a test — `meson.build`).
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -80,16 +81,21 @@ auto main() -> int {
       const auto seed = cs2::aim::md5_pseudo_random(static_cast<std::uint32_t>(1000 + index));
       const auto engine = cs2::aim::pellet_offsets(seed, kernel.spread, kernel.inaccuracy,
                                                    kernel.pellets, kernel.pattern);
-      const int count = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{mine});
-      expect(count == kernel.pellets, "the sampler draws every pellet");
+      const auto count = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{mine});
+      expect(count.has_value() && *count == kernel.pellets, "the sampler draws every pellet");
       expect(engine.size() == mine.size(), "the offsets have the same count");
       for (std::size_t i = 0; i < engine.size(); ++i) {
-        if (!near(engine[i].x, mine[i].x, 1e-6F) || !near(engine[i].y, mine[i].y, 1e-6F)) {
+        // **Exact equality**: the two assemblies are the same expression, so the
+        // cross-check is a **drift detector** — and it can only be one if the
+        // bit-identical claim is enforced. A tolerance of 1e-6 would let a
+        // rounding-only regrouping through (the review's m12: the mutation
+        // `spread * (r1 * cos(a1))` left the suite green).
+        if (engine[i].x != mine[i].x || engine[i].y != mine[i].y) {
           ++mismatches;
         }
       }
     }
-    expect(mismatches == 0, "the sampler's offsets are the engine's offsets");
+    expect(mismatches == 0, "the sampler's offsets are bit-identical to the engine's");
 
     // The revolver's `r -> 1 - r^2` transform is part of the draw.
     const SpreadKernel revolver{.spread = 0.02F,
@@ -100,13 +106,13 @@ auto main() -> int {
     const auto engine = cs2::aim::pellet_offsets(seed, revolver.spread, revolver.inaccuracy,
                                                  revolver.pellets, revolver.pattern);
     std::vector<Vec2> revolver_offsets(2);
-    const int revolver_count =
+    const auto revolver_count =
         cs2::aim::draw_pellet_offsets(seed, revolver, std::span<Vec2>{revolver_offsets});
-    expect(revolver_count == 2, "the revolver shot draws every pellet");
+    expect(revolver_count.has_value() && *revolver_count == 2,
+           "the revolver shot draws every pellet");
     int revolver_mismatches = 0;
     for (std::size_t i = 0; i < engine.size(); ++i) {
-      if (!near(engine[i].x, revolver_offsets[i].x, 1e-6F) ||
-          !near(engine[i].y, revolver_offsets[i].y, 1e-6F)) {
+      if (engine[i].x != revolver_offsets[i].x || engine[i].y != revolver_offsets[i].y) {
         ++revolver_mismatches;
       }
     }
@@ -114,12 +120,15 @@ auto main() -> int {
 
     // A golden vector: the exact offsets of one seed, so a change in the RNG itself
     // cannot pass unnoticed by the cross-check above (both sides use the same
-    // stream).
+    // stream). The literal is a **decimal**, so it is compared with a tolerance:
+    // a magic constant cannot be bit-exact across compilers (the FMA contraction
+    // and the libm's `cos`/`sin` differ) — the bit-exactness is enforced by the
+    // cross-check above, this pins the RNG's *value*.
     const SpreadKernel golden_kernel{.spread = 0.02F, .inaccuracy = 0.01F, .pellets = 1};
     std::vector<Vec2> golden(1);
-    const int golden_count = cs2::aim::draw_pellet_offsets(cs2::aim::md5_pseudo_random(7U),
-                                                           golden_kernel, std::span<Vec2>{golden});
-    expect(golden_count == 1, "the golden shot draws its pellet");
+    const auto golden_count = cs2::aim::draw_pellet_offsets(cs2::aim::md5_pseudo_random(7U),
+                                                             golden_kernel, std::span<Vec2>{golden});
+    expect(golden_count.has_value() && *golden_count == 1, "the golden shot draws its pellet");
     expect(near(golden[0].x, 0.00568924F, 1e-6F) && near(golden[0].y, -0.00373996F, 1e-6F),
            "the golden offset is the engine's");
   }
@@ -132,8 +141,8 @@ auto main() -> int {
     int outside = 0;
     for (int index = 0; index < 20000; ++index) {
       const auto seed = cs2::aim::md5_pseudo_random(static_cast<std::uint32_t>(index));
-      const int count = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{offsets});
-      expect(count == 1, "the support probe draws its pellet");
+      const auto count = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{offsets});
+      expect(count.has_value() && *count == 1, "the support probe draws its pellet");
       const float radius = std::sqrt(offsets[0].x * offsets[0].x + offsets[0].y * offsets[0].y);
       if (radius > limit + 1e-6F) {
         ++outside;
@@ -154,8 +163,8 @@ auto main() -> int {
     constexpr int k_samples = 40000;
     for (int index = 0; index < k_samples; ++index) {
       const auto seed = cs2::aim::md5_pseudo_random(static_cast<std::uint32_t>(index));
-      const int count = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{offsets});
-      expect(count == 1, "the radial-law probe draws its pellet");
+      const auto count = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{offsets});
+      expect(count.has_value() && *count == 1, "the radial-law probe draws its pellet");
       const float radius = std::sqrt(offsets[0].x * offsets[0].x + offsets[0].y * offsets[0].y);
       total += radius;
       largest = std::max(largest, radius);
@@ -203,8 +212,8 @@ auto main() -> int {
     total = 0.0;
     for (int index = 0; index < k_samples; ++index) {
       const auto seed = cs2::aim::md5_pseudo_random(static_cast<std::uint32_t>(index));
-      const int count = cs2::aim::draw_pellet_offsets(seed, pair, std::span<Vec2>{offsets});
-      expect(count == 1, "the two-term probe draws its pellet");
+      const auto count = cs2::aim::draw_pellet_offsets(seed, pair, std::span<Vec2>{offsets});
+      expect(count.has_value() && *count == 1, "the two-term probe draws its pellet");
       total += std::sqrt(offsets[0].x * offsets[0].x + offsets[0].y * offsets[0].y);
     }
     const double pair_mean = total / static_cast<double>(k_samples);
@@ -359,8 +368,8 @@ auto main() -> int {
     const SpreadKernel kernel{.spread = 0.05F, .inaccuracy = 0.0F, .pellets = 2};
     const auto seed = cs2::aim::md5_pseudo_random(4242U);
     std::vector<Vec2> offsets(2);
-    const int drawn = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{offsets});
-    expect(drawn == 2, "the union case draws both pellets");
+    const auto drawn = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{offsets});
+    expect(drawn.has_value() && *drawn == 2, "the union case draws both pellets");
     expect(std::fabs(offsets[0].x - offsets[1].x) > 1e-5F ||
                std::fabs(offsets[0].y - offsets[1].y) > 1e-5F,
            "the two pellets have different offsets");
@@ -695,6 +704,20 @@ auto main() -> int {
     expect(single.has_value(), "the single-target case evaluates");
     expect(near(single->target_damage, single->expected_damage, 1e-3F),
            "one target: the attributed damage is the scene's mean");
+  }
+
+  // --- 11. a too-small buffer is an error, not a silent truncation ------------
+  {
+    const SpreadKernel kernel{.spread = 0.02F, .inaccuracy = 0.01F, .pellets = 3};
+    std::vector<Vec2> small(2);
+    const auto truncated = cs2::aim::draw_pellet_offsets(1234, kernel, std::span<Vec2>{small});
+    expect(!truncated.has_value(), "a two-slot buffer cannot hold three pellets");
+    expect(!truncated.has_value() &&
+               truncated.error() == cs2::aim::MonteCarloError::buffer_too_small,
+           "the refusal names the too-small buffer");
+    std::vector<Vec2> enough(3);
+    const auto drawn = cs2::aim::draw_pellet_offsets(1234, kernel, std::span<Vec2>{enough});
+    expect(drawn.has_value() && *drawn == 3, "a buffer that fits draws every pellet");
   }
 
   if (failures == 0) {

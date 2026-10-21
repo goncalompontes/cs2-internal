@@ -655,6 +655,16 @@ the chart's local metric carries it into the chart's coordinates: a true angular
 offset of `r` radians spans `r` in the chart's `v` (pitch) and `r / cos(v)` in its
 `u` (yaw) — `yaw_scale`, `cs2/aim/geometry.hpp`.
 
+> **The existing solver places the same pellet elsewhere.** `DamageField::
+> value_at_pellets` (`payload/aim/src/field.cpp`) adds the **raw** offset as a
+> chart displacement, without the yaw scale: at a 45° pitch the two put the pellet
+> `1/cos(v) = 1.41×` apart in yaw, at 60° `2×` apart. The scaled form is the
+> correct one — every spherical angular quantity has to be scaled, or the model is
+> wrong at a steep aim (`docs/research/aim-objective-math.md`) — so **the two
+> solvers genuinely disagree at a steep pitch**. The existing solver is not this
+> task's to change; the divergence is stated here (the review's m3) and in the
+> code.
+
 **The weapons whose pellet pattern is not modelled are refused**, not silently given
 the standard pattern: the shotgun's pattern table (`FUN_1807cd1b0`) and the negev's
 `r -> 1 - r^(2^k)`. `WeaponProfile` carries the weapon *type* only, so the
@@ -763,14 +773,24 @@ takes the seed source as a **parameter** and implements both:
 The objective is not differentiable, so the search is a **bounded evaluation over a
 candidate set**: the best cells' **Chebyshev centres** and **centroids** — the same
 two candidates the existing solver's `field_candidates` builds — capped by a
-**documented budget** (`CandidateBudget`: 16 cells, 64 candidates), never a
-function of the field's size.
+**documented budget** (`CandidateBudget`: 16 cells, a cap of 64 candidates, **32 in
+practice** — 16 cells × 2), never a function of the field's size.
 
 > `field_candidates` is file-static in `payload/aim/src/field.cpp`, a file this task
 > does not own, so the candidate set is rebuilt from the same two primitives it
 > uses (`chebyshev_center`, `polygon_centroid`, both exposed by
 > `cs2/aim/geometry.hpp`) rather than by calling it. The candidate **kinds** are
 > the same; the budget is the module's own.
+>
+> **The divergence is explicit** (the review's m6): the existing generator emits
+> **four** candidates per cell — the Chebyshev centre, the centroid, the polygon's
+> **vertices** and the point **nearest the field centroid** — plus the **field
+> centroid** itself, and it filters by `value_floor` (a cell below the floor cannot
+> improve the objective). The Monte-Carlo generator emits the centre and the
+> centroid only and ranks the cells by value instead. The two candidate sets
+> therefore differ, and the Monte-Carlo search evaluates **fewer** candidates.
+> Exposing `field_candidates` would remove the divergence — that file is not this
+> task's, so the divergence is reported rather than fixed.
 
 The selection is the community's **lexicographic** rule
 (`docs/research/aim-objective-math.md` §2):
@@ -927,4 +947,12 @@ a cone 2.4× tighter than the Gaussian's).
 | `payload/aim/include/cs2/aim/ray_span.hpp` | the exact ray/solid span arithmetic, shared with the occluders |
 | `payload/aim/tests/test_aim_montecarlo.cpp` | the host test (`aim-montecarlo`) |
 | `payload/aim/bench/bench_montecarlo.cpp` | the committed benchmark (`aim_bench`) |
-| `artifacts/live-heatmap.json` | the saved cell set the benchmark replays (committed; the directory is git-ignored, so it is force-added) |
+| `artifacts/live-heatmap.json` | the saved cell set the benchmark replays (committed; the directory is git-ignored **except** this file, which `.gitignore` un-ignores explicitly) |
+
+> **The saved set is one line, and it stays that way.** The file is 244 KB of
+> machine-written JSON on a single line. Reformatting it would be a 244 KB diff
+> that carries no information — it is a *capture*, it does not change, and there is
+> no history to blame — so the one-line format is kept and the ignore rule was
+> narrowed instead (`artifacts/*` plus `!artifacts/live-heatmap.json`), so the tree
+> no longer contradicts its own ignore rule and a new artifact is still ignored
+> (the review's m11).

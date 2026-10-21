@@ -49,6 +49,12 @@ class UniformRandomStream {
 // (`FUN_1807cd1b0`) is not modelled.
 enum class SpreadPattern : std::uint8_t { standard, revolver };
 
+// The full turn, in radians — the engine's `RandomFloat(0, 2*pi)` in the draw
+// below. It lives here because the kernel's recipe is the kernel's constant: the
+// Monte-Carlo sampler (`cs2/aim/montecarlo.hpp`) draws the same angles and must
+// use the same value.
+inline constexpr float TWO_PI = 6.28318530717958647F;
+
 // The `K` pellet offsets in the chart (= the `(right, up)` tangent frame the engine
 // applies them in), following the engine's recipe:
 //   per pellet:  r1,a1 = RandomFloat(0,1),RandomFloat(0,2pi)   (spread)

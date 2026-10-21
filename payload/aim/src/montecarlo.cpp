@@ -12,8 +12,6 @@
 namespace cs2::aim {
 namespace {
 
-constexpr float TWO_PI = 6.28318530717958647F;
-
 // The grid the stand-in `angle_grid` hash quantises the probe angles onto (radians).
 constexpr float ANGLE_HASH_QUANTUM = 1.0e-4F;
 
@@ -37,12 +35,16 @@ constexpr int MAX_TRACKED_TARGETS = 32;
 //
 // with the revolver's `r1 -> 1 - r1²` transform. The draw order is load-bearing: the
 // offsets must be the engine's, so the expression order matches `pellet_offsets`
-// exactly (the floating-point result is bit-identical).
+// exactly — and the host test asserts the two are **bit-identical** (exact
+// equality, not a tolerance), so the claim is enforced rather than asserted.
 //
 // This is a **second implementation of the recipe, not a second RNG** — the stream
 // itself is the repo's `UniformRandomStream` and the seed is the repo's
-// `md5_pseudo_random`. Keeping the assembly separate is what makes the test a real
-// cross-check of the two implementations instead of a tautology.
+// `md5_pseudo_random`. It is, however, the **same expression**: the cross-check
+// against `pellet_offsets` is therefore a **drift detector** (if one of the two is
+// edited, the test fails) and **not** an independent derivation of the engine's
+// recipe. The recipe itself rests on the repo's RE (`docs/re/aim.md`), which
+// `spread.hpp` still marks as unvalidated against the live engine.
 [[nodiscard]] auto draw_pellet(UniformRandomStream& stream, float spread, float inaccuracy,
                                SpreadPattern pattern) noexcept -> Vec2 {
   float r1 = stream.random_float(0.0F, 1.0F);
@@ -132,10 +134,15 @@ constexpr int MAX_TRACKED_TARGETS = 32;
 // between the samples of an evaluation, so it is validated once per evaluation and
 // not once per ray.
 [[nodiscard]] auto evaluate_sample_checked(const MonteCarloInput& input, const Vec2& aim,
-                                           std::int32_t seed) noexcept -> Sample {
+                                           std::int32_t seed) noexcept
+    -> std::expected<Sample, MonteCarloError> {
   Sample sample{};
   std::array<Vec2, MAX_PELLETS> offsets{};
-  const int pellets = draw_pellet_offsets(seed, input.kernel, std::span<Vec2>{offsets});
+  const auto drawn = draw_pellet_offsets(seed, input.kernel, std::span<Vec2>{offsets});
+  if (!drawn.has_value()) {
+    return std::unexpected(drawn.error());
+  }
+  const int pellets = *drawn;
   if (pellets <= 0) {
     return sample;
   }
@@ -144,6 +151,15 @@ constexpr int MAX_TRACKED_TARGETS = 32;
   // spans `r` in the chart's `v` (pitch) but `r / cos(v)` in its `u` (yaw)
   // (`yaw_scale`, `cs2/aim/geometry.hpp`). The tangent displacement is therefore
   // `(offset.x · yaw_scale, offset.y)` in chart coordinates.
+  //
+  // **The existing solver places the same pellet elsewhere.** `DamageField::
+  // value_at_pellets` (`payload/aim/src/field.cpp`) adds the **raw** offset as a
+  // chart displacement, without the yaw scale: at a 45° pitch the two put the
+  // pellet 1/cos(v) = 1.41× apart in yaw, at 60° 2× apart. The scaled form is the
+  // correct one (every spherical angular quantity has to be scaled — the research's
+  // angle-dependent failure), so the two solvers genuinely disagree at a steep
+  // aim. The divergence is stated here and in `docs/ragebot.md` §13.2; the
+  // existing solver is not this task's to change.
   const float scale = yaw_scale(aim.y);
   bool have_nearest = false;
   for (int pellet = 0; pellet < pellets; ++pellet) {
@@ -222,6 +238,8 @@ auto to_string(MonteCarloError error) noexcept -> const char* {
       return "too_many_targets";
     case MonteCarloError::invalid_geometry:
       return "invalid_geometry";
+    case MonteCarloError::buffer_too_small:
+      return "buffer_too_small";
   }
   return "unknown";
 }
@@ -251,14 +269,22 @@ auto spread_kernel(const WeaponProfile& weapon, int pellets, SpreadPattern patte
 }
 
 auto draw_pellet_offsets(std::int32_t seed, const SpreadKernel& kernel,
-                         std::span<Vec2> out) noexcept -> int {
+                         std::span<Vec2> out) noexcept -> std::expected<int, MonteCarloError> {
+  if (kernel.pellets <= 0) {
+    return 0;
+  }
+  // A buffer that cannot hold the shot's pellets is an **error**, not a silent
+  // truncation: the caller would score a shot with fewer pellets than the weapon
+  // fires (the review's m5).
+  if (out.size() < static_cast<std::size_t>(kernel.pellets)) {
+    return std::unexpected(MonteCarloError::buffer_too_small);
+  }
   UniformRandomStream stream(seed);
-  const int count = std::min(kernel.pellets, static_cast<int>(out.size()));
-  for (int i = 0; i < count; ++i) {
+  for (int i = 0; i < kernel.pellets; ++i) {
     out[static_cast<std::size_t>(i)] =
         draw_pellet(stream, kernel.spread, kernel.inaccuracy, kernel.pattern);
   }
-  return count;
+  return kernel.pellets;
 }
 
 auto angle_seed_hash(float yaw, float pitch, std::uint32_t tick) noexcept -> std::uint32_t {
@@ -392,25 +418,28 @@ auto evaluate_hit_chance(const MonteCarloInput& input, const Vec2& aim) noexcept
   bool have_nearest = false;
   for (int index = 0; index < input.samples; ++index) {
     const std::int32_t seed = sample_seed(input.seed, aim, index, input.samples);
-    const Sample sample = evaluate_sample_checked(input, aim, seed);
-    if (!sample.hit) {
+    const auto sample = evaluate_sample_checked(input, aim, seed);
+    if (!sample.has_value()) {
+      return std::unexpected(sample.error());
+    }
+    if (!sample->hit) {
       continue;
     }
     ++chance.hits;
-    damage_total += sample.damage;
+    damage_total += sample->damage;
     for (std::size_t slot = 0; slot < input.targets.size(); ++slot) {
-      if (input.targets[slot].index == sample.target) {
-        damage_by_target[slot] += sample.damage;
+      if (input.targets[slot].index == sample->target) {
+        damage_by_target[slot] += sample->damage;
         break;
       }
     }
-    if (!have_nearest || sample.distance < nearest ||
-        (sample.distance == nearest &&
-         hitgroup_preference(sample.hitgroup) < hitgroup_preference(chance.hitgroup))) {
+    if (!have_nearest || sample->distance < nearest ||
+        (sample->distance == nearest &&
+         hitgroup_preference(sample->hitgroup) < hitgroup_preference(chance.hitgroup))) {
       have_nearest = true;
-      nearest = sample.distance;
-      chance.target = sample.target;
-      chance.hitgroup = sample.hitgroup;
+      nearest = sample->distance;
+      chance.target = sample->target;
+      chance.hitgroup = sample->hitgroup;
     }
   }
   chance.probability = static_cast<float>(chance.hits) / static_cast<float>(input.samples);
@@ -445,8 +474,24 @@ auto solve_montecarlo(const MonteCarloInput& input, std::span<const Cell> cells,
 
   // The candidate set: the field's best cells, by descending value. Each contributes
   // its Chebyshev centre and its centroid — the same two candidates the existing
-  // solver's `field_candidates` builds (`payload/aim/src/field.cpp`; that generator is
-  // file-static, so the primitives are reused here instead of it).
+  // solver's `field_candidates` builds (`payload/aim/src/field.cpp`).
+  //
+  // **This is a second candidate generator, and it is coarser than the existing
+  // one.** `field_candidates` is file-static in a file this task does not own, so
+  // the two primitives it uses (`chebyshev_center`, `polygon_centroid`) are reused
+  // here instead of the function. The divergence is explicit: the existing
+  // generator emits **four** candidates per cell — the Chebyshev centre, the
+  // centroid, the polygon's **vertices** and the point **nearest the field
+  // centroid** — plus the **field centroid** itself, and it **filters by
+  // `value_floor`** (a cell below the floor cannot improve the objective, so its
+  // candidates are skipped). This generator emits the centre and the centroid
+  // only, and filters by the cell's value rank instead of a floor. The two
+  // candidate sets therefore differ: the Monte-Carlo search evaluates fewer
+  // candidates, and its "best cell" is not the existing solver's.
+  //
+  // Opening `payload/aim/src/field.cpp` to expose `field_candidates` would remove
+  // the divergence; that file is **not** this task's (the spec §4), so the
+  // divergence is reported instead of fixed.
   std::vector<std::size_t> order(cells.size());
   std::iota(order.begin(), order.end(), std::size_t{0});
   const std::size_t cell_count =

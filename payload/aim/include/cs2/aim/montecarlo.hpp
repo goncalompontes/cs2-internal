@@ -53,6 +53,7 @@ enum class MonteCarloError : std::uint8_t {
   no_candidates,        ///< the candidate set is empty
   too_many_targets,     ///< more candidate targets than `MAX_TRACKED_TARGETS`
   invalid_geometry,     ///< a hitbox is not a well-formed solid (NaN, inf, degenerate)
+  buffer_too_small,     ///< the caller's buffer is smaller than the pellet count
 };
 
 [[nodiscard]] auto to_string(MonteCarloError error) noexcept -> const char*;
@@ -71,6 +72,11 @@ struct SpreadKernel {
 // The largest pellet count the sampler accepts. The engine's shotguns and the negev
 // fire 10; the bound keeps the sampler's scratch buffer on the stack (the payload is
 // manually mapped — no heap on the hot path).
+//
+// **It is a defensive cap, not a reachable one.** The weapons that fire more than
+// 16 pellets (the shotguns) are refused by `pattern_supported` anyway, so the bound
+// is not reachable through `spread_kernel`; it matters only to a caller that clears
+// the weapon type and states a pellet count of its own.
 inline constexpr int MAX_PELLETS = 16;
 
 // The engine's weapon types (`m_WeaponType`, `cs2/aim/field.hpp`).
@@ -119,8 +125,14 @@ inline constexpr int HITGROUP_GENERIC = 10;
 // in the engine's order (`r1, a1, r2, a2` per pellet, sequential across the pellets).
 // The number of offsets written is returned; `out` is the caller's buffer (no
 // allocation).
+//
+// **A buffer that is too small is an error, not a silent truncation** (the review's
+// m5): the caller asked for `kernel.pellets` offsets and did not get them, and a
+// caller that ignores the error would otherwise score a shot with fewer pellets
+// than the weapon fires.
 [[nodiscard]] auto draw_pellet_offsets(std::int32_t seed, const SpreadKernel& kernel,
-                                       std::span<Vec2> out) noexcept -> int;
+                                       std::span<Vec2> out) noexcept
+    -> std::expected<int, MonteCarloError>;
 
 // --- The seed policies ----------------------------------------------------------
 

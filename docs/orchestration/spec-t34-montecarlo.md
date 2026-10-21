@@ -208,7 +208,8 @@ struct SeedContext {
 struct Sample {
   Vec2 offset{};        ///< the chart-space offset (right, up).
   bool hit{false};       ///< did any pellet of this sample hit?
-  float damage{0.0F};   ///< the damage of the nearest hit, 0 when it missed.
+  float damage{0.0F};   ///< the damage the sample did: the SUM over the pellets
+                        ///< that hit (the engine's per-pellet damage), 0 on a miss.
   int target{-1};        ///< the target index of the nearest hit, -1 when it missed.
   int hitgroup{0};      ///< the hitgroup of the nearest hit.
 };
@@ -223,6 +224,14 @@ struct HitChance {
 
 }  // namespace cs2::aim
 ```
+
+> **Corrected 2026-10-21 (the review's m7).** `Sample::damage` originally said
+> *"the damage of the nearest hit"*, which is **not** what the implementation (or
+> the engine) does: a multi-pellet shot does the **sum** of the damage of the
+> pellets that hit (`payload/aim/src/montecarlo.cpp`). The sum is right — the
+> engine's damage model is per pellet — so the **spec's text** is corrected here
+> rather than the code. A reader of the original shape would have expected the
+> nearest hit's damage only, and under-counted every shotgun.
 
 **You own the exact shape** — this is the *shape*, not the contract. What is
 **contractual** is the behaviour in §2.2–§2.5 and the tests in §2.6.

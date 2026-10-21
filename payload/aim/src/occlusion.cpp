@@ -91,8 +91,8 @@ using HalfPlane = ConvexClipEdge;
   float t0 = 1.0e30F;
   float t1 = 1.0e30F;
   for (std::size_t i = 0; i + 2 < triangles.size(); i += 3) {
-    if (const auto t =
-            ray_triangle(eye, direction, triangles[i], triangles[i + 1], triangles[i + 2])) {
+    if (const auto t = ray_triangle(eye, direction, triangles[i], triangles[i + 1],
+                                    triangles[i + 2])) {
       if (*t < t0) {
         t1 = t0;
         t0 = *t;
@@ -203,8 +203,9 @@ constexpr std::uint32_t k_mesh_leaf = 8;  // triangles per BVH leaf
     cmax.z = std::max(cmax.z, c.z);
   }
   const float extent[3] = {cmax.x - cmin.x, cmax.y - cmin.y, cmax.z - cmin.z};
-  const int axis =
-      extent[0] >= extent[1] && extent[0] >= extent[2] ? 0 : (extent[1] >= extent[2] ? 1 : 2);
+  const int axis = extent[0] >= extent[1] && extent[0] >= extent[2]
+                       ? 0
+                       : (extent[1] >= extent[2] ? 1 : 2);
   const std::uint32_t mid = lo + (hi - lo) / 2;
   const auto key = [&](std::uint32_t tri) -> float {
     const Vec3 c = mesh_centroid(tmin[tri], tmax[tri]);
@@ -422,7 +423,8 @@ auto ray_mesh_bvh(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction)
   return RaySpan{.entry = t0, .exit = t1 >= 1.0e30F ? t0 : t1};
 }
 
-auto project_occluder(const Vec3& eye, const Basis& basis, const std::vector<Vec3>& world_vertices,
+auto project_occluder(const Vec3& eye, const Basis& basis,
+                      const std::vector<Vec3>& world_vertices,
                       const std::vector<OccluderPlane>& planes, float surface_modifier)
     -> std::optional<OccluderCell> {
   if (world_vertices.empty()) {
