@@ -86,6 +86,14 @@ auto kernel_file_api() noexcept -> KernelFileApi {
 struct FilePolicy {
   CloseHandleFn close_handle = nullptr;
 
+  // The closer is resolved from kernel32 at run time, so a policy that does
+  // not carry one cannot work: it cannot release the file. The wrapper asks
+  // this before it asks the policy anything else, so a policy without a
+  // closer is never asked to close anything.
+  [[nodiscard]] bool usable() const noexcept {
+    return close_handle != nullptr;
+  }
+
   [[nodiscard]] bool is_valid(void* handle) const noexcept {
     return handle != nullptr && handle != INVALID_HANDLE_VALUE;
   }

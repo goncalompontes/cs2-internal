@@ -31,6 +31,9 @@ struct FakePolicy {
   // a test can prove that a moved wrapper keeps its own closer.
   int* counter = &g_closed;
 
+  [[nodiscard]] bool usable() const noexcept {
+    return true;
+  }
   [[nodiscard]] bool is_valid(int handle) const noexcept {
     return handle > 0;
   }
@@ -50,6 +53,9 @@ struct FunctionPolicy {
   std::function<void(int)> close_fn;
   std::function<bool(int)> valid_fn;
 
+  [[nodiscard]] bool usable() const noexcept {
+    return static_cast<bool>(close_fn) && static_cast<bool>(valid_fn);
+  }
   [[nodiscard]] bool is_valid(int handle) const noexcept {
     return valid_fn(handle);
   }
@@ -60,11 +66,35 @@ struct FunctionPolicy {
 
 using FunctionHandle = cs2::core::ScopedHandle<int, FunctionPolicy>;
 
+// A policy whose *default* state cannot work: both of its `std::function`s
+// are empty, so calling one throws `std::bad_function_call`. The wrapper
+// must ask the policy whether it can work before it asks it anything else,
+// so a policy like this is never asked -- and the process survives.
+struct PoisonedPolicy {
+  std::function<void(int)> close_fn;
+  std::function<bool(int)> valid_fn;
+
+  [[nodiscard]] bool usable() const noexcept {
+    return static_cast<bool>(close_fn) && static_cast<bool>(valid_fn);
+  }
+  [[nodiscard]] bool is_valid(int handle) const noexcept {
+    return valid_fn(handle);
+  }
+  void close(int handle) const noexcept {
+    close_fn(handle);
+  }
+};
+
+using PoisonedHandle = cs2::core::ScopedHandle<int, PoisonedPolicy>;
+
 // A handle kind whose zero value is live: a POSIX file descriptor, where 0 is
 // stdin. The policy says so; the wrapper reserves the empty value anyway.
 struct ZeroIsLivePolicy {
   int* closed = nullptr;
 
+  [[nodiscard]] bool usable() const noexcept {
+    return true;
+  }
   [[nodiscard]] bool is_valid(int handle) const noexcept {
     return handle >= 0;
   }
@@ -198,6 +228,37 @@ auto main() -> int {
     assert(reset_closed == 0);
   }  // the moved-to wrapper releases 3, the source releases 7
   assert(reset_closed == 2);
+
+  // A policy that cannot work must never be asked. The wrapper asks the
+  // policy whether it can work before it asks it anything else, so a policy
+  // whose default state cannot answer (here: two empty `std::function`s,
+  // and calling one throws `std::bad_function_call`) is left alone: the
+  // wrapper takes the handle unowned and the process survives.
+  int poisoned_closed = 0;
+  {
+    // The default policy: it cannot work.
+    const PoisonedHandle handle(5);
+    assert(!handle.valid());  // the wrapper did not adopt it
+    assert(handle.get() == 5);
+  }  // the destructor: nothing owned, so nothing is asked -- the process
+     // survives
+  {
+    // The same for a default-constructed wrapper that is reset: the default
+    // policy cannot work, so the handle is not adopted either.
+    PoisonedHandle handle;
+    handle.reset(7);
+    assert(!handle.valid());
+    assert(handle.get() == 7);
+  }  // nothing owned, nothing asked
+  {
+    // A policy that *can* work is asked, and the handle is adopted.
+    PoisonedHandle handle(5, PoisonedPolicy{[&poisoned_closed](int) { ++poisoned_closed; },
+                                             [](int handle) { return handle > 0; }});
+    assert(handle.valid());
+    assert(handle.get() == 5);
+    assert(poisoned_closed == 0);
+  }  // the handle is released here
+  assert(poisoned_closed == 1);
 
   // The empty value is reserved: the wrapper never owns it, so a policy that
   // says the zero value is live does not get it closed (stdin!).

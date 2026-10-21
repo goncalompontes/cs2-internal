@@ -18,6 +18,12 @@ namespace cs2::control {
 // <windows.h> (the platform-independent core must not include it -- see
 // docs/style-guide.md §3).
 struct PipeHandlePolicy {
+  // The closer is the one in channel.cpp, and it is always there: this
+  // policy can always work.
+  [[nodiscard]] bool usable() const noexcept {
+    return true;
+  }
+
   // A pipe that was never opened is a null handle; `CreateNamedPipeA` reports
   // failure with INVALID_HANDLE_VALUE, which `Channel::open` rejects before
   // the handle is stored.

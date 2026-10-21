@@ -25,6 +25,12 @@ namespace cs2::core {
 using KernelHandle = void*;
 
 struct KernelHandlePolicy {
+  // The imported `CloseHandle` is always there, so this policy can always
+  // work: it is what tells the wrapper that it may ask it anything.
+  [[nodiscard]] bool usable() const noexcept {
+    return true;
+  }
+
   // `CreateFileA` reports failure with INVALID_HANDLE_VALUE and the other
   // creators with NULL, so neither is a handle.
   [[nodiscard]] bool is_valid(KernelHandle handle) const noexcept {
