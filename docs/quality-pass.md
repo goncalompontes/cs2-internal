@@ -593,6 +593,11 @@ the whole point of this pass:
    on CI, and on any fresh checkout. The payload the CI compiles is
    therefore a *compile* of the payload, **not** the shipped artifact; the
    shipped one is built after a calibration (docs/windows-validation.md).
+   The schema-facing code is guarded by
+   `#if __has_include("schemas/client_dll.hpp")`, so with an empty SDK it is
+   **compiled out**: the CI's payload step is a compile gate for the
+   payload's non-schema code only, and the SDK paths are compiled after a
+   local calibration.
    The generated headers are also written *into the source tree*, so a build
    leaves `payload/sdk/*.hpp` behind (they are git-ignored).
 4. **A Linux host build.** The CI runs on Windows because the payload is a
@@ -781,7 +786,7 @@ failure family as F2, one door over.
 | **m3** | the header said the wrapper "never asks the policy again", which is true of the validity test and not of the release | the contract says when `close` is asked | — |
 | **m4** | F1's evidence named no build directory | the report names the `build-payload/` directory of the branch worktree | — |
 | **m5** | the workflow header said the payload compiles against the headers the host build generates, and that the host build runs first for that reason | it does not: the payload project has its own `sdk-headers` target, so the payload build regenerates the headers itself | the fresh-tree run shows the generator twice |
-| **m6** | the CI spends a minute building the Rust dumper and pulling crates from crates.io, only to write *empty* headers | **the generator stays**, and the crates and the build are cached (the key follows the dumper's lock file). A checked-in stub was considered and declined: the payload would then be compiled against a *frozen* shape of the generated headers instead of the current one, and the stub would rot whenever the generator's output changes — a compile gate that quietly stops being one | the fresh-tree workflow still passes end to end, with the cache step in it |
+| **m6** | the CI spends a minute building the Rust dumper and pulling crates from crates.io, only to write *empty* headers | **the generator stays**, and the crates and the build are cached (the key follows the dumper's lock file). A checked-in stub was considered and declined: a frozen stub is no closer to the real shape of the generated headers than the empty ones are, and it rots whenever the generator's output changes. What the step proves is what the workflow's header says: with an empty SDK the schema-facing code is **compiled out** (`#if __has_include("schemas/client_dll.hpp")`), so the payload step is a compile gate for the non-schema code only | the fresh-tree workflow still passes end to end, with the cache step in it |
 | the nits | the "Pinned" header in `requirements-dev.txt` is contradicted by the MCP SDK's range; the CI job had no timeout; the workflow never said which ninja meson used; §3 did not mention the policy's requirements; the type checker's cache was not ignored | all five are fixed: the exception is named, the job has `timeout-minutes`, the versions are printed, §3 says what a policy must satisfy, and `.mypy_cache/` is ignored | — |
 
 ### 9.7 The second re-review's commits
