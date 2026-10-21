@@ -377,6 +377,10 @@ class Coverage:
         self.malformed = ""
         self.reason = ""
         self.entries: dict[str, str] = {}
+        #: The verdict of the virtualizer's analysis, per function. The
+        #: section is new: a coverage file of an older build has none, and
+        #: a reader that does not know it still reads the file.
+        self.vm: dict[str, dict[str, str]] = {}
 
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -411,6 +415,8 @@ class Coverage:
                         self.entries[pattern.strip()] = f"{state}:{reason.strip()}"
                     else:
                         self.entries[rest.strip()] = state.strip()
+                elif key == "vm":
+                    self._read_vm(value)
                 elif key == "content-sha256":
                     digest = value.strip().lower()
         except ValueError as error:
@@ -440,6 +446,22 @@ class Coverage:
                 self.mix_xor = int(number, 0)
             elif name == "key":
                 self.key_parts.append(int(number, 0))
+
+    def _read_vm(self, value: str) -> None:
+        """The `vm` line: the verdict of the virtualizer's analysis.
+
+        The line is `vm <symbol> <key>=<value>...`. The symbol is a mangled
+        name, so it has no space in it, and the values are numbers and
+        words.
+        """
+        symbol, _, fields = value.partition(" ")
+        if not symbol:
+            return
+        verdict: dict[str, str] = {}
+        for part in fields.split():
+            name, _, number = part.partition("=")
+            verdict[name] = number
+        self.vm[symbol.strip()] = verdict
 
     def _check_digest(self, lines: list[str], digest: str) -> bool:
         """Whether the file still is the one the plugin wrote.

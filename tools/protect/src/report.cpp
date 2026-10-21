@@ -157,6 +157,23 @@ namespace {
   return counts;
 }
 
+/// A text that goes into the coverage file, without the whitespace.
+///
+/// The coverage file is a line-based format: a value with a space in it
+/// would look like two values.
+[[nodiscard]] auto sanitize(std::string_view text) -> std::string {
+  std::string result;
+  result.reserve(text.size());
+  for (const char character : text) {
+    if (character == ' ' || character == '\t' || character == '\n' || character == '\r') {
+      result.push_back('_');
+      continue;
+    }
+    result.push_back(character);
+  }
+  return result;
+}
+
 }  // namespace
 
 [[nodiscard]] auto to_string(EntryState state) noexcept -> const char* {
@@ -278,6 +295,52 @@ void write_transform_report(const llvm::Module& module, const TransformResult& r
                << " descriptor=" << result.descriptor_size << "\n";
 }
 
+void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& functions,
+                     const Config& config) {
+  const std::string module_id = module.getSourceFileName();
+  const std::string_view tag = module_tag(module_id);
+
+  for (const VmFunction& function : functions) {
+    llvm::errs() << "[cs2-protect] " << tag << ": vm " << function.symbol;
+    if (!function.qualified.empty()) {
+      llvm::errs() << " (" << function.qualified << ")";
+    }
+    if (function.virtualizable) {
+      llvm::errs() << " virtualizable"
+                   << " slots=" << function.slots << " frame=" << function.frame_bytes
+                   << " bytecode=" << function.bytecode_bytes
+                   << " instructions=" << function.instructions << " calls=" << function.calls;
+    } else {
+      llvm::errs() << " refused reason=" << to_string(function.failure.reason);
+      if (!function.failure.detail.empty()) {
+        llvm::errs() << " detail=" << function.failure.detail;
+      }
+    }
+    llvm::errs() << "\n";
+  }
+}
+
+auto coverage_vm(const std::vector<VmFunction>& functions) -> std::vector<CoverageVm> {
+  std::vector<CoverageVm> result;
+  result.reserve(functions.size());
+  for (const VmFunction& function : functions) {
+    CoverageVm entry;
+    entry.symbol = function.symbol;
+    entry.virtualizable = function.virtualizable;
+    if (!function.virtualizable) {
+      entry.reason = to_string(function.failure.reason);
+      entry.detail = function.failure.detail;
+    }
+    entry.slots = function.slots;
+    entry.frame_bytes = function.frame_bytes;
+    entry.bytecode_bytes = function.bytecode_bytes;
+    entry.instructions = function.instructions;
+    entry.calls = function.calls;
+    result.push_back(std::move(entry));
+  }
+  return result;
+}
+
 auto coverage_entries(const SelectionResult& result) -> std::vector<CoverageEntry> {
   std::vector<CoverageEntry> entries;
   entries.reserve(result.policy_matches.size());
@@ -336,8 +399,8 @@ auto coverage_entries(const RecordedSelection& selection, std::string_view modul
 
 auto write_coverage(const Config& config, const llvm::Module& module,
                     const std::vector<CoverageEntry>& entries,
-                    const std::vector<CoverageFunction>& functions, const CoverageProtect& protect)
-    -> std::optional<std::string> {
+                    const std::vector<CoverageFunction>& functions, const CoverageProtect& protect,
+                    std::span<const CoverageVm> vm) -> std::optional<std::string> {
   if (!config.policy) {
     return std::nullopt;
   }
@@ -410,6 +473,34 @@ auto write_coverage(const Config& config, const llvm::Module& module,
     text += std::to_string(function.skipped);
     text += "\n";
   }
+  // What the virtualizer's analysis decided. The lines are new: a coverage
+  // file of an older build has none, and a reader that does not know them
+  // still reads the file.
+  for (const CoverageVm& function : vm) {
+    text += "vm ";
+    text += function.symbol;
+    text += " verdict=";
+    text += function.virtualizable ? "virtualizable" : "refused";
+    if (!function.reason.empty()) {
+      text += " reason=";
+      text += function.reason;
+    }
+    if (!function.detail.empty()) {
+      text += " detail=";
+      text += sanitize(function.detail);
+    }
+    text += " slots=";
+    text += std::to_string(function.slots);
+    text += " frame=";
+    text += std::to_string(function.frame_bytes);
+    text += " bytecode=";
+    text += std::to_string(function.bytecode_bytes);
+    text += " instructions=";
+    text += std::to_string(function.instructions);
+    text += " calls=";
+    text += std::to_string(function.calls);
+    text += "\n";
+  }
   // The digest of everything above: a file that was edited by hand (or
   // truncated) does not describe the build, and a reader that trusts it
   // would count a rewrite that never happened.
@@ -429,7 +520,7 @@ auto write_coverage(const Config& config, const llvm::Module& module,
 
 auto write_coverage(const Config& config, const llvm::Module& module, const SelectionResult& result)
     -> std::optional<std::string> {
-  return write_coverage(config, module, coverage_entries(result), {}, CoverageProtect{});
+  return write_coverage(config, module, coverage_entries(result), {}, CoverageProtect{}, {});
 }
 
 }  // namespace cs2::protect

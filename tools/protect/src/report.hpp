@@ -18,6 +18,7 @@
 #include "config.hpp"
 #include "selection.hpp"
 #include "transform.hpp"
+#include "vm.hpp"
 
 namespace llvm {
 class Module;
@@ -68,6 +69,24 @@ struct CoverageProtect {
   std::uint64_t mix_xor{0};
 };
 
+/// What the virtualizer's analysis decided about one function.
+///
+/// The analysis is read-only: the function is not rewritten yet, so the
+/// numbers are what the virtualized form *would* cost. The operator needs
+/// them before paying for the 5-50x.
+struct CoverageVm {
+  std::string symbol;
+  bool virtualizable{false};
+  std::string reason;  ///< the refusal reason ("" when the function is
+                       ///< virtualizable).
+  std::string detail;  ///< what the refusal is about.
+  std::size_t slots{0};
+  std::size_t frame_bytes{0};
+  std::size_t bytecode_bytes{0};
+  std::size_t instructions{0};
+  std::size_t calls{0};
+};
+
 /// Prints the selection report of one module to stderr.
 void write_report(const llvm::Module& module, const SelectionResult& result, const Config& config);
 
@@ -78,6 +97,19 @@ void write_report(const llvm::Module& module, const SelectionResult& result, con
 /// CS2_PROTECT_VERBOSE=1 it names every skipped call.
 void write_transform_report(const llvm::Module& module, const TransformResult& result,
                             const Config& config);
+
+/// Prints the report of the virtualizer's analysis to stderr.
+///
+/// The analysis is read-only: it says, for every selected function, whether
+/// it *could* be virtualized and what the virtualized form would cost. A
+/// function that cannot be virtualized is reported with the reason: the
+/// gate fails closed, and a refusal that is not reported is a refusal
+/// nobody can act on.
+void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& functions,
+                     const Config& config);
+
+/// The coverage entries of the virtualizer's analysis.
+[[nodiscard]] auto coverage_vm(const std::vector<VmFunction>& functions) -> std::vector<CoverageVm>;
 
 /// The coverage entries of a selection result.
 [[nodiscard]] auto coverage_entries(const SelectionResult& result) -> std::vector<CoverageEntry>;
@@ -110,10 +142,14 @@ void write_transform_report(const llvm::Module& module, const TransformResult& r
 /// The file also carries the digest of the source file and a digest of its
 /// own content, so that a reader can tell a coverage file of *this* build
 /// from one of another build or from a file that was edited by hand.
+///
+/// The `vm` lines are *new*: a coverage file of an older build has none, and
+/// a reader that does not know them still reads the file.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
                                   const std::vector<CoverageEntry>& entries,
                                   const std::vector<CoverageFunction>& functions,
-                                  const CoverageProtect& protect) -> std::optional<std::string>;
+                                  const CoverageProtect& protect,
+                                  std::span<const CoverageVm> vm) -> std::optional<std::string>;
 
 /// Writes the machine-readable coverage of one module from a selection.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
