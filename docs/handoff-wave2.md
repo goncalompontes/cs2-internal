@@ -249,15 +249,73 @@ log has the evidence, one line before the crash:
 ```
 
 So the **inline hook on the camera update is installed and then the first
-detour call faults** — the same class of problem as the chams' hook target
-(§5.2): the address was taken from a build that no longer matches. The hook is
-installed from the render thread (`ThirdPerson::update` → `install()`) while the
-game's own thread may be executing that very function, which is the other
-candidate. Until it is re-derived, the third-person camera should **stay off**
-(the console route still works on any build — the code says so at
-`payload/features/src/thirdperson.cpp`).
+detour call faults**. The faulting address (`0x1832100dd9c`) is **inside the
+payload**, not inside the game, and the access is a **read** of
+`0xFFFFFFFFFFFFFFFF`.
 
-### 5.2 The chams: the hook target is wrong
+**Corrected 2026-10-21: the address is *not* stale.** REA/Ghidra on the live
+`client.dll` (sha256 `659940c1…`, PE timestamp `0x6AD01314` — the very build
+the payload's gate accepts) shows that `client.dll + 0xB62A20` **is** a valid
+function (`FUN_180b62a20`, 3789 bytes) whose prologue and `(rcx, edx)`
+calling shape match the payload's `CameraUpdateFn`. So the previous
+explanation here ("the address was taken from a build that no longer matches")
+was wrong.
+
+The prime suspect is the **`thread_local` re-entrancy guard in the detour**
+(`payload/features/src/thirdperson.cpp:39`): the payload is **manually
+mapped**, so only the injector's entry thread has a TLS block
+(`payload/tls/include/cs2/tls/bootstrap.hpp` says exactly that), and the
+game's camera thread is not one of the threads the payload initialized — the
+detour's first instruction, the `thread_local` read, faults on an
+uninitialized per-thread block. The repository already states the rule
+(`docs/orchestration/spec-t20-animfix.md`): *"no `thread_local` in a detour on
+the manually mapped image"*.
+
+Until that is fixed, the third-person camera should **stay off** (the console
+route still works on any build — the code says so at
+`payload/features/src/thirdperson.cpp`). **T27** is the task that fixes it.
+
+### 5.2 The chams: the hook target is wrong — **RE-DERIVED (2026-10-21)**
+
+**The target has been re-derived on the live build; T26 implements it.**
+
+The RTTI chain, read out of the live `scenesystem.dll` (sha256 `040eb851…`,
+PE timestamp `0x6ACFCD4F`):
+
+| what | VA | RVA |
+|---|---|---|
+| the type descriptor (`.?AVCAnimatableSceneObjectDesc@@` at +0x10) | `0x18067C448` | `0x67C448` |
+| the complete object locator (this build's RTTI uses **32-bit** RVA fields) | `0x180606DC0` | `0x606DC0` |
+| the COL pointer (the vftable's `[-1]` slot — the only one in the module) | `0x1805E5C88` | `0x5E5C88` |
+| ⇒ the **vftable** starts at | `0x1805E5C90` | `0x5E5C90` |
+| slot 0 | `0x1800541D0` | a `GetTypeName` virtual (returns the class-name string) |
+| slot 1 | `0x180059FC0` | the **batch** wrapper (7 arguments, the material is the *fifth*) — **not** the draw |
+| slot 2 | `0x18001C240` | a three-byte `ret 0` stub |
+| slot 3 | `0x18005B030` | — |
+
+**The real draw is the function the batch wrapper calls** at `0x18005A465`:
+
+> **`scenesystem.dll` RVA `0x580A0`** (VA `0x1800580A0`)
+
+It is a **nine-argument** member function, and its arguments are settled by
+its own body: `RCX` = `this`, `RDX` = `IRenderContext*`, `R8` =
+`CMeshDrawPrimitive_t*` (it reads the primitive's index at `+0x372A`), **`R9`
+= `const IMaterial2*`** (the body calls `[R9 + 0x130]` and `[R9 + 0x4B8]` —
+the `IMaterial2` vtable), and the stack: the mode, the draw values, a **byte**
+(the deferred flag), the stats and the scene layer.
+
+**That is exactly the signature the payload already has** — the material is
+the fourth argument, index 3 counting `this` — so **the payload's detour was
+never wrong; only the address was.** The prologue
+`4C 89 4C 24 20 48 89 54 24 10 55 53 56 57 41 54 41 55 41 57` is **unique**
+in the module and its first 14 bytes hold no RIP-relative operand and no
+relative branch, so the repo's inline hook can displace them.
+
+The old note follows for the record.
+
+<details>
+<summary>The previous text (the hypothesis that was wrong)</summary>
+
 `payload/features/src/chams.cpp` now **refuses** to install the draw hook, behind
 `k_draw_hook_target_verified = false`. The address came from an MSVC RTTI
 **lambda** type; a lambda's `operator()` is **static** (eight arguments, no
@@ -266,12 +324,14 @@ eight — so the nine-argument detour shifted the whole argument list and the
 callee dereferenced the material pointer as a mesh pointer. That is the access
 violation (`0xc0000005`) that killed the game.
 
-**To finish it:** re-derive the target from the class's **own vtable** —
-`CAnimatableSceneObjectDesc` is at `scenesystem.dll + 0x5E5C90` (RTTI TypeDescriptor
-`0x18067C448` → COL `0x180606DC0` → the vtable at `+0x5E5C88`), and its **slot 1**
-holds the virtual that calls the draw. Hook the **vtable slot** (a pointer you
-can *verify* — it must equal the address you expect) rather than a raw function
-address, and derive the signature from the class, not from the lambda.
+</details>
+
+**To finish it:** the address is now known; what it needs is the ADR-0012
+route (a dumper signature, so it is re-resolved per build), a **runtime
+verification** (the prologue bytes are read through the fault-safe reader and
+compared before anything is patched) and the removal of the `thread_local`
+guard — the chams' detour has the same defect as the third-person's
+(§5.1b). **T26** is the task that does it.
 
 Everything else is ready: the material system (`CMaterialSystem2` vtable
 `0x12d920`, `FindMaterial` = slot 14), the flat material
@@ -496,6 +556,33 @@ the bots hold still), joins a team and adds the bots.
 ## 8. The one thing to do first
 
 **§5.1 is done** — the strafe's gate is measured, the default is right, and the
-payload reports the outcome and the gate (§5.1). What is left is the **chams'**
-hook target (§5.2), which needs the class's own vtable; everything else in this
-handoff is either done or a bigger project.
+payload reports the outcome and the gate (§5.1).
+
+**The order for the next session (2026-10-21):**
+
+1. **T26 — the chams' draw hook** (§5.2): the target is **re-derived**; the
+   task is the ADR-0012 route (a dumper signature), a runtime prologue
+   verification, and the removal of the `thread_local` guard.
+2. **T27 — the third-person camera's crash** (§5.1b): the address is **valid**;
+   the `thread_local` in the detour is the fault. The chams' detour has the
+   same defect.
+3. **T28 — the curated offsets, resolved offline**: the dumper's `--file` mode
+   already resolves the same signatures **without the game** (it reproduces
+   the shipped dump exactly), so a new signature becomes usable without the
+   operator launching CS2.
+4. **The live run** — the one thing no static review closes. The operator has
+   to launch the game (`schtasks /run /tn CS2Launch`) and inject **once**.
+
+**The protection workstream is out of scope** (the operator's decision,
+2026-10-21): `docs/handoff-protect.md`'s T20 (the virtualization) is **not**
+a task for this repository. The T18/T19 work that already landed stays.
+
+**`cpp-modernization` is not a merge candidate** (2026-10-21): it is C++23
+(the same dialect as the integration tree, so it is not "cpp2"), but it is
+**239 commits behind**, its **ADR numbering collides** with the integration
+tree's (its ADR-0023 "Enumerated domain types" against the integration
+tree's ADR-0023 "Default renderer"), and it rewrites the same ~90 files the
+integration tree has since rewritten. Keep the branch as a **source of ideas**
+(enumerated domain types, `std::expected` hook errors, the concept-constrained
+`Vec`/geometry, `magic_enum`, the typed SDK accessors); merging it is its
+own project.
