@@ -159,6 +159,32 @@ inline constexpr int SEED_SOURCE_DEFAULT = SEED_SOURCE_SEQUENCE;
   return value == SEED_SOURCE_ANGLE_GRID ? "angle_grid" : "sequence";
 }
 
+// Whether the seed's **sequence** is a fallback.
+//
+// Under the `sequence` policy the samples' seeds are derived from the command's
+// sequence number -- the thing `MD5_PseudoRandom(sequence)` is derived from
+// (`docs/re/aim.md` §"The seed"). **The live path cannot reach it**: the
+// `Input` module owns the `CUserCmd` pointer and exposes no accessor for the
+// command's number, and the one that exists is refreshed by the bunnyhop assist
+// alone (so it is zero when the assist is off and stale when it is on). The
+// prediction tick stands in for it, and the status says so.
+//
+// Under the `angle_grid` policy the sequence is not used at all -- the seed is
+// a function of the aim and the tick -- so the question does not arise.
+[[nodiscard]] constexpr auto seed_source_is_fallback(int value) noexcept -> bool {
+  return value != SEED_SOURCE_ANGLE_GRID;
+}
+
+// The note the status carries with the seed policy: what the number means and
+// whether it is exact.
+[[nodiscard]] constexpr auto seed_source_note(int value) noexcept -> std::string_view {
+  if (value == SEED_SOURCE_ANGLE_GRID) {
+    return "indicative, not exact: the hash is a stand-in for the engine's get_tick_view_angles";
+  }
+  return "fallback: the prediction tick stands in for the command's sequence number "
+         "(it is not reachable from the service)";
+}
+
 // --- The weapon's spread pattern ----------------------------------------------
 
 // Whether two names are the same, ignoring the case.

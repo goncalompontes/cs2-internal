@@ -488,8 +488,36 @@ class Service {
   std::atomic<float> rage_damage_{100.0F};
   std::atomic<float> rage_headshot_{4.0F};
   std::atomic<float> rage_range_modifier_{0.98F};
-  std::atomic<int> rage_objective_{1};  // 0 damage, 1 hitchance, 2 expected
+  std::atomic<int> rage_objective_{1};  // 0 damage, 1 hitchance, 2 expected, 3 monte_carlo
   std::atomic<float> rage_sigma_{0.0F};
+  // The Monte-Carlo objective's live state (`docs/ragebot.md` §13.7): the
+  // sample count, the seed policy, and the last solve's verdict.
+  //
+  // **The verdict crosses a thread boundary**: the solve runs on the game thread
+  // (the CreateMove hook) and the status is read on the control thread, so the
+  // numbers are published as atomics. They are the only way the operator can
+  // see that the Monte-Carlo solver **refused** — a silent fallback to another
+  // objective is exactly what must not happen.
+  //
+  // The sample count's **default is 64**: it is the only count that fits the
+  // frame budget at a live-sized hitbox set (`docs/ragebot.md` §13.6). A
+  // different count must be an explicit choice (the `rage` command's `samples`).
+  std::atomic<int> rage_mc_samples_{64};
+  // The seed policy: 0 = the sequence policy (the repo's own RE), 1 = the
+  // angle-grid policy (the community's, with the stand-in hash). The values are
+  // `cs2::aim::SeedSource`'s own (`cs2/control/rage_objective.hpp`).
+  std::atomic<int> rage_mc_seed_{0};
+  // The last Monte-Carlo verdict: the measured probability, the expected damage
+  // and the target the nearest hit named.
+  std::atomic<float> rage_mc_hitchance_{0.0F};
+  std::atomic<float> rage_mc_damage_{0.0F};
+  std::atomic<int> rage_mc_target_{-1};
+  // The last refusal: -1 when the solver produced a number, otherwise the
+  // `cs2::aim::MonteCarloError`'s value (the status names it).
+  std::atomic<int> rage_mc_refusal_{-1};
+  // Whether the last solve produced a Monte-Carlo verdict at all (the
+  // objective was the Monte-Carlo one and it did not refuse).
+  std::atomic<bool> rage_mc_valid_{false};
   // The ragebot's usability gate (`docs/ragebot.md`): the target FOV (degrees; 0 =
   // unlimited), the hitbox filter (0 auto, 1 head, 2 body) and the aim/fire thresholds.
   std::atomic<int> rage_hitbox_{0};

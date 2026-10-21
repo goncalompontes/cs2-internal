@@ -340,7 +340,12 @@ control_rage_objective_test = executable('control_rage_objective_test',
     include_directories('payload/game/include'),
   ],
 )
-test('control-rage-objective', control_rage_objective_test)
+test('control-rage-objective', control_rage_objective_test,
+  # The last check is a **source** check: the service needs the game, so the
+  # wiring (the call sites use the rules, they do not re-implement them) is
+  # checked by reading the service's own source.
+  args : [meson.current_source_dir()],
+)
 
 # The per-weapon rage profile's **line codec** (`cs2/control/rage_config.hpp`):
 # the text format of `cs2-rage.cfg` is a property of the file, not of the file

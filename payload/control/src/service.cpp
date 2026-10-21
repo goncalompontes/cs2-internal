@@ -16,6 +16,7 @@
 #include "cs2/aim/spread.hpp"
 #include "cs2/control/occlusion_query.hpp"
 #include "cs2/control/predicate.hpp"
+#include "cs2/control/rage_objective.hpp"
 #include "cs2/control/snapshot_json.hpp"
 #include "cs2/diag/watchdog.hpp"
 #include "cs2/game/log.hpp"
@@ -42,6 +43,34 @@ auto now_ms() noexcept -> std::uint64_t {
 #else
   return 0;
 #endif
+}
+
+// The Monte-Carlo objective's sample-count bounds (the `rage` command's
+// `samples` argument).
+//
+// **The default is 64** — the only count that fits the frame budget at a
+// live-sized hitbox set (57 hitboxes for three targets, where 128 is over the
+// 12 ms guard and 256 is over the tick; `docs/ragebot.md` §13.6). A different
+// count must be an **explicit** choice, and the status shows which one is in
+// force.
+constexpr int k_min_mc_samples = 1;
+constexpr int k_max_mc_samples = 256;
+
+// The prediction tick the seed context uses: the local controller's
+// `m_nTickBase`, the tick the client is simulating (`docs/re/lagcomp.md`).
+//
+// **It is the fallback for the command's sequence number**, which is not
+// reachable from where the service sits: the `Input` module owns the
+// `CUserCmd` pointer and exposes no accessor for the command's number, and the
+// one that exists (`bhop_cmd_number`) is refreshed by the **bunnyhop assist**
+// alone — so it is zero when the assist is off and stale when it is on. A
+// number that is the game's own must not be presented as such, so the tick
+// stands in for it and the status says the seed is a fallback.
+[[nodiscard]] auto prediction_tick(const game::Snapshot& snapshot) noexcept -> std::uint32_t {
+  if (!snapshot.local.has_value() || snapshot.local->tick_base <= 0) {
+    return 0U;
+  }
+  return static_cast<std::uint32_t>(snapshot.local->tick_base);
 }
 
 // The sound markers the ESP keeps (its sound cache's capacity) and the age
@@ -2141,15 +2170,60 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
         std::sqrt(inacc * inacc + solve_input->weapon.spread * solve_input->weapon.spread);
   }
   switch (tuning.objective) {
-    case 0:
+    case OBJECTIVE_VALUE_DAMAGE:
       solve_input->objective = aim::AimObjective::damage;
       break;
-    case 2:
+    case OBJECTIVE_VALUE_EXPECTED:
       solve_input->objective = aim::AimObjective::expected;
+      break;
+    case OBJECTIVE_VALUE_MONTE_CARLO:
+      solve_input->objective = aim::AimObjective::monte_carlo;
       break;
     default:
       solve_input->objective = aim::AimObjective::hitchance;
       break;
+  }
+  if (solve_input->objective == aim::AimObjective::monte_carlo) {
+    // The Monte-Carlo objective's parameters (`docs/ragebot.md` §13.7).
+    //
+    // The **seed context**: the tick is the prediction tick (the local
+    // controller's `m_nTickBase`), and the **sequence** is the documented
+    // fallback — the prediction tick stands in for the command's sequence
+    // number, which is not reachable from here (`prediction_tick`). The status
+    // says the seed is a fallback; a number presented as the game's own would
+    // not be honest.
+    const std::uint32_t tick = prediction_tick(snapshot);
+    solve_input->monte_carlo_seed =
+        aim::SeedContext{.sequence = tick,
+                         .tick = tick,
+                         .source = static_cast<aim::SeedSource>(rage_mc_seed_.load())};
+    // The sample count: **64** by default (`k_min_mc_samples` / `k_max_mc_samples`
+    // bound what the operator may choose).
+    solve_input->monte_carlo_samples = rage_mc_samples_.load();
+    // The weapon's **pellet pattern**: the core has no default for it, and a
+    // default would silently drop the revolver's `1 - r^2`. The designer name is
+    // the only thing that tells a revolver from a rifle (both are weapon type
+    // 3), so the rule is keyed on it (`cs2/control/rage_objective.hpp`).
+    solve_input->monte_carlo_pattern = spread_pattern_for(local.weapon);
+    // The weapon fires **one** pellet: the multi-pellet weapons are exactly the
+    // ones the core refuses (`pattern_supported`), and the core's per-pellet
+    // attribution is only reachable with more than one.
+    solve_input->monte_carlo_pellets = 1;
+    // The targets' **health**: the live enemies' own remaining health, for
+    // **every** candidate the solve considered — not only the one that is
+    // finally chosen. The Monte-Carlo rule's first key is "can this candidate
+    // kill the target", and it is judged against that target's own damage and
+    // that target's own health (`docs/ragebot.md` §13.5).
+    solve_input->monte_carlo_targets.clear();
+    for (const int index : candidates) {
+      for (const game::PlayerSnapshot& player : snapshot.players) {
+        if (player.index == index) {
+          solve_input->monte_carlo_targets.push_back(
+              aim::TargetHealth{.index = index, .health = static_cast<float>(player.health)});
+          break;
+        }
+      }
+    }
   }
 
   // The global pick across **all** candidates: which target's hitbox the best aimpoint
@@ -2276,6 +2350,37 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
                         std::memory_order_relaxed);
   perf_.poses.store(static_cast<std::uint32_t>(poses.size()), std::memory_order_relaxed);
 
+  // The Monte-Carlo objective's verdict, published for the status. The solve
+  // runs on the game thread and the status is read on the control thread, so
+  // the numbers cross the boundary as atomics.
+  //
+  // **A refusal is published, never swallowed**: the reason is what tells the
+  // operator that the aim came from the `damage` objective instead of the
+  // Monte-Carlo one.
+  if (solve_input->objective == aim::AimObjective::monte_carlo) {
+    if (result.monte_carlo.has_value()) {
+      rage_mc_valid_.store(true, std::memory_order_relaxed);
+      rage_mc_hitchance_.store(result.monte_carlo->probability, std::memory_order_relaxed);
+      rage_mc_damage_.store(result.monte_carlo->expected_damage, std::memory_order_relaxed);
+      rage_mc_target_.store(result.monte_carlo->target, std::memory_order_relaxed);
+      rage_mc_refusal_.store(-1, std::memory_order_relaxed);
+    } else {
+      rage_mc_valid_.store(false, std::memory_order_relaxed);
+      rage_mc_hitchance_.store(0.0F, std::memory_order_relaxed);
+      rage_mc_damage_.store(0.0F, std::memory_order_relaxed);
+      rage_mc_target_.store(-1, std::memory_order_relaxed);
+      rage_mc_refusal_.store(result.monte_carlo_refusal.has_value()
+                                 ? static_cast<int>(*result.monte_carlo_refusal)
+                                 : -1,
+                             std::memory_order_relaxed);
+    }
+  } else {
+    // Another objective: the Monte-Carlo's numbers are stale, so they are
+    // cleared rather than left to be read as the current ones.
+    rage_mc_valid_.store(false, std::memory_order_relaxed);
+    rage_mc_refusal_.store(-1, std::memory_order_relaxed);
+  }
+
   // The aim/fire gate (`docs/ragebot.md` §3): only aim and fire when the solve meets
   // the user's minimum damage and hitchance, and (optionally) when the shot is not
   // attenuated by a wall ("only visible").
@@ -2371,9 +2476,26 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
     return false;
   }
   const int target = input_.rage_target();
+  // The objective **by name**: the operator has to be able to tell the
+  // Monte-Carlo objective from the others at a glance, and the numbers mean
+  // different things under each (`docs/ragebot.md` section 13.7).
+  //
+  // **The name is copied into a stack buffer**: this line is written on the
+  // render thread (the overlay's per-frame sink), and a heap allocation there
+  // is the defect the chams' status line was written to avoid.
+  char objective[16] = {};
+  {
+    const std::string_view name = objective_name_for(rage_objective_.load());
+    // **Not `std::min`**: `<windows.h>` defines `min` and `max` as macros, so
+    // `std::min` does not survive it.
+    const std::size_t limit = sizeof(objective) - 1;
+    const std::size_t length = name.size() < limit ? name.size() : limit;
+    std::memcpy(objective, name.data(), length);
+    objective[length] = '\0';
+  }
   std::snprintf(
-      out, size, "rage: %s target %d box %d w%llu s%llu bt%llu rec%d occ%d fire %d%s%s%s",
-      input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(),
+      out, size, "rage: %s target %d box %d obj %s w%llu s%llu bt%llu rec%d occ%d fire %d%s%s%s",
+      input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(), objective,
       static_cast<unsigned long long>(input_.rage_writes()),
       static_cast<unsigned long long>(input_.rage_shots()),
       static_cast<unsigned long long>(rage_backtracks_.load()), rage_last_record_.load(),
@@ -2675,11 +2797,12 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
   if (const Json* objective = args.find("objective");
       objective != nullptr && objective->is_string()) {
     const std::string_view name = objective->as_string();
-    if (name == "hitchance") {
-      input->objective = aim::AimObjective::hitchance;
-    } else if (name == "expected") {
-      input->objective = aim::AimObjective::expected;
-    } else if (name == "pellets") {
+    // The name -> objective mapping is a **pure rule**
+    // (`cs2/control/rage_objective.hpp`), so the service and the host test
+    // cannot disagree about it. An unknown name selects the `damage` objective,
+    // exactly as before.
+    input->objective = objective_for_name(name);
+    if (input->objective == aim::AimObjective::pellets) {
       // The deterministic pellet-sum objective (docs/ragebot.md §2/§3). The seed is
       // `MD5_PseudoRandom(sequence)` unless an explicit `seed` is passed; the
       // spread/inaccuracy magnitudes come from the caller until the weapon's
@@ -2697,8 +2820,55 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
       const float inaccuracy = number("inaccuracy", input->weapon.inaccuracy);
       input->pellet_offsets =
           aim::pellet_offsets(seed, spread, inaccuracy, pellets > 0 ? pellets : 1);
-    } else {
-      input->objective = aim::AimObjective::damage;
+    } else if (input->objective == aim::AimObjective::monte_carlo) {
+      // The Monte-Carlo objective (`docs/ragebot.md` section 13.7). The seed
+      // context's tick is the prediction tick; the sequence is the **documented
+      // fallback** (the tick) unless the caller states one -- the command's
+      // sequence number is not reachable from here (`prediction_tick`).
+      const std::uint32_t tick = prediction_tick(snapshot);
+      const int stated_sequence = integer("sequence", 0);
+      const int stated_tick = integer("tick", 0);
+      const int samples = integer("samples", 64);
+      int seed_source = SEED_SOURCE_SEQUENCE;
+      if (const Json* value = args.find("seed"); value != nullptr && value->is_string()) {
+        seed_source = seed_source_for(value->as_string());
+      }
+      input->monte_carlo_samples =
+          samples >= k_min_mc_samples && samples <= k_max_mc_samples ? samples : 64;
+      input->monte_carlo_seed =
+          aim::SeedContext{.sequence = stated_sequence > 0
+                                             ? static_cast<std::uint32_t>(stated_sequence)
+                                             : tick,
+                           .tick = stated_tick > 0 ? static_cast<std::uint32_t>(stated_tick) : tick,
+                           .source = static_cast<aim::SeedSource>(seed_source)};
+      // The weapon's pattern: the core has no default for it, and the designer
+      // name is the only thing that tells a revolver from a rifle.
+      input->monte_carlo_pattern = spread_pattern_for(
+          snapshot.local.has_value() ? std::string_view{snapshot.local->weapon}
+                                     : std::string_view{});
+      // The target's own health: the rule's first key is judged against it. The
+      // solve considers **one** target (`build_input` picks the nearest, or the
+      // one the caller named), so the health list carries that one -- the same
+      // rule, so the list and the solve agree.
+      input->monte_carlo_targets.clear();
+      if (snapshot.local.has_value()) {
+        const game::PlayerSnapshot* chosen = nullptr;
+        for (const game::PlayerSnapshot& player : snapshot.players) {
+          if (player.is_local || !player.alive || player.team == snapshot.local->team) {
+            continue;
+          }
+          if (target >= 0 && player.index != target) {
+            continue;
+          }
+          if (chosen == nullptr || player.distance < chosen->distance) {
+            chosen = &player;
+          }
+        }
+        if (chosen != nullptr) {
+          input->monte_carlo_targets.push_back(
+              aim::TargetHealth{.index = chosen->index, .health = static_cast<float>(chosen->health)});
+        }
+      }
     }
   }
 
@@ -2747,6 +2917,28 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
   payload.set("aim_u", Json::number(result.aim.x));
   payload.set("aim_v", Json::number(result.aim.y));
   payload.set("wrote_view", Json::boolean(write));
+  // The objective **by name**, and — for the Monte-Carlo one — the numbers it
+  // produced and the reason it refused, if it did (`docs/ragebot.md` section
+  // 13.7). The two objectives' numbers mean different things, so the name is
+  // what tells them apart.
+  payload.set("objective", Json::string(std::string(objective_name_of(input->objective))));
+  if (result.monte_carlo.has_value()) {
+    payload.set("mc_samples", Json::number(static_cast<double>(result.monte_carlo->samples)));
+    payload.set("mc_hits", Json::number(static_cast<double>(result.monte_carlo->hits)));
+    payload.set("mc_hitchance",
+                Json::number(static_cast<double>(result.monte_carlo->probability)));
+    payload.set("mc_expected_damage",
+                Json::number(static_cast<double>(result.monte_carlo->expected_damage)));
+    payload.set("mc_target", Json::number(static_cast<double>(result.monte_carlo->target)));
+    payload.set("mc_hitgroup", Json::number(static_cast<double>(result.monte_carlo->hitgroup)));
+    payload.set("mc_can_kill", Json::boolean(result.monte_carlo->can_kill));
+    payload.set("mc_seed", Json::string(std::string(seed_source_name(
+        static_cast<int>(result.monte_carlo->seed_source)))));
+  }
+  if (result.monte_carlo_refusal.has_value()) {
+    payload.set("mc_refusal", Json::string(std::string(aim::to_string(*result.monte_carlo_refusal))));
+    payload.set("mc_fallback", Json::boolean(true));
+  }
 
   // Raw model hitboxes (validation for the exact-hitbox path).
   Json hitboxes = Json::array();
@@ -2826,8 +3018,25 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
     rage_sigma_.store(static_cast<float>(value->as_number()));
   }
   if (const Json* value = args.find("objective"); value != nullptr && value->is_string()) {
-    const std::string_view name = value->as_string();
-    rage_objective_.store(name == "damage" ? 0 : (name == "expected" ? 2 : 1));
+    // The name -> value mapping is a **pure rule**
+    // (`cs2/control/rage_objective.hpp`). An unknown name selects the documented
+    // safe default -- the hitchance -- exactly as it did before.
+    rage_objective_.store(objective_value_for(value->as_string()));
+  }
+  if (const Json* value = args.find("seed"); value != nullptr && value->is_string()) {
+    // The seed policy: which of the two accounts of the engine's seed is in
+    // force (`sequence` -- the repo's own RE -- or `angle_grid` -- the
+    // community's, with the stand-in hash). An unknown name selects the
+    // default, the `sequence` policy.
+    rage_mc_seed_.store(seed_source_for(value->as_string()));
+  }
+  if (const Json* value = args.find("samples"); value != nullptr && value->is_number()) {
+    // The Monte-Carlo sample count. The **default is 64**; a different count
+    // must be an explicit choice, and the status shows which one is in force.
+    const int samples = static_cast<int>(value->as_number());
+    if (samples >= k_min_mc_samples && samples <= k_max_mc_samples) {
+      rage_mc_samples_.store(samples);
+    }
   }
   if (const Json* value = args.find("fov"); value != nullptr && value->is_number()) {
     rage_fov_.store(static_cast<float>(value->as_number()));
@@ -2929,7 +3138,34 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
                   rage_occlusion_query_issues_.load(std::memory_order_relaxed))));
   payload.set("backtracks", Json::number(static_cast<double>(rage_backtracks_.load())));
   payload.set("record", Json::number(static_cast<double>(rage_last_record_.load())));
-  payload.set("objective", Json::number(static_cast<double>(rage_objective_.load())));
+  // The objective **by name**, not by number: the operator has to be able to
+  // tell the Monte-Carlo objective from the others, and the numbers mean
+  // different things under each (`docs/ragebot.md` section 13.7). The value is
+  // still reported, under its own key.
+  payload.set("objective", Json::string(std::string(objective_name_for(rage_objective_.load()))));
+  payload.set("objective_value", Json::number(static_cast<double>(rage_objective_.load())));
+  // The Monte-Carlo objective's own state: the sample count, the seed policy in
+  // force, the numbers the last solve produced, and the reason it refused if it
+  // did. **A fallback to another objective is never silent**: `mc_refusal` names
+  // it and `mc_fallback` says the aim came from the `damage` objective.
+  {
+    const int seed = rage_mc_seed_.load();
+    payload.set("mc_samples", Json::number(static_cast<double>(rage_mc_samples_.load())));
+    payload.set("mc_seed", Json::string(std::string(seed_source_name(seed))));
+    payload.set("mc_seed_fallback", Json::boolean(seed_source_is_fallback(seed)));
+    payload.set("mc_seed_note", Json::string(std::string(seed_source_note(seed))));
+    payload.set("mc_hitchance", Json::number(static_cast<double>(rage_mc_hitchance_.load())));
+    payload.set("mc_expected_damage",
+                Json::number(static_cast<double>(rage_mc_damage_.load())));
+    payload.set("mc_target", Json::number(static_cast<double>(rage_mc_target_.load())));
+    const int refusal = rage_mc_refusal_.load();
+    payload.set("mc_refusal",
+                Json::string(refusal >= 0
+                                ? std::string(aim::to_string(static_cast<aim::MonteCarloError>(refusal)))
+                                : std::string()));
+    payload.set("mc_fallback", Json::boolean(refusal >= 0));
+    payload.set("mc_valid", Json::boolean(rage_mc_valid_.load()));
+  }
   payload.set("hitbox_mode", Json::number(static_cast<double>(rage_hitbox_.load())));
   payload.set("fov", Json::number(static_cast<double>(rage_fov_.load())));
   payload.set("min_damage", Json::number(static_cast<double>(rage_min_damage_.load())));

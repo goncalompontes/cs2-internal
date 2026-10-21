@@ -13,6 +13,10 @@
 // bites in the debug build is not a test — `meson.build`).
 
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <string_view>
 
 #include "cs2/control/rage_objective.hpp"
@@ -28,9 +32,42 @@ void expect(bool condition, const char* what) {
   }
 }
 
+// The service's call sites must **use** the rules, not re-implement them: the
+// mapping that is tested here has to be the mapping that runs, and a second
+// copy inline in the service would be a second truth.
+//
+// This is a **source check** -- the repo's pattern for the call sites no host
+// test can run (`payload/control/tests/test_control_anti_aim.cpp`): the service
+// needs the game, so the wiring is checked by reading it.
+void test_the_service_uses_the_rules(const std::string& root) {
+  const std::filesystem::path path =
+      std::filesystem::path(root) / "payload" / "control" / "src" / "service.cpp";
+  std::ifstream file(path);
+  expect(file.good(), "the service's source is readable");
+  if (!file.good()) {
+    return;
+  }
+  const std::string source((std::istreambuf_iterator<char>(file)),
+                           std::istreambuf_iterator<char>());
+  expect(source.find("objective_value_for(") != std::string::npos,
+         "the rage command uses the name -> value rule");
+  expect(source.find("objective_for_name(") != std::string::npos,
+         "the aim command uses the name -> objective rule");
+  expect(source.find("objective_name_for(") != std::string::npos,
+         "the status uses the value -> name rule");
+  expect(source.find("AimObjective::monte_carlo") != std::string::npos,
+         "the service dispatches the Monte-Carlo objective");
+  // The **inline** mapping must be gone: a second copy of the truth in the
+  // service is a second truth.
+  expect(source.find("name == \"damage\" ? 0") == std::string::npos,
+         "the inline name -> value mapping is gone");
+  expect(source.find("name == \"hitchance\"") == std::string::npos,
+         "the inline name -> objective mapping is gone");
+}
+
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
   using cs2::aim::AimObjective;
   using cs2::aim::SpreadPattern;
   using cs2::control::OBJECTIVE_VALUE_DAMAGE;
@@ -195,6 +232,14 @@ auto main() -> int {
            "the revolver pattern is named");
     expect(cs2::control::spread_pattern_name(SpreadPattern::standard) == "standard",
            "the standard pattern is named");
+  }
+
+  // --- 8. the service uses the rules -----------------------------------------
+  {
+    expect(argc >= 2, "the repository root is an argument");
+    if (argc >= 2) {
+      test_the_service_uses_the_rules(argv[1]);
+    }
   }
 
   if (failures == 0) {
