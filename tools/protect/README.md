@@ -947,6 +947,22 @@ to express:
 
 A `switch` is lowered to a chain of `Cmp` + `BrIf`. It is not refused.
 
+**The width of each opcode** (§14.2) is part of the contract, and it is
+never 0:
+
+* the opcodes that produce a **value** carry the width of that value:
+  the width of the IR type of the operation (`Const`, `Move`, the
+  arithmetic, `Cmp`, `Cast`, `Load`, `Store`, `Gep`, `Pool`, `Alloca`),
+  and the width of the return type of the callee (`Call`);
+* the opcodes that produce **no** value carry the width of a cell of
+  the frame (**8**): `Br`, `BrIf`, `Arg`, `Pop`, and the `Call` of a
+  function that returns nothing (the uniform signature returns a
+  64-bit value);
+* `MemCpy` and `MemSet` are **byte-wise** and carry **1** (their length
+  is in `imm`);
+* the `Ret` carries the width of the **value it returns**, and 8 for a
+  function that returns nothing.
+
 ### 14.2 The encoding
 
 Every instruction is a fixed **24 bytes**:
@@ -956,7 +972,16 @@ u8 opcode | u8 width | u8 flags | u8 pad | u16 dst | u16 src1 | u16 src2 | u16 s
 ```
 
 * `opcode` is the permuted opcode (§14.5);
-* `width` is the width of the operation, in bytes (1, 2, 4 or 8);
+* `width` is the width of the operation, in bytes (**1, 2, 4 or 8 — never
+  0**). It is the width of the value the instruction **produces** (§14.1):
+  an instruction that produces no value carries the width of a cell of
+  the frame (**8**), except `MemCpy` and `MemSet`, which are byte-wise
+  and carry **1**. The `Ret` carries the width of the returned value, and
+  8 for a function that returns nothing. **A width of 0 is not a legal
+  value**: an interpreter written against this contract truncates its
+  result to the width, and a width of 0 would truncate it to nothing — it
+  would return 0 from every function and load a null pointer for every
+  global;
 * `flags` carries `nsw` (bit 0), `nuw` (bit 1) and `exact` (bit 2). The
   flags are **carried**, never dropped: dropping `nsw` turns undefined
   behaviour into a defined wrap;
@@ -1031,6 +1056,13 @@ operation, so an `i32` addition is an `i32` addition: widening it to
 An `i1` lives in a byte, and the value of an `i1` is its low bit, so the
 lowering masks every operation whose result is an `i1` (a comparison
 produces zero or one and needs no mask).
+
+**The frame is 8-byte aligned.** The cells are 64 bits wide, and a local
+is a byte offset into the frame (§14.1), so the base of the frame has to
+be a multiple of eight: that is the alignment of a cell, and it is the
+alignment every local may ask for. A local that needs more than eight
+bytes of alignment is **refused** (`local_variable`), so the frame's
+alignment is the only alignment the interpreter has to provide.
 
 ### 14.4 The budgets
 
@@ -1134,32 +1166,41 @@ left completely untouched, and the reason is reported. There is no "best
 effort" path — a half-lowered function computes garbage, and in a
 manually mapped payload with no exception tables that kills the game.
 
-The checks run in the order of the specification's table, and the first
-one that holds is the reason that is reported. The two budget checks are
-the exception: the argument count is raised in the call scan and the slot
-count when the allocator runs out, so a function that exceeds **both** is
-reported as `too_many_arguments`.
+The gate's checks run first, and the first one that holds is the reason
+that is reported. The table below is the **order of the code**: the
+gate's checks, and then the reasons that come from the lowering. The two
+budget checks are the exception: the argument count is raised in the
+call scan and the slot count when the allocator runs out, so a function
+that exceeds **both** is reported as `too_many_arguments`.
+
+The reasons that come from the **lowering** (`too_many_slots`,
+`unsupported_instruction`, `unsupported_type` and `local_variable`) can
+only be reported after **every** gate check has passed: the gate looks at
+the function, and the lowering looks at its instructions.
+`local_variable` is the last one of the table, because the locals are
+placed after the whole body is lowered — the value slots above them are
+only known at the end.
 
 | reason | refused because |
 |---|---|
 | `eh_pad` | the function has an EH pad, an `invoke`, a `landingpad` or a `resume`: the interpreter cannot model unwinding |
 | `variadic_function` | the function itself is variadic |
 | `variadic_callee` | it calls a variadic callee: the indirect call cannot reproduce the variadic ABI |
-| `indirect_call` | it makes an indirect call: there is no relocatable address for the pool |
 | `indirect_parameter` | a callee has a `byval` / `sret` / `inalloca` / `preallocated` parameter: Windows x64 rejects these in an indirect signature |
 | `musttail` | the tail-call contract does not survive the rewrite |
+| `indirect_call` | it makes an indirect call: there is no relocatable address for the pool |
 | `volatile_access` | a volatile access: the ordering guarantees are not modelled |
 | `atomic_access` | an atomic access: the ordering guarantees are not modelled |
 | `dynamic_memcpy` | a `memcpy` / `memset` with a **non-constant** length: it would lower to a CRT call |
 | `unsupported_type` | a float, a vector, an aggregate or an integer of more than 64 bits: this task handles integers of at most 64 bits and pointers only |
-| `local_variable` | the function has a local variable that the frame cannot hold: the locals are the cells above the value slots, and a local that does not fit (or one that needs more than eight bytes of alignment, or one whose size is not constant) is refused |
 | `address_taken` | the address of the function is taken (`&F`): the rewrite changes what the address means |
-| `too_many_slots` | the function needs more slots than the budget |
 | `too_many_arguments` | a call needs more arguments than the budget |
 | `recursion` | the function calls itself: the frame would multiply by the recursion depth |
 | `virtualized_callee` | the function calls a function that is itself selected at the `virtualized` level: the interpreter would have to call into another interpreter |
+| `too_many_slots` | the function needs more slots than the budget |
 | `unsupported_instruction` | the catch-all: an IR instruction the lowering does not model. The lowering has a default branch that refuses. |
 | `vanished` | the function did not survive to this phase: there is nothing to virtualize. The transform reports the same thing the same way. |
+| `local_variable` | the function has a local variable that the frame cannot hold: the locals are the cells above the value slots, and a local that does not fit (or one that needs more than eight bytes of alignment, or one whose size is not constant) is refused |
 
 The rules of the transform (§10.4) are **reused**, not written twice:
 the variadic callee, the indirect parameter, the `musttail` call and the
@@ -1167,21 +1208,24 @@ indirect call are the same rules, and the same reasons. The gate calls
 the transform's `skip_reason` (`src/transform.hpp`) and maps its reasons
 onto the virtual machine's, so the two phases cannot drift apart. The
 **order** is the transform's order — the variadic callee, the indirect
-parameter, the `musttail` call and the indirect call — and it is the
-one documented exception to the order of the table above: the table
-lists the indirect call before the indirect parameter, and the two
-phases have to agree.
+parameter, the `musttail` call and the indirect call — and the table
+above lists them in that order too. (The specification's §4 table still
+lists the indirect call before the indirect parameter: the table there
+and the order of the code disagree, and the code is the one that is
+right — the two phases have to agree.)
 
 What the lowering models: the integer and pointer arithmetic, the
 comparisons, the conversions, the loads and the stores, the `getelementptr`
 (both the constant and the variable indices), the branches, the `switch`,
 the `select` (a branch), the `phi` (a parallel copy, §14.3), the
 `freeze`, the `alloca` (a byte offset into the frame arena, §14.3), the
-`memcpy` and the `memset` with a constant length, the calls and the
-`ret`. What it refuses: the floats, the aggregates, a local that the
-frame cannot hold (`local_variable`), the `memmove` (it may copy
-overlapping ranges), the atomic and the volatile accesses, and
-everything else.
+`memcpy` and the `memset` with a constant length, the calls, the
+`ret` and the `unreachable` (a `Ret` of zero: the original is undefined
+behaviour, and what matters is that the interpreter **stops** — the ISA
+has no "stop" opcode, and the `Ret` is what stops it). What it refuses:
+the floats, the aggregates, a local that the frame cannot hold
+(`local_variable`), the `memmove` (it may copy overlapping ranges), the
+atomic and the volatile accesses, and everything else.
 
 **The moves of a PHI belong to the edge.** A PHI becomes edge
 assignments (§14.3): the predecessor performs the moves of the
@@ -1199,7 +1243,7 @@ and it is in the report (§7) and in the coverage (§9). The coverage
 gains a `vm` line per function:
 
 ```
-vm ?newest@RecordRing@aim@cs2@@QEBAPEBURecord@23@XZ verdict=virtualizable slots=7 locals=0 frame=3072 bytecode=392 instructions=15 calls=2
+vm ?newest@RecordRing@aim@cs2@@QEBAPEBURecord@23@XZ verdict=virtualizable slots=12 locals=0 frame=3072 bytecode=392 instructions=15 calls=0
 vm ?solve@aim@cs2@@YA?AUSolveResult@12@… verdict=refused reason=eh_pad detail=the_function_has_an_EH_edge slots=0 locals=0 frame=3072 bytecode=0 instructions=0 calls=0
 ```
 
@@ -1225,28 +1269,39 @@ therefore the numbers of the *refusals*, and the first thing to do
 before the next task is to widen the machine (the floats) or to narrow
 the ambition (the integer helpers).
 
-The gate is not empty, though. Over the whole `payload/aim` module
-(2490 functions, the standard library's templates included), it admits
-1878 of them and refuses 612:
+The gate is not empty, though. The numbers below are **measured**: they
+come from a protected payload build with the policy
+`{"protect": ["cs2::aim::*"]}`, and they are the `vm` lines of that
+build's coverage. The analysis runs for every *selected* function, so
+the population is the 278 functions the policy selects (the aim module's
+own functions and the standard library's templates that they pull in).
+**56 of them are virtualizable and 222 are refused**:
 
 | reason | refused |
 |---|---|
-| `unsupported_instruction` | 264 |
-| `unsupported_type` | 122 |
-| `eh_pad` | 115 |
-| `indirect_parameter` | 71 |
-| `dynamic_memcpy` | 23 |
-| `address_taken` | 8 |
-| `recursion` | 5 |
-| `indirect_call` | 2 |
-| `atomic_access` | 1 |
-| `variadic_function` | 1 |
+| `unsupported_type` | 97 |
+| `unsupported_instruction` | 46 |
+| `eh_pad` | 45 |
+| `indirect_parameter` | 12 |
+| `dynamic_memcpy` | 9 |
+| `indirect_call` | 6 |
+| `local_variable` | 4 |
+| `recursion` | 2 |
+| `vanished` | 1 |
 
 and the admitted ones are the small integer helpers:
-`cs2::aim::RecordRing::newest` (7 slots, 392 bytes of bytecode, 15
-instructions, 2 calls), `cs2::aim::RecordRing::oldest` (the same),
-`cs2::aim::Record::~Record` (4 slots, 176 bytes, 6 instructions, 1
-call) and the `std::span` / `std::array` accessors of the aim types.
+`cs2::aim::RecordRing::newest` (12 slots, 392 bytes of bytecode, 15
+instructions), `cs2::aim::RecordRing::oldest` (10 slots, 344 bytes, 13
+instructions), `cs2::aim::RecordRing::trim` (32 slots, 2024 bytes, 83
+instructions, 2 calls), `cs2::aim::UniformRandomStream::random_int` (66
+slots, 2600 bytes, 107 instructions) and the destructors and the
+accessors of the aim types.
+
+**The figures that were here before** (2490 functions of the module, 1878
+admitted and 612 refused) were measured **before** the fix round, over a
+*different* population: every function of the module, not the selected
+ones. They are not comparable with the table above, and they are not
+reproduced here.
 
 ### 14.9 Where the analysis runs
 

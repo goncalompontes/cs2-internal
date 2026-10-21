@@ -27,9 +27,17 @@
 // vm.hpp: the header of the bytecode is the contract, and this file is the
 // list of the opcodes it holds.
 //
-// The `width` of an instruction is in **bytes** (1, 2, 4 or 8), so a shift
-// masks its amount to `width * 8 - 1` **bits** (7, 15, 31 or 63), and the
-// `i1` of the source IR lives in a byte.
+// The `width` of an instruction is in **bytes** (1, 2, 4 or 8, and never
+// 0), so a shift masks its amount to `width * 8 - 1` **bits** (7, 15, 31
+// or 63), and the `i1` of the source IR lives in a byte.
+//
+// The width is the width of the value the instruction **produces**: an
+// instruction that produces no value carries 8 (the width of a cell of
+// the frame), except `MemCpy` and `MemSet`, which are byte-wise and
+// carry 1 (their length is in the `imm`). The `Ret` carries the width of
+// the value it returns, and 8 for a function that returns nothing. A
+// width of 0 is not a legal value: an interpreter that truncates its
+// result to the width would truncate it to nothing.
 
 #ifndef CS2_VM_OPCODE
 #error "isa.def is an X-macro list: define CS2_VM_OPCODE(name, number, comment) first"
