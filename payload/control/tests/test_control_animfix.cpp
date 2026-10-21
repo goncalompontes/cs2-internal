@@ -85,32 +85,27 @@ void test_a_fresh_capture_is_reapplied() {
   assert(nearly(*value, 42.0F));
 }
 
-// **The rule that matters**: a capture is consumed once per slot. The second
-// re-apply of the same capture is refused, so a value that has already been
-// written over the client's fresh prediction is never written again — the
-// animfix cannot make the pose worse than the prediction by repeating
-// itself.
-void test_a_capture_is_consumed_once_per_slot() {
+// The same fresh capture may be re-applied **again**: the engine writes a
+// graph parameter more than once per decode (the prediction runs from the
+// command path *and* from the frame path), and only the **last** write
+// before the graph is evaluated matters. A rule that allowed one re-apply
+// per capture would leave the client's own value in the graph — the animfix
+// would do nothing at all.
+void test_a_fresh_capture_survives_several_writes() {
   animfix::Capture capture{};
   animfix::store(capture, server_values(42.0F), 1000);
-  assert(animfix::take(capture, animfix::Slot::aim_yaw, 1000).has_value());
-  // The same capture, again: refused.
-  assert(!animfix::take(capture, animfix::Slot::aim_yaw, 1000).has_value());
-  // The consumption is **per slot**: the other slots of the same capture are
-  // still pending, because the prediction writes each of them once.
-  assert(animfix::take(capture, animfix::Slot::aim_pitch, 1000).has_value());
-  assert(animfix::take(capture, animfix::Slot::flashed, 1000).has_value());
-  assert(animfix::take(capture, animfix::Slot::air_height, 1000).has_value());
-  // And now every slot of that capture is consumed.
-  assert(!animfix::take(capture, animfix::Slot::aim_pitch, 1000).has_value());
+  for (int i = 0; i < 4; ++i) {
+    const auto value = animfix::take(capture, animfix::Slot::aim_yaw, 1000 + i);
+    assert(value.has_value());
+    assert(nearly(*value, 42.0F));
+  }
 }
 
-// A **new** capture re-opens the slots: the server sent a new value, so the
-// animfix may correct the slot again.
-void test_a_new_capture_reopens_the_slots() {
+// A **new** capture supersedes the old one: the value that is re-applied is
+// always the last one the server sent, never a superseded one.
+void test_a_new_capture_supersedes_the_old_one() {
   animfix::Capture capture{};
   animfix::store(capture, server_values(42.0F), 1000);
-  assert(animfix::take(capture, animfix::Slot::aim_yaw, 1000).has_value());
   animfix::store(capture, server_values(43.0F), 1016);
   const auto value = animfix::take(capture, animfix::Slot::aim_yaw, 1016);
   assert(value.has_value());
@@ -159,6 +154,27 @@ void test_the_capture_keeps_its_own_copy() {
   assert(nearly(*value, 42.0F));
 }
 
+// --- the target lookup ----------------------------------------------------
+
+// The animfix recognises **its own** four slots by the (node, index) pair
+// the prediction writes them through; a write to any other parameter (a
+// remote player's, another class's) is left alone.
+void test_only_the_animfixs_own_slots_are_recognised() {
+  std::array<animfix::Target, animfix::k_tracked_slot_count> targets{};
+  for (std::size_t i = 0; i < animfix::k_tracked_slot_count; ++i) {
+    targets[i] = animfix::Target{0x1000 + i * 0x10, static_cast<std::int16_t>(i)};
+  }
+  const auto found = animfix::find_slot(targets, 0x1000 + 2 * 0x10, 2);
+  assert(found.has_value());
+  assert(*found == animfix::Slot::aim_pitch);
+  // Another entity's parameter: not ours.
+  assert(!animfix::find_slot(targets, 0x2000, 0).has_value());
+  // The right node, the wrong index: not ours.
+  assert(!animfix::find_slot(targets, 0x1000, 7).has_value());
+  // A null node is never a target (an unbound slot must not match it).
+  assert(!animfix::find_slot(targets, 0, 0).has_value());
+}
+
 // --- the evidence -------------------------------------------------------------
 
 // The operator's evidence: the signed difference between the server's aim
@@ -177,11 +193,12 @@ auto main() -> int {
   test_the_slot_layout_is_the_engines();
   test_nothing_is_reapplied_before_the_first_capture();
   test_a_fresh_capture_is_reapplied();
-  test_a_capture_is_consumed_once_per_slot();
-  test_a_new_capture_reopens_the_slots();
+  test_a_fresh_capture_survives_several_writes();
+  test_a_new_capture_supersedes_the_old_one();
   test_an_aged_out_capture_is_refused();
   test_a_refreshed_capture_works_again();
   test_the_capture_keeps_its_own_copy();
+  test_only_the_animfixs_own_slots_are_recognised();
   test_the_aim_yaw_difference_is_signed_and_wrapped();
   std::puts("control-animfix: ok");
   return 0;
