@@ -83,6 +83,7 @@ if protect_enabled
   protect_tool = meson.current_source_dir() / '..' / 'tools' / 'protect'
   protect_verify = find_program(protect_tool / 'verify_plugin.py')
   protect_check = find_program(protect_tool / 'check_policy.py')
+  protect_payload_check = find_program(protect_tool / 'check_payload.py')
   protect_plugin_file = files(protect_plugin)
   protect_plugin_digest = fs.hash(protect_plugin_file, 'sha256')
 
@@ -136,6 +137,41 @@ if protect_enabled
     '-DCS2_PROTECT_POLICY_SHA256=' + protect_policy_digest.substring(0, 16),
   ]
   protect_link_depends = protect_link_depends + [files(protect_policy)]
+
+  # The image the transform produced has to be checked, and the check has to
+  # be part of the build: a build that produces an image whose dispatches
+  # are folded away, or whose mixer constants the backend mis-materialised,
+  # has to fail -- not to look protected and be wrong.
+  #
+  # The check disassembles the image, so it needs the disassembler of the
+  # LLVM SDK the plugin was built with: another LLVM may print the
+  # instructions differently enough for the check to miss a dispatch.
+  protect_objdump_probe = run_command(
+    find_program('python'), protect_tool / 'find_objdump.py', check : false)
+  if protect_objdump_probe.returncode() != 0
+    error('the protected build needs the llvm-objdump of the LLVM SDK:\n' +
+          protect_objdump_probe.stderr())
+  endif
+  protect_objdump = protect_objdump_probe.stdout().strip()
+
+  # The tree that is being built. The coverage directory is keyed by the
+  # policy, so two worktrees that share a policy share the directory: the
+  # coverage of the other tree is not evidence about this build, and the
+  # check has to be told which tree it is looking at.
+  protect_source_root = meson.current_source_dir() / '..'
+
+  # The unprotected image, when there is one: the checks that compare the two
+  # images (the exports, the imports, and the "the unprotected image has no
+  # dispatch") need it. Without it they are skipped, and the rest of the
+  # checks still run.
+  protect_reference = get_option('protect_reference')
+  protect_reference_args = []
+  if protect_reference != ''
+    if not fs.exists(protect_reference)
+      error('the unprotected reference image does not exist: ' + protect_reference)
+    endif
+    protect_reference_args = ['--unprotected', protect_reference]
+  endif
 
   add_project_arguments(
     '/clang:-fpass-plugin=' + protect_plugin.replace('\\', '/'),
@@ -228,9 +264,38 @@ else
     # policy entry matched *somewhere* in the build. The plugin records what
     # each module decided; this check reads the records and fails the build
     # when an entry matched nothing.
+    #
+    # The policy is **not** passed on the command line: the checker reads it
+    # from $CS2_PROTECT_CONFIG, exactly like the plugin does. Meson spells a
+    # path with forward slashes, and the coverage directory is keyed by the
+    # *spelling* of the policy path -- the checker and the plugin have to
+    # compute the same directory, and only the environment gives them the
+    # same string.
     custom_target('protect-policy-check',
       output : 'protect-policy-check.stamp',
-      command : [protect_check, '--output', '@OUTPUT@'],
+      command : [protect_check, '--output', '@OUTPUT@',
+                 '--source-root', protect_source_root],
+      depends : [payload_lib],
+      build_always_stale : true,
+      build_by_default : true,
+      console : true,
+    )
+
+    # The check of the image itself: the constants of the mixer have to be in
+    # the data of the image, the number of the encrypted dispatches has to be
+    # the number of the calls the pass reports having rewritten, and every
+    # dispatch has to decode to a callee of the image. A build that fails it
+    # fails: the image it produced is not the one the pass meant to write.
+    #
+    # The coverage directory is not passed: the checker takes it from
+    # $CS2_PROTECT_COVERAGE, else it computes the same default the plugin
+    # does (the digest of the policy path).
+    custom_target('protect-payload-check',
+      output : 'protect-payload-check.stamp',
+      command : [protect_payload_check,
+                 '--protected', payload_lib.full_path(),
+                 '--objdump', protect_objdump,
+                 '--source-root', protect_source_root] + protect_reference_args,
       depends : [payload_lib],
       build_always_stale : true,
       build_by_default : true,

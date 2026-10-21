@@ -22,16 +22,26 @@ tools/protect/
   CMakeLists.txt        the plugin build (CMake, because it needs LLVMConfig.cmake)
   README.md             this file
   check_policy.py       the whole-build check: every policy entry matched something
+  check_payload.py      the check of the image the transform produced (§11)
+  protect_checks.py     the image analysis and the coverage readers, shared by the
+                        three consumers (the payload check, the IR test, the
+                        differential test)
   compare_builds.py     the acceptance helper: compares two built payloads
+  find_objdump.py       the llvm-objdump of the LLVM SDK (the payload check needs it)
   verify_plugin.py      the guard: the plugin did not change under the build
   policy.example.json   an example policy
   src/
     plugin.cpp          llvmGetPassPluginInfo + the PassBuilder wiring
     config.hpp/.cpp     the environment configuration and the policy file
     selection.hpp/.cpp  which functions are protected
-    report.hpp/.cpp     what the pass reports
+    report.hpp/.cpp     what the pass reports, and the coverage file
+    transform.hpp/.cpp  the call encryption
   tests/
     protect_tests.cpp   the plugin's own tests (CTest)
+    ir_test.py          the shape of the rewritten IR
+    diff_test.py        the differential test: the same fixture, with and without
+    coverage_test.py    the readers of the coverage: a malformed file is reported,
+                        the coverage of another tree is not counted
 ```
 
 ---
@@ -120,6 +130,18 @@ cmd /c "call `"$vc`" >nul 2>&1 && set CC=clang-cl && set CXX=clang-cl && meson c
 * `protect_plugin` — the absolute path of `Cs2Protect.dll`. The path must be
   absolute and must not contain a space or a comma: it becomes **one**
   compiler argument.
+* `protect_reference` — the absolute path of the **unprotected** `payload.dll`.
+  It is optional: with it, the payload check also compares the two images
+  (the exports, the imports, and the "the unprotected image has no
+  dispatch"); without it, the checks that need only the protected image
+  still run.
+
+A protected build runs **two** checks of its own (§11): the policy check
+(every entry of the policy matched something) and the payload check (the
+image the transform produced is the image the pass meant to write). Both
+**fail the build** when they fail. The payload check needs the disassembler
+of the LLVM SDK (`tools/protect/find_objdump.py` finds it), so the
+configure step fails when it is missing.
 
 The flag that reaches the compiler is
 
@@ -167,6 +189,7 @@ the **environment**, which the compiler process hands down unchanged:
 | `CS2_PROTECT_SEED` | hexadecimal seed. Absent ⇒ derived per function from the module id and the symbol |
 | `CS2_PROTECT_VERBOSE` | `1` ⇒ print the skipped functions and why |
 | `CS2_PROTECT_COVERAGE` | where the per-module coverage goes (default: under the temp directory) |
+| `CS2_PROTECT_SOURCE_ROOT` | the tree that is being built. **The checkers read it** (the plugin does not): the coverage of another tree is not counted (§9) |
 
 The seed precedence is `CS2_PROTECT_SEED` → the policy's `seed` → the
 derived per-function seed (FNV-1a over the module id and the symbol, so a
@@ -341,17 +364,44 @@ The coverage is one file per **(policy, module)**:
 The identity is the path of the source file *relative to the root the policy
 file and the source file share* — `payload/aim/src/solver.cpp` for the
 payload, when the policy lives in `tools/protect/`. It does **not** depend
-on the build directory and not on the absolute path, so two worktrees of one
-tree (or a rebuild after a directory was renamed) write the **same** file:
-the directory holds one file per source, not one per build. (The absolute
-path would not do: two worktrees would write two files for one module, and
-the stale one would make the payload check count the rewrites twice.)
+on the build directory, so a rebuild overwrites the file instead of leaving
+a stale copy behind.
+
+When the policy lives **outside** the tree — the local reality, where the
+policy of one worktree is used to build the sources of another — the root
+the two share is the parent of both, and the identity is
+`cs2-wt/<worktree>/payload/aim/src/solver.cpp`: it names the worktree. Two
+worktrees that share the policy then write **two files for one module into
+the same coverage directory** (the directory is keyed by the policy), and
+counting both would count every rewrite twice: the payload check would
+report that the image has half the dispatches the pass wrote — a false
+*"the compiler folded the dispatch away"* on a perfectly good image.
+
+The readers therefore only count the coverage files whose source belongs to
+**the tree that is being built**: `--source-root` (the build passes it;
+`CS2_PROTECT_SOURCE_ROOT` is the fallback for a manual run). The coverage
+of another worktree is reported and **not** counted. Without the source
+root the readers count every file of the policy, which is what the check
+did before — and which is the double count above.
 
 The file carries the **digest of the source file** and a **digest of its own
 content**, so that a reader can tell a coverage file of *this* build from
 one of another build: a file whose source has changed since the compile, or
 a file that was edited by hand, is **skipped** (and reported) instead of
 being counted.
+
+The content digest is an **unkeyed** SHA-256: it catches an *accidental*
+corruption — a truncated write, a file that was edited by mistake — and
+nothing else. A file that was edited **on purpose** can be re-digested, so
+the digest is not a defence against a hostile editor: the coverage is
+build evidence, not a security boundary. (The *source* digest is what
+binds the coverage to the source: it is what tells a file of another state
+of the source from a file of this one.)
+
+The directory name is the **upper case** hexadecimal of the SHA-256 of the
+policy path: the plugin spells it `llvm::toHex` (upper case by default)
+and `check_policy.py` spells it `hexdigest().upper()`, so the two name the
+same directory on a file system whose case matters.
 
 The directory is keyed by the policy path (or `CS2_PROTECT_COVERAGE`), so an
 edited policy leaves the files of the previous version behind. The checker
@@ -465,9 +515,12 @@ The call site becomes:
 
 The GEP is **not** `inbounds`: the index is a value the image computes at
 run time, and the pass has no right to promise that it is inside the table.
-An out-of-range index would then be poison by the letter of the reference,
-and the call through it would be undefined behaviour; without the promise it
-is a wrong address, which the payload check can see.
+The promise would make an out-of-range index **poison**, and the poison
+would spread into the call; without it, an out-of-range index is a load
+from a wrong address — still undefined behaviour by the letter of the
+reference, but a *wrong address* and not a poison value. The index cannot
+be out of range with a correct descriptor, and the payload check verifies
+that for the built image; the IR itself does not assert it.
 
 The **function type is unchanged**: the call still has the callee's
 parameter types, its return type, its calling convention and its
@@ -504,13 +557,11 @@ the image is the number of the calls the pass reports having rewritten.
 six memory reads (the three key constants, the two mixer constants and the
 descriptor), against the one instruction of the direct call it replaces. The
 table's address is hoisted out of the loop, the constants are not: they are
-volatile. On the 20-million-iteration benchmark of `tools/protect/tests`
-(one selected function, two protected calls per iteration) the best of
-twelve interleaved runs is **81.0 ms** unprotected, **82.0 ms** with the
-mixer constants as immediates and **81.8 ms** with them in the data — about
-**+1 %**, the loop being dominated by the latency of the two calls. The
-numbers depend on the load of the machine; the *shape* (eight instructions,
-six reads) does not.
+volatile. The *shape* (eight instructions, six reads) is what the IR test
+asserts, and it is what the cost consists of. The *time* it costs depends on
+the load of the machine and on the call the dispatch guards, and **this
+repository does not measure it**: there is no benchmark in it, and a number
+that cannot be reproduced from the repository is worse than no number.
 
 ### 10.4 The skip rules
 
@@ -589,10 +640,12 @@ format of the descriptor has to keep open).
 ```
 python tools/protect/check_payload.py --protected build-payload-protect/payload.dll \
     --unprotected build-payload/payload.dll --objdump <llvm-objdump.exe> \
-    --coverage <the coverage directory> --policy <the policy file>
+    --coverage <the coverage directory> --policy <the policy file> \
+    --source-root <the tree that is being built>
 ```
 
-* the **exports** and the **imports** are the same as the unprotected ones;
+* the **exports** and the **imports** are the same as the unprotected ones
+  (only with `--unprotected`);
 * the `.reloc` section is there, with DIR64 entries (the mapper applies
   them);
 * the exception directory (`.pdata`) is there and well formed (the mapper
@@ -602,19 +655,59 @@ python tools/protect/check_payload.py --protected build-payload-protect/payload.
 * the number of the **encrypted dispatches** is the number of the calls the
   pass reports having rewritten (read from the coverage files), and it is
   zero in the unprotected image;
-* **every dispatch reaches the right callee**: the check decodes the
-  descriptor of the image with the key the pass used, resolves the index in
-  the table of the image, and checks that the address is code of the image.
+* every dispatch **decodes to a callee of the image**: the descriptor,
+  decoded with the key the pass used, names an entry of the table of the
+  image, and that entry is the code of the image.
 
-The last one is the check the specification asks for ("the pass rewrites
+The last check is the one the specification asks for ("the pass rewrites
 calls, so a mistake shows up as a wrong call target, not as a crash. The
 test must catch that"): a count does not catch a dispatch that reaches the
 *wrong* function, and a wrong function does not crash.
+
+What it proves is exactly what it says: the descriptor, decoded with the key
+the pass used, names an entry of the table of the image, and that entry is
+code of the image. It does **not** compare the entry with the callee of the
+original call site (the plugin does not record it), and it does not check
+that the arithmetic of the image is the one the check assumes: a backend
+that reordered the arithmetic, or a table that held the wrong function,
+would pass it. The chain is sound today (the pass encrypts the descriptor
+with the key the check decodes it with, and the key is in the image), but
+the check is a *plausibility* check on the callee, not a proof of it.
 
 A dispatch is counted by its **own signature**: an indirect call through the
 table of the transform, or the tail jump the backend emits when the call is
 the last thing a function does (the decode is right before it, and a switch
 table jump has no decode before it). The unprotected image has none.
+
+### The check is part of the build
+
+The check is **not** a manual step: the protected build runs it, and the
+build **fails** when it fails. Without it, a regression (the mixer
+constants back in the instruction stream, or the backend mis-materialising a
+64-bit constant again) would leave every build green while the shipped
+image calls the wrong functions.
+
+The build passes the image it has just linked, the coverage directory, the
+policy and the tree that is being built (`--source-root`, §9). The
+disassembler is the one of the LLVM SDK the plugin was built with — another
+LLVM may print the instructions differently enough for the check to miss a
+dispatch — and `tools/protect/find_objdump.py` finds it (`$CS2_LLVM_SDK`,
+else `$CS2_PROTECT_OBJDUMP`, else the default SDK); the configure step
+**fails** when it is missing, because a protected build that cannot check
+its image must not pretend to.
+
+The **unprotected image** is optional: without it, the checks that compare
+the two images (the exports, the imports, and the "the unprotected image has
+no dispatch") are skipped, and the rest of the checks still run. Pass it
+with
+
+```
+meson setup build-payload-protect payload -Dprotect=true \
+    -Dprotect_plugin=<the dll> -Dprotect_reference=<the unprotected payload.dll>
+```
+
+A coverage directory that holds **no** file of this build is a **failure**,
+not a skip: the check would otherwise pass without having checked anything.
 
 `compare_builds.py --attribute` attributes the difference between the two
 images. A byte-for-byte comparison cannot work any more: the transform
@@ -654,6 +747,20 @@ changes the callers as well.
 
 ## 13. Known limits of the build wiring
 
+* **The protected build needs the `llvm-objdump` of the LLVM SDK** (§11): the
+  payload check disassembles the image it verifies, and the disassembler has
+  to be the one of the SDK the plugin was built with. The configure step
+  **fails** when it is missing: a protected build that cannot check its image
+  must not pretend to.
+* **The comparison against the unprotected image needs a second build**
+  (`-Dprotect_reference=<the unprotected payload.dll>`): the payload project
+  builds one image, so the reference comes from a second build directory
+  (§11). Without it the checks that need only the protected image still run.
+* **The coverage directory is shared by everything that shares the policy**
+  (§9): the coverage of another worktree is in it, and the readers skip it
+  by comparing the source of every coverage file with the tree that is being
+  built. A reader that is not told the tree counts every file of the policy
+  — and counts every rewrite twice.
 * **Meson 1.11 dropped `depend_files` and `build_depends` for build
   targets.** The payload therefore uses `link_depends` (the modern
   equivalent) for the plugin file, and the verification target

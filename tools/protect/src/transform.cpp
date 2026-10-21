@@ -252,7 +252,9 @@ void record_selection(llvm::Module& module, const SelectionResult& result) {
       state = "matched";
     } else if (match.unimplemented) {
       state = "unimplemented";
-      reason = to_string(match.level);
+      // The level that was applied to the function, not the level of the
+      // entry: the entry did not get its own level.
+      reason = to_string(match.applied_level);
     } else if (match.blocked) {
       state = "blocked";
       if (match.blocked_reason.has_value()) {

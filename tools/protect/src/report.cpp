@@ -93,8 +93,11 @@ namespace {
 ///
 /// The policy file normally lives in the tree (`tools/protect/`), so the root
 /// is the root of the repository. When the policy lives outside the tree, the
-/// absolute path is the fallback: the coverage is then per worktree, which is
-/// still correct, only less tidy.
+/// absolute path is the fallback: the identity then names the worktree, and
+/// two worktrees that share the policy write two files for one module into
+/// the same coverage directory. The readers therefore only count the coverage
+/// files whose source belongs to the tree that is being built (`--source-root`
+/// of the checkers), and the coverage of another worktree is never counted.
 [[nodiscard]] auto module_identity(const Config& config, const llvm::Module& module)
     -> std::string {
   // The source file name is the path the compiler was given, resolved to an
@@ -214,7 +217,7 @@ void write_report(const llvm::Module& module, const SelectionResult& result, con
       llvm::errs() << " reason=" << to_string(*match.blocked_reason);
     }
     if (match.unimplemented) {
-      llvm::errs() << " reason=" << to_string(match.level);
+      llvm::errs() << " reason=" << to_string(match.applied_level);
     }
     if (!match.module.empty()) {
       llvm::errs() << " module=" << match.module;
@@ -285,7 +288,9 @@ auto coverage_entries(const SelectionResult& result) -> std::vector<CoverageEntr
       entry.state = EntryState::matched;
     } else if (match.unimplemented) {
       entry.state = EntryState::unimplemented;
-      entry.reason = to_string(match.level);
+      // The level that was *applied* to the function, not the level of the
+      // entry: the entry did not get its own level.
+      entry.reason = to_string(match.applied_level);
     } else if (match.blocked) {
       entry.state = EntryState::blocked;
       if (match.blocked_reason.has_value()) {

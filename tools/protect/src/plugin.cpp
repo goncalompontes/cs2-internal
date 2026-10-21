@@ -128,9 +128,17 @@ class SelectPass : public llvm::PassInfoMixin<SelectPass> {
             /*gen_crash_diag=*/false);
       }
       if (match.unimplemented) {
+        // The level that was *applied* to the function, not the level of the
+        // entry: the level of a function is the strongest level the entries
+        // that name it ask for, so an entry that asks for the call level can
+        // name a function that was selected at the virtualized level. The
+        // message names the entry and the level that was applied, because
+        // "the level 'call' is not implemented" would be a lie: the call
+        // level is the one this task implements.
         llvm::errs() << "[cs2-protect] " << module.getSourceFileName() << ": the policy entry '"
-                     << match.pattern << "' matched a function whose level '"
-                     << cs2::protect::to_string(match.level) << "' is not implemented yet (T20)\n";
+                     << match.pattern << "' named a function that is selected at the level '"
+                     << cs2::protect::to_string(match.applied_level)
+                     << "', which is not implemented yet (T20)\n";
         llvm::report_fatal_error(
             "cs2-protect: a policy entry matched a function whose level is not implemented",
             /*gen_crash_diag=*/false);

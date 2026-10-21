@@ -546,6 +546,39 @@ void test_vanished() {
         "the coverage does not record the vanished function");
 }
 
+void test_level_gate_two_entries() {
+  llvm::LLVMContext context;
+  const auto module = build_transform_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  // Two entries name the same function: one asks for the call level, the
+  // other for the level of T20. The level that applies to the function is
+  // the strongest one, so the call entry did not get its level either: it
+  // protects nothing. The level that was *applied* is the level of the
+  // function (the virtualized one), not the level of the entry -- the
+  // diagnostic has to say which one, or it says that the call level (the
+  // one this task implements) is not implemented.
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::virtualized});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  check(selection.selected.size() == 1, "the caller is selected");
+  check(selection.selected[0].level == cs2::protect::ProtectionLevel::virtualized,
+        "the level of the function is the strongest level of the entries");
+  check(selection.policy_matches.size() == 2, "the policy has two entries");
+  for (const cs2::protect::PolicyMatch& match : selection.policy_matches) {
+    check(!match.matched, "an entry that did not get its level does not match");
+    check(match.unimplemented, "the entry is not implemented");
+    check(match.applied_level == cs2::protect::ProtectionLevel::virtualized,
+          "the applied level is the level of the function, not the level of the entry");
+  }
+}
+
 }  // namespace
 
 auto main() -> int {
@@ -555,6 +588,7 @@ auto main() -> int {
   test_coverage();
   test_transform();
   test_level_gate();
+  test_level_gate_two_entries();
   test_vanished();
   if (g_failures != 0) {
     std::printf("protect: %d check(s) failed\n", g_failures);

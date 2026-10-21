@@ -65,8 +65,11 @@ struct PolicyMatch {
   std::string pattern;                           ///< the glob of the entry.
   std::string module;                            ///< the scope of the entry ("" = any module).
   ProtectionLevel level{ProtectionLevel::call};  ///< the level of the entry.
-  bool applicable{false};                        ///< the scope of the entry names this module.
-  bool matched{false};                           ///< the entry named a function that is protected.
+  ProtectionLevel applied_level{ProtectionLevel::call};  ///< the level the function was
+                                                         ///< selected at (the strongest level
+                                                         ///< of the entries that name it).
+  bool applicable{false};     ///< the scope of the entry names this module.
+  bool matched{false};        ///< the entry named a function that is protected.
   bool blocked{false};        ///< the entry named a function that cannot be protected.
   bool unimplemented{false};  ///< the entry named a function whose level is not
                               ///< implemented yet.

@@ -532,6 +532,12 @@ auto select_functions(const llvm::Module& module, const Config& config) -> Selec
       // that was selected at the virtualized level did not get its level,
       // and claiming "matched" would be a coverage file that promises a
       // protection that does not exist.
+      //
+      // The applied level is the level of the *function*, not the level of
+      // the entry: an entry that asks for the call level and names a
+      // function that another entry wants virtualized did not get the call
+      // level, and the diagnostic has to say which level was applied.
+      result.policy_matches[index].applied_level = level;
       if (level == ProtectionLevel::call) {
         match_entry(result.policy_matches[index]);
       } else {

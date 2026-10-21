@@ -167,3 +167,9 @@ add_test(NAME protect-diff-test
           --fixture ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diff_fixture.cpp
           --policy ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/diff.policy.json
           --work ${CMAKE_CURRENT_BINARY_DIR}/diff-test)
+
+# The readers of the coverage: a malformed file has to be reported and
+# ignored (never a traceback), and the coverage of another tree has to be
+# skipped (it would count every rewrite twice).
+add_test(NAME protect-coverage-test
+  COMMAND ${CS2_PROTECT_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/coverage_test.py)

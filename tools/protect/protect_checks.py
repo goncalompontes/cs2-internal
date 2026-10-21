@@ -18,11 +18,13 @@ half of it): the multiplier, the xor constant and the rotation.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import struct
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 #: The multiplier of the mixer.
 MIX_MULTIPLIER = 0x9E3779B97F4A7C15
@@ -270,8 +272,18 @@ class PeImage:
 
     def __init__(self, data: bytes) -> None:
         self.data = data
-        if data[:2] != b"MZ":
+        if len(data) < 0x40 or data[:2] != b"MZ":
             raise Failure("the file is not a PE image")
+        try:
+            self._read_headers(data)
+        except struct.error as error:
+            # A truncated file (or a file that is not a PE at all) is a
+            # *reported* failure, not a crash: a reader that dies with a
+            # traceback tells the operator nothing.
+            raise Failure(f"the file is not a PE image: {error}") from error
+
+    def _read_headers(self, data: bytes) -> None:
+        """Reads the headers of the image."""
         pe_offset = struct.unpack_from("<I", data, 0x3C)[0]
         if data[pe_offset : pe_offset + 4] != b"PE\0\0":
             raise Failure("the file is not a PE image")
@@ -330,7 +342,10 @@ class PeImage:
 
     def u64_at_rva(self, rva: int) -> int:
         """The 64-bit little-endian value at an RVA."""
-        value: int = struct.unpack("<Q", self.bytes_at_rva(rva, 8))[0]
+        try:
+            value: int = struct.unpack("<Q", self.bytes_at_rva(rva, 8))[0]
+        except struct.error as error:
+            raise Failure(f"the RVA 0x{rva:x} holds no 64-bit value: {error}") from error
         return value
 
     def is_code_address(self, value: int) -> bool:
@@ -359,37 +374,52 @@ class Coverage:
         self.mix_xor = 0
         self.rewritten = 0
         self.intact = False
+        self.malformed = ""
         self.reason = ""
         self.entries: dict[str, str] = {}
 
-        text = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            self.malformed = f"the file cannot be read: {error}"
+            self.reason = self.malformed
+            return
+
         lines = text.splitlines()
         digest = ""
-        for index, line in enumerate(lines):
-            key, _, value = line.partition(" ")
-            if key == "policy-sha256":
-                self.policy = value.strip().upper()
-            elif key == "module":
-                self.module = value.strip()
-            elif key == "source-path":
-                self.source_path = value.strip()
-            elif key == "source-sha256":
-                self.source_sha256 = value.strip().lower()
-            elif key == "protect":
-                self._read_protect(value)
-            elif key == "fn":
-                for part in value.split():
-                    if part.startswith("rewritten="):
-                        self.rewritten += int(part.split("=", 1)[1])
-            elif key == "entry":
-                state, _, rest = value.partition(" ")
-                if state in ("blocked", "unimplemented"):
-                    reason, _, pattern = rest.partition(" ")
-                    self.entries[pattern.strip()] = f"{state}:{reason.strip()}"
-                else:
-                    self.entries[rest.strip()] = state.strip()
-            elif key == "content-sha256":
-                digest = value.strip().lower()
+        try:
+            for line in lines:
+                key, _, value = line.partition(" ")
+                if key == "policy-sha256":
+                    self.policy = value.strip().upper()
+                elif key == "module":
+                    self.module = value.strip()
+                elif key == "source-path":
+                    self.source_path = value.strip()
+                elif key == "source-sha256":
+                    self.source_sha256 = value.strip().lower()
+                elif key == "protect":
+                    self._read_protect(value)
+                elif key == "fn":
+                    for part in value.split():
+                        if part.startswith("rewritten="):
+                            self.rewritten += int(part.split("=", 1)[1])
+                elif key == "entry":
+                    state, _, rest = value.partition(" ")
+                    if state in ("blocked", "unimplemented"):
+                        reason, _, pattern = rest.partition(" ")
+                        self.entries[pattern.strip()] = f"{state}:{reason.strip()}"
+                    else:
+                        self.entries[rest.strip()] = state.strip()
+                elif key == "content-sha256":
+                    digest = value.strip().lower()
+        except ValueError as error:
+            # A number that is not a number, a line that does not have the
+            # shape the plugin writes: the file is malformed. It is reported,
+            # not counted -- and it never crashes the reader.
+            self.malformed = f"the file is malformed: {error}"
+            self.reason = self.malformed
+            return
         self.intact = self._check_digest(lines, digest)
 
     def states(self) -> dict[str, str]:
@@ -438,10 +468,10 @@ class Coverage:
         if not self.source_sha256:
             return True
         name = self.source_path or self.module
-        source = Path(name)
-        if not source.is_absolute():
-            # The path is relative to the working directory of the compile.
-            source = Path.cwd() / source
+        source = source_of(self)
+        if source is None:
+            self.reason = "the coverage names no source file"
+            return False
         if not source.is_file():
             self.reason = f"the source file '{name}' is gone"
             return False
@@ -452,24 +482,110 @@ class Coverage:
         return True
 
 
-def read_coverage(coverage: Path, policy: Path) -> tuple[list[Coverage], list[tuple[str, str, int]]]:
+def source_of(coverage: Coverage) -> Path | None:
+    """The source file a coverage file describes, or None when it names none.
+
+    The path is normalised: the plugin writes it normalised, but a *relative*
+    path (the one the compiler was given) is resolved against the working
+    directory of the compile, and the result has to be comparable with the
+    tree the check is looking at.
+    """
+    name = coverage.source_path or coverage.module
+    if not name:
+        return None
+    source = Path(name)
+    if not source.is_absolute():
+        # The path is relative to the working directory of the compile.
+        source = Path.cwd() / source
+    return Path(os.path.normpath(source))
+
+
+def belongs_to_tree(coverage: Coverage, root: Path) -> bool:
+    """Whether a coverage file describes a source of the tree that is built.
+
+    The coverage directory is keyed by the *policy*, so two worktrees that
+    share a policy share the directory. Their coverage files are different
+    (the identity of a module names the worktree when the policy lives
+    outside the tree), and counting both would count every rewrite twice:
+    the payload check would then report that the image has half the
+    dispatches the pass wrote -- a false "the compiler folded the dispatch
+    away" on a perfectly good image.
+
+    The tree is therefore part of what a coverage file has to match: only
+    the files whose source belongs to the tree being built are evidence
+    about it.
+    """
+    source = source_of(coverage)
+    if source is None:
+        return False
+    try:
+        return source.is_relative_to(Path(os.path.normpath(root)))
+    except ValueError:
+        # Two paths on different drives (Windows) are never relative.
+        return False
+
+
+class CoverageRead(NamedTuple):
+    """What the coverage directory holds."""
+
+    #: The coverage files that describe this build.
+    files: list[Coverage]
+    #: The files that do not, with the reason: (name, reason, rewrites).
+    skipped: list[tuple[str, str, int]]
+    #: The files of this policy that are malformed: (name, reason).
+    malformed: list[tuple[str, str]]
+
+
+def default_coverage_dir(policy_path: str) -> Path:
+    """The directory the plugin writes the coverage to.
+
+    The digest is the **upper case** hexadecimal of the SHA-256 of the policy
+    path: the plugin spells it `llvm::toHex`, which is upper case by default,
+    and the two have to name the same directory on a file system whose case
+    matters.
+    """
+    digest = hashlib.sha256(policy_path.encode()).hexdigest().upper()[:16]
+    root = os.environ.get("TEMP") or os.environ.get("TMP") or "."
+    return Path(root) / "cs2-protect-coverage" / digest
+
+
+def read_coverage(coverage: Path, policy: Path, source_root: Path | None = None) -> CoverageRead:
     """The coverage files of a policy, and the ones that do not describe this build.
 
-    A file that does not belong to the policy, that was edited by hand or
-    that describes another state of the source is not evidence about this
-    build: it is skipped, and the reason is returned with it.
+    A file that does not belong to the policy, that was edited by hand, that
+    is malformed or that describes another state of the source is not
+    evidence about this build: it is skipped, and the reason is returned
+    with it.
+
+    The source root is the tree that is being built. When it is given, the
+    coverage of another tree (another worktree that shares the policy) is
+    skipped as well: it would otherwise be counted twice.
     """
     files: list[Coverage] = []
     skipped: list[tuple[str, str, int]] = []
+    malformed: list[tuple[str, str]] = []
     if not policy.is_file():
-        return files, skipped
+        return CoverageRead(files, skipped, malformed)
     digest = hashlib.sha256(policy.read_bytes()).hexdigest().upper()
     for path in sorted(coverage.glob("*.cov")):
         entry = Coverage(path)
         if entry.policy != digest:
             continue
+        if entry.malformed:
+            reason = entry.malformed
+            skipped.append((path.name, reason, entry.rewritten))
+            if source_root is not None and not belongs_to_tree(entry, source_root):
+                # Another tree's broken file: it is not this build's business
+                # (and it is pruned by the policy checker).
+                continue
+            malformed.append((path.name, reason))
+            continue
         if not entry.intact or not entry.source_is_current():
             skipped.append((path.name, entry.reason, entry.rewritten))
             continue
+        if source_root is not None and not belongs_to_tree(entry, source_root):
+            skipped.append((path.name, "the coverage describes a source of another tree",
+                            entry.rewritten))
+            continue
         files.append(entry)
-    return files, skipped
+    return CoverageRead(files, skipped, malformed)

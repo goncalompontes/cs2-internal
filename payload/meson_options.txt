@@ -7,3 +7,8 @@ option('protect_plugin',
   type: 'string',
   value: '',
   description: 'Path to Cs2Protect.dll (the LLVM pass plugin).')
+
+option('protect_reference',
+  type: 'string',
+  value: '',
+  description: 'Path to the unprotected payload.dll, for the image comparison of the payload check.')
