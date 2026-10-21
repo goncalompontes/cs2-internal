@@ -492,9 +492,9 @@ auto coverage_entries(const RecordedSelection& selection, std::string_view modul
 auto write_coverage(const Config& config, const llvm::Module& module,
                     const std::vector<CoverageEntry>& entries,
                     const std::vector<CoverageFunction>& functions, const CoverageProtect& protect,
-                    std::span<const CoverageVm> vm,
-                    const std::vector<CoverageString>& strings, std::string_view strings_salt,
-                    const CrossModuleState& cross) -> std::optional<std::string> {
+                    std::span<const CoverageVm> vm, const std::vector<CoverageString>& strings,
+                    std::string_view strings_salt, const CrossModuleState& cross)
+    -> std::optional<std::string> {
   if (!config.policy) {
     return std::nullopt;
   }

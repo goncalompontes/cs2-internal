@@ -27,6 +27,7 @@ import io
 import shutil
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 # The readers are shared with the checkers, and the checkers put the
@@ -320,7 +321,7 @@ def run_check_policy(policy: Path, coverage: Path) -> int:
         return check_policy.main(["--policy", str(policy), "--coverage", str(coverage)])
 
 
-def expect_failure(action, *args) -> None:
+def expect_failure(action: Callable[..., object], *args: object) -> None:
     """The action has to fail: the rule it holds is the one under test."""
     try:
         action(*args)
@@ -329,7 +330,7 @@ def expect_failure(action, *args) -> None:
     raise TestFailure(f"{action.__name__} did not fail")
 
 
-def expect_success(action, *args) -> None:
+def expect_success(action: Callable[..., object], *args: object) -> None:
     """The action must not fail."""
     try:
         action(*args)
