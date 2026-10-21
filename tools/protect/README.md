@@ -1005,10 +1005,27 @@ of this repository produced:
 | refused `escapes_to_initializer` | 364 (the event names and the event fields) |
 | refused `eh_use` | 35 |
 | refused `too_short` | 8 |
+| the image grew by | 5 120 bytes (0.21 %) |
 
-The 35 `eh_use` refusals are the price of the rule: the payload is built
-with `/EHsc`, so a function that owns a `std::string` has a cleanup landing
-pad, and the rule refuses every literal one of them uses. A literal that is
-protected in one module and refused in another is legitimately still in the
-image, and `check_payload.py` says so instead of failing the build.
+per module:
+
+| module | protected | refused |
+|---|---|---|
+| `config_store.cpp` | **77** | 4 `too_short` |
+| `events.cpp` | 0 | 90 `escapes_to_initializer` |
+| `state_reader.cpp`, `esp_world.cpp`, `input.cpp`, `payload_main.cpp` | 0 | 65 `escapes_to_initializer` each |
+| `settings_access.cpp` | 0 | 14 `escapes_to_initializer` |
+| `service.cpp` | 0 | 24 `eh_use`, 3 `too_short` |
+| `snapshot_json.cpp` | 0 | 8 `eh_use` |
+| `payload_main.cpp`, `overlay.cpp` | 0 | 2 and 1 `eh_use` |
+
+The 364 `escapes_to_initializer` refusals are the event names and the event
+fields: they are baked into the `constexpr` arrays of
+`event_names.hpp`, so they cannot be protected by this design at all
+(§14.2). The 35 `eh_use` refusals are the price of the rule: the payload is
+built with `/EHsc`, so a function that owns a `std::string` has a cleanup
+landing pad, and the rule refuses every literal one of them uses. A literal
+that is protected in one module and refused in another is legitimately still
+in the image, and `check_payload.py` says so instead of failing the build.
+
 
