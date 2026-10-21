@@ -175,6 +175,7 @@ class Lowerer {
   void branch_to(VmOpcode opcode, std::size_t label) {
     VmInstruction instruction;
     instruction.opcode = opcode;
+    instruction.width = 8;  // a branch produces no value: the width is the cell's
     instruction.dst = k_no_slot;
     fixups_.emplace_back(code_.size(), label);
     code_.push_back(instruction);
@@ -204,15 +205,15 @@ class Lowerer {
     return found->second;
   }
 
-  /// Whether the symbol is one of the functions that are themselves selected
-  /// at the `virtualized` level.
-  [[nodiscard]] auto is_virtualized(llvm::StringRef symbol) const -> bool {
-    for (const std::string& name : options_.virtualized_symbols) {
-      if (name == symbol) {
-        return true;
-      }
+  /// The width of the value the function returns.
+  ///
+  /// A function that returns nothing returns zero, and the width of that
+  /// zero is the width of a cell of the frame.
+  [[nodiscard]] auto return_width() const -> std::uint8_t {
+    if (function_.getReturnType()->isVoidTy()) {
+      return 8;
     }
-    return false;
+    return width_of(function_.getReturnType());
   }
 
   /// The name of a type, for the call sites.
@@ -321,6 +322,10 @@ class Lowerer {
       // value, and zero is one of them.
       instruction.opcode = VmOpcode::Const;
       instruction.width = width_of(constant->getType());
+      if (instruction.width == 0) {
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_type, "the undef is not an integer nor a pointer"});
+      }
       instruction.imm = 0;
       prologue_.push_back(instruction);
       return {};
@@ -349,6 +354,7 @@ class Lowerer {
       // The address therefore comes out of the pool, which the mapper
       // relocates.
       instruction.opcode = VmOpcode::Pool;
+      instruction.width = 8;  // the entry of the pool is a pointer
       instruction.imm = pool_.size();
       pool_.push_back(VmPoolEntry{global->getName().str(), false, global});
       prologue_.push_back(instruction);
@@ -364,6 +370,7 @@ class Lowerer {
       // A GEP of a global: the linker folds the offset into the
       // relocation, so the expression itself is what the pool holds.
       instruction.opcode = VmOpcode::Pool;
+      instruction.width = 8;  // the entry of the pool is a pointer
       instruction.imm = pool_.size();
       pool_.push_back(VmPoolEntry{constant_name(expression), false, expression});
       prologue_.push_back(instruction);
@@ -579,12 +586,34 @@ class Lowerer {
     if (llvm::isa<llvm::UnreachableInst>(instruction)) {
       // The original is undefined behaviour, so any behaviour is allowed:
       // the virtual machine returns zero.
-      VmInstruction zero;
-      zero.opcode = VmOpcode::Const;
-      zero.dst = k_no_slot;
-      zero.width = 8;
-      zero.imm = 0;
-      emit(zero);
+      //
+      // The return is a `Ret` and not a destination-less instruction: the
+      // ISA has no "stop" opcode, and the `Ret` is what stops the
+      // interpreter. A `Const` with no destination would fall out of the
+      // block and into the next one.
+      const auto width = return_width();
+      if (width == 0) {
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_type, "the return type is not an integer"});
+      }
+      const auto zero = allocate_slot();
+      if (!zero.has_value()) {
+        return std::unexpected(
+            VmFailure{VmRefusal::too_many_slots, "the function needs too many slots"});
+      }
+      VmInstruction constant;
+      constant.opcode = VmOpcode::Const;
+      constant.width = width;
+      constant.dst = *zero;
+      constant.imm = 0;
+      emit(constant);
+
+      VmInstruction ret;
+      ret.opcode = VmOpcode::Ret;
+      ret.width = width;
+      ret.dst = k_no_slot;
+      ret.src1 = *zero;
+      emit(ret);
       return {};
     }
     if (auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction)) {
@@ -1178,6 +1207,7 @@ class Lowerer {
       }
       VmInstruction push;
       push.opcode = VmOpcode::Arg;
+      push.width = 8;  // a cell of the argument stack holds a value
       push.dst = k_no_slot;
       push.src1 = *slot;
       emit(push);
@@ -1202,7 +1232,9 @@ class Lowerer {
 
     VmInstruction instruction;
     instruction.opcode = VmOpcode::Call;
-    instruction.width = width_of(callee->getReturnType());
+    // The call goes through the uniform signature, which returns a 64-bit
+    // value: a call that returns nothing carries the width of that value.
+    instruction.width = callee->getReturnType()->isVoidTy() ? 8 : width_of(callee->getReturnType());
     instruction.dst = result.value_or(k_no_slot);
     instruction.imm = site.pool_index;
     instruction.aux = static_cast<std::uint32_t>(site.argument_count);
@@ -1235,6 +1267,7 @@ class Lowerer {
       const auto taken = new_label();
       VmInstruction conditional;
       conditional.opcode = VmOpcode::BrIf;
+      conditional.width = 8;  // a branch produces no value: the width is the cell's
       conditional.dst = k_no_slot;
       conditional.src1 = *condition;
       fixups_.emplace_back(code_.size(), taken);
@@ -1311,6 +1344,7 @@ class Lowerer {
       case_labels.push_back(case_label);
       VmInstruction conditional;
       conditional.opcode = VmOpcode::BrIf;
+      conditional.width = 8;  // a branch produces no value: the width is the cell's
       conditional.dst = k_no_slot;
       conditional.src1 = *temporary;
       fixups_.emplace_back(code_.size(), case_label);
@@ -1351,11 +1385,17 @@ class Lowerer {
 
     // The select is a branch: the value is written on the edge that is
     // taken. The two edges meet again at the merge point.
+    const auto width = width_of(select.getType());
+    if (width == 0) {
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_type, "the select is not on an integer nor a pointer"});
+    }
     const auto true_label = new_label();
     const auto merge_label = new_label();
 
     VmInstruction conditional;
     conditional.opcode = VmOpcode::BrIf;
+    conditional.width = 8;  // a branch produces no value: the width is the cell's
     conditional.dst = k_no_slot;
     conditional.src1 = *condition;
     fixups_.emplace_back(code_.size(), true_label);
@@ -1363,7 +1403,7 @@ class Lowerer {
 
     VmInstruction false_move;
     false_move.opcode = VmOpcode::Move;
-    false_move.width = width_of(select.getType());
+    false_move.width = width;
     false_move.dst = *dst;
     false_move.src1 = *false_value;
     code_.push_back(false_move);
@@ -1373,7 +1413,7 @@ class Lowerer {
     place_label(true_label);
     VmInstruction true_move;
     true_move.opcode = VmOpcode::Move;
-    true_move.width = width_of(select.getType());
+    true_move.width = width;
     true_move.dst = *dst;
     true_move.src1 = *true_value;
     code_.push_back(true_move);
@@ -1408,7 +1448,14 @@ class Lowerer {
             VmFailure{VmRefusal::unsupported_instruction, "the returned value has no slot"});
       }
       value = *slot;
-      width = width_of(ret.getType());
+      // The width of the `Ret` is the width of the **returned value**: the
+      // type of the `ret` itself is `void`, and a void return carries the
+      // width of a cell.
+      width = width_of(ret.getReturnValue()->getType());
+      if (width == 0) {
+        return std::unexpected(
+            VmFailure{VmRefusal::unsupported_type, "the returned value is not an integer"});
+      }
     }
     VmInstruction instruction;
     instruction.opcode = VmOpcode::Ret;
@@ -1428,9 +1475,14 @@ class Lowerer {
       return std::unexpected(
           VmFailure{VmRefusal::unsupported_instruction, "an operand of the freeze has no slot"});
     }
+    const auto width = width_of(freeze.getType());
+    if (width == 0) {
+      return std::unexpected(
+          VmFailure{VmRefusal::unsupported_type, "the freeze is not on an integer nor a pointer"});
+    }
     VmInstruction instruction;
     instruction.opcode = VmOpcode::Move;
-    instruction.width = width_of(freeze.getType());
+    instruction.width = width;
     instruction.dst = *dst;
     instruction.src1 = *src;
     emit(instruction);
@@ -1456,6 +1508,7 @@ class Lowerer {
       }
       VmInstruction instruction;
       instruction.opcode = VmOpcode::MemCpy;
+      instruction.width = 1;  // the copy is byte-wise: the length is in the imm
       instruction.dst = k_no_slot;
       instruction.src1 = *destination;
       instruction.src2 = *source;
@@ -1480,6 +1533,7 @@ class Lowerer {
       }
       VmInstruction instruction;
       instruction.opcode = VmOpcode::MemSet;
+      instruction.width = 1;  // the set is byte-wise: the length is in the imm
       instruction.dst = k_no_slot;
       instruction.src1 = *destination;
       instruction.src2 = *value;
@@ -1540,6 +1594,7 @@ class Lowerer {
       }
       VmInstruction push;
       push.opcode = VmOpcode::Arg;
+      push.width = 8;  // a cell of the argument stack holds a value
       push.dst = k_no_slot;
       push.src1 = *slot;
       emit(push);
@@ -1552,6 +1607,7 @@ class Lowerer {
       }
       VmInstruction pop;
       pop.opcode = VmOpcode::Pop;
+      pop.width = 8;  // a cell of the argument stack holds a value
       pop.dst = *dst;
       emit(pop);
     }

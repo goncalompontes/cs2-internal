@@ -160,6 +160,20 @@ auto signed_of(std::uint64_t value, std::uint8_t bytes) noexcept -> std::int64_t
 
 // --- The decoded instruction --------------------------------------------------
 
+/// The name of an opcode, from the ISA itself.
+///
+/// The names are not part of the contract's *values*, but a failure message
+/// that names the opcode is a failure message that can be acted on.
+auto name_of(cs2::protect::VmOpcode opcode) -> const char* {
+#define CS2_VM_OPCODE(name, number, comment)    \
+  if (opcode == cs2::protect::VmOpcode::name) { \
+    return #name;                               \
+  }
+#include "isa.def"
+#undef CS2_VM_OPCODE
+  return "?";
+}
+
 /// One instruction of the container, decoded.
 ///
 /// The encoding is the contract (README §14.2): 24 bytes, little endian.
@@ -621,6 +635,102 @@ auto decode(const cs2::protect::VmFunction& function, std::vector<Decoded>& code
   return header;
 }
 
+/// The widths of the contract: 1, 2, 4 or 8 bytes, and **never 0**.
+///
+/// The width of an instruction is the width of the value it produces, and
+/// an instruction that produces no value carries the width of a cell of the
+/// frame (8), except `MemCpy` and `MemSet`, which are byte-wise (1). A
+/// width of 0 would make an interpreter that truncates its result to the
+/// width return zero from every function.
+void check_the_widths(const cs2::protect::VmFunction& function, const std::string& what) {
+  std::vector<Decoded> code;
+  decode(function, code);
+  for (std::size_t index = 0; index < code.size(); ++index) {
+    const Decoded& instruction = code[index];
+    const auto opcode = static_cast<cs2::protect::VmOpcode>(instruction.opcode);
+    const std::string where =
+        what + ": the instruction " + std::to_string(index) + " (" + name_of(opcode) + ")";
+    expect(instruction.width == 1 || instruction.width == 2 || instruction.width == 4 ||
+               instruction.width == 8,
+           where + " carries the width " + std::to_string(instruction.width) +
+               ", and not one of 1, 2, 4 or 8");
+    switch (opcode) {
+      case cs2::protect::VmOpcode::Br:
+      case cs2::protect::VmOpcode::BrIf:
+      case cs2::protect::VmOpcode::Arg:
+      case cs2::protect::VmOpcode::Pop:
+      case cs2::protect::VmOpcode::Pool:
+        expect(instruction.width == 8, where + " produces no value: the width must be 8, and not " +
+                                           std::to_string(instruction.width));
+        break;
+      case cs2::protect::VmOpcode::MemCpy:
+      case cs2::protect::VmOpcode::MemSet:
+        expect(instruction.width == 1, where + " is byte-wise: the width must be 1, and not " +
+                                           std::to_string(instruction.width));
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+/// The destinations of the contract.
+///
+/// An instruction that produces a value has a destination, and an
+/// instruction that produces no value has none: `0xFFFF` is the encoding of
+/// "no slot", and the interpreter does not have to special-case a
+/// destination-less instruction that produces a value.
+void check_the_destinations(const cs2::protect::VmFunction& function, const std::string& what) {
+  for (std::size_t index = 0; index < function.code.size(); ++index) {
+    const cs2::protect::VmInstruction& instruction = function.code[index];
+    const std::string where = what + ": the instruction " + std::to_string(index) + " (" +
+                              name_of(instruction.opcode) + ")";
+    switch (instruction.opcode) {
+      case cs2::protect::VmOpcode::Br:
+      case cs2::protect::VmOpcode::BrIf:
+      case cs2::protect::VmOpcode::Arg:
+      case cs2::protect::VmOpcode::Store:
+      case cs2::protect::VmOpcode::MemCpy:
+      case cs2::protect::VmOpcode::MemSet:
+      case cs2::protect::VmOpcode::Ret:
+        expect(instruction.dst == cs2::protect::k_no_slot,
+               where + " produces no value: it must have no destination");
+        break;
+      case cs2::protect::VmOpcode::Const:
+      case cs2::protect::VmOpcode::Move:
+      case cs2::protect::VmOpcode::Add:
+      case cs2::protect::VmOpcode::Sub:
+      case cs2::protect::VmOpcode::Mul:
+      case cs2::protect::VmOpcode::And:
+      case cs2::protect::VmOpcode::Or:
+      case cs2::protect::VmOpcode::Xor:
+      case cs2::protect::VmOpcode::SDiv:
+      case cs2::protect::VmOpcode::UDiv:
+      case cs2::protect::VmOpcode::SRem:
+      case cs2::protect::VmOpcode::URem:
+      case cs2::protect::VmOpcode::Shl:
+      case cs2::protect::VmOpcode::LShr:
+      case cs2::protect::VmOpcode::AShr:
+      case cs2::protect::VmOpcode::Neg:
+      case cs2::protect::VmOpcode::Not:
+      case cs2::protect::VmOpcode::Cmp:
+      case cs2::protect::VmOpcode::Cast:
+      case cs2::protect::VmOpcode::Load:
+      case cs2::protect::VmOpcode::Gep:
+      case cs2::protect::VmOpcode::Pop:
+      case cs2::protect::VmOpcode::Pool:
+      case cs2::protect::VmOpcode::Alloca:
+        expect(instruction.dst != cs2::protect::k_no_slot,
+               where + " produces a value: it must have a destination");
+        break;
+      case cs2::protect::VmOpcode::Call:
+        // A call that returns nothing has no destination; a call that
+        // returns something has one.
+        break;
+    }
+  }
+}
+
 /// The function of a module, lowered.
 auto analyze(llvm::Module& module, const std::string& name) -> cs2::protect::VmFunction {
   llvm::Function* function = module.getFunction(name);
@@ -630,7 +740,36 @@ auto analyze(llvm::Module& module, const std::string& name) -> cs2::protect::VmF
   }
   cs2::protect::VmOptions options;
   options.seed = k_seed;
-  return cs2::protect::analyze_function(*function, options);
+  const auto result = cs2::protect::analyze_function(*function, options);
+  if (result.virtualizable) {
+    // Every instruction of every fixture carries a width of the contract.
+    check_the_widths(result, name);
+    check_the_destinations(result, name);
+  }
+  return result;
+}
+
+/// The first instruction of an opcode, or null when there is none.
+auto first_of(const cs2::protect::VmFunction& function, cs2::protect::VmOpcode opcode)
+    -> const cs2::protect::VmInstruction* {
+  for (const cs2::protect::VmInstruction& instruction : function.code) {
+    if (instruction.opcode == opcode) {
+      return &instruction;
+    }
+  }
+  return nullptr;
+}
+
+/// Every instruction of an opcode, in order.
+auto all_of(const cs2::protect::VmFunction& function, cs2::protect::VmOpcode opcode)
+    -> std::vector<const cs2::protect::VmInstruction*> {
+  std::vector<const cs2::protect::VmInstruction*> instructions;
+  for (const cs2::protect::VmInstruction& instruction : function.code) {
+    if (instruction.opcode == opcode) {
+      instructions.push_back(&instruction);
+    }
+  }
+  return instructions;
 }
 
 /// Runs the bytecode of a function and returns the value it computes.
@@ -1039,6 +1178,178 @@ entry:
          "the local variable: the bytecode returned " + std::to_string(result) + " and not 42");
 }
 
+/// The widths of the instructions.
+///
+/// The width is the width of the value the instruction produces, and it is
+/// never 0: an instruction that produces no value carries the width of a
+/// cell of the frame (8), the two byte-wise ones carry 1, and the `Ret`
+/// carries the width of the value it returns (8 for a function that
+/// returns nothing).
+void test_the_widths() {
+  static const std::string k_ir = R"(
+@counter = global i32 0
+
+declare i32 @add_one(i32)
+declare void @poke()
+
+define i32 @wide(i32 %x, i32 %y) {
+entry:
+  %slot = alloca i32
+  %global = load i32, ptr @counter
+  %called = call i32 @add_one(i32 %x)
+  call void @poke()
+  %chosen = select i1 true, i32 %called, i32 %global
+  %bigger = icmp sgt i32 %chosen, %y
+  br i1 %bigger, label %then, label %other
+
+then:
+  %a = phi i32 [ %chosen, %entry ]
+  br label %merge
+
+other:
+  %b = phi i32 [ %global, %entry ]
+  br label %merge
+
+merge:
+  %m = phi i32 [ %a, %then ], [ %b, %other ]
+  store i32 %m, ptr %slot
+  %read = load i32, ptr %slot
+  ret i32 %read
+}
+
+define void @nothing() {
+entry:
+  ret void
+}
+
+define void @copies(ptr %destination, ptr %source) {
+entry:
+  call void @llvm.memcpy.p0.p0.i64(ptr align 4 %destination, ptr align 4 %source, i64 16, i1 false)
+  call void @llvm.memset.p0.i64(ptr align 4 %destination, i8 0, i64 16, i1 false)
+  ret void
+}
+)";
+  const auto module = parse(k_ir);
+  if (module == nullptr) {
+    return;
+  }
+
+  {
+    const auto function = analyze(*module, "wide");
+    expect(function.virtualizable, "the function with every shape is refused");
+    if (!function.virtualizable) {
+      return;
+    }
+    // The pool yields a pointer.
+    const auto* pool = first_of(function, cs2::protect::VmOpcode::Pool);
+    expect(pool != nullptr, "the global is reached through the pool");
+    if (pool != nullptr) {
+      expect(pool->width == 8, "the pool yields a pointer: the width must be 8, and not " +
+                                   std::to_string(pool->width));
+    }
+    // The two calls: one returns an `i32`, the other returns nothing.
+    const auto calls = all_of(function, cs2::protect::VmOpcode::Call);
+    expect(calls.size() == 2, "the function makes two calls");
+    if (calls.size() == 2) {
+      expect(calls[0]->width == 4, "the call that returns an i32 has the width 4, and not " +
+                                       std::to_string(calls[0]->width));
+      expect(calls[1]->width == 8, "the call that returns nothing has the width 8, and not " +
+                                       std::to_string(calls[1]->width));
+    }
+    // The return carries the width of the value it returns.
+    const auto* ret = first_of(function, cs2::protect::VmOpcode::Ret);
+    expect(ret != nullptr, "the function returns");
+    if (ret != nullptr) {
+      expect(ret->width == 4, "the return of an i32 function has the width 4, and not " +
+                                  std::to_string(ret->width));
+    }
+    // The branches, the pushes and the pops carry the width of a cell.
+    for (const cs2::protect::VmOpcode opcode :
+         {cs2::protect::VmOpcode::Br, cs2::protect::VmOpcode::BrIf, cs2::protect::VmOpcode::Arg,
+          cs2::protect::VmOpcode::Pop}) {
+      for (const cs2::protect::VmInstruction* instruction : all_of(function, opcode)) {
+        expect(instruction->width == 8, std::string(name_of(opcode)) +
+                                            " produces no value: the width must be 8, and not " +
+                                            std::to_string(instruction->width));
+      }
+    }
+  }
+
+  {
+    // A function that returns nothing returns zero, and the width of that
+    // zero is the width of a cell.
+    const auto function = analyze(*module, "nothing");
+    expect(function.virtualizable, "the function that returns nothing is refused");
+    if (!function.virtualizable) {
+      return;
+    }
+    const auto* ret = first_of(function, cs2::protect::VmOpcode::Ret);
+    expect(ret != nullptr, "the function returns");
+    if (ret != nullptr) {
+      expect(ret->width == 8, "the return of a void function has the width 8, and not " +
+                                  std::to_string(ret->width));
+    }
+  }
+
+  {
+    // The two byte-wise instructions carry 1.
+    const auto function = analyze(*module, "copies");
+    expect(function.virtualizable, "the function with the copies is refused");
+    if (!function.virtualizable) {
+      return;
+    }
+    const auto* copy = first_of(function, cs2::protect::VmOpcode::MemCpy);
+    expect(copy != nullptr, "the copy is lowered");
+    if (copy != nullptr) {
+      expect(copy->width == 1, "the memcpy is byte-wise: the width must be 1, and not " +
+                                   std::to_string(copy->width));
+    }
+    const auto* set = first_of(function, cs2::protect::VmOpcode::MemSet);
+    expect(set != nullptr, "the set is lowered");
+    if (set != nullptr) {
+      expect(set->width == 1,
+             "the memset is byte-wise: the width must be 1, and not " + std::to_string(set->width));
+    }
+  }
+}
+
+/// The `unreachable` **stops** the interpreter.
+///
+/// The original is undefined behaviour, so the value does not matter: what
+/// matters is that the bytecode does not fall out of the block and into the
+/// next one. The ISA has no "stop" opcode, and the `Ret` is what stops the
+/// interpreter.
+void test_the_unreachable_stops() {
+  static const std::string k_ir = R"(
+define i32 @stops() {
+entry:
+  unreachable
+}
+)";
+  const auto module = parse(k_ir);
+  if (module == nullptr) {
+    return;
+  }
+  const auto function = analyze(*module, "stops");
+  expect(function.virtualizable, "the function with an unreachable is refused");
+  if (!function.virtualizable) {
+    return;
+  }
+  expect(!function.code.empty(), "the function has instructions");
+  if (function.code.empty()) {
+    return;
+  }
+  const auto& last = function.code.back();
+  expect(last.opcode == cs2::protect::VmOpcode::Ret,
+         "the unreachable lowers to a return, and not to " + std::string(name_of(last.opcode)));
+  expect(last.width == 8 || last.width == 4,
+         "the return of the unreachable carries the width of the returned value");
+  // The interpreter stops at the return: it does not run off the end of
+  // the stream.
+  const auto result = run_of(function, {});
+  expect(result == 0, "the unreachable returns zero, and not " + std::to_string(result));
+}
+
 /// The opcode permutation: a bijection of the whole opcode space, and a
 /// multiplier that is odd and coprime with the number of the opcodes, for
 /// every seed.
@@ -1073,6 +1384,8 @@ auto main() -> int {
   test_the_order_of_the_arguments();
   test_the_slot_budget();
   test_the_local_variable();
+  test_the_widths();
+  test_the_unreachable_stops();
   test_the_permutation();
   if (g_failures != 0) {
     std::printf("vm-values: %d check(s) failed\n", g_failures);

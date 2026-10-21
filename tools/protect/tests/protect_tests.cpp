@@ -703,6 +703,20 @@ void test_vm_virtualizable() {
               perm_b) == cs2::protect::VmOpcode::Add,
           "the permutation is invertible");
   }
+
+  // The width of every instruction is one of 1, 2, 4 or 8: a width of 0
+  // would make an interpreter that truncates its result to the width return
+  // zero from every function.
+  for (const cs2::protect::VmInstruction& instruction : result.code) {
+    check(instruction.width == 1 || instruction.width == 2 || instruction.width == 4 ||
+              instruction.width == 8,
+          "the width of an instruction is one of 1, 2, 4 or 8");
+  }
+  // The `Ret` carries the width of the value it returns: the type of the
+  // `ret` itself is `void`.
+  check(result.code.back().opcode == cs2::protect::VmOpcode::Ret,
+        "the last instruction of the function is the return");
+  check(result.code.back().width == 4, "the return of an i32 function has the width 4");
 }
 
 /// The virtualizer's front end: the parallel copy of a swapping back-edge.
@@ -1039,9 +1053,9 @@ void test_vm_refusals() {
 
   // A local variable whose size is not constant: the frame is a constant.
   {
-    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                            llvm::GlobalValue::ExternalLinkage, "dynamic_local",
-                                            &module);
+    auto* function =
+        llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                               llvm::GlobalValue::ExternalLinkage, "dynamic_local", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     builder.CreateAlloca(i32, function->getArg(0), "slot");
@@ -1053,9 +1067,9 @@ void test_vm_refusals() {
   // Locals that do not fit in the frame: the value region of the frame
   // holds 256 cells, and the locals are the cells above the value slots.
   {
-    auto* function = llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
-                                            llvm::GlobalValue::ExternalLinkage, "big_local",
-                                            &module);
+    auto* function =
+        llvm::Function::Create(llvm::FunctionType::get(i32, {i32}, false),
+                               llvm::GlobalValue::ExternalLinkage, "big_local", &module);
     llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
     llvm::IRBuilder<> builder(entry);
     // 64 cells of local, and 200 values: the sum does not fit.
@@ -1139,9 +1153,9 @@ void test_vm_refusals() {
 void test_vm_vanished() {
   llvm::LLVMContext context;
   llvm::Module module("vanished.obj", context);
-  auto* function = llvm::Function::Create(
-      llvm::FunctionType::get(llvm::Type::getInt32Ty(context), {}, false),
-      llvm::GlobalValue::ExternalLinkage, "survivor", &module);
+  auto* function =
+      llvm::Function::Create(llvm::FunctionType::get(llvm::Type::getInt32Ty(context), {}, false),
+                             llvm::GlobalValue::ExternalLinkage, "survivor", &module);
   llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", function);
   llvm::IRBuilder<> builder(entry);
   builder.CreateRet(builder.getInt32(0));
@@ -1191,6 +1205,18 @@ void test_vm_call() {
   const auto opcodes = opcodes_of(result);
   check(count_of(opcodes, cs2::protect::VmOpcode::Arg) == 2, "the arguments are pushed");
   check(count_of(opcodes, cs2::protect::VmOpcode::Call) == 1, "the call is one instruction");
+
+  // The widths: the call carries the width of the value it returns (the
+  // callee returns an `i32`), and the pushes carry the width of a cell.
+  for (const cs2::protect::VmInstruction& instruction : result.code) {
+    if (instruction.opcode == cs2::protect::VmOpcode::Call) {
+      check(instruction.width == 4, "the call that returns an i32 has the width 4");
+    }
+    if (instruction.opcode == cs2::protect::VmOpcode::Arg ||
+        instruction.opcode == cs2::protect::VmOpcode::Pop) {
+      check(instruction.width == 8, "a cell of the argument stack has the width 8");
+    }
+  }
 }
 
 }  // namespace
