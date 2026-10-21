@@ -398,29 +398,49 @@ is a one-line `dependencies :` list on each side.
 
 ### 6.1 The handles
 
-**Method:** count the occurrences of `CloseHandle` and of a raw `HANDLE`
-local (`^\s*(const\s+)?HANDLE\s+\w+\s*=`) in every tracked C/C++ file,
-excluding `external/`, `payload/third_party/` and `payload/sdk/`, at the
-branch's base commit (`e539bc6`) and at the tip.
+**Method** (git bash; the *same* file list is used for both revisions, so the
+comparison is like for like — the file list is the tip's, the base commit is
+read out of the object store):
+
+```sh
+# the tracked C/C++ sources, without the vendored trees
+git ls-files '*.c' '*.cpp' '*.h' '*.hpp' \
+  | grep -v -e '^external/' -e '^payload/third_party/' -e '^payload/sdk/' > /tmp/t21-files.txt
+
+# the occurrences of the token `CloseHandle`
+git grep -o -h 'CloseHandle' e539bc6 -- $(cat /tmp/t21-files.txt) | wc -l
+git grep -o -h 'CloseHandle' -- $(cat /tmp/t21-files.txt) | wc -l
+
+# the raw `HANDLE` locals (one per matching line)
+git grep -E -h -c '^\s*(const\s+)?HANDLE\s+\w+\s*=' e539bc6 -- $(cat /tmp/t21-files.txt) \
+  | awk '{s+=$1} END {print s}'
+git grep -E -h -c '^\s*(const\s+)?HANDLE\s+\w+\s*=' -- $(cat /tmp/t21-files.txt) \
+  | awk '{s+=$1} END {print s}'
+```
 
 | what | before | after |
 |---|---|---|
-| `CloseHandle` (occurrences of the token) | 31 | 12 |
-| raw `HANDLE` locals | 25 | 6 |
+| `CloseHandle` (occurrences of the token) | 35 | 14 |
+| raw `HANDLE` locals | 25 | 5 |
 
-Of the 12 remaining `CloseHandle` sites: 5 are the type aliases and the
-comments in `rage_config.cpp` plus the policy's own `close`; 2 are the shared
-policy in `cs2/core/win_handle.hpp`; 1 is the channel's closer; **3 are in
-the contended `service.cpp`** (F3, F4); 1 is the injector's trivial test aid.
+Before, the 35 occurrences were: 9 in `rage_config.cpp`, 8 in the injector, 4
+in the model publisher, 3 in the contended `service.cpp`, 3 in the overlay's
+transport, 2 in the watchdog, 2 in the config store, and one each in the
+present hook, the payload log, the channel and the injector's test aid.
 
-(The count is of *occurrences of the token*, not of call sites: five of the
-twelve are the type aliases and the comments the method also counts.)
+Of the 14 that are left: 7 are in `rage_config.cpp` (the type aliases, the
+comments and the policy's own `close`), 2 are the shared policy in
+`cs2/core/win_handle.hpp`, 1 is the channel's closer, **3 are in the
+contended `service.cpp`** (F3, F4), and 1 is the injector's trivial test aid.
+The count is of *occurrences of the token*, not of call sites: seven of the
+fourteen are the type aliases and the comments the method also counts.
 
-Of the 6 remaining raw `HANDLE` locals: 1 is the channel's local (handed
+Of the 5 remaining raw `HANDLE` locals: 1 is the channel's local (handed
 straight to the wrapper), 1 is the contended `service.cpp`, 1 is the overlay's
-`g_mapping` global (F12), 1 is the injector's target process handle (F14), 1
-is the injector's test aid (F15), and 1 is the wrapper's own `handle_`
-member.
+`g_mapping` global (F12), 1 is the injector's target process handle (F14) and
+1 is the injector's test aid (F15). (The wrapper's own member is a
+`KernelHandle` — an opaque `void*` — and not a raw `HANDLE` local, so it is
+not one of the five.)
 
 ### 6.2 The files
 
