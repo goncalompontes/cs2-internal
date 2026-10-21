@@ -856,11 +856,16 @@ auto Service::input_status() noexcept -> Json {
   result.set("animfix_acted", Json::boolean(input_.animfix_acted()));
   result.set("animfix_captures", Json::number(static_cast<double>(input_.animfix_captures())));
   result.set("animfix_applies", Json::number(static_cast<double>(input_.animfix_applies())));
+  // The units: `animfix_captures` counts the decodes of the local controller,
+  // `animfix_applies` counts the **graph parameters written**, and
+  // `animfix_skips` and the refusal counters count **anim ticks** (one reason
+  // per tick: the capture-level reasons - no capture, aged out, the
+  // controller changed - hold for every slot, so counting them per slot
+  // would multiply them by the number of slots).
   result.set("animfix_skips", Json::number(static_cast<double>(input_.animfix_skips())));
   // The refusals, by reason: "the codec has not run yet" must be
   // distinguishable from "every capture aged out" (a stalled connection or a
-  // server whose snapshot rate the bound does not cover) and from "the
-  // capture was already used" (the normal case).
+  // server whose snapshot rate the bound does not cover).
   result.set("animfix_skip_no_capture",
              Json::number(static_cast<double>(input_.animfix_skip_no_capture())));
   result.set("animfix_skip_stale", Json::number(static_cast<double>(input_.animfix_skip_stale())));
