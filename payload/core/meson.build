@@ -20,3 +20,15 @@ core_inc = include_directories('include')
 core_dep = declare_dependency(
   include_directories : core_inc,
 )
+
+# The ownership rules are platform-independent, so they have a host regression
+# test (the Windows-only sources that use the wrapper cannot be tested
+# off-Windows). The test is wired here, like the loader's and the hooks':
+# the payload project cross-compiles, and a test cannot run there.
+if not meson.is_cross_build()
+  core_handle_test = executable('core_handle_test',
+    files('tests/test_handle.cpp'),
+    dependencies : core_dep,
+  )
+  test('core-handle', core_handle_test)
+endif
