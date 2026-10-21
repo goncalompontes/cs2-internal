@@ -892,8 +892,8 @@ auto main(int argc, char** argv) -> int {
   DWORD exit_code = 0;
   {
     const cs2::core::ScopedKernelHandle thread(
-        CreateRemoteThread(process, nullptr, 0,
-                           reinterpret_cast<LPTHREAD_START_ROUTINE>(stub_mem), nullptr, 0, nullptr));
+        CreateRemoteThread(process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(stub_mem),
+                           nullptr, 0, nullptr));
     if (!thread.valid()) {
       std::printf("injector: CreateRemoteThread failed: %lu\n", GetLastError());
       return 1;
