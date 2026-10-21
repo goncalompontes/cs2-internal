@@ -8,6 +8,13 @@
 # `<windows.h>`) that the host test `control-strafe` (root meson.build)
 # compiles on its own.
 #
+# `include/cs2/control/anti_aim.hpp` is the anti-aim's decision maths — the
+# fake yaw, the pitch clamp, the per-command jitter and the **movement
+# re-base** (the projection of the player's intent from the camera frame into
+# the anti-aim frame). It is header-only and dependency-free in the same way,
+# and the host test `control-anti-aim` (root meson.build) compiles it on its
+# own.
+#
 # The overlay's `include/` is on the path because `cs2/overlay/wire.hpp` is the
 # **shared POD contract** between the payload and the Vulkan layer (the
 # settings block the `settings` command reads and writes), not a layering

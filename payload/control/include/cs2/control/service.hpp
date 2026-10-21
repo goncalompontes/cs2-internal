@@ -405,6 +405,10 @@ class Service {
   // The local animfix (`docs/re/animfix.md`): make the server's animation win
   // for the local player.
   void do_animfix(const Json& args, Json& out) noexcept;
+  // The anti-aim (`antiaim`): the fake (desync) angles for the command's own
+  // `viewangles`, and the movement re-base that keeps the operator's W/A/S/D
+  // camera-relative (`on`, `yaw_offset`, `pitch`, `jitter`, `side`, `rebase`).
+  void do_antiaim(const Json& args, Json& out) noexcept;
   // Ragebot aim (docs/ragebot.md): solve the damage field for the nearest enemy
   // and report the aim direction. Diagnostic — does not write the view yet.
   void do_aim(const Json& args, Json& out) noexcept;

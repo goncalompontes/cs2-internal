@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from . import (animfix, autostrafe, bhop, bot_match, game_events, join_bot_match,
+from . import (anti_aim, animfix, autostrafe, bhop, bot_match, game_events, join_bot_match,
                move_and_aim, move_to, movement_probe, screens, status, strafe_probe,
                subtick_aim, subtick_move, subtick_shot, usercmd_move, aim_probe, aim_shot,
                rage, heatmap)
@@ -36,6 +36,7 @@ SCENARIOS: dict[str, Scenario] = {
     "strafe-probe": strafe_probe.run,
     "autostrafe": autostrafe.run,
     "animfix": animfix.run,
+    "anti-aim": anti_aim.run,
     "move-to": move_to.run,
     "screens": screens.run,
     "status": status.run,

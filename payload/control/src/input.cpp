@@ -84,10 +84,11 @@ auto velocity_offset() noexcept -> std::uint32_t {
 // `{-1, 0, 1}²` move states survive. Snap a request into that set:
 // `round(v / scale) * scale`, clamped to one step. A fractional request is
 // therefore *not* silently rounded to zero by the server — its residual belongs
-// on the sub-tick channel (`Input::write_move_steps`).
+// on the sub-tick channel (`Input::write_move_steps`). The rule itself lives in
+// the pure anti-aim module, so the anti-aim's re-based axes and the other
+// movement features snap the same way.
 [[nodiscard]] auto valid_set(float value) noexcept -> float {
-  const auto steps = std::round(value / k_move_scale);
-  return std::clamp(steps, -1.0F, 1.0F) * k_move_scale;
+  return cs2::control::anti_aim::quantize_axis(value / k_move_scale) * k_move_scale;
 }
 
 // The axes actually handed to the engine: clamped to ±`k_move_scale` and, in
@@ -161,6 +162,16 @@ constexpr std::size_t k_bhop_step_capacity = 32;
 [[nodiscard]] auto quantize64(float value) noexcept -> float {
   return std::floor(value * 64.0F + 0.5F) * k_subtick_grid;
 }
+
+// The anti-aim's "why" codes (`Input::anti_aim_reason`): why it did or did not
+// write this tick.
+constexpr int k_anti_aim_reason_off = 0;
+constexpr int k_anti_aim_reason_acted = 1;
+constexpr int k_anti_aim_reason_no_camera = 2;
+constexpr int k_anti_aim_reason_no_angles = 3;
+constexpr int k_anti_aim_reason_no_rebase = 4;
+constexpr int k_anti_aim_reason_strafe = 5;
+constexpr int k_anti_aim_reason_look = 6;
 
 using run_command_fn = void(__fastcall*)(void* self, void* cmd);
 using set_prediction_command_fn = void(__fastcall*)(void* self, void* cmd);
@@ -303,6 +314,252 @@ void Input::write_silent_angles(void* cmd, float pitch, float yaw, float roll) n
     *reinterpret_cast<std::uint32_t*>(angles + k_angles_has_bits_offset) |= k_angles_bits;
     angle_writes_.fetch_add(1);
   }
+}
+
+// Write the command's **own** `viewangles` (`base + 0x40`) — the field the
+// server reads the player's angles from, and the field the movement's wish
+// basis is built from (`SetupMove` copies it into the `CMoveData`'s angles;
+// `AirMove` builds the wish from it).
+//
+// This is the **one** place that field is written: the `look` control command
+// and the anti-aim share it.
+auto Input::write_command_angles(std::uint8_t* base, float pitch, float yaw,
+                                  float roll) noexcept -> bool {
+  if (base == nullptr) {
+    return false;
+  }
+  if (!writable(reinterpret_cast<std::uintptr_t>(base),
+                k_base_viewangles_offset + sizeof(void*))) {
+    return false;
+  }
+  const auto angles = *reinterpret_cast<std::uintptr_t*>(base + k_base_viewangles_offset);
+  if (!writable(angles, k_angles_values_offset + 3 * sizeof(float))) {
+    return false;
+  }
+  auto* xyz = reinterpret_cast<float*>(angles + k_angles_values_offset);
+  xyz[0] = pitch;
+  xyz[1] = yaw;
+  xyz[2] = roll;
+  *reinterpret_cast<std::uint32_t*>(angles + k_angles_has_bits_offset) |= k_angles_bits;
+  *reinterpret_cast<std::uint32_t*>(base + k_base_has_bits_offset) |= k_base_viewangles_bit;
+  return true;
+}
+
+// Write the command's analog axes — the three places the engine's analog
+// lives:
+//
+//   * the command's own floats (`base + 0x58/+0x5c`),
+//   * the **raw** axes (`CCSGOInput + 0x270/0x274`) — the slot-5 builder
+//     re-derives the command's floats from them, so a command-only write is
+//     overwritten (`docs/re/angle-split.md` §5.3, step 1b),
+//   * the **button bits** (the command's legacy mask and the `buttons_pb`'s two
+//     states) — `SetupMove`'s sanitizer turns the held buttons into the same
+//     axes (`FUN_180a780a0`), so a command whose buttons disagree with its
+//     analog is re-derived from the buttons.
+//
+// Every pointer is read **inside** its `writable()` guard: a stale or garbage
+// pointer must never fault the game thread (the payload is manually mapped
+// without registered exception tables).
+//
+// Returns false when the wish carries no move button at all — there is
+// nothing to write.
+auto Input::write_move_axes(std::uint8_t* base, void* cmd, float forward,
+                             float left) noexcept -> bool {
+  if (base == nullptr) {
+    return false;
+  }
+  constexpr std::uint64_t move_bits =
+      button::k_forward | button::k_back | button::k_moveleft | button::k_moveright;
+  const std::uint64_t held =
+      cs2::control::engine_move_buttons(forward, left, k_move_epsilon);
+  if ((held & move_bits) == 0) {
+    return false;  // nothing to write
+  }
+  if (writable(reinterpret_cast<std::uintptr_t>(base), k_base_move_offset + 12)) {
+    auto* move = reinterpret_cast<float*>(base + k_base_move_offset);
+    move[0] = forward;
+    move[1] = left;
+    move[2] = 0.0F;
+    *reinterpret_cast<std::uint32_t*>(base + k_base_has_bits_offset) |= k_base_move_bits;
+  }
+  if (ccsgo_input_ != 0) {
+    auto* raw = reinterpret_cast<float*>(ccsgo_input_ + k_input_move_offset);
+    if (writable(reinterpret_cast<std::uintptr_t>(raw), 3 * sizeof(float))) {
+      raw[0] = forward;
+      raw[1] = left;
+      raw[2] = 0.0F;
+    }
+  }
+  if (cmd != nullptr &&
+      writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_buttons_offset,
+               sizeof(std::uint64_t))) {
+    auto* legacy = reinterpret_cast<std::uint64_t*>(static_cast<std::uint8_t*>(cmd) +
+                                                   k_cmd_buttons_offset);
+    *legacy = (*legacy & ~move_bits) | held;
+  }
+  // The `buttons_pb` pointer lives in the command's base — read it **inside**
+  // the guard, so an unmapped base cannot fault the game thread.
+  if (writable(reinterpret_cast<std::uintptr_t>(base), k_base_buttons_pb_offset + 8)) {
+    const auto buttons_pb =
+        *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
+    if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
+      auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb +
+                                                     k_buttonstate_values_offset);
+      state[0] = (state[0] & ~move_bits) | held;
+      state[1] = (state[1] & ~move_bits) | held;
+      *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
+    }
+  }
+  return true;
+}
+
+// True when the command's own `viewangles` already carry the given angles.
+//
+// The anti-aim's write is **idempotent** (the jitter is keyed on the command's
+// number, so both writes of a tick carry the same values), and the hook can
+// run more than once for the same command (`docs/re/subtick.md` §"the hook
+// runs more than once"). This is the content-based guard that keeps the write
+// to **once per command** without any state of its own: a write that failed
+// left the old angles in place, and the next call writes again.
+auto Input::command_angles_are(std::uint8_t* base, float pitch, float yaw) const noexcept
+    -> bool {
+  if (base == nullptr ||
+      !writable(reinterpret_cast<std::uintptr_t>(base),
+                k_base_viewangles_offset + sizeof(void*))) {
+    return false;
+  }
+  const auto angles = *reinterpret_cast<std::uintptr_t*>(base + k_base_viewangles_offset);
+  if (!writable(angles, k_angles_values_offset + 3 * sizeof(float))) {
+    return false;
+  }
+  const auto* xyz = reinterpret_cast<const float*>(angles + k_angles_values_offset);
+  return std::fabs(xyz[0] - pitch) <= 1.0e-3F && std::fabs(xyz[1] - yaw) <= 1.0e-3F;
+}
+
+// One tick of the anti-aim.
+//
+// The write point is the **command's own** `viewangles` (`base + 0x40`) — the
+// channel the server reads the player's angles from, and the channel the
+// movement's wish basis is built from (`docs/re/angle-split.md` §5, W1). The
+// camera reads a **different** field (the live view angles,
+// `CCSGOInput + 0x688`), which this code only ever *reads*: the camera cannot
+// follow the fake angles, so the split needs no pin (§5.2, §7 step 7).
+//
+// The write happens in the **command path** (the game thread, once per
+// command), never per frame: the engine writes the command's `viewangles`
+// exactly once per tick, and a higher-frequency writer fights its own
+// write-back (§7 step 6).
+void Input::anti_aim_tick(void* cmd, std::uint8_t* base) noexcept {
+  anti_aim_acted_.store(false);
+  anti_aim_reason_.store(k_anti_aim_reason_off);
+  if (!anti_aim_enabled_.load() || base == nullptr) {
+    return;
+  }
+  // --- The composition rules ---------------------------------------------------
+  // The anti-aim must not destroy another feature's work:
+  //   * the auto-strafe's **sub-tick** mode rotates the movement basis with
+  //     `yaw_delta` steps — the same basis the anti-aim fakes, so the two
+  //     rotations would add up and the strafe would steer off;
+  //   * the `look` command writes the **same field** (`base + 0x40`).
+  // The auto-strafe's *analog* mode and the ragebot's auto-stop compose: they
+  // write the camera frame's axes, and the re-base re-expresses whatever the
+  // command carries.
+  if (strafe_enabled_.load() && strafe_subticks_.load() > 0) {
+    anti_aim_reason_.store(k_anti_aim_reason_strafe);
+    anti_aim_rebase_skipped_.fetch_add(1);
+    return;
+  }
+  if (command_angles_enabled_.load()) {
+    anti_aim_reason_.store(k_anti_aim_reason_look);
+    anti_aim_rebase_skipped_.fetch_add(1);
+    return;
+  }
+  // --- The camera's own angles --------------------------------------------------
+  // The **live** view angles (`CCSGOInput + 0x688`). The anti-aim reads them
+  // and never writes them — the camera reads the same field, so a write here
+  // would drag the operator's view onto the fake angles.
+  float camera[3] = {0.0F, 0.0F, 0.0F};
+  if (ccsgo_input_ == 0 ||
+      !cs2::game::read(ccsgo_input_ + k_input_view_angles_offset, camera)) {
+    anti_aim_reason_.store(k_anti_aim_reason_no_camera);
+    return;
+  }
+  const anti_aim::Angles camera_angles{camera[0], camera[1], camera[2]};
+  anti_aim_camera_yaw_.store(camera_angles.yaw);
+  anti_aim_camera_pitch_.store(camera_angles.pitch);
+
+  // --- The fake angles ---------------------------------------------------------
+  // The command's own number: the tick the jitter is keyed on. The jitter is
+  // re-rolled once per **command** — the same command always gets the same
+  // offset, so the two writes of a tick (the slot-5 builder and the slot-25
+  // finaliser) agree and the write stays idempotent.
+  std::uint32_t number = 0;
+  if (cmd != nullptr &&
+      writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_number_offset,
+               sizeof(std::uint32_t))) {
+    number = *reinterpret_cast<const std::uint32_t*>(static_cast<std::uint8_t*>(cmd) +
+                                                      k_cmd_number_offset);
+  }
+  const auto side = static_cast<anti_aim::Side>(anti_aim_side_.load());
+  const float fake =
+      anti_aim::fake_yaw(camera_angles.yaw, anti_aim_yaw_offset_.load(), side,
+                         anti_aim_seed_, number, anti_aim_jitter_.load());
+  const float pitch = anti_aim::clamp_pitch(anti_aim_pitch_.load());
+  anti_aim_fake_yaw_.store(fake);
+  anti_aim_fake_pitch_.store(pitch);
+  anti_aim_basis_cos_.store(std::cos(pitch * k_deg_to_rad));
+
+  // --- The write ---------------------------------------------------------------
+  // The fake angles into the command's own `viewangles` ...
+  if (command_angles_are(base, pitch, fake)) {
+    // The command already carries the fake angles (the hook ran twice for the
+    // same command): the anti-aim has acted for it and the write is not
+    // repeated. The guard is **before** the re-base below on purpose — the
+    // anti-aim's own write puts the anti-aim frame's axes on the command, and
+    // re-basing those again would rotate them twice.
+    anti_aim_acted_.store(true);
+    anti_aim_reason_.store(k_anti_aim_reason_acted);
+    return;
+  }
+  // --- The movement re-base ----------------------------------------------------
+  // The command's **current** axes: whatever wrote them — the engine's own
+  // input, the auto-strafe's wish, the ragebot's auto-stop — are in the
+  // **camera** frame, and the re-base re-expresses them in the anti-aim frame.
+  anti_aim::Axes current{};
+  if (writable(reinterpret_cast<std::uintptr_t>(base), k_base_move_offset + 12)) {
+    const auto* move = reinterpret_cast<const float*>(base + k_base_move_offset);
+    current.forward = move[0];
+    current.left = move[1];
+  }
+  // The **delivered** axes: a member of the engine's discrete set, chosen so
+  // the walk direction stays as close to the camera's as the set allows. The
+  // cost is reported: the direction error and the walk-speed factor.
+  const auto delivery = anti_aim::deliver_axes(
+      camera_angles, anti_aim::Angles{pitch, fake, 0.0F}, current);
+  anti_aim_forward_.store(delivery.axes.forward);
+  anti_aim_left_.store(delivery.axes.left);
+  anti_aim_direction_error_.store(delivery.direction_error_deg);
+  anti_aim_wish_factor_.store(delivery.wish_factor);
+  anti_aim_saturated_.store(delivery.saturated);
+
+  if (!write_command_angles(base, pitch, fake, 0.0F)) {
+    anti_aim_reason_.store(k_anti_aim_reason_no_angles);
+    return;
+  }
+  if (anti_aim_move_rebase_.load()) {
+    // ... and the delivered axes into the command's floats, the raw axes and
+    // the button bits.
+    write_move_axes(base, cmd, delivery.axes.forward, delivery.axes.left);
+    anti_aim_rebase_applied_.fetch_add(1);
+  } else {
+    // The re-base is off: the fake angles are in place and the movement's wish
+    // basis follows them — a diagnostic, not a mode to play in.
+    anti_aim_reason_.store(k_anti_aim_reason_no_rebase);
+    anti_aim_rebase_skipped_.fetch_add(1);
+  }
+  anti_aim_writes_.fetch_add(1);
+  anti_aim_acted_.store(true);
+  anti_aim_reason_.store(k_anti_aim_reason_acted);
 }
 
 auto Input::read_aim_punch(float out[3]) const noexcept -> bool {
@@ -930,45 +1187,15 @@ auto Input::write_strafe_wish(std::uint8_t* base, std::uint8_t* cmd, float forwa
     strafe_rot_.store(0.0F);
   }
 
-  // The command's analog + both button states (the legacy `cmd + 0x60` mask and
-  // `buttons_pb`, like `apply()`'s explicit move). The button bits follow the
-  // engine's convention — a positive `leftmove` is the player's LEFT, so it
-  // goes with `IN_MOVELEFT` (`docs/re/strafe-sign.md` §4.2).
-  constexpr std::uint64_t move_bits =
-      button::k_forward | button::k_back | button::k_moveleft | button::k_moveright;
-  const std::uint64_t held = cs2::control::engine_move_buttons(forward, left, k_move_epsilon);
-  if ((held & move_bits) == 0) {
-    return false;  // nothing to write
-  }
-  auto* move = reinterpret_cast<float*>(base + k_base_move_offset);
-  move[0] = forward;
-  move[1] = left;
-  move[2] = 0.0F;
-  *reinterpret_cast<std::uint32_t*>(base + k_base_has_bits_offset) |= k_base_move_bits;
-  if (cmd != nullptr && writable(reinterpret_cast<std::uintptr_t>(cmd) + k_cmd_buttons_offset,
-                                 sizeof(std::uint64_t))) {
-    auto* legacy = reinterpret_cast<std::uint64_t*>(cmd + k_cmd_buttons_offset);
-    *legacy = (*legacy & ~move_bits) | held;
-  }
-  const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
-  if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
-    auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
-    state[0] = (state[0] & ~move_bits) | held;
-    state[1] = (state[1] & ~move_bits) | held;
-    *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
-  }
-
-  // The raw axes are the source `create_move_input` derives the command floats
-  // from; write them here too so the value survives (and is the one the movement
-  // reads).
-  if (ccsgo_input_ != 0) {
-    auto* raw = reinterpret_cast<float*>(ccsgo_input_ + k_input_move_offset);
-    if (writable(reinterpret_cast<std::uintptr_t>(raw), 3 * sizeof(float))) {
-      raw[0] = forward;
-      raw[1] = left;
-      raw[2] = 0.0F;
-      strafe_raw_writes_.fetch_add(1);
-    }
+  // The command's analog, the raw axes and both button states (the legacy
+  // `cmd + 0x60` mask and `buttons_pb`, like `apply()`'s explicit move). The
+  // button bits follow the engine's convention — a positive `leftmove` is the
+  // player's LEFT, so it goes with `IN_MOVELEFT` (`docs/re/strafe-sign.md`
+  // §4.2). The shared helper writes all three places, with every pointer
+  // read inside its `writable()` guard.
+  const bool written = write_move_axes(base, cmd, forward, left);
+  if (written && ccsgo_input_ != 0) {
+    strafe_raw_writes_.fetch_add(1);
   }
   return true;
 }
@@ -1158,6 +1385,14 @@ void Input::clear_raw_angles() noexcept {
 
 void Input::clear_command_angles() noexcept {
   command_angles_enabled_.store(false);
+}
+
+void Input::set_anti_aim_config(float yaw_offset, float pitch, float jitter, int side) noexcept {
+  anti_aim_yaw_offset_.store(yaw_offset);
+  anti_aim_pitch_.store(anti_aim::clamp_pitch(pitch));
+  anti_aim_jitter_.store(std::abs(jitter));
+  // The side: 0 = automatic, +1 = left, -1 = right.
+  anti_aim_side_.store(std::clamp(side, -1, 1));
 }
 
 void Input::set_move(float forward, float side, float up, bool quantize, bool step,
@@ -2180,19 +2415,28 @@ void Input::apply(void* cmd) noexcept {
   if (control && command_angles_enabled_.load()) {
     const auto base =
         *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset + k_pb_base_offset);
-    if (writable(base, k_base_viewangles_offset + sizeof(void*))) {
-      const auto angles = *reinterpret_cast<std::uintptr_t*>(base + k_base_viewangles_offset);
-      if (writable(angles, k_angles_values_offset + 3 * sizeof(float))) {
-        auto* xyz = reinterpret_cast<float*>(angles + k_angles_values_offset);
-        xyz[0] = command_angle_pitch_.load();
-        xyz[1] = command_angle_yaw_.load();
-        xyz[2] = command_angle_roll_.load();
-        *reinterpret_cast<std::uint32_t*>(angles + k_angles_has_bits_offset) |= k_angles_bits;
-        *reinterpret_cast<std::uint32_t*>(base + k_base_has_bits_offset) |= k_base_viewangles_bit;
-        command_angle_writes_.fetch_add(1);
-      }
+    if (write_command_angles(reinterpret_cast<std::uint8_t*>(base),
+                             command_angle_pitch_.load(), command_angle_yaw_.load(),
+                             command_angle_roll_.load())) {
+      command_angle_writes_.fetch_add(1);
     }
   }
+
+  // 4b. The anti-aim: the fake (desync) angles into the command's own
+  //     `viewangles`, and the **movement re-base** that keeps the operator's
+  //     W/A/S_D camera-relative. The command's angles are the movement's wish
+  //     basis (`SetupMove` copies them into the `CMoveData`'s angles and
+  //     `AirMove` builds the wish from them), so the two halves belong
+  //     together: the fake angles without the re-base rotate the walk basis.
+  //     It runs after the strafe and after the `look` command's angles — it
+  //     **re-expresses** the axes the command already carries (the strafe's
+  //     wish, the ragebot's auto-stop, the player's own keys) in the anti-aim
+  //     frame, so those features keep working. It refuses to act where a
+  //     composition is impossible (the strafe's sub-tick basis rotation, the
+  //     `look` command's own angles) and says so in `anti_aim_reason`.
+  anti_aim_tick(cmd, reinterpret_cast<std::uint8_t*>(
+                          *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset +
+                                                            k_pb_base_offset)));
 
   // 5. Sub-tick view angles: every `input_history` entry's `view_angles` (the
   //    silent-aim seam). The shot reads the entry at
