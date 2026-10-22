@@ -125,11 +125,11 @@ def check_the_readers(root: Path) -> None:
                    layout="layout functions=42 moved=40 seed=0x0123456789abcdef\n",
                    cross="cross matched cs2::aim::DamageField::add "
                          "?add@DamageField@aim@cs2@@QEAA...\n"
-                         "cross blocked:indirect_parameter cs2::aim::project_capsule "
+                         "cross blocked:byval_parameter cs2::aim::project_capsule "
                          "?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ\n"
                          "cross unmatched cs2::aim::never_called\n",
                    direct="direct ?atan2f external_callee\n"
-                          "direct ?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ indirect_parameter\n",
+                          "direct ?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ byval_parameter\n",
                    cross_rewritten=3)
     # The coverage of another worktree that shares the policy. It has no
     # `vm` line, no `layout` line and no rotation in its `protect` line:
@@ -209,7 +209,7 @@ def check_the_readers(root: Path) -> None:
         f"the reader did not read the state of the cross_module entry: {states}",
     )
     check(
-        states.get("cs2::aim::project_capsule") == "blocked:indirect_parameter",
+        states.get("cs2::aim::project_capsule") == "blocked:byval_parameter",
         f"the reader did not read the blocked state: {states}",
     )
     check(
@@ -224,7 +224,7 @@ def check_the_readers(root: Path) -> None:
     direct = read.files[0].direct_callees()
     check(direct.get("?atan2f") == "external_callee",
           f"the reader did not read the direct callee: {direct}")
-    check(direct.get("?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ") == "indirect_parameter",
+    check(direct.get("?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ") == "byval_parameter",
           f"the reader did not read the reason of the direct callee: {direct}")
     check(read.files[0].cross_rewritten == 3, "the reader did not read the cross rewrites")
 
@@ -460,8 +460,9 @@ def check_the_payload_rules(root: Path) -> None:
       define is **stale** -- the function is gone, and the entry protects
       nothing;
     * a protected function may not call the payload's own code **directly**.
-      The `sret` edges are the only exception: this task does not narrow
-      the `sret` rule.
+      **Nothing is excepted**: the `sret` edges used to be excepted by
+      name, the rule that refused them is narrowed, and the
+      struct-returning calls go through a thunk.
 
     The test drives them with the coverage a plugin would write, so that a
     rule that rots (a rule that is neutered, or one that stops reading the
@@ -516,15 +517,23 @@ def check_the_payload_rules(root: Path) -> None:
     # failure -- the callee is the payload's own code.
     expect_failure(check_direct_callees,
                    with_direct("0x3.cov", "?own@aim@cs2@@YAXXZ", "external_callee"), payload)
-    # The `sret` edges are excepted: the rule is not narrowed by this task.
-    expect_success(check_direct_callees,
-                   with_direct("0x4.cov", "?sret@aim@cs2@@YAXXZ", "indirect_parameter"), payload)
+    # **Nothing is excepted.** The `sret` edges used to be excepted by
+    # name: a callee that stayed direct for a reason the routing cannot
+    # bypass is a failure too.
+    expect_failure(check_direct_callees,
+                   with_direct("0x4.cov", "?sret@aim@cs2@@YAXXZ", "byval_parameter"), payload)
     # A callee the payload does not own is an import or a CRT symbol: it is
     # left alone, and the check says how many it left alone.
     excepted, left_alone = check_direct_callees(
         with_direct("0x5.cov", "?atan2f", "external_callee"), payload)
     check(excepted == 0, f"the check excepted {excepted} callees, not 0")
     check(left_alone == 1, f"the check left {left_alone} callees alone, not 1")
+    # No direct callee at all: the check says so, and it does not print a
+    # stale entry.
+    excepted, left_alone = check_direct_callees(
+        with_cross("0x9.cov", "?own@aim@cs2@@YAXXZ"), payload)
+    check(excepted == 0, f"the check excepted {excepted} callees, not 0")
+    check(left_alone == 0, f"the check left {left_alone} callees alone, not 0")
 
     # The advice names the reason: a callee that the routing cannot route
     # is not fixed by adding it to the `cross_module` list.
@@ -540,10 +549,10 @@ def check_the_payload_rules(root: Path) -> None:
     else:
         raise TestFailure("a variadic callee did not fail the check")
 
-    # The exception is decided per (module, symbol): a symbol that one
-    # module excepts and another module refuses is a failure, whatever the
-    # order the coverage files are read in.
-    both = (with_direct("0x7.cov", "?own@aim@cs2@@YAXXZ", "indirect_parameter")
+    # The decision is per (module, symbol): a symbol that one module
+    # reports with one reason and another module with another one is a
+    # failure, whatever the order the coverage files are read in.
+    both = (with_direct("0x7.cov", "?own@aim@cs2@@YAXXZ", "byval_parameter")
             + with_direct("0x8.cov", "?own@aim@cs2@@YAXXZ", "external_callee", other))
     expect_failure(check_direct_callees, both, payload)
     expect_failure(check_direct_callees, list(reversed(both)), payload)
@@ -575,7 +584,7 @@ def check_the_cross_module_rule(root: Path) -> None:
     # The entry was seen, but the call to it could not be routed: the build
     # has to fail, and the reason has to be named.
     write_coverage(target, policy_digest, source, 7,
-                   cross="cross blocked:indirect_parameter cs2::aim::DamageField::add "
+                   cross="cross blocked:byval_parameter cs2::aim::DamageField::add "
                          "?add@DamageField@aim@cs2@@QEAA...\n")
     status = run_check_policy(policy, coverage)
     check(status == 1, f"a blocked cross_module entry did not fail the build (status {status})")

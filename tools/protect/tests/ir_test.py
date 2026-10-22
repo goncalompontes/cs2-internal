@@ -17,8 +17,11 @@ not as a crash, so the test asserts on the shape of the rewritten IR:
   * the descriptor global exists and its bytes are not the plain index;
   * decoding the descriptor really yields the index of the callee (the test
     recomputes the key from the three constants of the image and the mixer);
-  * the calls that must be skipped -- a variadic callee, a callee with an
-    `sret` parameter, a `musttail` call -- are untouched.
+  * a callee with an `sret` parameter is routed through a **thunk**, and the
+    thunk carries the `sret` attribute of the call and the hidden pointer out
+    of the first cell of the scratch;
+  * the calls that must be skipped -- a variadic callee, a `musttail` call --
+    are untouched.
 
 Usage: ir_test.py --opt FILE --plugin FILE --fixture FILE --policy FILE --work DIR
 """
@@ -65,6 +68,25 @@ def body_of(ir: str, function: str) -> str:
     start = ir.find(marker)
     if start < 0:
         raise Failure(f"the function '{function}' is not in the output IR")
+    body = []
+    for line in ir[start:].splitlines():
+        body.append(line)
+        if line == "}":
+            break
+    return "\n".join(body)
+
+
+def body_of_thunk(ir: str, thunk: str) -> str:
+    """The body of one thunk of the IR.
+
+    The thunk is the adapter of a struct-returning call: it takes the
+    scratch, loads the arguments out of it and calls the callee with the
+    `sret` attribute.
+    """
+    marker = f"define internal i64 @{thunk}("
+    start = ir.find(marker)
+    if start < 0:
+        raise Failure(f"the thunk '{thunk}' is not in the output IR")
     body = []
     for line in ir[start:].splitlines():
         body.append(line)
@@ -181,17 +203,22 @@ def check_ir(ir: str) -> None:
         "the function type of the caller changed",
     )
 
-    # The table holds the target and the external symbol, and the descriptor
-    # holds an encrypted index.
+    # The table holds the target, the external symbol and the two `sret`
+    # callees, and the descriptor holds an encrypted index.
     table = re.search(
         r"@cs2\.protect\.table = private unnamed_addr constant \[(\d+) x ptr\] \[([^\]]*)\]", ir
     )
     check(table is not None, "the table global is missing")
     assert table is not None
     table_size = int(table.group(1))
-    check(table_size >= 2, "the table does not hold the two callees")
+    check(table_size >= 4, "the table does not hold the four callees")
     check("@target" in table.group(2), "the table does not hold the target")
     check("@external_target" in table.group(2), "the table does not hold the external symbol")
+    check("@sret_target" in table.group(2), "the table does not hold the sret callee")
+    check(
+        "@external_sret_target" in table.group(2),
+        "the table does not hold the external sret callee",
+    )
 
     descriptor = re.search(
         r"@cs2\.protect\.desc = private unnamed_addr constant \[(\d+) x i64\] \[([^\]]*)\]", ir
@@ -242,8 +269,8 @@ def check_ir(ir: str) -> None:
         check(index < len(entries), "the decoded index is outside the table")
         decoded.add(entries[index])
     check(
-        decoded == {"@target", "@external_target"},
-        f"the decoded indices point at {sorted(decoded)} and not at the two callees",
+        decoded == {"@target", "@external_target", "@sret_target", "@external_sret_target"},
+        f"the decoded indices point at {sorted(decoded)} and not at the four callees",
     )
 
     # The calls that must be skipped are untouched.
@@ -252,22 +279,20 @@ def check_ir(ir: str) -> None:
         "the variadic call was rewritten",
     )
     check(
-        "call void @sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x)" in caller,
-        "the call with an sret parameter was rewritten",
-    )
-    check(
         "musttail call i32 @musttail_target(i32 %x)" in caller,
         "the musttail call was rewritten",
     )
 
-    # The decode is inline: the caller makes exactly the six calls it made
+    # The decode is inline: the caller makes exactly the calls it made
     # before, and none of them is a call to a shared helper (a helper would
     # add a stack frame to every call site).
     calls = re.findall(r"\bcall\b", caller)
-    check(len(calls) == 5, f"the caller makes {len(calls)} calls and not five")
+    check(len(calls) == 6, f"the caller makes {len(calls)} calls and not six")
     symbols = set(re.findall(r"@[A-Za-z0-9_.$]+\(", "\n".join(caller.splitlines()[1:])))
     check(
-        symbols == {"@variadic_target(", "@sret_target(", "@musttail_target("},
+        symbols == {"@variadic_target(", "@musttail_target("} | {
+            f"@{name}(" for name in thunks_of(ir)
+        },
         f"the caller calls an unexpected symbol: {sorted(symbols)}",
     )
 
@@ -306,6 +331,67 @@ def check_ir(ir: str) -> None:
         "the GEP into the table promises `inbounds`",
     )
 
+    check_thunks(ir)
+
+
+def thunks_of(ir: str) -> list[str]:
+    """The names of the thunks the pass emitted."""
+    return re.findall(r"^define internal i64 @(cs2\.protect\.thunk\.\d+)\(", ir, re.MULTILINE)
+
+
+def check_thunks(ir: str) -> None:
+    """The assertions of the thunk.
+
+    The thunk is the adapter of a struct-returning call: it takes the
+    scratch, loads the arguments out of it and calls the callee **with the
+    `sret` attribute**. The hidden pointer is the first cell of the scratch,
+    and the thunk passes it unchanged.
+    """
+    thunks = thunks_of(ir)
+    check(len(thunks) == 2, f"the pass emitted {len(thunks)} thunks and not two")
+    for thunk in thunks:
+        body = body_of_thunk(ir, thunk)
+        # The call of the thunk: the callee is a value (the dispatch), and
+        # the call carries the `sret` attribute.
+        call = re.search(r"call void %\d+\(ptr [^()]*sret\([^()]*\) (%\d+),", body)
+        check(
+            call is not None,
+            f"the call of the thunk '{thunk}' does not carry the sret attribute",
+        )
+        # The hidden pointer: the **first** cell of the scratch, unchanged.
+        # The cell is the scratch itself (offset zero), and the thunk's
+        # parameter is `%0`.
+        if call is not None:
+            argument = re.escape(call.group(1))
+            check(
+                re.search(rf"{argument} = load ptr, ptr %0,", body) is not None,
+                f"the thunk '{thunk}' does not take the hidden pointer out of the first cell "
+                "of the scratch",
+            )
+        # The thunk returns zero: the callee returns nothing.
+        check(
+            re.search(r"ret i64 0", body) is not None,
+            f"the thunk '{thunk}' does not return zero",
+        )
+        # The decode is in the thunk: the callee is reached through the
+        # caller's own table.
+        check(
+            "@cs2.protect.table" in body,
+            f"the thunk '{thunk}' does not reach the callee through the table",
+        )
+    # The caller: the `sret` calls go through the thunks, and the scratch is
+    # in the caller's frame.
+    caller = body_of(ir, "caller")
+    for thunk in thunks:
+        check(
+            f"call i64 @{thunk}(" in caller,
+            f"the caller does not call the thunk '{thunk}'",
+        )
+    check(
+        "alloca { ptr, i32 }" in caller,
+        "the scratch of the thunk is not in the caller's frame",
+    )
+
 
 def check_layout(ir: str, same: str, other: str) -> None:
     """The assertions of the layout permutation.
@@ -325,9 +411,11 @@ def check_layout(ir: str, same: str, other: str) -> None:
     check(defines_of(other) != defines, "another seed gives the same order")
 
     # The order is a permutation of the original one: no function is lost
-    # and none is duplicated. The fixture's order is the one of the file.
+    # and none is duplicated. The fixture's order is the one of the file,
+    # and the thunks the pass emitted are part of the module.
     original = ["target", "variadic_target", "musttail_target", "sret_target", "caller"]
-    check(sorted(defines) == sorted(original), "the permutation lost or duplicated a function")
+    expected = sorted(original + thunks_of(ir))
+    check(sorted(defines) == expected, "the permutation lost or duplicated a function")
     check(defines != original, "the function list is in the original order: it was not permuted")
 
 

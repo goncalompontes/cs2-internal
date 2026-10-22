@@ -89,15 +89,7 @@ EXCEPTION_DIRECTORY = 3
 #: The base relocation directory of a PE.
 BASE_RELOCATION_DIRECTORY = 5
 
-#: The reason a cross-TU callee may stay direct without failing the build.
-#:
-#: The `sret` rule is not narrowed by this task (that is the other half of
-#: the cross-TU work): a callee that returns a big aggregate keeps its
-#: `sret` parameter, and the call stays direct. The check names those
-#: callees instead of failing on them.
-SRET_REASON = "indirect_parameter"
-
-#: The reasons a `cross_module` entry cannot route a callee.
+#: The reasons a cross-TU callee cannot be routed, whatever the policy says.
 #:
 #: The routing replaces the callee of a call with a value read from the
 #: table of the caller. It cannot reproduce a variadic call, a tail call or
@@ -105,10 +97,17 @@ SRET_REASON = "indirect_parameter"
 #: properties stays direct -- and no `cross_module` entry will ever route
 #: it. The advice the check gives has to say so: an advice that says "add
 #: it to the list" sends the operator in a circle.
+#:
+#: The `sret` parameter is **not** one of them: the rule is narrowed, and a
+#: callee that returns an aggregate is routed through a thunk.
 UNROUTABLE_REASONS = {
     "variadic_callee": "the callee is variadic",
     "musttail": "the call is a tail call",
     "optnone_callee": "the callee is `optnone`",
+    "byval_parameter": "the callee has a `byval` parameter: the caller copies the argument",
+    "inalloca_parameter": "the callee has an `inalloca` parameter: the frame is the caller's",
+    "preallocated_parameter": "the callee has a `preallocated` parameter: the frame is the "
+    "caller's",
 }
 
 #: A symbol of a `llvm-nm` listing: "0000000000000000 T ?solve@aim@cs2@@…".
@@ -781,15 +780,10 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
     the payload's own code, and the edge is still a direct call in the
     image.
 
-    The `sret` edges are excepted: this task does not narrow the `sret`
-    rule, so a callee that returns a big aggregate keeps its direct call.
-    The check names those callees instead of failing on them.
-
-    The exception is decided per **(module, symbol)** pair, not per symbol:
-    the coverage of one module is the evidence of that module, and two
-    modules may disagree about a callee. A symbol that one module excepts
-    and another module refuses for another reason is a failure, whatever
-    the order the coverage files are read in.
+    **Nothing is excepted.** The `sret` edges used to be excepted by name:
+    the rule that refused a callee with an `sret` parameter is narrowed, the
+    struct-returning calls go through a thunk, and there is nothing left to
+    except.
 
     The number of the calls it left alone is returned too: the operator
     sees the CRT's symbols that the image still calls directly.
@@ -807,7 +801,6 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
         per_symbol.setdefault(symbol, []).append(reason)
 
     failures: list[tuple[str, str]] = []
-    excepted: list[str] = []
     left_alone = 0
     for symbol in sorted(per_symbol):
         module_reasons = per_symbol[symbol]
@@ -818,11 +811,10 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
             continue
         # The reasons are sorted, so the one that is named does not depend
         # on the order the coverage files were read in.
-        refused = sorted({reason for reason in module_reasons if reason != SRET_REASON})
+        refused = sorted(set(module_reasons))
         if refused:
             failures.append((symbol, refused[0]))
             continue
-        excepted.append(symbol)
 
     if failures:
         names = ", ".join(f"{symbol} ({reason})" for symbol, reason in failures)
@@ -831,12 +823,12 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
             f"{len(failures)} cross-TU callees that a protected function calls directly are "
             f"the payload's own code: {names}. {advice}"
         )
-    if excepted:
+    if not per_symbol:
         print(
-            f"check_payload: {len(excepted)} cross-TU callees stay direct because of the "
-            "`sret` rule (this task does not narrow it): " + ", ".join(excepted)
+            "check_payload: no cross-TU callee of a protected function stayed direct: "
+            "the cross-TU edges of the protected functions are all routed"
         )
-    return len(excepted), left_alone
+    return 0, left_alone
 
 
 def advice_for(reason: str) -> str:
@@ -851,12 +843,24 @@ def advice_for(reason: str) -> str:
       routing cannot reproduce a variadic call, a tail call or a call to an
       `optnone` function. No `cross_module` entry will ever route it, and
       an advice that says "add it to the list" sends the operator in a
-      circle.
+      circle;
+    * a callee with a `sret` parameter stays direct only when the module's
+      target is not the one the narrowing was measured on.
     """
     if reason in UNROUTABLE_REASONS:
         return (
             f"The routing cannot bypass `{reason}` ({UNROUTABLE_REASONS[reason]}): the edge "
             "stays direct, and no `cross_module` entry will route it."
+        )
+    if reason == "sret_parameter":
+        return (
+            "The `sret` parameter is routable on `x86_64-pc-windows-msvc` only: the module's "
+            "target is not the one the narrowing was measured on."
+        )
+    if reason == "sret_result":
+        return (
+            "The callee takes an `sret` parameter **and** returns a value: that is not a thing "
+            "in the x64 ABI."
         )
     return (
         "A callee that is not in the policy's `cross_module` list is refused with "
@@ -1375,10 +1379,10 @@ def main(argv: list[str]) -> int:
                     "reported as passed"
                 )
             check_cross_module_entries(files, symbols)
-            excepted, left_alone = check_direct_callees(files, symbols)
+            left_alone = check_direct_callees(files, symbols)
             print(
                 f"check_payload: {len(symbols)} symbols of the payload's own libraries; "
-                f"{excepted} cross-TU callees stay direct because of the `sret` rule, and "
+                f"no cross-TU callee of a protected function stayed direct, and "
                 f"{left_alone} direct calls name a symbol the payload does not own"
             )
 

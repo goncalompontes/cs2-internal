@@ -4,12 +4,18 @@
 The pass rewrites the calls of a selected function into indirect dispatches
 through an encrypted descriptor. A mistake does not crash: it calls the
 *wrong* function, so the test builds the same fixture twice -- once with the
-pass and once without -- runs both and compares their output *and* their
-exit code.
+pass and once without -- loads both and compares what they return.
 
 The fixture calls enough functions through the rewritten path (and one
 variadic callee, which the pass must skip) that a mis-dispatch changes the
 result.
+
+The fixture is a **DLL**, like the payload: the loader calls `DllMain`, and
+the probe is reached through the loader's own path. The struct-returning
+callees are the case this test exists for: the call carries an `sret`
+parameter, the pass routes it through a thunk, and the hidden pointer has to
+reach the callee unchanged. A mistake there is a **wrong value**, not a
+crash.
 
 The build needs the MSVC toolchain (the static CRT of the fixture), so the
 driver sets up vcvars64 the way scripts/build-protect-plugin.py does.
@@ -19,6 +25,7 @@ Usage: diff_test.py --clang-cl FILE --plugin FILE --fixture FILE --policy FILE -
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import shutil
 import subprocess
@@ -132,6 +139,9 @@ def compile_fixture(
         "/EHsc",
         "/GR-",
         "/MT",
+        # The fixture is a DLL, like the payload: the loader calls DllMain,
+        # and the probe is reached through the loader's own path.
+        "/LD",
     ]
     if compile_only:
         command.append("/c")
@@ -142,6 +152,19 @@ def compile_fixture(
     if plugin is not None:
         command.append(f"/clang:-fpass-plugin={plugin}")
     return run(command, environment, vcvars)
+
+
+def probe(dll: Path, seed: int) -> int:
+    """Loads the DLL and calls its exported probe.
+
+    The loader calls `DllMain`, so the fixture is loaded the way the payload
+    is loaded: the probe is reached through the loader's own path.
+    """
+    library = ctypes.WinDLL(str(dll))
+    function = library.cs2_fixture_probe
+    function.restype = ctypes.c_ulonglong
+    function.argtypes = [ctypes.c_int]
+    return int(function(seed))
 
 
 def check_constants(binary: Path, mixers: list[Mixer]) -> None:
@@ -233,8 +256,8 @@ def check_result(args: argparse.Namespace) -> None:
     vcvars = find_vcvars()
     check(vcvars is not None, "no vcvars64.bat found: the fixture needs the MSVC toolchain")
 
-    plain = work / "plain.exe"
-    protected = work / "protected.exe"
+    plain = work / "plain.dll"
+    protected = work / "protected.dll"
 
     built = compile_fixture(
         args.clang_cl, args.fixture, plain, None, args.policy, work / "coverage-plain", vcvars
@@ -320,18 +343,17 @@ def check_result(args: argparse.Namespace) -> None:
         "the dispatch away",
     )
 
-    # The two runs have to agree.
-    plain_run = subprocess.run([str(plain)], capture_output=True, text=True)
-    protected_run = subprocess.run([str(protected)], capture_output=True, text=True)
-    check(
-        plain_run.stdout == protected_run.stdout,
-        f"the output differs:\n--- unprotected\n{plain_run.stdout}\n--- protected\n{protected_run.stdout}",
-    )
-    check(
-        plain_run.returncode == protected_run.returncode,
-        f"the exit code differs: {plain_run.returncode} and {protected_run.returncode}",
-    )
-    check(plain_run.stdout != "", "the fixture printed nothing: the test would be vacuous")
+    # The two runs have to agree: the value the probe returns carries the
+    # result **and** the counter, so a call that reached the wrong function
+    # changes it.
+    for seed in (5, 0, -3):
+        first = probe(plain, seed)
+        second = probe(protected, seed)
+        check(
+            first == second,
+            f"the two builds disagree on the seed {seed}: {first} and {second}",
+        )
+    check(probe(plain, 5) != 0, "the fixture returned nothing: the test would be vacuous")
 
 
 if __name__ == "__main__":

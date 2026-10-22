@@ -3,7 +3,8 @@
     { "symbol": "cs2_fixture_caller", "module": "diff_fixture.cpp", "level": "call" }
   ],
   "cross_module": [
-    "cs2_fixture_helper"
+    "cs2_fixture_helper",
+    "cs2_fixture_cross"
   ],
   "seed": "0xFEDCBA9876543210"
 }
