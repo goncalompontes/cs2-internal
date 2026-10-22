@@ -19,10 +19,13 @@ void install_crash_handler() noexcept;
 // process is recovered to just after `call_guarded`, the fault is logged, and it
 // returns false. Otherwise it returns true once `fn` returns.
 //
-// This exists because the payload is manually mapped with no exception tables, so
-// a C++ `__try/__except` cannot be registered; the guard uses the vectored
-// handler + `longjmp` instead. Use it only for read-only calls whose partial
-// side effects are acceptable (e.g. probing a fault-prone engine query).
+// This exists because the payload is manually mapped: the loader does not
+// register the image's exception tables, so the payload does not lean on the
+// C++ exception machinery. The injector registers the `.pdata` explicitly --
+// and the guard's `longjmp` needs it, because it unwinds the frames it leaves.
+// The fault itself is caught in a vectored handler and turned back into a
+// return. Use it only for read-only calls whose partial side effects are
+// acceptable (e.g. probing a fault-prone engine query).
 //
 // **The limits of the guard** (they are the guard's contract, not accidents):
 //
@@ -44,7 +47,8 @@ void install_crash_handler() noexcept;
 //   * The handler that owns the jump is **not** `noexcept`; a `noexcept` frame
 //     is `nounwind` and the jump out of it would run its `std::terminate`
 //     cleanup instead of recovering. `payload/diag/src/crash_handler.cpp`
-//     explains it and a `static_assert` keeps it out.
+//     explains it, and `payload/diag/tests/test_diag_guard.cpp` checks it
+//     (behaviourally, built with clang-cl, and textually).
 //
 // The guard is the tree's **only** recovery mechanism: `cs2::diag` owns it and
 // everything that needs a guarded engine call uses it.
