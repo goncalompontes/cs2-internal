@@ -49,8 +49,8 @@ namespace trace_guard {
 // The guard's state. One copy for the whole program (an `inline` variable), behind
 // a typed accessor — the same shape as the diag module's guard.
 struct State {
-  std::jmp_buf jump{};        // the jump target
-  volatile long active = 0;   // a guarded call is in flight
+  std::jmp_buf jump{};                // the jump target
+  volatile long active = 0;           // a guarded call is in flight
   volatile unsigned long thread = 0;  // the thread that owns it
   volatile long installed = 0;        // the handler is registered
 };
@@ -80,8 +80,7 @@ inline State g_state{};
 // `longjmp` will not unwind through it.
 LONG CALLBACK handler(EXCEPTION_POINTERS* info) {
   const DWORD code = info->ExceptionRecord->ExceptionCode;
-  if (g_state.active != 0 && g_state.thread == GetCurrentThreadId() &&
-      is_recoverable(code)) {
+  if (g_state.active != 0 && g_state.thread == GetCurrentThreadId() && is_recoverable(code)) {
     g_state.active = 0;
     std::longjmp(g_state.jump, 1);
   }

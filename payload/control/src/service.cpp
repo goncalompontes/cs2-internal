@@ -4018,8 +4018,7 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   const float spread = number("spread", 0.0F);
   const int count = integer("count", 1);
   if (!trace_fan_size_ok(count)) {
-    set_error(out,
-              "trace_probe: count must be between 1 and " + std::to_string(TRACE_MAX_RAYS));
+    set_error(out, "trace_probe: count must be between 1 and " + std::to_string(TRACE_MAX_RAYS));
     return;
   }
   if (spread < 0.0F || spread > 45.0F) {
@@ -4032,8 +4031,8 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   if (depth <= 0.0F) {
     depth = k_trace_probe_default_depth;
     float range = 0.0F;
-    if (local.weapon_vdata != 0 &&
-        cs2::game::read(local.weapon_vdata + k_vdata_range, range) && range > 0.0F) {
+    if (local.weapon_vdata != 0 && cs2::game::read(local.weapon_vdata + k_vdata_range, range) &&
+        range > 0.0F) {
       depth = range;
     }
   }
@@ -4059,8 +4058,7 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   // The fan: ray 0 is the view ray itself, the rest are the golden-angle spiral
   // around it (a documented, deterministic order — two runs compare).
   const aim::Basis basis = aim::Basis::world();
-  const std::vector<TraceRay> rays =
-      build_trace_fan(eye, basis, yaw, pitch, spread, count, depth);
+  const std::vector<TraceRay> rays = build_trace_fan(eye, basis, yaw, pitch, spread, count, depth);
 
   // Arm the request; the game thread runs the engine call and publishes the answer.
   {
@@ -4192,16 +4190,14 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
       Json record = Json::object();
       record.set("entry", Json::number(static_cast<double>(span.entry)));
       record.set("exit", Json::number(static_cast<double>(span.exit)));
-      record.set("enter_record",
-                 Json::integer(span.enter_record >= 0 &&
-                                       static_cast<std::size_t>(span.enter_record) <
-                                           ray.intervals.size()
-                                   ? span.enter_record
-                                   : -1));
+      record.set("enter_record", Json::integer(span.enter_record >= 0 &&
+                                                       static_cast<std::size_t>(span.enter_record) <
+                                                           ray.intervals.size()
+                                                   ? span.enter_record
+                                                   : -1));
       record.set("exit_record",
-                 Json::integer(span.exit_record >= 0 &&
-                                       static_cast<std::size_t>(span.exit_record) <
-                                           ray.intervals.size()
+                 Json::integer(span.exit_record >= 0 && static_cast<std::size_t>(span.exit_record) <
+                                                            ray.intervals.size()
                                    ? span.exit_record
                                    : -1));
       engine_only.push_back(std::move(record));

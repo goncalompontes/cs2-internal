@@ -60,8 +60,7 @@ auto main() -> int {
   expect(value == 42, "the process is still running its own code");
 
   // A null function is refused (never a call through a null pointer).
-  expect(!cs2::control::trace_call_guarded(nullptr, &value),
-         "a null call is refused");
+  expect(!cs2::control::trace_call_guarded(nullptr, &value), "a null call is refused");
 
   if (failures == 0) {
     std::printf("control-trace-probe-guard: ok\n");

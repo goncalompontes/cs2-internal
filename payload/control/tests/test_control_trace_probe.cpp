@@ -104,8 +104,8 @@ void test_ray_construction() {
   std::vector<cs2::aim::Vec3> vertices;
   for (int i = 0; i < 8; ++i) {
     vertices.push_back(cs2::aim::Vec3{.x = box_centre.x + ((i & 1) != 0 ? 50.0F : -50.0F),
-                                       .y = box_centre.y + ((i & 2) != 0 ? 50.0F : -50.0F),
-                                       .z = box_centre.z + ((i & 4) != 0 ? 50.0F : -50.0F)});
+                                      .y = box_centre.y + ((i & 2) != 0 ? 50.0F : -50.0F),
+                                      .z = box_centre.z + ((i & 4) != 0 ? 50.0F : -50.0F)});
   }
   const std::vector<cs2::aim::OccluderPlane> planes = cs2::aim::convex_hull_3d(vertices);
   expect(!planes.empty(), "the test box has half-spaces");
@@ -131,8 +131,7 @@ void test_fan_order() {
   const float spread = 4.0F;
   const int count = 5;
 
-  const auto rays =
-      cs2::control::build_trace_fan(eye, basis, yaw, pitch, spread, count, 1000.0F);
+  const auto rays = cs2::control::build_trace_fan(eye, basis, yaw, pitch, spread, count, 1000.0F);
   expect(rays.size() == static_cast<std::size_t>(count), "the fan has the requested rays");
 
   // Ray 0 is the view ray itself.
@@ -140,12 +139,10 @@ void test_fan_order() {
          "the fan's first ray is the view ray");
 
   // The fan is **deterministic**: two runs compare.
-  const auto again =
-      cs2::control::build_trace_fan(eye, basis, yaw, pitch, spread, count, 1000.0F);
+  const auto again = cs2::control::build_trace_fan(eye, basis, yaw, pitch, spread, count, 1000.0F);
   bool identical = again.size() == rays.size();
   for (std::size_t i = 0; identical && i < rays.size(); ++i) {
-    identical = near(again[i].direction, rays[i].direction) &&
-                near(again[i].end, rays[i].end);
+    identical = near(again[i].direction, rays[i].direction) && near(again[i].end, rays[i].end);
   }
   expect(identical, "the fan is deterministic");
 
@@ -177,8 +174,7 @@ void test_fan_order() {
   expect(distinct, "no two fan rays are the same");
 
   // A fan of one ray is the view ray, whatever the spread.
-  const auto single =
-      cs2::control::build_trace_fan(eye, basis, yaw, pitch, spread, 1, 1000.0F);
+  const auto single = cs2::control::build_trace_fan(eye, basis, yaw, pitch, spread, 1, 1000.0F);
   expect(single.size() == 1U && near(single.front().direction, rays.front().direction),
          "a fan of one ray is the view ray");
 }
@@ -191,8 +187,7 @@ void test_interval_reader() {
   record[cs2::control::TRACE_INTERVAL_ENTER_EXIT] = 1U;
   record[0] = 0xABU;  // a byte outside the pinned fields: the raw copy must keep it
 
-  const cs2::control::TraceInterval interval =
-      cs2::control::read_trace_interval(record, 800.0F);
+  const cs2::control::TraceInterval interval = cs2::control::read_trace_interval(record, 800.0F);
   expect(near(interval.fraction, 0.25F), "the fraction is read from +0x0C");
   expect(near(interval.distance, 200.0F), "the distance is the fraction times the ray's length");
   expect(interval.enter_exit == 1U, "the enter/exit byte is read from +0x32");
@@ -202,13 +197,11 @@ void test_interval_reader() {
 
   // A "leave" record reads the other byte value.
   record[cs2::control::TRACE_INTERVAL_ENTER_EXIT] = 0U;
-  const cs2::control::TraceInterval leave =
-      cs2::control::read_trace_interval(record, 800.0F);
+  const cs2::control::TraceInterval leave = cs2::control::read_trace_interval(record, 800.0F);
   expect(leave.enter_exit == 0U, "a leave record reads zero at +0x32");
 
   // A missing record reads as empty (never a fault).
-  const cs2::control::TraceInterval missing =
-      cs2::control::read_trace_interval(nullptr, 800.0F);
+  const cs2::control::TraceInterval missing = cs2::control::read_trace_interval(nullptr, 800.0F);
   expect(missing.fraction == 0.0F && missing.distance == 0.0F && missing.enter_exit == 0U,
          "a missing record reads as empty");
 }
@@ -239,8 +232,8 @@ void test_difference() {
 
   // The engine found a solid we have nothing for.
   {
-    const std::vector<cs2::control::TraceInterval> intervals = {
-        interval_at(100.0F, 1U), interval_at(120.0F, 0U)};
+    const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
+                                                                interval_at(120.0F, 0U)};
     const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, {}, 2.0F);
     expect(diff.verdict == cs2::control::TraceVerdict::engine_only,
            "an interval with no occluder is engine_only");
@@ -266,8 +259,8 @@ void test_difference() {
 
   // Both found the same solid: they agree.
   {
-    const std::vector<cs2::control::TraceInterval> intervals = {
-        interval_at(100.0F, 1U), interval_at(120.0F, 0U)};
+    const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
+                                                                interval_at(120.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(101.0F, 119.0F)};
     const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, 2.0F);
     expect(diff.verdict == cs2::control::TraceVerdict::agrees,
@@ -278,8 +271,8 @@ void test_difference() {
   // The same solid at a **different depth**: the engine's span and our occluder
   // overlap, so they are the same solid — our thickness is simply bigger.
   {
-    const std::vector<cs2::control::TraceInterval> intervals = {
-        interval_at(100.0F, 1U), interval_at(110.0F, 0U)};
+    const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
+                                                                interval_at(110.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(100.0F, 130.0F)};
     const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, 2.0F);
     expect(diff.verdict == cs2::control::TraceVerdict::agrees,
@@ -288,8 +281,8 @@ void test_difference() {
 
   // Two different solids: the difference is in both directions.
   {
-    const std::vector<cs2::control::TraceInterval> intervals = {
-        interval_at(100.0F, 1U), interval_at(120.0F, 0U)};
+    const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
+                                                                interval_at(120.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(400.0F, 430.0F)};
     const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, 2.0F);
     expect(diff.verdict == cs2::control::TraceVerdict::both, "two different solids are 'both'");
@@ -300,25 +293,24 @@ void test_difference() {
   // The tolerance: an occluder a unit away is the same solid, one ten units away
   // is not.
   {
-    const std::vector<cs2::control::TraceInterval> intervals = {
-        interval_at(100.0F, 1U), interval_at(120.0F, 0U)};
+    const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
+                                                                interval_at(120.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> close = {hit_at(101.0F, 119.0F)};
     const std::vector<cs2::control::TraceOccluderHit> far = {hit_at(130.0F, 150.0F)};
     expect(cs2::control::diff_trace(intervals, close, 2.0F).verdict ==
                cs2::control::TraceVerdict::agrees,
            "an occluder within the tolerance is the same solid");
-    expect(cs2::control::diff_trace(intervals, far, 2.0F).verdict ==
-               cs2::control::TraceVerdict::both,
-           "an occluder beyond the tolerance is a different solid");
+    expect(
+        cs2::control::diff_trace(intervals, far, 2.0F).verdict == cs2::control::TraceVerdict::both,
+        "an occluder beyond the tolerance is a different solid");
   }
 
   // The pairing: the records are paired into spans (an enter opens a span, the
   // next leave closes it), so a ray that crosses one solid gives one span.
   {
-    const std::vector<cs2::control::TraceInterval> intervals = {
-        interval_at(100.0F, 1U), interval_at(120.0F, 0U)};
-    const std::vector<cs2::control::TraceSpan> spans =
-        cs2::control::pair_trace_spans(intervals);
+    const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
+                                                                interval_at(120.0F, 0U)};
+    const std::vector<cs2::control::TraceSpan> spans = cs2::control::pair_trace_spans(intervals);
     expect(spans.size() == 1U, "an enter/leave pair is one span");
     if (!spans.empty()) {
       expect(spans.front().enter_record == 0 && spans.front().exit_record == 1,
@@ -361,7 +353,8 @@ void test_bounds() {
          "the maximum is published as it is");
   const cs2::control::TraceIntervalBudget over =
       cs2::control::trace_interval_budget(cs2::control::TRACE_MAX_INTERVALS + 10);
-  expect(over.published == cs2::control::TRACE_MAX_INTERVALS, "the budget publishes at most the maximum");
+  expect(over.published == cs2::control::TRACE_MAX_INTERVALS,
+         "the budget publishes at most the maximum");
   expect(over.overflow, "the budget reports the overflow");
   expect(cs2::control::TRACE_INTERVAL_CAPACITY >= cs2::control::TRACE_MAX_INTERVALS,
          "the results buffer is at least as large as the published maximum");

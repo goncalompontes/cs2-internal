@@ -1335,7 +1335,7 @@ TraceLineIntervalsFn g_trace_line_intervals = nullptr;
 // external and pre-sized; the engine's own call sizes its vector for 64 entries, and
 // this one is larger so a dense scene cannot make it grow.
 alignas(16) unsigned char g_trace_interval_buffer[TRACE_INTERVAL_CAPACITY *
-                                                 k_trace_interval_stride] = {};
+                                                  k_trace_interval_stride] = {};
 
 // One `TraceLineIntervals` call.
 struct TraceCall {
@@ -1631,8 +1631,7 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
   // (`AabbBvh::query_pyramid`), and `OccluderCell::ray_span` then decides which of
   // those solids the ray actually enters.
   const cs2::aim::Aabb target{.min = far_lo, .max = far_hi};
-  OcclusionQueryResult occluders =
-      query_world_occluders(eye, lo, hi, true, nullptr, 0, &target, 1);
+  OcclusionQueryResult occluders = query_world_occluders(eye, lo, hi, true, nullptr, 0, &target, 1);
   run.occluders = static_cast<int>(occluders.hulls.size());
 
   // The projected cells — the very same projection the solver's heatmap uses, so the
@@ -1687,8 +1686,8 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
       extension = &ray.start;
     }
     bool ok = false;
-    const std::int32_t count = run_trace_query(reinterpret_cast<void*>(iface), filter, *start,
-                                                *extension, vector, &ok);
+    const std::int32_t count =
+        run_trace_query(reinterpret_cast<void*>(iface), filter, *start, *extension, vector, &ok);
     result.engine_ok = ok;
     result.engine_faulted = !ok;
     result.interval_count = count;

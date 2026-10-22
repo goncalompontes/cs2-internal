@@ -271,7 +271,7 @@ enum class TraceVerdict : std::uint8_t { agrees, engine_only, ours_only, both };
 
 // The difference between the engine's answer and ours for one ray.
 struct TraceDiff {
-  std::vector<TraceSpan> engine_only;      // the spans our set has nothing for
+  std::vector<TraceSpan> engine_only;       // the spans our set has nothing for
   std::vector<TraceOccluderHit> ours_only;  // our solids the engine did not report
   TraceVerdict verdict = TraceVerdict::agrees;
 };
@@ -325,17 +325,16 @@ struct TraceIntervalBudget {
   if (count < 0) {
     return TraceIntervalBudget{};
   }
-  return TraceIntervalBudget{
-      .published = count < TRACE_MAX_INTERVALS ? count : TRACE_MAX_INTERVALS,
-      .overflow = count > TRACE_MAX_INTERVALS};
+  return TraceIntervalBudget{.published = count < TRACE_MAX_INTERVALS ? count : TRACE_MAX_INTERVALS,
+                             .overflow = count > TRACE_MAX_INTERVALS};
 }
 
 // One ray's answer: the engine's intervals, our solids and the difference.
 struct TraceRayResult {
   TraceRay ray{};
-  bool engine_ok = false;       // the engine call returned (no fault)
-  bool engine_faulted = false;  // a guarded fault was recovered
-  int interval_count = 0;       // the intervals the engine returned
+  bool engine_ok = false;           // the engine call returned (no fault)
+  bool engine_faulted = false;      // a guarded fault was recovered
+  int interval_count = 0;           // the intervals the engine returned
   bool intervals_overflow = false;  // more intervals than the probe publishes
   std::vector<TraceInterval> intervals;
   std::vector<TraceOccluderHit> ours;
@@ -344,8 +343,8 @@ struct TraceRayResult {
 
 // The whole probe: the engine's health, our occluder set and the per-ray answers.
 struct TraceProbeRun {
-  bool ok = false;       // the engine call succeeded
-  bool faulted = false;  // a guarded fault was recovered (the probe's own health)
+  bool ok = false;                   // the engine call succeeded
+  bool faulted = false;              // a guarded fault was recovered (the probe's own health)
   TraceAbi abi = TraceAbi::correct;  // how the engine was called
   std::uintptr_t iface = 0;
   std::uintptr_t filter = 0;
@@ -497,8 +496,9 @@ struct TraceProbeRun {
 // construction the occluder projection uses, so the probe's ray and the solver's ray
 // are the same 3-D segment.
 [[nodiscard]] inline auto build_trace_fan(const cs2::aim::Vec3& eye, const cs2::aim::Basis& basis,
-                                          float yaw_degrees, float pitch_degrees, float spread_degrees,
-                                          int count, float depth) -> std::vector<TraceRay> {
+                                          float yaw_degrees, float pitch_degrees,
+                                          float spread_degrees, int count, float depth)
+    -> std::vector<TraceRay> {
   constexpr float k_deg_to_rad = 0.01745329251994329577F;
   constexpr float k_golden_angle = 2.39996322972865332F;  // 137.50776405 degrees
   std::vector<TraceRay> rays;
@@ -519,10 +519,8 @@ struct TraceProbeRun {
       v = centre_v + radius * std::sin(theta);
     }
     const cs2::aim::Vec3 direction = basis.unproject(cs2::aim::Vec2{.x = u, .y = v});
-    rays.push_back(TraceRay{.start = eye,
-                             .direction = direction,
-                             .end = eye + direction * depth,
-                             .depth = depth});
+    rays.push_back(TraceRay{
+        .start = eye, .direction = direction, .end = eye + direction * depth, .depth = depth});
   }
   return rays;
 }
@@ -537,18 +535,17 @@ struct TraceProbeRun {
     -> std::optional<cs2::aim::OccluderCell> {
   if (hull.kind == cs2::aim::SolidKind::sphere) {
     return cs2::aim::project_sphere_occluder(eye, basis, hull.a, hull.radius,
-                                              hull.surface_modifier);
+                                             hull.surface_modifier);
   }
   if (hull.kind == cs2::aim::SolidKind::capsule) {
     return cs2::aim::project_capsule_occluder(eye, basis, hull.a, hull.b, hull.radius,
-                                               hull.surface_modifier);
+                                              hull.surface_modifier);
   }
   if (hull.kind == cs2::aim::SolidKind::mesh) {
     return cs2::aim::project_mesh_occluder(eye, basis, hull.vertices, hull.triangles,
-                                            hull.surface_modifier, hull.mesh_bvh);
+                                           hull.surface_modifier, hull.mesh_bvh);
   }
-  return cs2::aim::project_occluder(eye, basis, hull.vertices, hull.planes,
-                                    hull.surface_modifier);
+  return cs2::aim::project_occluder(eye, basis, hull.vertices, hull.planes, hull.surface_modifier);
 }
 
 // The probe: our occluder set's answer and the engine's own answer for the same rays,
