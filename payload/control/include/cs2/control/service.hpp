@@ -604,6 +604,16 @@ class Service {
   // operator has to be able to see that it *stuck* (the menu cannot show the
   // objective at all).
   std::atomic<std::uint32_t> rage_menu_fields_{0};
+  // The objective the **menu's tab is showing**: the block's own byte, which
+  // the menu's `Objective` combo displays.
+  //
+  // **Why it is tracked.** The menu cannot show the Monte-Carlo objective (it
+  // has three options), so after the control channel has set it the tab still
+  // reads "Hitchance" while a **different** objective is in force. The menu
+  // may not be touched to say so (the task's scope), so the **status** is
+  // where the difference is visible: `objective` is the objective in force,
+  // `menu_objective` is the one on the tab.
+  std::atomic<int> rage_menu_objective_{1};
   // Note the ownership of the fields a write carried.
   void note_rage_owner(std::uint32_t fields, RageSource source) noexcept;
   // The tuning actually used by the solve: the per-weapon profile when `per_weapon` is

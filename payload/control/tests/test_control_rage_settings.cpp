@@ -472,6 +472,30 @@ void test_the_status_names_the_owner() {
          "the ownership is per field");
 }
 
+// The status's **effective** owner: the owner of the objective **in force**.
+//
+// The scope is the point: `objective` is the effective objective (the
+// per-weapon profile's when one is in force), so its owner has to be the
+// effective one too — otherwise the two keys describe different objectives.
+void test_the_status_names_the_effective_owner() {
+  // No profile in force: the effective objective is the global one, so the
+  // owner is the channel that owns it.
+  expect(cs2::control::rage_effective_owner_name(0, 3, 3) == "control",
+         "the control channel owns the objective in force");
+  expect(cs2::control::rage_effective_owner_name(cs2::control::RAGE_FIELD_OBJECTIVE, 1, 1) ==
+             "menu",
+         "the menu owns the objective in force");
+  // A profile's objective is in force: it comes from the profile file, so no
+  // channel owns it.
+  expect(cs2::control::rage_effective_owner_name(cs2::control::RAGE_FIELD_OBJECTIVE, 2, 3) ==
+             "profile",
+         "a profile's objective has no channel owner");
+  // A profile that happens to carry the global objective's value is not a
+  // profile's objective in force.
+  expect(cs2::control::rage_effective_owner_name(0, 3, 3) != "profile",
+         "the global objective in force is not a profile's");
+}
+
 // The **sink** consults the rule before it applies, and the copy it compares
 // against is the one it just applied.
 void test_the_sink_consults_the_rule(const std::string& root) {
@@ -552,14 +576,25 @@ void test_the_service_applies_only_the_masked_fields(const std::string& root) {
   // The ownership is recorded.
   expect(code.find("note_rage_owner(") != std::string::npos,
          "the service records the owner of the fields it wrote");
+  // The menu's **displayed** objective is recorded, so the status can say what
+  // the menu's tab shows.
+  expect(code.find("rage_menu_objective_") != std::string::npos,
+         "the service records the objective the menu's tab is showing");
   // The status publishes the owner.
   const std::string status = function_body(source, "void Service::do_rage(");
   expect(!status.empty(), "the rage command's status was found");
   if (!status.empty()) {
     const std::string status_code = strip_comments(status);
-    expect(status_code.find("objective_source") != std::string::npos,
-           "the status says which channel owns the objective");
-    expect(status_code.find("menu_fields") != std::string::npos,
+    // **The keys are matched as the quoted literals they are.** A substring
+    // search would accept a key named `objective_source_disabled` — and the
+    // status would then not say what the check claims it says.
+    expect(status_code.find("\"objective_source\"") != std::string::npos,
+           "the status says which channel owns the objective in force");
+    expect(status_code.find("\"objective_global_source\"") != std::string::npos,
+           "the status says which channel owns the global objective");
+    expect(status_code.find("\"menu_objective\"") != std::string::npos,
+           "the status says which objective the menu's tab is showing");
+    expect(status_code.find("\"menu_fields\"") != std::string::npos,
            "the status says which channel owns each field");
   }
 }
@@ -596,6 +631,7 @@ auto main(int argc, char** argv) -> int {
   test_the_weapon_key_is_compared_as_a_name();
   test_the_rule_keeps_the_control_channels_value();
   test_the_status_names_the_owner();
+  test_the_status_names_the_effective_owner();
 
   if (argc >= 2) {
     const std::string root(argv[1]);

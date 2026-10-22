@@ -205,6 +205,27 @@ inline constexpr RageFieldName k_rage_field_names[] = {
   return rage_menu_owns(menu_fields, bit) ? "menu" : "control";
 }
 
+// The owner of the **effective** objective — the one **in force**.
+//
+// The **global** objective is the setting the two channels write. With a
+// per-weapon profile in force the solve runs the **profile's** objective
+// instead, and that one comes from the profile file: no channel owns it, so
+// the status says "profile".
+//
+// **The scope is the point.** The status's `objective` is the *effective*
+// objective, so its owner has to be the effective one too — otherwise the two
+// keys describe different objectives and the reader cannot tell which is
+// which.
+[[nodiscard]] constexpr auto rage_effective_owner_name(std::uint32_t menu_fields,
+                                                        int effective_objective,
+                                                        int global_objective) noexcept
+    -> std::string_view {
+  if (effective_objective != global_objective) {
+    return "profile";
+  }
+  return rage_owner_name(menu_fields, RAGE_FIELD_OBJECTIVE);
+}
+
 // --- The rule ---------------------------------------------------------------
 
 // The weapon key: the name up to the NUL.

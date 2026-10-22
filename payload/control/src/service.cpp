@@ -1331,6 +1331,18 @@ void Service::set_rage_features(bool on, int key, bool fire, int objective, int 
   if ((fields & RAGE_FIELD_OBJECTIVE) != 0) {
     rage_objective_.store(objective);
   }
+  // **The objective the menu's tab is showing.** The menu cannot show the
+  // Monte-Carlo objective, so the tab and the ragebot can disagree — and the
+  // menu may not be touched to say so. The status is where the difference is
+  // visible (`objective` is the objective in force, `menu_objective` is the
+  // one on the tab), so the menu's own value is recorded on **every** menu
+  // write, masked or not.
+  //
+  // Only the menu's write records it: the control channel's write carries the
+  // service's own value, which is not what the tab shows.
+  if (source == RageSource::menu) {
+    rage_menu_objective_.store(objective, std::memory_order_relaxed);
+  }
   if ((fields & RAGE_FIELD_HITBOX) != 0) {
     rage_hitbox_.store(hitbox);
   }
@@ -3393,15 +3405,32 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   // channel both write the ragebot's settings, and the control channel is the
   // **only** way to reach the Monte-Carlo objective — the menu has no such
   // option — so the operator has to be able to tell "the control channel set
-  // it and it stuck" from "the menu set it and it stuck". The ownership is the
-  // global objective's (the per-weapon profile's objective comes from the
-  // profile file, not from a channel).
+  // it and it stuck" from "the menu set it and it stuck".
   //
-  // `menu_fields` is the whole answer: the rage fields the **menu** owns. A
-  // field that is not in the list belongs to the control channel.
+  // **The scope is in the key's name.** `objective` is the **effective**
+  // objective (the per-weapon profile's when one is in force), so
+  // `objective_source` is the owner of **that** one; `objective_global` is
+  // the setting the two channels write, so `objective_global_source` is its
+  // owner. Without the two names the reader cannot tell which objective a
+  // source describes — with a per-weapon profile in force the two differ.
+  //
+  // `menu_fields` is the whole answer for the fields: the rage fields the
+  // **menu** owns. A field that is not in the list belongs to the control
+  // channel.
   const std::uint32_t menu_fields = rage_menu_fields_.load(std::memory_order_relaxed);
   payload.set("objective_source",
+              Json::string(std::string(rage_effective_owner_name(
+                  menu_fields, effective_objective, global_objective))));
+  payload.set("objective_global_source",
               Json::string(std::string(rage_owner_name(menu_fields, RAGE_FIELD_OBJECTIVE))));
+  // **The objective the menu's tab is showing.** The menu has three options
+  // and cannot show the Monte-Carlo one, so the tab and the ragebot can
+  // disagree — and the operator has to be able to see it. `objective` is what
+  // runs, `menu_objective` is what the tab reads: the two differ when the
+  // control channel owns the objective (and when the operator's own click did
+  // not change the value — `docs/ragebot.md` §15.1).
+  payload.set("menu_objective",
+              Json::string(std::string(objective_name_for(rage_menu_objective_.load()))));
   payload.set("menu_fields", Json::string(rage_menu_field_list(menu_fields)));
   // The Monte-Carlo objective's own state: the sample count, the seed policy in
   // force, the numbers the last solve produced, and the reason it refused if it
