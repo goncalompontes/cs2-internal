@@ -170,7 +170,9 @@ killed the game.**
   action is `std::terminate`**, so MSVC's `longjmp` — which unwinds the frames
   it leaves — ran that cleanup and the runtime **fast-failed with
   `0xC0000409`**. Because it is a fast fail it **bypasses the vectored
-  handlers**, so the guard never recovered.
+  handlers**, so the guard's recovery was not to be relied on (and it was not:
+  of the twelve faults it saw, it recovered eight and lost the payload four —
+  see below).
 * **It has fired 12 times**, in **two different signatures**, and **4 of the 12
   killed the payload**, which then had to be re-injected:
   * the **four deaths** are the tier0 allocator fault (`read addr=0x40` — the
@@ -204,16 +206,20 @@ survived**.
 > `docs/known-issues.md` §17 both carry the corrected figure; the branch's
 > commit message does not, and it is not amended (the task forbids it).
 
-**And the eight survivors are not evidence that the broken handler worked.**
-The handler has carried `noexcept` since the file's first commit (`66bc92c`),
-and with it the `longjmp` out of the handler's frame runs that frame's
-terminate cleanup — so under the old build a fault killed the process every
-time (measured: the pre-fix handler exits 0xC0000409). The eight therefore
-came from a build whose handler was already fixed — most plausibly T42's own
-build, injected to test the fix live — but **the log does not record which
-build that was**, so that is *inferred, not measured*. What the log says,
-exactly: **four deaths with the tier0-allocator signature, eight recoveries
-at a fresh injection with a different signature.**
+**And the eight survivors came from the *broken* handler — measured, not
+inferred.** The injector was run from the integration tree (`cd
+C:\Users\gpmpo\cs2-internal; build-injector\injector.exe cs2.exe
+build-payload\payload.dll`), the **last injection of any kind was at
+02:10:57** on 2026-10-22 (the boot file's last entry is pid 49028, and the
+injector's own output for that minute says `injector: target pid 49028`), and
+T42's fix is **06:01** (commit) / **06:26** (build) — after every one of the
+twelve. The integration tree's handler still spells `noexcept`. So the eight
+recoveries are **not** evidence that the fixed guard has run in the live
+game: it never has. They are evidence that the **broken** guard was not
+uniformly fatal — the same `noexcept` handler recovered eight times and
+killed the payload four times. The measurable difference is the signature
+(the deaths are the tier0 allocator fault; the recoveries are a null access
+three frames down in ntdll); the log does not say why the two differ.
 
 ---
 

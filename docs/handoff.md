@@ -588,17 +588,28 @@ the accuracy work (spread/records, trace cross-validation).
   that count matched a *later* injection's line, because the handler writes
   its stack frames **before** it dies and the scan has to skip them.
 
-  **What the eight recoveries do not say.** They are *not* evidence that the
-  broken handler worked: the handler has carried `noexcept` since the file's
-  first commit (`66bc92c`), and with it the `longjmp` out of the handler's
-  frame runs that frame's terminate cleanup, so a fault under the old build
-  killed the process every time (measured: the pre-fix handler exits
-  0xC0000409). The eight therefore came from a build whose handler was
-  already fixed — most plausibly this branch's own build, injected to test
-  the fix live — but **the log does not say which build that was**, so that
-  part is *inferred, not measured*. What the log does say, exactly, is four
-  deaths with the tier0-allocator signature and eight recoveries at a fresh
-  injection with a different signature.
+  **Which build the eight came from — measured, not inferred.** The injector
+  was run from the integration tree (`cd C:\Users\gpmpo\cs2-internal;
+  build-injector\injector.exe cs2.exe build-payload\payload.dll`), and the
+  **last injection of any kind was at 02:10:57** on 2026-10-22 (the boot
+  file's last entry is pid 49028, and the injector's own output for that
+  minute says `injector: target pid 49028`). The fix's commit is at **06:01**
+  and its build at **06:26** — *after every one of the twelve* — and the
+  integration tree's handler still spells `noexcept` (this branch is not
+  merged). **So the eight recoveries came from the broken handler.**
+
+  That is worth saying plainly, because it cuts both ways:
+  * they are **not** evidence that the fixed guard has already recovered real
+    faults in the live game — **it has never run in the game**;
+  * they **are** evidence that the broken guard was not uniformly fatal: the
+    same `noexcept` handler **recovered eight times and killed the payload
+    four times**. The measurable difference is the signature — the four
+    deaths are the tier0 allocator fault (`read addr=0x40`, the payload's own
+    engine call), and the eight recoveries are a null access three frames
+    down in ntdll, called from the game's own code. The log does not say
+    *why* the two behave differently; what it says is that the broken guard's
+    behaviour depended on what the fault hit, and the fix removes that
+    dependence.
 - **The game relaunch is flaky** — the map load sometimes crashes on startup; just
   run `scripts/run-scenario.py` again.
 - The game auto-updated mid-session: `client.dll` sha `659940c1…` (was `44af2aa0…`);
