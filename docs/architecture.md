@@ -1,5 +1,11 @@
 # Build & test
 
+> **Cleanup note (2026-10-22).** This page predates the cleanup: the Vulkan
+> layer, the named-pipe control channel and the per-feature diagnostics are
+> gone. The current shape is in [`../AGENTS.md`](../AGENTS.md) and
+> [`decisions.md`](decisions.md) ADR-0024. Build commands are in
+> [`setup-windows.md`](setup-windows.md); the MCP tools wrap them.
+
 - **Meson + Ninja.** Host tools build natively.
 - The payload is a **separate Meson project** cross-compiled with
   `clang-cl`/`lld` against msvc-wine headers/libs (`toolchain/`).

@@ -627,3 +627,33 @@ closes. `GetCursorPos`-based look (`m_rawinput 0`) is not covered.
 confirmation; the raw-input block needs live confirmation; the ragebot follow-ups
 in `docs/next-session-present-hook.md` remain.
 
+
+---
+
+## ADR-0024 — one render path, JSON-RPC control, one state machine (2026-10-22)
+
+**Status: accepted (cleanup branch).** Supersedes the renderer half of ADR-0015
+and the control-transport half of ADR-0020; ADR-0016 (the Vulkan layer) is
+retired.
+
+- **One renderer.** The external Vulkan implicit layer, its shared-memory model
+  and its settings segment are removed. The payload draws in-process from the
+  game's own DXGI/D3D11 `Present`; the menu owns the settings block.
+- **JSON-RPC 2.0 control.** The named pipe is gone. The payload listens on an
+  AF_UNIX socket (`%LOCALAPPDATA%\cs2-internal\control.sock`, loopback TCP as
+  the fallback), frames with `Content-Length`, and requires the per-session
+  token from `control.json` in `initialize`. Method names and results are the
+  old command surface; a bad token closes that connection only.
+- **One state machine.** `payload/game/include/cs2/game/game_state.hpp` reduces
+  every snapshot to a `GameScreen` and a capability mask. Every feature — the
+  ESP, chams, camera, movement, ragebot, trigger, anti-aim, animfix — asks it
+  before acting. The `state` answer publishes `screen` and `capabilities`.
+- **No diagnostics in the feature code.** `RagePerf`, the trace probe, the
+  heatmap command, the HUD status sections and the per-frame state dump are
+  removed; the crash guard and the event ring stay. The angular-chart math the
+  solver uses is not diagnostics and stays.
+- **The protection pass is a separate repository** (`C:\Users\gpmpo\cs2-protect`).
+  This tree loads the built DLL (`-Dprotect=true -Dprotect_tools=<repo>`).
+- **The MCP is the tool surface.** Build, test, offsets, preflight and
+  calibration are `tools.cs2.*`; the one-time scripts and task specs are in
+  `docs/archive/`.
