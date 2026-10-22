@@ -392,6 +392,16 @@ struct TraceInterval {
   std::uint8_t raw[TRACE_INTERVAL_SIZE] = {};
 };
 
+// One solid the enumeration kept, as the probe reports it: what kind it is and
+// where it is. This is what attributes a missing wall — the per-ray lists only say
+// that the ray hits nothing, not whether the solid was ever a candidate.
+struct TraceHullInfo {
+  cs2::aim::SolidKind kind = cs2::aim::SolidKind::polytope;
+  cs2::aim::Vec3 min{};
+  cs2::aim::Vec3 max{};
+  int target = -1;
+};
+
 // One of **our** occluders the ray enters — the solver's own answer
 // (`OccluderCell::ray_span`, not a re-implementation of it).
 struct TraceOccluderHit {
@@ -561,6 +571,17 @@ struct TraceProbeRun {
   int filter_flags = 0;
   int occluders = 0;  // the solids our enumeration produced
   int occluder_hits = 0;
+  // How many of the enumerated solids the probe could **project** (the solver's
+  // own projection). Fewer than `occluders` means the projection dropped them —
+  // a different failure from "the ray does not cross them".
+  int occluders_projected = 0;
+  // Whether the enumeration was the per-target pyramid union or the single AABB
+  // (`TraceEnum`); the two differ only in which solids they keep, so the
+  // difference between their answers localises a selection bug.
+  int enum_box = 0;
+  // The kept solids (bounded), so a missing wall can be looked up by position.
+  std::vector<TraceHullInfo> kept;
+  static constexpr int k_max_kept_published = 64;
   // The probe's own bounds: how many solids it projects at most, and whether the
   // enumeration produced more than that (the answer is then incomplete).
   int occluder_cap = TRACE_MAX_OCCLUDERS;
@@ -572,6 +593,12 @@ struct TraceProbeRun {
   bool world_cached = false;
   // The probe's refusal, when it refused: `none` when it answered.
   TraceRefusal refusal = TraceRefusal::none;
+  // The enumeration behind **our** answer: what the world body parsed into (the
+  // shape-type histogram and the mesh clusters the walls are split into), the
+  // records/bodies/shapes visited, and the query's own completeness. This is what
+  // tells "the mesh was never enumerated" apart from "the mesh is enumerated but
+  // does not cover the ray", which the per-ray lists alone cannot.
+  OcclusionQueryStats stats;
   std::vector<TraceRayResult> rays;
 };
 
@@ -865,9 +892,16 @@ struct TraceExclude {
 // game thread's sink.
 //
 // `exclude` are the players to skip from the probe's own enumeration.
+//
+// `box_query` selects the enumeration's volume: `false` is the solver's per-target
+// pyramid union (exact, the default), `true` the single eye→far-end AABB. Both are
+// conservative supersets of the true occluders, so running the same ray through
+// both localises a **selection** bug: a solid the box keeps and the pyramid drops
+// is a solid the solver would never see.
 [[nodiscard]] auto probe_trace(const std::vector<TraceRay>& rays, bool invoke,
                                TraceAbi abi = TraceAbi::correct,
-                               const TraceExclude& exclude = TraceExclude{}) -> TraceProbeRun;
+                               const TraceExclude& exclude = TraceExclude{},
+                               bool box_query = false) -> TraceProbeRun;
 
 // Has the static world body been parsed yet? The probe's enumeration reuses the
 // parsed cache; parsing it inside the input hook is the probe's one expensive case

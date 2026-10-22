@@ -442,6 +442,12 @@ class Service {
   // `pitch_tolerance`, `delay_ms`, `key`, `fire`, `mode`). With no arguments it
   // returns the current state.
   void do_trigger(const Json& args, Json& out) noexcept;
+  // The trace probe (`docs/re/bullet-trace.md`): ask the engine **its own**
+  // question (`TraceLineIntervals`, the call the real bullet makes) for a ray, and
+  // publish both answers side by side plus the difference — what the engine's
+  // trace hit, what our occluder set says about the same ray, and where the two
+  // disagree. The measurement the occlusion loses are diagnosed from.
+  void do_trace_probe(const Json& args, Json& out) noexcept;
   // Append one record per live enemy to the store (called from the render thread
   // each frame, before the ragebot's own early-out).
   void sample_records(const game::Snapshot& snapshot) noexcept;
@@ -762,6 +768,17 @@ class Service {
   bool occlusion_inputs_complete_ = true;
   std::vector<OcclusionHull> occlusion_hulls_;
   OcclusionQueryStats occlusion_stats_;
+  // The trace probe's handshake between the control thread (which arms the request
+  // and waits) and the game thread (which runs the engine call — an engine call
+  // that reaches tier0's allocator faults on the payload's own thread). The probe
+  // runs **once per command**, never per tick.
+  std::mutex trace_probe_mutex_;
+  std::atomic<bool> trace_probe_armed_{false};
+  std::vector<TraceRay> trace_probe_rays_;
+  TraceAbi trace_probe_abi_ = TraceAbi::correct;
+  bool trace_probe_box_ = false;
+  bool trace_probe_done_ = false;
+  TraceProbeRun trace_probe_run_{};
   // The game thread's heartbeat: how many times the CreateMove hook's sink has run.
   // The control thread samples it around the probe's wait, so a caller can tell
   // "the game thread is busy" from "the game thread is not running at all" — the

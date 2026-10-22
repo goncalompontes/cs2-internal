@@ -53,8 +53,8 @@ MISSING_PIPE = r"\\.\pipe\cs2-internal-control-test-missing"
 
 #: The tools the catalogue must expose (one per API area).
 EXPECTED_TOOLS = (
-    "cs2_ping", "cs2_state", "cs2_screen", "cs2_ensure", "cs2_exec",
-    "cs2_look", "cs2_move", "cs2_press", "cs2_release", "cs2_aim",
+    "cs2_ping", "cs2_state", "cs2_screen", "cs2_ensure", "cs2_trace_probe",
+    "cs2_exec", "cs2_look", "cs2_move", "cs2_press", "cs2_release", "cs2_aim",
     "cs2_rage", "cs2_events", "cs2_wait_for", "cs2_settings_get",
     "cs2_settings_set", "cs2_list_scenarios", "cs2_run_scenario",
     "cs2_launch", "cs2_inject", "cs2_build", "cs2_test", "cs2_offsets",

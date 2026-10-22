@@ -100,6 +100,24 @@ class ExecArgs(TypedDict):
     line: str
 
 
+class TraceProbeArgs(TypedDict, total=False):
+    """``cs2_trace_probe``: the occlusion instrument's ray, in degrees/world units.
+
+    The keys are the payload command's own. `count`/`spread` fan the rays around the
+    view direction deterministically (ray 0 is the view ray itself), so two runs
+    compare.
+    """
+
+    eye: list[float]
+    yaw: float
+    pitch: float
+    spread: float
+    count: int
+    depth: float
+    abi: str
+    enum: str
+
+
 class LookArgs(TypedDict, total=False):
     """``cs2_look``: the view angles."""
 
@@ -375,6 +393,15 @@ def _tool_ensure(args: Mapping[str, Any], session: Session) -> Any:
     return session.run(action, timeout=budget + 60.0)
 
 
+def _tool_trace_probe(args: Mapping[str, Any], session: Session) -> Any:
+    """Ask the engine its own question for a ray and compare it with ours."""
+    # The probe runs on the game thread and the control thread waits for it, so the
+    # wire deadline has to cover the probe's own timeout plus the round trip (its
+    # commands are bounded: 8 rays, 64 intervals a ray).
+    return session.call(lambda control: control.request(
+        "trace_probe", dict(args), timeout=30.0), timeout=60.0)
+
+
 def _tool_exec(args: Mapping[str, Any], session: Session) -> Any:
     """Queue one console line."""
     line = str(args["line"])
@@ -582,8 +609,8 @@ def _tail(text: str, limit: int = 6000) -> str:
 def _run(command: Sequence[str] | str, timeout: float) -> dict[str, Any]:
     """Run one command in the repository and return a bounded result.
 
-    A ``str`` is handed to the platform as-is (the shell form ``_shell`` emits); a
-    sequence is quoted by the platform's own argument rules.
+    A ``str`` is handed to the platform as-is (the shell form ``_shell`` emits);
+    a sequence is quoted by the platform's own argument rules.
     """
     try:
         completed = subprocess.run(
@@ -627,9 +654,9 @@ def _shell(command: str) -> str | list[str]:
     Windows returns **one string**, not ``["cmd", "/c", …]``: the vcvars prefix is
     itself quoted (``call "C:\\Program Files\\…\\vcvars64.bat"``), and an argument
     list makes Python escape those quotes (``\\"…\\"``), so cmd then looks for a
-    program literally named `"C:\\Program Files\\…"` — the build tools failed with
-    ``'\\"C:\\Program Files\\…\\vcvars64.bat\\"' is not recognized`` before meson ever
-    started. With ``/s`` cmd strips the outer quotes and runs the rest as written.
+    program literally named `"C:\\Program Files\\…"` and the build fails before
+    meson starts. With ``/s`` cmd strips the outer quotes and runs the rest as
+    written, which is exactly the form this needs.
     """
     if os.name == "nt":
         vcvars = _vcvars()
@@ -744,6 +771,24 @@ TOOLS: tuple[Tool, ...] = (
         ),
         shape=EnsureArgs,
         handler=_tool_ensure,
+    ),
+    Tool(
+        name="cs2_trace_probe",
+        description=(
+            "The occlusion instrument: ask the ENGINE its own question for a ray "
+            "(`TraceLineIntervals`, the call the real bullet makes) and get its "
+            "answer next to our occluder set's answer for the same ray, plus the "
+            "difference and the enumeration's stats. Use it to attribute a missing "
+            "wall: `engine.world.type_counts` / `mesh_clusters` / `world_cache_hulls` "
+            "say whether the geometry was parsed, `engine.world.kept` (bounded) says "
+            "whether it was a candidate, and `rays[].ours` says whether the ray "
+            "crosses it. The world's cache must be warm (turn the ragebot on for a "
+            "tick) or the probe REFUSES (`engine.refused`). `abi=swapped` / "
+            "`static_filter` are deliberately wrong and prove the probe can fail. "
+            "Needs the game to be running."
+        ),
+        shape=TraceProbeArgs,
+        handler=_tool_trace_probe,
     ),
     Tool(
         name="cs2_exec",

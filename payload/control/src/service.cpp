@@ -133,6 +133,18 @@ constexpr std::uint64_t k_sound_max_age_ms = 1000;
 // few times a second — never per frame.
 constexpr std::uint64_t k_visibility_interval_ms = 250;
 
+// The trace probe's ray length when the weapon's own `m_flRange` cannot be read:
+// the engine's maximum trace length (`docs/re/bullet-trace.md`).
+constexpr float k_trace_probe_default_depth = 8192.0F;
+// How long the control thread waits for the game thread to answer the probe. The
+// probe runs once per command, on the game's tick; two seconds is hundreds of
+// ticks at any playable frame rate, and a game thread that has not answered by
+// then is not going to (`game_thread_ticks_` tells "busy" from "stalled").
+constexpr std::uint64_t k_trace_probe_timeout_ms = 2000;
+// `CCSWeaponBaseVData::m_flRange` (`docs/re/bullet-trace.md`): the trace length the
+// bullet itself uses.
+constexpr std::uintptr_t k_vdata_range = 0x830;
+
 // Microsecond wall clock (the fire path uses it for its press interval).
 auto now_us() noexcept -> std::uint64_t {
   return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -358,7 +370,8 @@ auto Service::dispatch_command(std::string_view command, const Json& arguments,
     do_rage(arguments, out);
   } else if (command == "trigger") {
     do_trigger(arguments, out);
-
+  } else if (command == "trace_probe") {
+    do_trace_probe(arguments, out);
   } else if (command == "predict") {
     do_predict(arguments, out);
   } else if (command == "settings") {
@@ -2047,6 +2060,59 @@ void Service::on_game_thread() noexcept {
     const std::scoped_lock lock(occlusion_mutex_);
     occlusion_hulls_ = std::move(query.hulls);
     occlusion_stats_ = query.stats;
+  }
+
+  // The trace probe: the engine's own answer for a ray. The call runs **here**
+  // (a game thread): an engine call that reaches tier0's allocator faults on the
+  // payload's own thread. The control thread armed the request and waits for the
+  // answer. The probe's work is bounded (a capped ray fan, a fixed interval
+  // buffer, a capped projection count — `occlusion_query.hpp`) and it runs **once
+  // per command**, not per tick; it refuses while the world's cache is cold, so it
+  // never pays the world's parse (10k brush shapes) inside the input hook.
+  if (trace_probe_armed_.exchange(false, std::memory_order_acq_rel)) {
+    std::vector<TraceRay> rays;
+    TraceAbi abi = TraceAbi::correct;
+    bool box_query = false;
+    {
+      const std::scoped_lock lock(trace_probe_mutex_);
+      rays = trace_probe_rays_;
+      abi = trace_probe_abi_;
+      box_query = trace_probe_box_;
+    }
+    // The players are targets, not occluders: the probe excludes them itself, so
+    // its answer never depends on the solver having run in this tick. The
+    // enumeration drops a player two ways — its handle index and its entity
+    // pointer — so both lists are built here.
+    std::uint16_t handles[k_max_occlusion_exclude] = {};
+    std::uintptr_t entities[k_max_occlusion_exclude] = {};
+    int exclude_count = 0;
+    {
+      game::Snapshot snapshot;
+      bool have_snapshot = false;
+      {
+        const std::scoped_lock lock(snapshot_mutex_);
+        snapshot = last_snapshot_;
+        have_snapshot = have_snapshot_.load(std::memory_order_relaxed);
+      }
+      if (have_snapshot) {
+        for (const game::PlayerSnapshot& player : snapshot.players) {
+          if (exclude_count >= k_max_occlusion_exclude || player.pawn == 0 || player.index < 0) {
+            continue;
+          }
+          handles[exclude_count] = static_cast<std::uint16_t>(player.index & 0x7fff);
+          entities[exclude_count] = player.pawn;
+          ++exclude_count;
+        }
+      }
+    }
+    const TraceExclude exclude{.handles = handles,
+                               .handle_count = exclude_count,
+                               .entities = entities,
+                               .entity_count = exclude_count};
+    TraceProbeRun probe = probe_trace(rays, true, abi, exclude, box_query);
+    const std::scoped_lock lock(trace_probe_mutex_);
+    trace_probe_run_ = std::move(probe);
+    trace_probe_done_ = true;
   }
 
   // The ESP's visibility: the per-player states, derived from the solids the
@@ -3782,6 +3848,356 @@ void Service::do_trigger(const Json& args, Json& out) noexcept {
   // The press goes through the command backend, so the backend decides whether
   // it reaches the command at all (`docs/control-harness.md` §"Input backends").
   payload.set("backend", Json::string(Input::backend_name(input_.backend())));
+  set_ok(out, std::move(payload));
+}
+
+// The trace probe (`docs/re/bullet-trace.md`): ask the engine its **own** question
+// for a ray — the call the real bullet makes, `TraceLineIntervals` — and publish
+// the engine's intervals next to our occluder set's answer for the same ray, plus
+// the difference. It measures; it does not decide.
+//
+// The engine call runs on the **game thread**: the control thread arms the request
+// here and the CreateMove hook's sink runs it, because an engine call that reaches
+// tier0's allocator faults on the payload's own thread.
+//
+// **Why the enumeration's stats are published too.** The per-ray lists say what
+// our set had for the ray; they do not say whether the world was parsed at all.
+// `world.type_counts` / `world.mesh_clusters` / `world.hulls` are what tell "the
+// mesh was never enumerated" apart from "the mesh is enumerated and the ray does
+// not cross it" — the two answers that a missing wall can mean.
+void Service::do_trace_probe(const Json& args, Json& out) noexcept {
+  refresh_reader(true);
+  if (!reader_.has_value()) {
+    set_error(out, "trace_probe unavailable: client.dll / entity system not ready");
+    return;
+  }
+  game::Snapshot snapshot = reader_->snapshot();
+  refresh_reader(snapshot.valid);
+  if (!snapshot.valid || !snapshot.local.has_value()) {
+    set_error(out, "trace_probe unavailable: no local player");
+    return;
+  }
+  const game::PlayerSnapshot& local = *snapshot.local;
+
+  const auto number = [&](const char* key, float fallback) -> float {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
+                                                  : fallback;
+  };
+  const auto integer = [&](const char* key, int fallback) -> int {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<int>(value->as_number()) : fallback;
+  };
+
+  // Which rays to probe: the current view ray is the only source today.
+  if (const Json* value = args.find("rays");
+      value != nullptr && value->is_string() && value->as_string() != "view") {
+    set_error(out, "trace_probe: unknown rays source '" + std::string(value->as_string()) +
+                       "' (only 'view' is available)");
+    return;
+  }
+
+  // The ray's origin: the local player's eye unless the caller gave one.
+  game::Vec3 eye = local.eye_origin;
+  if (const Json* value = args.find("eye");
+      value != nullptr && value->is_array() && value->items().size() == 3) {
+    const std::vector<Json>& items = value->items();
+    eye = game::Vec3{.x = static_cast<float>(items[0].as_number()),
+                     .y = static_cast<float>(items[1].as_number()),
+                     .z = static_cast<float>(items[2].as_number())};
+  }
+
+  // The view direction, in degrees (the Source convention: the pitch is positive
+  // downwards). The default is the local player's own eye angles.
+  float yaw = local.eye_angles.yaw;
+  float pitch = local.eye_angles.pitch;
+  if (const Json* value = args.find("yaw"); value != nullptr && value->is_number()) {
+    yaw = static_cast<float>(value->as_number());
+  }
+  if (const Json* value = args.find("pitch"); value != nullptr && value->is_number()) {
+    pitch = static_cast<float>(value->as_number());
+  }
+  const float spread = number("spread", 0.0F);
+  const int count = integer("count", 1);
+  if (!trace_fan_size_ok(count)) {
+    set_error(out, "trace_probe: count must be between 1 and " + std::to_string(TRACE_MAX_RAYS));
+    return;
+  }
+  if (spread < 0.0F || spread > 45.0F) {
+    set_error(out, "trace_probe: spread must be between 0 and 45 degrees");
+    return;
+  }
+  // The ray's length: the engine's own trace length (the weapon's `m_flRange`)
+  // unless the caller gave one.
+  float depth = number("depth", 0.0F);
+  if (depth <= 0.0F) {
+    depth = k_trace_probe_default_depth;
+    float range = 0.0F;
+    if (local.weapon_vdata != 0 && cs2::game::read(local.weapon_vdata + k_vdata_range, range) &&
+        range > 0.0F) {
+      depth = range;
+    }
+  }
+
+  // How the engine is called: the pinned call form, or one of the deliberately
+  // wrong ones (the proof that the probe can fail — a wrong argument order or a
+  // wrong filter must give a visibly wrong answer or a caught fault, never a crash).
+  TraceAbi abi = TraceAbi::correct;
+  if (const Json* value = args.find("abi"); value != nullptr && value->is_string()) {
+    const std::string_view name = value->as_string();
+    if (name == "correct") {
+      abi = TraceAbi::correct;
+    } else if (name == "swapped") {
+      abi = TraceAbi::swapped;
+    } else if (name == "static_filter") {
+      abi = TraceAbi::static_filter;
+    } else {
+      set_error(out, "trace_probe: unknown abi '" + std::string(name) + "'");
+      return;
+    }
+  }
+
+  // The enumeration volume: the solver's per-target pyramid union (the default) or
+  // the single eye→far-end AABB. Both are conservative; running the same ray through
+  // both localises a **selection** bug (`docs/re/occlusion.md`).
+  bool box_query = false;
+  if (const Json* value = args.find("enum"); value != nullptr && value->is_string()) {
+    const std::string_view name = value->as_string();
+    if (name == "box") {
+      box_query = true;
+    } else if (name != "pyramid") {
+      set_error(out, "trace_probe: unknown enum '" + std::string(name) + "'");
+      return;
+    }
+  }
+
+  // The fan: ray 0 is the view ray itself, the rest are the golden-angle spiral
+  // around it (a documented, deterministic order — two runs compare).
+  const aim::Basis basis = aim::Basis::world();
+  const std::vector<TraceRay> rays = build_trace_fan(eye, basis, yaw, pitch, spread, count, depth);
+
+  // Arm the request; the game thread runs the engine call and publishes the answer.
+  {
+    const std::scoped_lock lock(trace_probe_mutex_);
+    trace_probe_rays_ = rays;
+    trace_probe_abi_ = abi;
+    trace_probe_box_ = box_query;
+    trace_probe_done_ = false;
+    trace_probe_run_ = TraceProbeRun{};
+  }
+  trace_probe_armed_.store(true, std::memory_order_release);
+  input_.refresh();  // install the CreateMove hook (the game-thread query site)
+
+  const std::uint64_t ticks_before = game_thread_ticks_.load(std::memory_order_relaxed);
+  const std::uint64_t deadline = now_ms() + k_trace_probe_timeout_ms;
+  bool done = false;
+  while (!done && now_ms() < deadline) {
+    {
+      const std::scoped_lock lock(trace_probe_mutex_);
+      done = trace_probe_done_;
+    }
+    if (!done) {
+      Sleep(2);
+    }
+  }
+  const std::uint64_t ticks_after = game_thread_ticks_.load(std::memory_order_relaxed);
+
+  TraceProbeRun run;
+  {
+    const std::scoped_lock lock(trace_probe_mutex_);
+    run = trace_probe_run_;
+  }
+  // Why the answer is missing, when it is: the game thread answered ("answered"),
+  // it is running but did not answer in time ("busy"), or it is not running at all
+  // ("stalled" — the CreateMove hook is not installed).
+  const char* game_thread = "answered";
+  if (!done) {
+    game_thread = ticks_after != ticks_before ? "busy" : "stalled";
+  }
+
+  const auto vec3_json = [](const game::Vec3& v) -> Json {
+    Json item = Json::object();
+    item.set("x", Json::number(static_cast<double>(v.x)));
+    item.set("y", Json::number(static_cast<double>(v.y)));
+    item.set("z", Json::number(static_cast<double>(v.z)));
+    return item;
+  };
+  const auto hex = [](std::uintptr_t value) -> std::string {
+    char buffer[24];
+    std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(value));
+    return std::string(buffer);
+  };
+  const auto hex_bytes = [](const std::uint8_t* bytes, std::size_t count) -> std::string {
+    constexpr char k_digits[] = "0123456789abcdef";
+    std::string text;
+    text.resize(count * 2);
+    for (std::size_t i = 0; i < count; ++i) {
+      text[i * 2] = k_digits[(bytes[i] >> 4U) & 0x0FU];
+      text[(i * 2) + 1] = k_digits[bytes[i] & 0x0FU];
+    }
+    return text;
+  };
+
+  Json payload = Json::object();
+  payload.set("eye", vec3_json(eye));
+  payload.set("yaw", Json::number(static_cast<double>(yaw)));
+  payload.set("pitch", Json::number(static_cast<double>(pitch)));
+  payload.set("spread", Json::number(static_cast<double>(spread)));
+  payload.set("count", Json::integer(count));
+  payload.set("depth", Json::number(static_cast<double>(depth)));
+  payload.set("max_rays", Json::integer(TRACE_MAX_RAYS));
+  payload.set("max_intervals", Json::integer(TRACE_MAX_INTERVALS));
+  payload.set("abi", Json::string(to_string(run.abi)));
+  // The probe's own health: whether the engine call succeeded, and loudly whether
+  // it faulted (the guard caught it — a probe that faults is a *result*, not a
+  // crash) or whether the engine wrote past the results buffer (the canary
+  // tripped — the answer cannot be vouched for, so it is refused).
+  Json engine = Json::object();
+  engine.set("ok", Json::boolean(run.ok));
+  engine.set("faulted", Json::boolean(run.faulted));
+  engine.set("overrun", Json::boolean(run.overrun));
+  engine.set("rays_ok", Json::integer(run.rays_ok));
+  engine.set("rays_faulted", Json::integer(run.rays_faulted));
+  engine.set("rays_overrun", Json::integer(run.rays_overrun));
+  engine.set("iface", Json::string(hex(run.iface)));
+  engine.set("filter", Json::string(hex(run.filter)));
+  engine.set("filter_mask", Json::integer(run.filter_mask));
+  engine.set("filter_group", Json::integer(run.filter_group));
+  engine.set("filter_flags", Json::integer(run.filter_flags));
+  engine.set("occluders", Json::integer(run.occluders));
+  engine.set("occluders_projected", Json::integer(run.occluders_projected));
+  engine.set("occluder_hits", Json::integer(run.occluder_hits));
+  engine.set("enum", Json::string(run.enum_box != 0 ? "box" : "pyramid"));
+  engine.set("occluder_cap", Json::integer(run.occluder_cap));
+  engine.set("occluders_truncated", Json::boolean(run.occluders_truncated));
+  engine.set("world_cached", Json::boolean(run.world_cached));
+  engine.set("refused", Json::boolean(run.refusal != TraceRefusal::none));
+  engine.set("refusal_reason", Json::string(to_string(run.refusal)));
+  engine.set("target_pad", Json::number(static_cast<double>(TRACE_TARGET_PAD)));
+  // What our enumeration produced for this command — the world body's parse, so a
+  // missing wall can be attributed to the parse (0 clusters) or to the geometry.
+  Json world = Json::object();
+  world.set("records", Json::integer(run.stats.records));
+  world.set("bodies", Json::integer(run.stats.bodies));
+  world.set("shapes", Json::integer(run.stats.shapes));
+  world.set("hulls", Json::integer(run.stats.hulls));
+  world.set("mesh_clusters", Json::integer(run.stats.mesh_clusters));
+  world.set("world_cache_hulls", Json::integer(run.stats.world_cache_hulls));
+  world.set("world_box_kept", Json::integer(run.stats.world_box_kept));
+  world.set("world_box_rejected", Json::integer(run.stats.world_box_rejected));
+  world.set("hulls_no_planes", Json::integer(run.stats.hulls_no_planes));
+  world.set("query_complete", Json::boolean(run.stats.complete));
+  world.set("query_issues", Json::integer(static_cast<std::int64_t>(run.stats.incomplete_reasons)));
+  Json shapes_by_type = Json::array();
+  for (int type = 0; type < 8; ++type) {
+    shapes_by_type.push_back(Json::integer(run.stats.type_counts[type]));
+  }
+  world.set("type_counts", std::move(shapes_by_type));
+  // The kept solids (bounded): the wall's bounds in this list mean the enumeration
+  // kept it and the loss is downstream; absent means the selection dropped it.
+  Json kept = Json::array();
+  for (const TraceHullInfo& hull : run.kept) {
+    Json item = Json::object();
+    item.set("kind", Json::string(solid_kind_name(hull.kind)));
+    item.set("target", Json::integer(hull.target));
+    item.set("min", vec3_json(hull.min));
+    item.set("max", vec3_json(hull.max));
+    kept.push_back(std::move(item));
+  }
+  world.set("kept", std::move(kept));
+  engine.set("world", std::move(world));
+  payload.set("engine", std::move(engine));
+  payload.set("ran", Json::boolean(done));
+  payload.set("timeout", Json::boolean(!done));
+  payload.set("game_thread", Json::string(game_thread));
+
+  Json rays_json = Json::array();
+  // The record index the answer carries, or -1 when the span names a record the
+  // answer does not publish (the reader's own bound, in one place).
+  const auto record_index = [](int index, std::size_t published) -> int {
+    return index >= 0 && static_cast<std::size_t>(index) < published ? index : -1;
+  };
+  for (const TraceRayResult& ray : run.rays) {
+    Json item = Json::object();
+    item.set("start", vec3_json(ray.ray.start));
+    item.set("direction", vec3_json(ray.ray.direction));
+    item.set("end", vec3_json(ray.ray.end));
+    item.set("depth", Json::number(static_cast<double>(ray.ray.depth)));
+
+    // A. The engine's answer: the intervals, their distance and their raw bytes.
+    Json engine_json = Json::object();
+    engine_json.set("ok", Json::boolean(ray.engine_ok));
+    engine_json.set("faulted", Json::boolean(ray.engine_faulted));
+    engine_json.set("overrun", Json::boolean(ray.engine_overrun));
+    engine_json.set("interval_count", Json::integer(ray.interval_count));
+    engine_json.set("intervals_overflow", Json::boolean(ray.intervals_overflow));
+    engine_json.set("answer_missing", Json::boolean(ray.engine_answer_missing));
+    engine_json.set("surface_mapped", Json::boolean(false));
+    Json intervals = Json::array();
+    for (const TraceInterval& interval : ray.intervals) {
+      Json record = Json::object();
+      record.set("fraction", Json::number(static_cast<double>(interval.fraction)));
+      record.set("distance", Json::number(static_cast<double>(interval.distance)));
+      record.set("enter_exit", Json::integer(interval.enter_exit));
+      // The record's surface is **unmapped** (only two of its fields are pinned) —
+      // the raw bytes are published so a later RE pass can map the rest from the
+      // probe's own output.
+      record.set("surface", Json::string("unmapped"));
+      record.set("raw", Json::string(hex_bytes(interval.raw, TRACE_INTERVAL_SIZE)));
+      intervals.push_back(std::move(record));
+    }
+    engine_json.set("intervals", std::move(intervals));
+    item.set("engine", std::move(engine_json));
+
+    // B. Our answer: the occluders the ray enters, with their kind and the span
+    // the solver would value. `thickness == 0` on a `mesh` is the open sheet the
+    // map's walls are: it is still the surface the bullet hits, and the engine's
+    // entry cost applies to it (`docs/re/bullet-trace.md`).
+    Json ours = Json::array();
+    for (const TraceOccluderHit& hit : ray.ours) {
+      Json record = Json::object();
+      record.set("index", Json::integer(hit.index));
+      record.set("kind", Json::string(solid_kind_name(hit.kind)));
+      record.set("cluster", Json::integer(hit.cluster));
+      record.set("entry", Json::number(static_cast<double>(hit.entry)));
+      record.set("exit", Json::number(static_cast<double>(hit.exit)));
+      record.set("thickness", Json::number(static_cast<double>(hit.exit - hit.entry)));
+      ours.push_back(std::move(record));
+    }
+    item.set("ours", std::move(ours));
+
+    // C. The difference: what the engine found that our set has nothing for, and
+    // what our set has that the engine did not report.
+    Json difference = Json::object();
+    difference.set("verdict", Json::string(to_string(ray.diff.verdict)));
+    difference.set("engine_answer_usable", Json::boolean(ray.diff.engine_answer_usable));
+    Json engine_only = Json::array();
+    for (const TraceSpan& span : ray.diff.engine_only) {
+      Json record = Json::object();
+      record.set("entry", Json::number(static_cast<double>(span.entry)));
+      record.set("exit", Json::number(static_cast<double>(span.exit)));
+      record.set("enter_record",
+                 Json::integer(record_index(span.enter_record, ray.intervals.size())));
+      record.set("exit_record",
+                 Json::integer(record_index(span.exit_record, ray.intervals.size())));
+      engine_only.push_back(std::move(record));
+    }
+    difference.set("engine_only", std::move(engine_only));
+    Json ours_only = Json::array();
+    for (const TraceOccluderHit& hit : ray.diff.ours_only) {
+      Json record = Json::object();
+      record.set("index", Json::integer(hit.index));
+      record.set("kind", Json::string(solid_kind_name(hit.kind)));
+      record.set("cluster", Json::integer(hit.cluster));
+      record.set("entry", Json::number(static_cast<double>(hit.entry)));
+      record.set("exit", Json::number(static_cast<double>(hit.exit)));
+      ours_only.push_back(std::move(record));
+    }
+    difference.set("ours_only", std::move(ours_only));
+    item.set("difference", std::move(difference));
+    rays_json.push_back(std::move(item));
+  }
+  payload.set("rays", std::move(rays_json));
   set_ok(out, std::move(payload));
 }
 

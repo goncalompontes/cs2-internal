@@ -1588,7 +1588,7 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
 // plus the difference. Runs on a game thread (an engine call must not reach tier0's
 // allocator from the payload's own thread — docs/handoff.md).
 auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
-                 const TraceExclude& exclude) -> TraceProbeRun {
+                 const TraceExclude& exclude, bool box_query) -> TraceProbeRun {
   TraceProbeRun run;
   run.abi = abi;
   if (rays.empty()) {
@@ -1698,9 +1698,26 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
   // The players are targets, not occluders: the probe excludes them **itself**, so
   // the answer never depends on the solver having run first in the tick.
   set_occlusion_exclude_pawns(exclude.entities, exclude.entity_count);
+  run.enum_box = box_query ? 1 : 0;
   OcclusionQueryResult occluders =
-      query_world_occluders(eye, lo, hi, true, exclude.handles, exclude.handle_count, &target, 1);
+      query_world_occluders(eye, lo, hi, true, exclude.handles, exclude.handle_count,
+                            box_query ? nullptr : &target, box_query ? 0 : 1);
   run.occluders = static_cast<int>(occluders.hulls.size());
+  run.stats = occluders.stats;
+  // The kept solids, so a missing wall can be looked up by position: if the wall's
+  // bounds are in this list the enumeration kept it, and the loss is downstream
+  // (projection or valuation); if they are not, the selection dropped it.
+  run.kept.reserve(std::min(static_cast<int>(occluders.hulls.size()),
+                            TraceProbeRun::k_max_kept_published));
+  for (const OcclusionHull& hull : occluders.hulls) {
+    if (static_cast<int>(run.kept.size()) >= TraceProbeRun::k_max_kept_published) {
+      break;
+    }
+    Vec3 mn{};
+    Vec3 mx{};
+    hull_bounds(hull, mn, mx);
+    run.kept.push_back(TraceHullInfo{.kind = hull.kind, .min = mn, .max = mx, .target = hull.target});
+  }
 
   // The projected cells — the very same projection the solver's heatmap uses, so the
   // probe's answer is the solver's answer. The number of projections is bounded: the
@@ -1733,6 +1750,7 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
     // The solid's index in the enumerated set — the identifier the answer carries.
     hulls.push_back(static_cast<int>(index));
   }
+  run.occluders_projected = static_cast<int>(cells.size());
 
   // The engine's results buffer: **not** a local and **not** on the game's stack
   // (the probe runs on the game's main thread, in its input path). It holds the
