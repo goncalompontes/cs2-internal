@@ -331,6 +331,28 @@ control_core_test = executable('control_core_test',
 )
 test('control-core', control_core_test)
 
+# The trace probe's **comparison**, replayed from one recorded ray: the engine's own
+# `TraceLineIntervals` answer through the payload's own `pair_trace_spans` /
+# `diff_trace`, with no game. The fixture pins the interval record's enter/leave
+# polarity (it was read the other way round and shifted every pair by one record) and
+# the mesh-as-two-surfaces rule (`docs/re/occlusion.md`). It also pins the claim the
+# live run of 2026-10-22 could not settle: how much of "missing solids" is the
+# representation, and how much is geometry we do not have.
+control_trace_comparison_test = executable('control_trace_comparison_test',
+  files(
+    'payload/control/tests/test_control_trace_comparison.cpp',
+    'payload/control/src/json.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('control-trace-comparison', control_trace_comparison_test,
+  args : [meson.current_source_dir()],
+)
+
 # The live rage objective's **pure rules** (the objective's names and values,
 # the seed policy's names, the weapon's spread pattern) — a pure header, so the
 # test compiles it alone. The mappings used to live inline in `service.cpp`,

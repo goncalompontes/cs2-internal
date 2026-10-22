@@ -4530,6 +4530,9 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
       record.set("fraction", Json::number(static_cast<double>(interval.fraction)));
       record.set("distance", Json::number(static_cast<double>(interval.distance)));
       record.set("enter_exit", Json::integer(interval.enter_exit));
+      // The raw byte's meaning, so the answer cannot be read with the wrong polarity
+      // (it was: `0` is the entry, see `docs/re/occlusion.md`).
+      record.set("role", Json::string(trace_interval_role(interval.enter_exit)));
       // The record's surface is **unmapped** (only two of its fields are pinned) —
       // the raw bytes are published so a later RE pass can map the rest from the
       // probe's own output.
@@ -4562,6 +4565,11 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
     Json difference = Json::object();
     difference.set("verdict", Json::string(to_string(ray.diff.verdict)));
     difference.set("engine_answer_usable", Json::boolean(ray.diff.engine_answer_usable));
+    // Of the spans that matched, how many were answered by **our surfaces** (a mesh
+    // slab's two faces) rather than by one solid covering the span. It keeps "we have
+    // the wall as sheets" distinguishable from "we have it as a volume".
+    difference.set("spans_bounded_by_surfaces",
+                   Json::integer(ray.diff.spans_bounded_by_surfaces));
     Json engine_only = Json::array();
     for (const TraceSpan& span : ray.diff.engine_only) {
       Json record = Json::object();

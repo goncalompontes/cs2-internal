@@ -393,7 +393,16 @@ struct TraceInterval {
   float fraction = 0.0F;
   // The fraction scaled by the ray's length: the same number in world units.
   float distance = 0.0F;
-  // The record's `+0x32`: 1 = the ray **enters** a solid, 0 = it leaves one.
+  // The record's `+0x32`: 0 = the ray **enters** a solid, non-zero = it leaves one.
+  //
+  // The polarity is the opposite of the first reading of the byte (`docs/re/occlusion.md`
+  // used to call `1` the entry). It is pinned by the **recorded** ray in
+  // `payload/control/tests/fixtures/trace-comparison-dust2-wall.json`: our own convex
+  // hull is entered at `266.09` and left at `273.30`, and the engine's records at
+  // `266.02` and `273.03` carry `0` and `1` respectively. The two other hulls on the
+  // same ray (`1136.7 → 1138.9`, `1139.3 → 1145.2`) repeat the pattern, and the mesh
+  // slabs' faces land on the same `0`/`1` boundaries. The engine's own consumer pairs
+  // them in this order (see `pair_trace_spans`).
   std::uint8_t enter_exit = 0;
   // The record's raw bytes (the surface is unmapped — see above).
   std::uint8_t raw[TRACE_INTERVAL_SIZE] = {};
@@ -441,6 +450,10 @@ struct TraceDiff {
   std::vector<TraceSpan> engine_only;       // the spans our set has nothing for
   std::vector<TraceOccluderHit> ours_only;  // our solids the engine did not report
   TraceVerdict verdict = TraceVerdict::agrees;
+  // How many of the engine's spans our **surfaces** answered for (a mesh slab's two
+  // faces) instead of one of our solids covering the span. Published so the two cases
+  // stay distinguishable: it means "we have the wall as sheets, not as a volume".
+  int spans_bounded_by_surfaces = 0;
   // Whether the engine's answer could be read at all. When it is false the verdict
   // is `unknown` and the two lists are empty: the engine's answer was dropped, and
   // saying "agrees" would be a lie.
@@ -667,18 +680,33 @@ struct TraceProbeRun {
   return interval;
 }
 
-// Pair the interval records into spans: a record with the enter byte opens a span and
-// the next record that leaves a solid closes it (the engine's own consumer pairs them
-// the same way — `FUN_180886090` reads the enter/exit byte to do it). The pairs are
-// nested (last in, first out), so a ray that enters two solids at once gets both
-// spans. A span the ray never leaves ends at the ray's end.
+// The record's **role**, as the answer publishes it next to the raw byte: `0` is the
+// entry (`"enter"`), non-zero is the leave (`"leave"`). It exists so the polarity is
+// readable in the answer without knowing it — it was misread once.
+[[nodiscard]] inline auto trace_interval_role(std::uint8_t enter_exit) noexcept -> const char* {
+  return enter_exit == 0 ? "enter" : "leave";
+}
+
+// Pair the interval records into spans: a record with the **entry** byte (`0`) opens a
+// span and the next record that leaves a solid closes it (the engine's own consumer
+// pairs them the same way — `FUN_180886090` reads the enter/exit byte to do it). The
+// pairs are nested (last in, first out), so a ray that enters two solids at once gets
+// both spans. A span the ray never leaves ends at the ray's end.
+//
+// **The polarity is `0` = enter, non-zero = leave.** It was read the other way round
+// for the first measurement, which shifted every pair by one record: an exit got
+// paired with the *next* solid's entry, producing spans that no geometry can explain
+// (`9.6 → 94.8`, and a 619-unit "solid" the bullet could not cross). The recorded ray
+// in `payload/control/tests/fixtures/trace-comparison-dust2-wall.json` pins it: our
+// hull `266.09 → 273.30` matches the engine's records at `266.02` (byte `0`) and
+// `273.03` (byte `1`). See `docs/re/occlusion.md` §"The interval record's polarity".
 [[nodiscard]] inline auto pair_trace_spans(const std::vector<TraceInterval>& intervals)
     -> std::vector<TraceSpan> {
   std::vector<TraceSpan> spans;
   std::vector<int> open;
   for (int i = 0; i < static_cast<int>(intervals.size()); ++i) {
     const TraceInterval& interval = intervals[static_cast<std::size_t>(i)];
-    if (interval.enter_exit != 0) {
+    if (interval.enter_exit == 0) {
       open.push_back(i);
       continue;
     }
@@ -730,6 +758,67 @@ struct TraceProbeRun {
   return std::min(span.exit, hit.exit) > std::max(span.entry, hit.entry);
 }
 
+// The slack under which one of our hits is a **surface** rather than a solid: a
+// collision mesh is an open sheet, so `ray_span` reports `entry == exit` for it
+// (`docs/re/occlusion.md` §"the measurement").
+inline constexpr float TRACE_SURFACE_SLACK = 0.01F;
+
+[[nodiscard]] inline auto trace_hit_is_surface(const TraceOccluderHit& hit) noexcept -> bool {
+  return hit.exit - hit.entry <= TRACE_SURFACE_SLACK;
+}
+
+// The ordinal of one of our **surfaces** within `tolerance` of `distance`, or -1.
+[[nodiscard]] inline auto trace_surface_at(const std::vector<TraceOccluderHit>& ours,
+                                           float distance, float tolerance) noexcept -> int {
+  for (int i = 0; i < static_cast<int>(ours.size()); ++i) {
+    const TraceOccluderHit& hit = ours[static_cast<std::size_t>(i)];
+    if (!trace_hit_is_surface(hit)) {
+      continue;
+    }
+    if (std::abs(hit.entry - distance) <= tolerance) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+// A span the engine reports as a **solid volume** is represented on our side by the
+// **two surfaces** that bound it when the world's geometry for it is a collision mesh:
+// our parse yields one crossing per face (two zero-thickness occluders), the engine
+// yields one enter/exit pair for the volume between them. They are the same wall in two
+// representations, so the difference must not call it missing.
+//
+// The test is deliberately strict: a surface must sit at **each** boundary, within the
+// position tolerance. A single face in front of the engine's span is still a different
+// solid — that is the case the "a solid must cover the span" rule protects, and this
+// one does not weaken it.
+//
+// `entry_out` / `exit_out` receive the occluders that answered for the two boundaries.
+[[nodiscard]] inline auto trace_span_bounded_by_surfaces(const TraceSpan& span,
+                                                         const std::vector<TraceOccluderHit>& ours,
+                                                         float tolerance, int* entry_out,
+                                                         int* exit_out) noexcept -> bool {
+  if (entry_out == nullptr || exit_out == nullptr) {
+    return false;
+  }
+  const int entry = trace_surface_at(ours, span.entry, tolerance);
+  if (entry < 0) {
+    return false;
+  }
+  const int exit = trace_surface_at(ours, span.exit, tolerance);
+  if (exit < 0) {
+    return false;
+  }
+  // A zero-thickness engine span (a sheet the engine reports as a single solid) may be
+  // answered by one surface; a volume needs two distinct ones.
+  if (entry == exit && span.exit - span.entry > tolerance) {
+    return false;
+  }
+  *entry_out = entry;
+  *exit_out = exit;
+  return true;
+}
+
 // The difference between the engine's intervals and our solids for one ray: the
 // spans our set has nothing for, the solids the engine did not report, and the
 // one-line verdict.
@@ -757,6 +846,20 @@ struct TraceProbeRun {
       span_matched[s] = true;
       ours_matched[o] = true;
     }
+    if (span_matched[s]) {
+      continue;
+    }
+    // The same wall in our representation: the two surfaces that bound the engine's
+    // solid volume. Only when no solid of ours covers the span.
+    int entry_hit = -1;
+    int exit_hit = -1;
+    if (!trace_span_bounded_by_surfaces(spans[s], ours, tolerance, &entry_hit, &exit_hit)) {
+      continue;
+    }
+    span_matched[s] = true;
+    ours_matched[static_cast<std::size_t>(entry_hit)] = true;
+    ours_matched[static_cast<std::size_t>(exit_hit)] = true;
+    ++diff.spans_bounded_by_surfaces;
   }
   for (std::size_t s = 0; s < spans.size(); ++s) {
     if (!span_matched[s]) {

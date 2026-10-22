@@ -1,0 +1,248 @@
+{
+  "recorded": "2026-10-22T20:11:43",
+  "map": "de_dust2",
+  "note": "the saved O8b/O8c wall repro, restored with sv_cheats 1; setpos -157.5 -573.0 0.92; setang -5.46 -153.07. The engine half is verbatim (raw bytes included); our half is the occluder set of the build that recorded it (before the multi-surface mesh fix 86275be), so it is the last measurement made before it.",
+  "position": [
+    -157.540955,
+    -573.041748,
+    64.6880264
+  ],
+  "yaw": -153.072174,
+  "pitch": -5.45608521,
+  "depth": 8192,
+  "filter_mask": 1847307,
+  "filter_group": 3,
+  "filter_flags": 15,
+  "client_sha256": "5a46a09b...",
+  "tolerance": 2.0,
+  "expected": {
+    "verdict": "both",
+    "spans_bounded_by_surfaces": 3,
+    "engine_only": [
+      [
+        1.04611182,
+        9.64404297
+      ],
+      [
+        205.570496,
+        517.872009
+      ],
+      [
+        3058.41309,
+        4058.93335
+      ]
+    ],
+    "ours_only_count": 4,
+    "span_count": 9
+  },
+  "ray": {
+    "start": {
+      "x": -157.540955,
+      "y": -573.041748,
+      "z": 64.6880264
+    },
+    "direction": {
+      "x": -0.887538314,
+      "y": -0.450815976,
+      "z": 0.0950827971
+    },
+    "end": {
+      "x": -7428.25488,
+      "y": -4266.12598,
+      "z": 843.606323
+    },
+    "depth": 8192
+  },
+  "engine": {
+    "intervals": [
+      {
+        "fraction": 0.000127699197,
+        "distance": 1.04611182,
+        "enter_exit": 0,
+        "raw": "e77b6a3f6655c03e8f8210befee6053900d429ecae0200000000000000000000ffffffffffffffff070000002f81e7019300000100000000"
+      },
+      {
+        "fraction": 0.00117725134,
+        "distance": 9.64404297,
+        "enter_exit": 1,
+        "raw": "aaa85abf155cfbbe25ad2f3e004e9a3a00d429ecae0200000000000000000000ffffffffffffffff070000002f81e7019300010100000000"
+      },
+      {
+        "fraction": 0.011571655,
+        "distance": 94.7949982,
+        "enter_exit": 0,
+        "raw": "c588e234b7fc7f3f4808243c0a973d3c40e53718af020000600b4b19af020000fffffffff0d90000ffffffff008000002e00000000000000"
+      },
+      {
+        "fraction": 0.0181816816,
+        "distance": 148.944336,
+        "enter_exit": 1,
+        "raw": "00000000000080bf00000000c0f1943c40e53718af020000600b4b19af020000fffffffff2d90000ffffffff008000002e00010000000000"
+      },
+      {
+        "fraction": 0.0250940546,
+        "distance": 205.570496,
+        "enter_exit": 0,
+        "raw": "9a99833eaf2117bb0266773f0c92cd3c40e53718af020000600b4b19af020000ffffffff0ed90000ffffffff008000002e00000000000000"
+      },
+      {
+        "fraction": 0.0324734002,
+        "distance": 266.022095,
+        "enter_exit": 0,
+        "raw": "000000000000803f00000000d402053d40e53718af020000805e30a2ae020000ffffffffffffffffffffffff008000002e00000000000000"
+      },
+      {
+        "fraction": 0.0333287306,
+        "distance": 273.028961,
+        "enter_exit": 1,
+        "raw": "4d0c6fbe000000003ced78bfb583083d40e53718af020000805e30a2ae020000ffffffffffffffffffffffff008000002e00010000000000"
+      },
+      {
+        "fraction": 0.063216798,
+        "distance": 517.872009,
+        "enter_exit": 1,
+        "raw": "d9881b3d08e78b3c2bc77f3fcf77813d40e53718af020000600b4b19af020000ffffffff724e0000ffffffff008000002e00010000000000"
+      },
+      {
+        "fraction": 0.138753131,
+        "distance": 1136.66565,
+        "enter_exit": 0,
+        "raw": "000000340100803f000000004d150e3e40e53718af02000000d0b819af020000ffffffffffffffffffffffff008000002000000000000000"
+      },
+      {
+        "fraction": 0.1390239,
+        "distance": 1138.88379,
+        "enter_exit": 1,
+        "raw": "000000b4010080bf00000000485c0e3e40e53718af02000000d0b819af020000ffffffffffffffffffffffff008000002000010000000000"
+      },
+      {
+        "fraction": 0.139068365,
+        "distance": 1139.24805,
+        "enter_exit": 0,
+        "raw": "000000b40100803f00000000f0670e3e40e53718af02000040fb3a18af020000ffffffffffffffffffffffff008000003600000000000000"
+      },
+      {
+        "fraction": 0.139791787,
+        "distance": 1145.17432,
+        "enter_exit": 1,
+        "raw": "00000034010080bf0000000094250f3e40e53718af02000040fb3a18af020000ffffffffffffffffffffffff008000003600010000000000"
+      },
+      {
+        "fraction": 0.227002382,
+        "distance": 1859.60352,
+        "enter_exit": 0,
+        "raw": "ffff7f3f5e305fb7009bb9b95073683e40e53718af020000600b4b19af020000ffffffff70030000ffffffff008000002e00000000000000"
+      },
+      {
+        "fraction": 0.284216791,
+        "distance": 2328.30396,
+        "enter_exit": 1,
+        "raw": "000080bf0000000000000000dd84913e40e53718af020000600b4b19af020000ffffffffc0020000ffffffff008000002e00010000000000"
+      },
+      {
+        "fraction": 0.352435678,
+        "distance": 2887.15308,
+        "enter_exit": 0,
+        "raw": "0000803f00000000000000007372b43e40e53718af020000600b4b19af020000ffffffff74010000ffffffff008000002e00000000000000"
+      },
+      {
+        "fraction": 0.373341441,
+        "distance": 3058.41309,
+        "enter_exit": 0,
+        "raw": "0000803f00000000000000009c26bf3e40e53718af020000a00b4b19af020000ffffffff08000000ffffffff008000000000000000000000"
+      },
+      {
+        "fraction": 0.495475262,
+        "distance": 4058.93335,
+        "enter_exit": 1,
+        "raw": "000080bf0000000000000000efaefd3e40e53718af020000600b4b19af020000ffffffffcd000000ffffffff008000002e00010000000000"
+      }
+    ]
+  },
+  "ours": [
+    {
+      "index": 4,
+      "kind": "hull",
+      "cluster": -1,
+      "entry": 266.0914,
+      "exit": 273.301331
+    },
+    {
+      "index": 9,
+      "kind": "hull",
+      "cluster": -1,
+      "entry": 1139.31726,
+      "exit": 1145.24353
+    },
+    {
+      "index": 19,
+      "kind": "hull",
+      "cluster": -1,
+      "entry": 1136.73486,
+      "exit": 1138.953
+    },
+    {
+      "index": 21,
+      "kind": "mesh",
+      "cluster": 0,
+      "entry": 1135.62573,
+      "exit": 1135.62573
+    },
+    {
+      "index": 25,
+      "kind": "mesh",
+      "cluster": 4,
+      "entry": 81.9807968,
+      "exit": 81.9807968
+    },
+    {
+      "index": 26,
+      "kind": "mesh",
+      "cluster": 5,
+      "entry": 1115.66199,
+      "exit": 1115.66199
+    },
+    {
+      "index": 41,
+      "kind": "mesh",
+      "cluster": 20,
+      "entry": 94.7949905,
+      "exit": 94.7949905
+    },
+    {
+      "index": 42,
+      "kind": "mesh",
+      "cluster": 21,
+      "entry": 148.944321,
+      "exit": 148.944321
+    },
+    {
+      "index": 50,
+      "kind": "mesh",
+      "cluster": 29,
+      "entry": 1859.60352,
+      "exit": 1859.60352
+    },
+    {
+      "index": 52,
+      "kind": "mesh",
+      "cluster": 31,
+      "entry": 2328.30396,
+      "exit": 2328.30396
+    },
+    {
+      "index": 54,
+      "kind": "mesh",
+      "cluster": 33,
+      "entry": 2887.15308,
+      "exit": 2887.15308
+    },
+    {
+      "index": 55,
+      "kind": "mesh",
+      "cluster": 34,
+      "entry": 3058.41309,
+      "exit": 3058.41309
+    }
+  ]
+}
