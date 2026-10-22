@@ -60,6 +60,32 @@ auto main() -> int {
     expect(near(c.random_float(0.0F, 1.0F), 0.61710943F, 1e-6F), "RNG first float (seed 999)");
   }
 
+  // The generator is **tier0's `CUniformRandomStreamImpl`** — the one the
+  // engine's cone sampler draws from (`tier0.dll` `0x15e1b0`,
+  // `GenerateRandomNumber_Locked`) and the one the shotgun's pattern table is
+  // built with. The values below are that function's own output, transcribed
+  // from an instruction-level emulation of it (the warm-up's 40 steps, the
+  // Schrage step `m*16807 - q*2147483647` and the shuffle index
+  // `(iy + (iy<0 ? 0x3ffffff : 0)) >> 26`): the repo's stream and tier0's
+  // agree **bit for bit** over 20 000 seeds and four draws each
+  // (`docs/re/aim.md` §"The RNG").
+  {
+    UniformRandomStream a(12345);
+    expect(a.random_int() == 1982386332, "tier0's first draw (seed 12345)");
+    expect(a.random_int() == 715426902, "tier0's second draw (seed 12345)");
+    expect(a.random_int() == 424962143, "tier0's third draw (seed 12345)");
+    expect(a.random_int() == 2038867620, "tier0's fourth draw (seed 12345)");
+    UniformRandomStream b(0);
+    expect(b.random_int() == 893351816, "tier0's first draw (seed 0)");
+    expect(b.random_int() == 197493099, "tier0's second draw (seed 0)");
+    UniformRandomStream c(4242);
+    expect(c.random_int() == 2122186564, "tier0's first draw (seed 4242)");
+    expect(c.random_int() == 1235562359, "tier0's second draw (seed 4242)");
+    UniformRandomStream d(31337);
+    expect(d.random_int() == 1627753057, "tier0's first draw (seed 31337)");
+    expect(d.random_int() == 461619958, "tier0's second draw (seed 31337)");
+  }
+
   // The stream is deterministic and stays in range.
   {
     UniformRandomStream a(12345);
