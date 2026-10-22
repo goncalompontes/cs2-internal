@@ -672,9 +672,9 @@ void Input::rage_tick(std::uint8_t* cmd, const std::uint64_t* buttons) noexcept 
   if (buttons == nullptr) {
     return;
   }
-  // Mirror the (persistently asserted) attack, zoom and reload into the command's
-  // `CInButtonStatePB` so the sub-tick records agree with the legacy mask. A changed
-  // word is needed for the engine to see a fresh press edge (zoom/reload act on the
+  // Mirror the attack, zoom and reload into the command's `CInButtonStatePB`
+  // so the sub-tick records agree with the legacy mask. A changed word is
+  // needed for the engine to see a fresh press edge (zoom/reload act on the
   // edge), exactly as the attack does.
   const auto base = *reinterpret_cast<std::uintptr_t*>(cmd + k_cmd_pb_offset + k_pb_base_offset);
   const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);

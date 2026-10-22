@@ -457,6 +457,10 @@ class Service {
   // next-attack record. The decision is published to the `Input`, which puts
   // the attack bit on the command.
   void decide_rage_fire(const game::Snapshot& snapshot) noexcept;
+  // Forget the fire path's bookkeeping (the ragebot was switched off): the
+  // next shot starts a new edge, and the clip difference against the previous
+  // weapon is not a shot.
+  void reset_rage_fire() noexcept;
   // The weapon's **fire state**, read fresh on the game thread: the clip, the
   // reload flag, the deploy tick and the engine's own next-attack record.
   void read_weapon_fire_state(const game::PlayerSnapshot& local,

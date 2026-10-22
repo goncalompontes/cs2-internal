@@ -1229,3 +1229,185 @@ as exact.
 **The HUD line's buffer is 192 bytes.** The line carries the objective's
 name, the Monte-Carlo's marker and the two occlusion markers, and the old
 128-byte buffer cut the last of them off.
+
+## 15. The fire path — the edge and the gate
+
+> **The one-line version:** the ragebot used to hold `IN_ATTACK` down on
+> **every** command while a solve was active, so a **semi-automatic** weapon
+> (a pistol, the R8, the scout) fired **once** and never again — the engine
+> needs a release→re-press **edge**. And nothing in the fire path asked
+> whether the shot could be taken at all: the clip, the fire interval, the
+> weapon's state and the fire mode were all unread.
+
+Both defects were reported by the operator by **playing the game** on
+2026-10-22 and then verified in the code
+(`docs/orchestration/spec-t37-fire-path.md`).
+
+### 15.1 What the payload reads, and where from
+
+Every field is read through the generated client schema
+(`payload/sdk/schemas/client_dll.hpp`, ADR-0001) — never through a
+hard-coded offset. The offsets live in two places, each with the schema
+lookup and this build's value as the fallback:
+
+| field | class | what it means |
+|---|---|---|
+| `m_bIsFullAuto` | `CCSWeaponBaseVData` | the weapon's **fire mode**: it fires while the trigger is held, or it fires once per press |
+| `m_flCycleTime` | `CCSWeaponBaseVData` | the weapon's **fire interval** in seconds (the fallback for the engine's own record) |
+| `m_iClip1` | `C_BasePlayerWeapon` | the rounds in the **clip** |
+| `m_bInReload` | `C_CSWeaponBase` | the weapon is **reloading** — the engine ignores the trigger |
+| `m_nDeployTick` | `C_CSWeaponBase` | the weapon's **deploy tick** — while it is in the future the weapon is still being deployed |
+| `m_nNextPrimaryAttackTick` | `C_BasePlayerWeapon` | the engine's **own** record of the tick at which the weapon may fire again |
+| `m_nTickBase` | `CBasePlayerController` | the tick the client is simulating — the clock the record above is written in |
+
+**Why `m_nNextPrimaryAttackTick` and not `m_flFireInterval` /
+`m_flRefireTime`.** The specification listed three candidates "the schema
+has all three". It does not: in this build's schema `m_flFireInterval`
+belongs to `PointAngularVelocitySensor` and `m_flRefireTime` to
+`TimerEntity` — **neither is a weapon field**. The weapon's own rate record
+is `m_nNextPrimaryAttackTick`, and it is the field the engine itself
+consults before it takes a shot, so it is the one the fire path uses. The
+VData's `m_flCycleTime` is kept as the **fallback** for the case where that
+record cannot be read.
+
+**The rate is read fresh, on the game thread.** The VData's fields (the fire
+mode, the cycle time) are stable and travel in the snapshot; the weapon
+*instance*'s fields (the clip, the reload, the deploy, the next-attack tick)
+are read **in the command path's tick**, where the weapon's state is
+readable. A stale readiness record would let the ragebot press *inside* the
+interval — on a semi-automatic weapon that is **the shot being wasted** — so
+it is read per tick, not per frame.
+
+### 15.2 The edge — the release a semi-automatic weapon needs
+
+**The rule.** On a **semi-automatic** weapon (and on a weapon whose fire mode
+is **unknown**), the ragebot's shots are separate shots: after a press, the
+ragebot **withdraws** its attack contribution and keeps it withdrawn until
+the weapon is ready again, so the engine sees a **release→re-press edge**
+between two shots.
+
+**When does it release?** On the first tick after the press, and then for as
+long as the weapon is not ready. The window is deliberately longer than one
+command tick (two ticks, `k_fire_release_window`): the release must be
+visible on a command the engine **simulates**, and the tick boundary and the
+command boundary are not the same instant.
+
+**Why "until the weapon is ready again" and not "for one tick"?** The
+engine's own next-attack record is the weapon's rate, so re-pressing on the
+first tick the weapon is ready costs no rate at all. Releasing for a fixed
+one tick would re-press *inside* the interval on a fast weapon and waste the
+shot.
+
+**Why not on a full-automatic weapon?** A full-automatic weapon fires
+*while the trigger is held* — the engine's rate governs it, and the edge
+would only cost a tick per shot. So the trigger stays down there, and the
+behaviour is unchanged from before this section.
+
+**The release is scoped to the ragebot's own contribution.** The features'
+bits are only ever **set**, never cleared: *"a feature that releases the
+attack button must not take the player's own press of the same button
+away"*. The ragebot therefore **withdraws** its contribution — it simply
+does not put the attack bit on the command — and the engine's own mask (the
+player's own press) is left untouched. The command's `CInButtonState`
+follows the mask exactly, so the withdrawal is a **release** the engine can
+see, and the player's press is still there.
+
+**What happens when the player holds attack.** Then the engine's own mask
+carries the attack bit on every command, so the engine sees **one continuous
+press**: the semi-automatic weapon fires **once**, exactly as it does for a
+human who holds the trigger. **The edge is then the player's to make, not the
+ragebot's** — the ragebot's withdrawal cannot take the player's press away
+(that is the rule above), so it cannot manufacture an edge the player has
+removed. The status says so: `player-attack` on the HUD line, and
+`player_attack` in the `rage` command's JSON.
+
+### 15.3 The gate — can the weapon take the shot?
+
+The gate is evaluated on the **game thread**, once per tick, and its verdict
+is published to the command path. The conditions, in the order the status
+reports them (the first one that blocks is the one the operator is told
+about):
+
+| condition | refusal | why |
+|---|---|---|
+| the clip is empty | `no-ammo` | the shot cannot be fired; the auto-reload assist already holds `IN_RELOAD` |
+| the weapon is reloading | `reloading` | the engine ignores the trigger |
+| the weapon is still being deployed | `deploying` | same |
+| the weapon's fire interval has not elapsed | `interval` | the shot would be dropped by the engine — and on a semi-automatic weapon a press inside the interval is **the shot being wasted** |
+| the deliberate release the edge needs | `edge` | not a block: the fire path is *choosing* to release so the next shot is a new edge |
+| no active solve | `no-solve` | the ragebot is not aiming at anybody |
+
+**The "unknown" degradation.** A weapon whose VData could not be read has an
+**unknown** fire mode. The fire path then treats it as **semi-automatic** —
+the conservative direction: the re-press edge costs at most a tick per shot
+and is always correct, while a held trigger on a semi-automatic weapon fires
+**once** and never again. The status says `unknown`; it never guesses `auto`.
+
+**The rate's two sources.** The engine's own record
+(`m_nNextPrimaryAttackTick`) is authoritative. When it cannot be read, the
+VData's cycle time is the fallback. When **neither** is available the gate
+refuses the shot (`interval`): *a gate that is wrong in the "don't fire"
+direction is safe; a gate that is wrong in the "fire" direction is not.*
+
+### 15.4 What the operator sees
+
+The HUD line (`rage: …`) and the `rage` command's JSON carry the fire path's
+verdict. The line's tail:
+
+```
+… s12 p13 e12 bt0 fire 1 semi ok stop
+```
+
+| field | meaning |
+|---|---|
+| `s` | the **engine's** shots — the clip fell while the ragebot was pressing |
+| `p` | the ragebot's **attempts** — the ticks the fire path decided to assert the attack |
+| `e` | the **release→re-press edges** the fire path produced (zero on a full-automatic weapon, whose trigger stays down) |
+| `fire 1` | the ragebot's fire is enabled |
+| `semi` / `auto` / `unknown` | the weapon's fire mode as the payload reads it |
+| `ok` / `no-ammo` / `reloading` / `deploying` / `interval` / `edge` / `no-solve` | the gate's verdict: `ok` when the shot can be taken, the blocking condition's name when it cannot |
+| `player-attack` | the **player** is holding the trigger — the engine sees one continuous press, so the edge is the player's to make |
+
+The JSON carries the same facts under `shots`, `presses`, `edges`,
+`fire_mode`, `fire_refusal` and `player_attack`.
+
+**`shots` changed meaning.** The counter that used to answer `shots` counted
+the **commands** the attack was asserted on — the ragebot's *attempts*, not
+shots (on a full-automatic weapon it grew at the tick rate). It is now the
+**engine's** shots, detected by the clip falling, and the attempts are
+`presses`.
+
+### 15.5 What the host proves and what only the game can prove
+
+**The host tests prove that the payload *emits* the edge**: the decision is a
+pure function (`cs2/control/strafe_geometry.hpp`'s fire path), and the test
+drives it — the fire mode's classification, the edge between two shots on a
+semi-automatic weapon, the gate's every blocking condition, the unknown
+mode's conservative path, and the rule that the ragebot's withdrawal never
+clears the player's own press.
+
+**They cannot prove that the engine *honours* the edge.** Whether a
+semi-automatic weapon really needs a release→re-press, and whether the
+engine reads the release from the command's mask, from the PB's button state
+or from the movement services' held word, is **engine behaviour**: only the
+operator's live run can show it. The payload writes the release to **all
+three** places (the command's mask, the PB's `CInButtonState` and the
+movement services' held word), so the engine sees it whichever one it
+reads.
+
+### 15.6 The known limits
+
+- **A burst weapon is treated as semi-automatic.** `m_bHasBurstMode` is not
+  read, so a weapon with a burst mode (the Tec-9, the R8) is classified
+  `semi` and the edge is required between its shots. The burst's own
+  repetition is the engine's.
+- **The rate's tick comparison is conservative.** The client's tick base is
+  the tick it is simulating, and the engine's record is a tick at least that
+  far ahead, so the gate can be **late** by a tick but never early.
+- **The shot attribution is a best guess.** `shots` counts the clip falling
+  while the ragebot was pressing; with the player firing as well, the two
+  cannot be told apart. `presses` and `player_attack` are there to read it.
+- **The decision is made once per tick**, so the command the slot-25 hook
+  writes (a copy of the command) can carry the previous tick's answer. The
+  command the movement services simulate carries the current one.
+

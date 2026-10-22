@@ -1868,6 +1868,7 @@ void Service::on_game_thread() noexcept {
   if (!rage_wanted && !trigger_wanted) {
     input_.clear_rage_aim();
     trigger_.reset(input_);
+    reset_rage_fire();
     return;
   }
   game::Snapshot snapshot;
@@ -1890,13 +1891,14 @@ void Service::on_game_thread() noexcept {
   }
   if (!rage_wanted) {
     input_.clear_rage_aim();
+    reset_rage_fire();
     return;
   }
   if (!have_snapshot) {
     // No snapshot: the weapon's state is unknown, so the fire path stands
     // down — a fire path that cannot see the weapon must not assert the
     // attack. The aim and the assists are left alone.
-    input_.set_rage_fire_press(false);
+    reset_rage_fire();
     return;
   }
   rage_tick(snapshot);
@@ -2648,6 +2650,15 @@ void Service::decide_rage_fire(const game::Snapshot& snapshot) noexcept {
   // The decision is published to the input path: it is made **once per tick**,
   // so every command of the tick carries the same answer.
   input_.set_rage_fire_press(decision.press);
+}
+
+void Service::reset_rage_fire() noexcept {
+  rage_last_press_us_ = 0;
+  rage_prev_weapon_ = 0;
+  rage_prev_clip_ = 0;
+  rage_prev_press_ = false;
+  rage_withdrawn_ = false;
+  input_.set_rage_fire_press(false);
 }
 
 auto Service::read_hitboxes(std::uintptr_t pawn, game::HitboxCapsule* out, int max) const noexcept
