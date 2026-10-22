@@ -26,17 +26,21 @@
 // host test can pin them without the engine.
 //
 // The module also owns the **fire path** (the last section): the ragebot's
-// *edge* (a semi-automatic weapon needs a release between two shots) and its
-// *gate* (can the weapon take the shot at all?). Both are decisions about the
-// command's attack button, so they belong with the button bits — and, being
-// pure, the host test can drive them exhaustively.
+// *edge* (a semi-automatic weapon needs a release between two shots), its
+// *gate* (can the weapon take the shot at all?), the *write* that puts the
+// decision on the command, and the **status line** the operator reads. All of
+// them are decisions about the command's attack button, so they belong with
+// the button bits — and, being pure, the host test can drive them
+// exhaustively.
 //
 // This header must stay dependency-free: no engine headers, no `<windows.h>`.
 // It is compiled into the host test and into the payload.
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <string_view>
 
 namespace cs2::control {
@@ -696,9 +700,9 @@ private:
 
 // --- The fire path -------------------------------------------------------------
 //
-// The ragebot's fire: **the edge** and **the gate**.
+// The ragebot's fire: **the edge**, **the gate** and the **write**.
 //
-// Two facts the fire path needs, and the payload did not have:
+// Three facts the fire path needs, and the payload did not have:
 //
 //   * a **semi-automatic** weapon fires **once** per release->re-press *edge*.
 //     A trigger that is held down is **one** edge, so the ragebot's persistent
@@ -708,11 +712,19 @@ private:
 //   * a shot can only be taken when the weapon can take it: the clip must hold
 //     a round, the weapon must not be reloading or deploying, and the weapon's
 //     own fire interval must have elapsed. A press **inside** the interval is
-//     **the shot being wasted** on a semi-automatic weapon.
+//     **the shot being wasted** on a semi-automatic weapon;
+//   * the ragebot's own press must be **replaceable**. The features' bits are
+//     only ever *set* (the repo's rule: a feature that releases the attack
+//     button must not take the player's own press of the same button away) —
+//     but that rule protects the **player's** press, not the payload's **own**.
+//     A contribution that can only be added can never be taken back, so a
+//     withdrawal would leave the press on the command and the engine would
+//     never see the release.
 //
 // The decision is a **pure function** of the weapon's capability and the
-// ragebot's own state, so the host test can drive it exhaustively without a
-// game (`docs/orchestration/spec-t37-fire-path.md` §4.1).
+// ragebot's own state, and the **write** is a pure function of the decision
+// and the command's mask, so the host test can drive both exhaustively
+// without a game (`docs/orchestration/spec-t37-fire-path.md` §4.1).
 
 /// How the weapon fires.
 enum class FireMode : std::uint8_t {
@@ -722,14 +734,21 @@ enum class FireMode : std::uint8_t {
 };
 
 /// Why the fire path did not assert the attack.
+///
+/// The order is the order the conditions are checked in, and it is the order
+/// the status reports them in: the **first** one that blocks is the one the
+/// operator is told about (`docs/ragebot.md` §"the fire path").
 enum class FireRefusal : std::uint8_t {
-  none,      // the shot can be taken
-  no_solve,  // the ragebot has no active solve
-  no_ammo,   // the clip is empty
-  reloading, // the weapon is reloading
-  deploying, // the weapon is still being deployed
-  interval,  // the weapon's fire interval has not elapsed
-  edge,      // the deliberate release the edge needs
+  none,          // the shot can be taken
+  no_solve,      // the ragebot has no active solve
+  fire_off,      // the fire path is disabled (the operator's toggle, or the visibility gate)
+  no_ammo,       // the clip is empty
+  clip_unknown,  // the clip could not be read (or there is no weapon)
+  reloading,     // the weapon is reloading
+  deploying,     // the weapon is still being deployed
+  edge,          // the deliberate release the edge needs
+  interval,      // the weapon's fire interval has not elapsed
+  rate_unknown,  // the weapon's rate could not be read at all
 };
 
 /// The minimum time the attack stays released after the ragebot's press, in
@@ -752,6 +771,11 @@ struct FireCapability {
   FireMode mode{FireMode::unknown};
   /// Rounds in the clip (`m_iClip1`).
   int clip{0};
+  /// The clip could be read at all. A **failed read** leaves the clip at zero,
+  /// which is not the same fact as an empty clip — and the difference matters:
+  /// an empty clip is a reason not to fire, a failed read is a reason not to
+  /// *count* a shot.
+  bool clip_known{false};
   /// The weapon is reloading (`m_bInReload`).
   bool reloading{false};
   /// The weapon is still being deployed (`m_nDeployTick`).
@@ -768,8 +792,13 @@ struct FireCapability {
 
 /// The inputs of the fire path's decision.
 struct FireInputs {
-  /// The ragebot wants to fire: a solve is active and the fire is enabled.
-  bool want{false};
+  /// The ragebot has an active solve: it is aiming at somebody.
+  bool solved{false};
+  /// The fire path is **enabled**: the operator's `fire` toggle and the
+  /// visibility gate (`only_visible`). A disabled fire path is a different
+  /// fact from "there is no solve" — the operator has to be able to tell them
+  /// apart.
+  bool enabled{false};
   /// The weapon's capability.
   FireCapability capability{};
   /// Seconds since the ragebot last asserted the attack.
@@ -812,6 +841,7 @@ struct FireDecision {
     case FireMode::unknown:
       break;
   }
+  // A mode this build does not know about: say so, do not guess.
   return "unknown";
 }
 
@@ -822,18 +852,25 @@ struct FireDecision {
       return "ok";
     case FireRefusal::no_solve:
       return "no-solve";
+    case FireRefusal::fire_off:
+      return "fire-off";
     case FireRefusal::no_ammo:
       return "no-ammo";
+    case FireRefusal::clip_unknown:
+      return "clip-unknown";
     case FireRefusal::reloading:
       return "reloading";
     case FireRefusal::deploying:
       return "deploying";
+    case FireRefusal::edge:
+      return "edge";
     case FireRefusal::interval:
       return "interval";
-    case FireRefusal::edge:
+    case FireRefusal::rate_unknown:
       break;
   }
-  return "edge";
+  // A refusal this build does not know about: say so, do not guess.
+  return "unknown";
 }
 
 /// The fire path's decision for one command.
@@ -844,10 +881,23 @@ struct FireDecision {
 /// **The unknown fire mode is treated as semi-automatic** (the conservative
 /// direction, see `classify_fire_mode`).
 [[nodiscard]] inline constexpr auto decide_fire(const FireInputs& inputs) noexcept -> FireDecision {
-  if (!inputs.want) {
+  // No solve: the ragebot is not aiming at anybody, so there is nothing to
+  // fire at.
+  if (!inputs.solved) {
     return FireDecision{.press = false, .refusal = FireRefusal::no_solve};
   }
+  // The fire path is **disabled**: the operator's `fire` toggle is off, or the
+  // visibility gate refused the shot. A different fact from "no solve" — the
+  // operator can act on this one.
+  if (!inputs.enabled) {
+    return FireDecision{.press = false, .refusal = FireRefusal::fire_off};
+  }
   const FireCapability& weapon = inputs.capability;
+  // The clip could not be read: the payload does not know whether the weapon
+  // can shoot, and *when in doubt, do not fire*.
+  if (!weapon.clip_known) {
+    return FireDecision{.press = false, .refusal = FireRefusal::clip_unknown};
+  }
   // The clip is empty: the shot cannot be fired. The auto-reload assist holds
   // `IN_RELOAD` in this case.
   if (weapon.clip <= 0) {
@@ -879,14 +929,403 @@ struct FireDecision {
   // being wasted**. The engine's own record (`m_nNextPrimaryAttackTick`) is
   // authoritative; the VData's cycle time is the fallback when that record
   // could not be read.
-  const bool rate_ok =
-      weapon.ready_known
-          ? weapon.ready
-          : (weapon.interval > 0.0F && inputs.elapsed >= weapon.interval);
-  if (!rate_ok) {
-    return FireDecision{.press = false, .refusal = FireRefusal::interval};
+  if (weapon.ready_known) {
+    if (!weapon.ready) {
+      return FireDecision{.press = false, .refusal = FireRefusal::interval};
+    }
+  } else if (weapon.interval > 0.0F) {
+    if (inputs.elapsed < weapon.interval) {
+      return FireDecision{.press = false, .refusal = FireRefusal::interval};
+    }
+  } else {
+    // **Neither** source of the rate could be read: the gate refuses the
+    // shot, and it says *why* — the rate is unknown, not "the interval has
+    // not elapsed". A refusal the operator cannot act on is a silent refusal
+    // with a name on it.
+    return FireDecision{.press = false, .refusal = FireRefusal::rate_unknown};
   }
   return FireDecision{.press = true, .refusal = FireRefusal::none};
+}
+
+// --- The fire path's write ------------------------------------------------------
+//
+// The **decision** above says whether the ragebot contributes the attack bit.
+// The **write** below puts that on the command — and it is where the release
+// actually happens, so it is where the edge is won or lost.
+//
+// The rule the repo states (`compose_button_mask`): *the features' bits are
+// only ever **set**, never cleared — a feature that releases the attack button
+// must not take the player's own press of the same button away.* That rule
+// protects the **player's** press. It does not say that the payload may never
+// take **its own** press back: a contribution that can only be *added* can
+// never be *removed*, so a withdrawal would leave the press on the command and
+// the engine would never see the release.
+//
+// So the attack bit is the one bit that is **replaced** rather than merged:
+// it is recomputed from its **contributors** for every command.
+
+/// The attack button's **contributors** on one command.
+///
+/// Three parties can assert the attack button besides the ragebot: the
+/// **engine** (the player's own press), the **control channel** (an explicit
+/// `press("attack")`) and the **triggerbot** (its own hold, a feature bit).
+/// They are all **held**: they survive the ragebot's withdrawal. The
+/// ragebot's own contribution is the **replaceable** one.
+struct AttackContributors {
+  /// The **player's own** press: the engine's own mask, read before the
+  /// payload's write.
+  bool player{false};
+  /// The **control channel's** own press of the button.
+  bool control{false};
+  /// The **triggerbot's** own hold (a feature bit).
+  bool trigger{false};
+  /// The **ragebot's** fire path's decision for this command.
+  bool rage{false};
+};
+
+/// The command's attack bit, from its contributors.
+[[nodiscard]] inline constexpr auto compose_attack_bit(const AttackContributors& contributors) noexcept
+    -> std::uint64_t {
+  return (contributors.player || contributors.control || contributors.trigger || contributors.rage)
+             ? button::k_attack
+             : 0ULL;
+}
+
+/// The command's button mask, with the **attack bit replaced** by the
+/// contributors' composition.
+///
+/// The features' **other** bits are only ever *set*, never cleared — the repo's
+/// rule, and it holds here. The **attack** bit is the deliberate exception:
+/// the ragebot's contribution to it must be **replaceable**, or the withdrawal
+/// could never remove the payload's own press. The contributors carry the
+/// player's own press and the triggerbot's hold, so neither of them is taken
+/// away.
+[[nodiscard]] inline constexpr auto compose_command_mask(std::uint64_t current_mask,
+                                                          std::uint64_t control_set,
+                                                          std::uint64_t control_clear,
+                                                          std::uint64_t feature_mask,
+                                                          bool usercmd_backend,
+                                                          const AttackContributors& contributors) noexcept
+    -> std::uint64_t {
+  std::uint64_t value = compose_button_mask(current_mask, control_set, control_clear, feature_mask,
+                                             usercmd_backend);
+  // The control channel's own **release** takes the button away entirely —
+  // that is the operator's release, and it outranks the contributors.
+  if (button_reaches_command(ButtonPath::control_command, usercmd_backend) &&
+      (control_clear & button::k_attack) != 0) {
+    return value & ~button::k_attack;
+  }
+  // The attack bit is **replaced**: the payload's own previous press is not
+  // among the contributors, so a withdrawal is a real release.
+  return (value & ~button::k_attack) | compose_attack_bit(contributors);
+}
+
+/// The ragebot's own contribution to the attack button.
+///
+/// The **fire path's decision** (`press`) is the service's, and it is only
+/// honoured when the ragebot has a solve and its fire is enabled. Putting the
+/// expression here (and not in the payload) is what keeps it honest: a ragebot
+/// that holds `IN_ATTACK` on **every** command — the original defect — is one
+/// `&&` away, and the host test has to catch it.
+[[nodiscard]] inline constexpr auto rage_attack_press(bool solved, bool fire_enabled,
+                                                       bool press) noexcept -> bool {
+  return solved && fire_enabled && press;
+}
+
+/// The fire path's **command cache**: what the engine's own mask said, per
+/// command.
+///
+/// The payload writes to **two** commands per tick — the slot-25 copy of the
+/// command and the slot-5 command the engine has just built — and the engine
+/// **reuses** the command objects: a command the payload wrote last tick still
+/// carries the payload's own press. So the engine's own attack bit is
+/// remembered **per command number** (`CUserCmd::nSequenceNumber`), and the
+/// payload composes from *that* and never from what it wrote itself.
+///
+/// Without the cache the payload would read **its own** press back as the
+/// player's, and a withdrawal would then never clear the bit — which is
+/// exactly the release the edge needs.
+class FireCommandCache {
+ public:
+  /// The engine's own attack bit for one command.
+  struct Reading {
+    /// The **player's own** press of the attack button.
+    bool player_attack{false};
+  };
+
+  /// The engine's own attack bit for a command.
+  ///
+  /// `observed_attack` is the command's attack bit **as it stands**.
+  ///
+  /// `fresh` is true for the command the engine has **just built** (the slot-5
+  /// command): its mask is the engine's own, so it is a **clean** reading. The
+  /// slot-25 **copy** may already carry the payload's own press (the engine
+  /// copies the command it has just built), so it never contributes a fresh
+  /// reading — it reuses the last one.
+  ///
+  /// A command the payload has **not** written the attack bit to yet also
+  /// carries the engine's own mask, so it is a clean reading as well — and it
+  /// is refreshed, so the reading follows the player's own trigger.
+  [[nodiscard]] auto read(std::uint32_t number, bool observed_attack, bool fresh) noexcept
+      -> Reading {
+    Entry* entry = find(number);
+    if (entry == nullptr) {
+      entry = &slots_[next_];
+      next_ = (next_ + 1) % k_slots;
+      entry->number = number;
+      entry->valid = true;
+      entry->player_attack = fresh ? observed_attack : last_;
+      entry->attack_written = false;
+      if (fresh) {
+        last_ = observed_attack;
+      }
+      return Reading{.player_attack = entry->player_attack};
+    }
+    if (!entry->attack_written) {
+      // The payload has not put its own press on this command, so the mask is
+      // still the engine's own: the reading is clean and it is refreshed.
+      entry->player_attack = observed_attack;
+      last_ = observed_attack;
+    }
+    return Reading{.player_attack = entry->player_attack};
+  }
+
+  /// Remember that the payload put its own press on a command (`attack`), so
+  /// the next reading of that command is **not** clean.
+  void wrote(std::uint32_t number, bool attack) noexcept {
+    Entry* entry = find(number);
+    if (entry == nullptr) {
+      return;
+    }
+    entry->attack_written = attack;
+  }
+
+ private:
+  struct Entry {
+    std::uint32_t number{0};
+    bool valid{false};
+    /// The engine's own attack bit (the player's own press).
+    bool player_attack{false};
+    /// The payload's own press is on this command.
+    bool attack_written{false};
+  };
+  // Four slots: the payload sees at most two commands per tick, and a command
+  // number is only reused after the engine's ring buffer wraps.
+  static constexpr std::size_t k_slots = 4;
+  Entry slots_[k_slots]{};
+  std::size_t next_{0};
+  // The last clean reading — the fallback for a copy of a command the payload
+  // has already written to.
+  bool last_{false};
+
+  [[nodiscard]] auto find(std::uint32_t number) noexcept -> Entry* {
+    for (auto& entry : slots_) {
+      if (entry.valid && entry.number == number) {
+        return &entry;
+      }
+    }
+    return nullptr;
+  }
+};
+
+/// Everything the payload needs to write one command's **fire path**.
+struct FireWriteInputs {
+  /// The command's button mask **as it stands** — the engine's own mask plus
+  /// whatever the payload wrote to it before.
+  std::uint64_t current_mask{0};
+  /// The control channel's own masks (`press` / `release`).
+  std::uint64_t control_set{0};
+  std::uint64_t control_clear{0};
+  /// The **features'** bits (the triggerbot's hold).
+  std::uint64_t feature_mask{0};
+  /// The control channel reaches the command (the `usercmd` backend).
+  bool usercmd_backend{false};
+  /// The **player's own** press of the attack button. The payload reads it
+  /// from the engine's own mask, **before** its own write — a command the
+  /// payload already wrote to carries the payload's press, not the player's.
+  bool player_attack{false};
+  /// The **control channel's** own press of the attack button.
+  bool control_attack{false};
+  /// The fire path's decision: does the ragebot contribute the attack bit?
+  bool rage_press{false};
+  /// The payload's **own** contribution to the attack changed since the
+  /// previous tick — a press or a **withdrawal**. A withdrawal is a change
+  /// too, and the changed word has to say so.
+  bool attack_changed{false};
+  /// The ragebot's assists (the scope, the reload) — the bits it asserts.
+  std::uint64_t assists{0};
+  /// The PB's own words (what the engine wrote into `CInButtonStatePB`).
+  std::uint64_t pb_held{0};
+  std::uint64_t pb_changed{0};
+};
+
+/// What the payload writes for one command.
+struct FireWrite {
+  /// The command's legacy button mask (`cmd + 0x60`).
+  std::uint64_t command_mask{0};
+  /// The PB's **held** word (`buttonstate1`).
+  std::uint64_t pb_held{0};
+  /// The PB's **changed** word (`buttonstate2`).
+  std::uint64_t pb_changed{0};
+  /// The movement services' **held** word: the bits to **set**.
+  std::uint64_t engine_set{0};
+  /// ... and the bits to **clear**.
+  std::uint64_t engine_clear{0};
+};
+
+/// The fire path's **write** on one command.
+///
+/// Everything the payload puts on the command for the fire path, in **one**
+/// pure function, so the host test drives the **wiring** and not a neighbour
+/// of it (`docs/orchestration/spec-t37-fire-path.md` §4.1).
+///
+/// The three channels and what each of them carries:
+///
+///   * the **command's mask** (`cmd + 0x60`) — the attack bit is *replaced*,
+///     so a withdrawal is a release;
+///   * the **PB's** `CInButtonStatePB` — the **held** word (`buttonstate1`)
+///     follows the command's mask, and the **changed** word (`buttonstate2`)
+///     carries the attack whenever it is asserted or has changed;
+///   * the **movement services'** `CInButtonState` — the **held** word follows
+///     the command's mask, so a withdrawal clears it.
+[[nodiscard]] inline constexpr auto compose_fire_write(const FireWriteInputs& in) noexcept -> FireWrite {
+  const AttackContributors contributors{
+      .player = in.player_attack,
+      .control = in.control_attack,
+      .trigger = (in.feature_mask & button::k_attack) != 0,
+      .rage = in.rage_press,
+  };
+  const std::uint64_t command_mask = compose_command_mask(
+      in.current_mask, in.control_set, in.control_clear, in.feature_mask, in.usercmd_backend,
+      contributors);
+  const std::uint64_t attack = command_mask & button::k_attack;
+  // The PB's **held** word follows the command's mask exactly. The attack bit
+  // is *replaced*, so the ragebot's withdrawal clears it: the engine's own
+  // held state goes to zero for one command, and the next press is a new
+  // edge — the edge a semi-automatic weapon needs. The player's own press is
+  // in the mask, so it stays.
+  std::uint64_t pb_held = (in.pb_held & ~button::k_attack) | attack;
+  std::uint64_t pb_changed = in.pb_changed;
+  if (in.assists != 0) {
+    pb_held = (pb_held & ~in.assists) | in.assists;
+    pb_changed |= in.assists;
+  }
+  // The **changed** word carries the attack edge: it is set when the payload's
+  // own contribution changed (a press **or** a **release** — a release is a
+  // change too) and while the payload's own press is on. It is deliberately
+  // **not** set for the **player's** own press: the engine computes that edge
+  // itself, and a changed bit on every command would be a press edge on every
+  // command.
+  if (in.rage_press || in.attack_changed) {
+    pb_changed |= button::k_attack;
+  }
+  // The movement services' **held** word: the same bits as the command's mask.
+  // A withdrawal **clears** the attack bit — that is the release.
+  return FireWrite{
+      .command_mask = command_mask,
+      .pb_held = pb_held,
+      .pb_changed = pb_changed,
+      .engine_set = attack | in.assists,
+      .engine_clear = ~attack & button::k_attack,
+  };
+}
+
+// --- The engine's shots ---------------------------------------------------------
+
+/// The clip's reading on one tick.
+struct ClipSample {
+  /// The clip could be read at all.
+  bool known{false};
+  /// The rounds in the clip.
+  int clip{0};
+  /// The weapon is reloading.
+  bool reloading{false};
+};
+
+/// Whether the clip's fall between two ticks is the **engine's** shot.
+///
+/// Two things make the clip fall without a shot, and neither is one:
+///
+///   * a **reload** empties the magazine (30 -> 0 -> 30), and the reload flag
+///     is the only thing that says so;
+///   * a **failed read** (a stale weapon entity, a weapon switch between the
+///     snapshot and the read) reads as zero — and zero is *not* a fact about
+///     the magazine.
+///
+/// So the detector needs **both** readings to be known and **neither** to be a
+/// reload.
+[[nodiscard]] inline constexpr auto is_engine_shot(const ClipSample& previous,
+                                                    const ClipSample& current) noexcept -> bool {
+  if (!previous.known || !current.known) {
+    return false;
+  }
+  if (previous.reloading || current.reloading) {
+    return false;
+  }
+  return current.clip < previous.clip;
+}
+
+// --- The rage status line -------------------------------------------------------
+//
+// The line is the operator's window on the ragebot, and it has to fit the
+// HUD's **192-byte** buffer (`payload/features/src/overlay.cpp`). Only a host
+// test can prove that, so the format lives here and the test measures it.
+//
+// The line carries the fire path's verdict and its three counters. The
+// diagnostics that do not belong on it — the aim **writes** and the
+// **backtracks** — are in the `rage` command's JSON instead.
+
+/// The rage status line's fields.
+struct RageStatusFields {
+  /// "AIM" (a solve is active) or "hold".
+  const char* aim{""};
+  /// The target's index.
+  int target{0};
+  /// The hitbox.
+  int hitbox{0};
+  /// The objective's name.
+  const char* objective{""};
+  /// The Monte-Carlo's marker ("" when there is none).
+  const char* monte_carlo{""};
+  /// The **engine's** shots.
+  std::uint64_t shots{0};
+  /// The ragebot's **attempts**.
+  std::uint64_t presses{0};
+  /// The release->re-press **edges**.
+  std::uint64_t edges{0};
+  /// The weapon's fire mode ("auto", "semi", "unknown").
+  const char* fire_mode{""};
+  /// The gate's verdict ("ok", "no-ammo", ...).
+  const char* fire_refusal{""};
+  /// The auto-stop marker ("" when it is off).
+  const char* stop{""};
+  /// The occlusion query's marker ("" when the query was complete).
+  const char* occlusion_query{""};
+  /// The occlusion candidates' marker ("" when they were complete).
+  const char* occlusion_candidates{""};
+  /// The **player** is holding the trigger ("" otherwise).
+  const char* player_attack{""};
+};
+
+/// The rage status line.
+///
+/// The line's fields are few and short on purpose: the worst case (every
+/// field at its longest) has to fit the HUD's 192-byte buffer, and the host
+/// test drives every field to its longest and measures the result.
+[[nodiscard]] inline auto format_rage_status(const RageStatusFields& fields, char* out,
+                                             std::size_t size) noexcept -> std::size_t {
+  if (out == nullptr || size == 0) {
+    return 0;
+  }
+  const int written =
+      std::snprintf(out, size, "rage: %s tgt %d box %d obj %s%s s%llu p%llu e%llu %s %s %s%s%s%s",
+                    fields.aim, fields.target, fields.hitbox, fields.objective, fields.monte_carlo,
+                    static_cast<unsigned long long>(fields.shots),
+                    static_cast<unsigned long long>(fields.presses),
+                    static_cast<unsigned long long>(fields.edges), fields.fire_mode,
+                    fields.fire_refusal, fields.stop, fields.occlusion_query,
+                    fields.occlusion_candidates, fields.player_attack);
+  return written < 0 ? 0 : static_cast<std::size_t>(written);
 }
 
 }  // namespace cs2::control

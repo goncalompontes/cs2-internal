@@ -29,6 +29,7 @@
 #include "cs2/control/rage_config.hpp"
 #include "cs2/control/rage_objective.hpp"
 #include "cs2/control/settings_access.hpp"
+#include "cs2/control/strafe_geometry.hpp"
 #include "cs2/control/trigger.hpp"
 #include "cs2/game/state_reader.hpp"
 
@@ -646,12 +647,12 @@ class Service {
   std::atomic<std::uint64_t> rage_shots_{0};
   std::atomic<std::uint64_t> rage_presses_{0};
   std::atomic<std::uint64_t> rage_edges_{0};
-  // The fire path's own bookkeeping (the **game thread** only): the last
+  // The fire path's own bookkeeping (**the game thread only**): the last
   // press (the edge's origin), the weapon and the clip the last tick saw (the
   // engine's shot detector), and the previous decision.
   std::uint64_t rage_last_press_us_{0};
   std::uintptr_t rage_prev_weapon_{0};
-  int rage_prev_clip_{0};
+  ClipSample rage_prev_clip_{};
   bool rage_prev_press_{false};
   bool rage_withdrawn_{false};
   // Backtracking (`docs/ragebot.md` §8): how many solves chose a lag record over the

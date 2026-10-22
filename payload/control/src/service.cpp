@@ -2539,16 +2539,21 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
 
 void Service::read_weapon_fire_state(const game::PlayerSnapshot& local,
                                      FireCapability& capability) const noexcept {
-  // No weapon: the capability stays empty, and the gate refuses the shot
-  // (the clip is zero).
+  // No weapon: the capability stays empty, and the gate refuses the shot (the
+  // clip could not be read).
   if (local.weapon_entity == 0) {
     return;
   }
   const WeaponFireOffsets& offsets = weapon_fire_offsets();
   // The clip (`m_iClip1`) — the shot cannot be fired without a round.
+  //
+  // A **failed read** is not an empty clip: it is "unknown". The two are
+  // different facts (an empty clip is a reason not to fire, a failed read is a
+  // reason not to *count* a shot), so the flag is kept.
   std::int32_t clip = 0;
   if (cs2::game::read(local.weapon_entity + offsets.clip1, clip)) {
     capability.clip = clip;
+    capability.clip_known = true;
   }
   // The reload (`m_bInReload`) — the engine ignores the trigger.
   std::uint8_t reloading = 0;
@@ -2585,8 +2590,12 @@ void Service::read_weapon_fire_state(const game::PlayerSnapshot& local,
 }
 
 void Service::decide_rage_fire(const game::Snapshot& snapshot) noexcept {
-  // The ragebot wants to fire: a solve is active and the fire is enabled.
-  const bool want = input_.rage_active() && input_.rage_fire();
+  // The ragebot has an **active solve**, and the fire path is **enabled**: the
+  // operator's `fire` toggle and the visibility gate (`set_rage_fire` carries
+  // both). The two are different facts, and the status reports them apart: a
+  // disabled fire is not "there is no solve".
+  const bool solved = input_.rage_active();
+  const bool enabled = input_.rage_fire();
   FireCapability capability{};
   if (snapshot.local.has_value()) {
     const game::PlayerSnapshot& local = *snapshot.local;
@@ -2609,16 +2618,25 @@ void Service::decide_rage_fire(const game::Snapshot& snapshot) noexcept {
   // well, the attribution is the payload's best guess: the status says how
   // many the ragebot caused, and the press counter says how many it tried.)
   //
+  // Two things make the clip fall **without** a shot, and the detector knows
+  // both: a **reload** empties the magazine, and a **failed read** reads as
+  // zero. Neither is a shot (`is_engine_shot`).
+  //
   // A **new weapon** starts with a clip of its own: the difference against
   // the previous weapon's clip is not a shot.
   const std::uintptr_t weapon =
       snapshot.local.has_value() ? snapshot.local->weapon_entity : 0;
   const bool new_weapon = weapon != rage_prev_weapon_;
   rage_prev_weapon_ = weapon;
-  if (!new_weapon && capability.clip < rage_prev_clip_ && rage_prev_press_) {
+  const ClipSample clip{
+      .known = capability.clip_known,
+      .clip = capability.clip,
+      .reloading = capability.reloading,
+  };
+  if (!new_weapon && rage_prev_press_ && is_engine_shot(rage_prev_clip_, clip)) {
     rage_shots_.fetch_add(1, std::memory_order_relaxed);
   }
-  rage_prev_clip_ = capability.clip;
+  rage_prev_clip_ = clip;
 
   // The **edge**: the time since the ragebot's last press. The release the
   // edge needs is measured against it.
@@ -2628,7 +2646,8 @@ void Service::decide_rage_fire(const game::Snapshot& snapshot) noexcept {
           ? 1000.0F
           : static_cast<float>(static_cast<double>(now - rage_last_press_us_) / 1.0e6);
   FireInputs inputs{};
-  inputs.want = want;
+  inputs.solved = solved;
+  inputs.enabled = enabled;
   inputs.capability = capability;
   inputs.elapsed = elapsed;
   const FireDecision decision = decide_fire(inputs);
@@ -2645,20 +2664,28 @@ void Service::decide_rage_fire(const game::Snapshot& snapshot) noexcept {
     rage_presses_.fetch_add(1, std::memory_order_relaxed);
     rage_last_press_us_ = now;
   }
+  // The **changed** flag: the payload's own contribution to the attack moved —
+  // a press or a **withdrawal**. The PB's changed word carries it, and that is
+  // the release the engine sees (`docs/ragebot.md` §"the fire path").
+  const bool changed = decision.press != rage_prev_press_;
   rage_prev_press_ = decision.press;
   rage_refusal_.store(static_cast<int>(decision.refusal), std::memory_order_relaxed);
   // The decision is published to the input path: it is made **once per tick**,
   // so every command of the tick carries the same answer.
-  input_.set_rage_fire_press(decision.press);
+  input_.set_rage_fire_press(decision.press, changed);
 }
 
 void Service::reset_rage_fire() noexcept {
   rage_last_press_us_ = 0;
   rage_prev_weapon_ = 0;
-  rage_prev_clip_ = 0;
+  rage_prev_clip_ = ClipSample{};
   rage_prev_press_ = false;
   rage_withdrawn_ = false;
-  input_.set_rage_fire_press(false);
+  // The verdict goes **with** the fire path: a stale refusal (or a stale fire
+  // mode) would tell the operator a reason that is no longer true.
+  rage_refusal_.store(static_cast<int>(FireRefusal::no_solve), std::memory_order_relaxed);
+  rage_fire_mode_.store(static_cast<int>(FireMode::unknown), std::memory_order_relaxed);
+  input_.set_rage_fire_press(false, false);
 }
 
 auto Service::read_hitboxes(std::uintptr_t pawn, game::HitboxCapsule* out, int max) const noexcept
@@ -2727,29 +2754,42 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
   // count (both in the `rage` command's JSON status) are left out to make
   // room for the Monte-Carlo's marker.
   //
-  // The **fire path**'s three facts are on the line too (`docs/ragebot.md`
+  // The **fire path**'s facts are on the line too (`docs/ragebot.md`
   // §"the fire path"): the weapon's fire mode as the payload reads it ("auto",
   // "semi", "unknown"), whether the fire path can shoot right now and — when
   // it cannot — **which condition blocked it**, and the counters (the
   // **engine's** shots, the ragebot's presses and the release->re-press
   // edges).
-  const char* mode =
-      fire_mode_name(static_cast<FireMode>(rage_fire_mode_.load(std::memory_order_relaxed)));
-  const char* refusal =
-      fire_refusal_name(static_cast<FireRefusal>(rage_refusal_.load(std::memory_order_relaxed)));
-  std::snprintf(
-      out, size,
-      "rage: %s target %d box %d obj %s%s w%llu s%llu p%llu e%llu bt%llu fire %d %s %s%s%s%s%s",
-      input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(), objective, mc,
-      static_cast<unsigned long long>(input_.rage_writes()),
-      static_cast<unsigned long long>(rage_shots_.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(rage_presses_.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(rage_edges_.load(std::memory_order_relaxed)),
-      static_cast<unsigned long long>(rage_backtracks_.load()), input_.rage_fire() ? 1 : 0, mode,
-      refusal, input_.rage_stop() ? " stop" : "",
-      rage_occlusion_query_complete_.load(std::memory_order_relaxed) ? "" : " occlusion-incomplete",
-      rage_occlusion_candidates_complete_.load(std::memory_order_relaxed) ? "" : " occlusion-cap",
-      input_.rage_player_attack() ? " player-attack" : "");
+  //
+  // The line's **format** lives in `strafe_geometry.hpp` (`format_rage_status`)
+  // so the host test can drive every field to its longest and measure the
+  // result against the HUD's 192-byte buffer. The diagnostics that do not fit
+  // there — the aim **writes** and the **backtracks** — are in the `rage`
+  // command's JSON, and the `fire` toggle is not on the line at all: the
+  // refusal says "fire-off" when the fire path is disabled.
+  const RageStatusFields fields{
+      .aim = input_.rage_active() ? "AIM" : "hold",
+      .target = target,
+      .hitbox = input_.rage_hitbox(),
+      .objective = objective,
+      .monte_carlo = mc,
+      .shots = rage_shots_.load(std::memory_order_relaxed),
+      .presses = rage_presses_.load(std::memory_order_relaxed),
+      .edges = rage_edges_.load(std::memory_order_relaxed),
+      .fire_mode =
+          fire_mode_name(static_cast<FireMode>(rage_fire_mode_.load(std::memory_order_relaxed))),
+      .fire_refusal =
+          fire_refusal_name(static_cast<FireRefusal>(rage_refusal_.load(std::memory_order_relaxed))),
+      .stop = input_.rage_stop() ? " stop" : "",
+      .occlusion_query = rage_occlusion_query_complete_.load(std::memory_order_relaxed)
+                             ? ""
+                             : " occ-inc",
+      .occlusion_candidates = rage_occlusion_candidates_complete_.load(std::memory_order_relaxed)
+                                  ? ""
+                                  : " occ-cap",
+      .player_attack = input_.rage_player_attack() ? " player" : "",
+  };
+  format_rage_status(fields, out, size);
   return true;
 }
 
