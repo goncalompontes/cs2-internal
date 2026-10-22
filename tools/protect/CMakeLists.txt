@@ -24,6 +24,7 @@ add_library(Cs2Protect SHARED
   src/report.cpp
   src/strings.cpp
   src/transform.cpp
+  src/layout.cpp
   src/cipher.cpp
   src/vm_gate.cpp
   src/vm_lower.cpp
@@ -131,6 +132,7 @@ add_executable(cs2-protect-tests
   src/report.cpp
   src/strings.cpp
   src/transform.cpp
+  src/layout.cpp
   src/cipher.cpp
   src/vm_gate.cpp
   src/vm_lower.cpp
@@ -158,6 +160,7 @@ add_executable(cs2-protect-vm-values-test
   src/report.cpp
   src/strings.cpp
   src/transform.cpp
+  src/layout.cpp
   src/cipher.cpp
   src/vm_gate.cpp
   src/vm_lower.cpp
@@ -245,6 +248,14 @@ set_tests_properties(protect-str-ir-test protect-str-diff-test
 # skipped (it would count every rewrite twice).
 add_test(NAME protect-coverage-test
   COMMAND ${CS2_PROTECT_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/coverage_test.py)
+
+# The reader of the rotation: the X86 backend spells the rotation of the
+# mixer in three ways, and two of the sixty-three legal rotations have **no
+# immediate at all** (`rolq %rax` is a rotation by one, `rorq %rax` is a
+# rotation by 63). A reader that knows only `rolq $imm8` cannot see them, and
+# the build of a legal seed fails its own check.
+add_test(NAME protect-rotation-test
+  COMMAND ${CS2_PROTECT_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/tests/rotation_test.py)
 
 # The front end of the virtualizer: the analysis is read-only, so the test
 # proves that the module comes out of it unchanged, and that the report and

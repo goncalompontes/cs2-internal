@@ -132,6 +132,32 @@ if protect_enabled
   if not fs.exists(protect_policy)
     error('the policy file does not exist: ' + protect_policy)
   endif
+
+  # The seed is **mandatory**. The protection's constants, its keys and its
+  # layout come from it, and the fallback (a constant of the payload: an
+  # FNV-1a over the module id) is what makes two builds without a seed byte
+  # for byte the same file. A protected build without a seed is therefore
+  # the same failure as a protected build without a policy -- a constant
+  # image that looks protected -- and the configure step fails for it the
+  # same way.
+  #
+  # The plugin refuses to run without a seed as well
+  # (tools/protect/src/config.cpp): the wiring catches it here, where the
+  # message can name both sources.
+  #
+  # The rule is the **plugin's**, and the probe that applies it is the
+  # policy checker's (`--seed`): there is one reader of the policy, and the
+  # configure step fails with the plugin's own message -- a malformed
+  # policy is the plugin's error to report, and it is not hidden behind a
+  # seed error.
+  protect_seed_probe = run_command(protect_check, '--seed', check : false)
+  if protect_seed_probe.returncode() == 1
+    error('-Dprotect=true needs a build seed: set CS2_PROTECT_SEED=<64-bit hexadecimal> or ' +
+          'put a "seed" in the policy file')
+  elif protect_seed_probe.returncode() != 0
+    error('-Dprotect=true: the seed or the policy is invalid: ' +
+          protect_seed_probe.stderr().strip())
+  endif
   protect_policy_digest = fs.hash(files(protect_policy), 'sha256')
   protect_policy_args = [
     '-DCS2_PROTECT_POLICY_SHA256=' + protect_policy_digest.substring(0, 16),

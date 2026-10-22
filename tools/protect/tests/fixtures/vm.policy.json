@@ -1,5 +1,6 @@
 {
   "protect": [
     "vm_*"
-  ]
+  ],
+  "seed": "0x0BADC0DEDEADBEEF"
 }

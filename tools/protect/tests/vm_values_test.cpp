@@ -64,16 +64,25 @@ void expect(bool condition, const std::string& what) {
 // The three primitives of the cipher, written from the contract (README
 // §14.5 and `src/cipher.hpp`): the mixer, the seeded stream and the
 // keystream of the container.
+//
+// The mixer is **per build**: its multiplier, its xor constant and its
+// rotation come from the module's seed. The contract says how, and this
+// copy is written from the contract and not from the plugin's code.
 
-constexpr std::uint64_t k_mix_multiplier = 0x9E3779B97F4A7C15ULL;
-constexpr std::uint64_t k_mix_xor = 0xBF58476D1CE4E5B9ULL;
-constexpr unsigned k_mix_rotate = 31;
+constexpr std::uint64_t k_mixer_salt = 0x4D495845525F5345ULL;
 
-auto mix64(std::uint64_t value) noexcept -> std::uint64_t {
-  value *= k_mix_multiplier;
-  value ^= k_mix_xor;
-  return (value << k_mix_rotate) | (value >> (64U - k_mix_rotate));
-}
+/// The mixer of a build.
+struct Mixer {
+  std::uint64_t multiplier{1};
+  std::uint64_t xor_constant{1};
+  unsigned rotate{31};
+
+  auto mix64(std::uint64_t value) const noexcept -> std::uint64_t {
+    value *= multiplier;
+    value ^= xor_constant;
+    return (value << rotate) | (value >> (64U - rotate));
+  }
+};
 
 auto splitmix64(std::uint64_t& state) noexcept -> std::uint64_t {
   state += 0x9E3779B97F4A7C15ULL;
@@ -81,6 +90,19 @@ auto splitmix64(std::uint64_t& state) noexcept -> std::uint64_t {
   value = (value ^ (value >> 30U)) * 0xBF58476D1CE4E5B9ULL;
   value = (value ^ (value >> 27U)) * 0x94D049BB133111EBULL;
   return value ^ (value >> 31U);
+}
+
+/// The mixer of a build, from the seed.
+auto mixer_for(std::uint64_t seed) noexcept -> Mixer {
+  std::uint64_t state = seed ^ k_mixer_salt;
+  Mixer mixer;
+  mixer.multiplier = splitmix64(state) | 1ULL;
+  mixer.xor_constant = splitmix64(state);
+  if (mixer.xor_constant == 0) {
+    mixer.xor_constant = 1;
+  }
+  mixer.rotate = 1U + static_cast<unsigned>(splitmix64(state) % 63ULL);
+  return mixer;
 }
 
 /// The key of the container: the three parts of the key, combined.
@@ -105,13 +127,14 @@ auto key_of(std::uint64_t seed) noexcept -> std::uint64_t {
       }
     }
   }
-  return mix64(parts[0] ^ parts[1] ^ parts[2]);
+  return mixer_for(seed).mix64(parts[0] ^ parts[1] ^ parts[2]);
 }
 
 /// The byte of the keystream at the offset `position`.
-auto keystream_byte(std::uint64_t key, std::size_t position) noexcept -> std::uint8_t {
+auto keystream_byte(const Mixer& mixer, std::uint64_t key, std::size_t position) noexcept
+    -> std::uint8_t {
   const std::uint64_t word = position / 8U;
-  const std::uint64_t mixed = mix64(key + word * k_mix_multiplier);
+  const std::uint64_t mixed = mixer.mix64(key + word * mixer.multiplier);
   return static_cast<std::uint8_t>((mixed >> (8U * (position % 8U))) & 0xFFU);
 }
 
@@ -594,12 +617,13 @@ auto parse(const std::string& ir) -> std::unique_ptr<llvm::Module> {
 /// contract, not the plugin's.
 auto decode(const cs2::protect::VmFunction& function, std::vector<Decoded>& code)
     -> cs2::protect::VmHeader {
+  const Mixer mixer = mixer_for(k_seed);
   const std::uint64_t key = key_of(k_seed);
   expect(key == function.key, "the key of the module is not the key of the contract");
 
   std::vector<std::uint8_t> plain = function.blob;
   for (std::size_t index = 0; index < plain.size(); ++index) {
-    plain[index] ^= keystream_byte(key, index);
+    plain[index] ^= keystream_byte(mixer, key, index);
   }
 
   cs2::protect::VmHeader header;

@@ -38,8 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from protect_checks import (  # noqa: E402
     MASK64,
-    MIX_MULTIPLIER,
-    MIX_XOR,
+    Mixer,
     mix64,
     signed64,
 )
@@ -74,13 +73,42 @@ def body_of(ir: str, function: str) -> str:
     return "\n".join(body)
 
 
-def run_opt(opt: Path, plugin: Path, fixture: Path, policy: Path, work: Path) -> str:
+def defines_of(ir: str) -> list[str]:
+    """The names of the functions the IR defines, in the order of the list.
+
+    The order is the one of the module's function list: the pass permutes
+    it, and the object writer emits the functions in that order.
+    """
+    return re.findall(r"^define\s+.*?@([A-Za-z0-9_.$]+)\(", ir, re.MULTILINE)
+
+
+def rotation_of(caller: str) -> int | None:
+    """The rotation of the mixer, as the decode emits it.
+
+    The decode is a rotation: a `shl` by the rotation and a `lshr` by 64
+    minus the rotation. The rotation is the one value of the mixer that is
+    in the instruction stream, and it is what makes the `.text` of two
+    builds with two seeds differ.
+    """
+    amounts = [int(value) for value in re.findall(r"\b(?:shl|lshr) i64 %\w+, (\d+)\b", caller)]
+    for amount in amounts:
+        if 1 <= amount <= 63 and (64 - amount) in amounts:
+            return amount
+    return None
+
+
+def run_opt(opt: Path, plugin: Path, fixture: Path, policy: Path, work: Path,
+            seed: str | None = None, name: str = "calls") -> str:
     """Runs the pass over the fixture and returns the output IR."""
     work.mkdir(parents=True, exist_ok=True)
-    output = work / "calls.out.ll"
+    output = work / f"{name}.out.ll"
     environment = dict(os.environ)
     environment["CS2_PROTECT_CONFIG"] = str(policy)
     environment["CS2_PROTECT_COVERAGE"] = str(work / "coverage")
+    # The seed of the build: the environment wins over the policy.
+    environment.pop("CS2_PROTECT_SEED", None)
+    if seed is not None:
+        environment["CS2_PROTECT_SEED"] = seed
     command = [
         str(opt),
         f"-load-pass-plugin={plugin}",
@@ -107,12 +135,19 @@ def main(argv: list[str]) -> int:
 
     try:
         ir = run_opt(args.opt, args.plugin, args.fixture, args.policy, args.work)
+        # The same seed gives the same layout, and another seed gives another
+        # one: the permutation is seeded.
+        same = run_opt(args.opt, args.plugin, args.fixture, args.policy, args.work,
+                       seed="0x0123456789ABCDEF", name="same")
+        other = run_opt(args.opt, args.plugin, args.fixture, args.policy, args.work,
+                        seed="0xFEDCBA9876543210", name="other")
     except Failure as error:
         print(f"ir_test: {error}", file=sys.stderr)
         return 1
 
     try:
         check_ir(ir)
+        check_layout(ir, same, other)
     except Failure as error:
         print(f"ir_test: {error}", file=sys.stderr)
         print("--- the output IR ---", file=sys.stderr)
@@ -181,7 +216,24 @@ def check_ir(ir: str) -> None:
         assert found is not None
         parts.append(int(found.group(1)) & MASK64)
     check(len(set(parts)) == 3, "the key is not split into three different constants")
-    key = mix64(parts[0] ^ parts[1] ^ parts[2])
+
+    # The mixer is **per build**: its multiplier and its xor constant are in
+    # the globals, and its rotation is the one the decode emits. The test
+    # reads all three out of the IR, so it does not have to know them: the
+    # decode has to be the one the pass encrypted the descriptor with.
+    constants = {}
+    for name in ("mixmul", "mixxor"):
+        found = re.search(rf"@cs2\.protect\.{name} = private unnamed_addr constant i64 (-?\d+)", ir)
+        check(found is not None, f"the constant '{name}' is missing")
+        assert found is not None
+        constants[name] = int(found.group(1)) & MASK64
+    rotation = rotation_of(caller)
+    check(rotation is not None, "the decode does not rotate: there is no rotation in the IR")
+    assert rotation is not None
+    check(1 <= rotation <= 63, f"the rotation is {rotation}, and it is not in [1, 63]")
+
+    mixer = Mixer(constants["mixmul"], constants["mixxor"], rotation)
+    key = mix64(parts[0] ^ parts[1] ^ parts[2], mixer)
 
     entries = re.findall(r"ptr (@[A-Za-z0-9_.$]+)", table.group(2))
     decoded: set[str] = set()
@@ -237,14 +289,7 @@ def check_ir(ir: str) -> None:
     # immediate in this shape (it loses a bit of it), and a wrong constant
     # is a wrong call target -- not a crash. A constant in a global is
     # written by the object writer, so it reaches the image bit for bit.
-    for name, value in (("mixmul", MIX_MULTIPLIER), ("mixxor", MIX_XOR)):
-        found = re.search(rf"@cs2\.protect\.{name} = private unnamed_addr constant i64 (-?\d+)", ir)
-        check(found is not None, f"the constant '{name}' is missing")
-        assert found is not None
-        check(
-            int(found.group(1)) & MASK64 == value,
-            f"the constant '{name}' does not hold the value of the mixer",
-        )
+    for name, value in (("mixmul", constants["mixmul"]), ("mixxor", constants["mixxor"])):
         signed = signed64(value)
         check(
             re.search(rf"\b{signed}\b", caller) is None,
@@ -260,6 +305,30 @@ def check_ir(ir: str) -> None:
         "getelementptr inbounds ptr, ptr @cs2.protect.table" not in caller,
         "the GEP into the table promises `inbounds`",
     )
+
+
+def check_layout(ir: str, same: str, other: str) -> None:
+    """The assertions of the layout permutation.
+
+    The pass permutes the module's function list with a permutation derived
+    from the module's seed: the object writer emits the functions in that
+    order, and the linker keeps the order of an object's sections, so the
+    permutation is what moves the code in the image.
+    """
+    defines = defines_of(ir)
+    check(len(defines) >= 2, "the fixture has fewer than two definitions")
+    check(len(set(defines)) == len(defines), "the module defines a function twice")
+
+    # The same seed gives the same order, and another seed gives another
+    # one.
+    check(defines_of(same) == defines, "the same seed gives another order")
+    check(defines_of(other) != defines, "another seed gives the same order")
+
+    # The order is a permutation of the original one: no function is lost
+    # and none is duplicated. The fixture's order is the one of the file.
+    original = ["target", "variadic_target", "musttail_target", "sret_target", "caller"]
+    check(sorted(defines) == sorted(original), "the permutation lost or duplicated a function")
+    check(defines != original, "the function list is in the original order: it was not permuted")
 
 
 if __name__ == "__main__":

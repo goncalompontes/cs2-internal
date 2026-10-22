@@ -18,8 +18,10 @@
 //     level that is not implemented yet is refused, and a selected function
 //     that did not survive is reported.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -40,7 +42,9 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "cipher.hpp"
 #include "config.hpp"
+#include "layout.hpp"
 #include "report.hpp"
 #include "selection.hpp"
 #include "strings.hpp"
@@ -119,6 +123,105 @@ void test_policy_reader() {
   if (seed.has_value() && seed->seed.has_value()) {
     check_equal(std::to_string(*seed->seed), "1311768467463790320",
                 "the low 64 bits of the seed are kept");
+  }
+}
+
+/// The mandatory seed ---------------------------------------------------------
+
+/// Sets an environment variable, for the tests.
+///
+/// The plugin reads its configuration from the environment, and the test has
+/// to set it: `setenv` is the POSIX spelling and `_putenv_s` the Windows
+/// one.
+void set_env(const char* name, const char* value) {
+#if defined(_WIN32)
+  _putenv_s(name, value);
+#else
+  setenv(name, value, 1);
+#endif
+}
+
+/// The seed is mandatory: the plugin refuses to run without one.
+///
+/// The fallback is not a default, it is a **constant of the payload**: two
+/// builds without a seed are byte for byte the same file. The failure has to
+/// be loud, and the message has to name both sources.
+void test_mandatory_seed() {
+  set_env("CS2_PROTECT_SEED", "");
+  set_env("CS2_PROTECT_CONFIG", "");
+  auto without = cs2::protect::load_config();
+  check(!without.has_value(), "the configuration without a seed is refused");
+  if (!without.has_value()) {
+    const std::string& message = without.error().message;
+    check(message.find("CS2_PROTECT_SEED") != std::string::npos,
+          "the message names the environment variable");
+    check(message.find("\"seed\"") != std::string::npos, "the message names the policy's seed");
+  }
+
+  // A policy that carries a seed: the configuration is accepted.
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() / "cs2-protect-tests-seed";
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+  std::filesystem::create_directories(directory);
+  const std::filesystem::path policy = directory / "policy.json";
+  {
+    std::ofstream out(policy);
+    out << R"({"protect": [], "seed": "0x0123456789ABCDEF"})";
+  }
+  set_env("CS2_PROTECT_CONFIG", policy.string().c_str());
+  auto with_policy = cs2::protect::load_config();
+  check(with_policy.has_value(), "the policy's seed is enough");
+  if (with_policy.has_value()) {
+    const auto seed = cs2::protect::build_seed(*with_policy);
+    check(seed.has_value() && *seed == 0x0123456789ABCDEFULL,
+          "the policy's seed is the seed of the build");
+  }
+
+  // The environment wins over the policy: the environment is what the
+  // release process sets.
+  set_env("CS2_PROTECT_SEED", "0xFEDCBA9876543210");
+  auto with_both = cs2::protect::load_config();
+  check(with_both.has_value(), "the configuration with two seeds is accepted");
+  if (with_both.has_value()) {
+    const auto seed = cs2::protect::build_seed(*with_both);
+    check(seed.has_value() && *seed == 0xFEDCBA9876543210ULL,
+          "the environment wins over the policy");
+  }
+
+  // The environment is cleared again: the other tests read the
+  // configuration by hand.
+  set_env("CS2_PROTECT_SEED", "");
+  set_env("CS2_PROTECT_CONFIG", "");
+  std::filesystem::remove_all(directory, error);
+}
+
+/// The mixer ------------------------------------------------------------------
+
+/// The mixer is per build.
+///
+/// The multiplier, the xor constant and the rotation come from the module's
+/// seed: two builds with two seeds hold two different mixers, and the
+/// protection leaves no fixed byte in the image.
+void test_per_build_mixer() {
+  const cs2::protect::Mixer first = cs2::protect::mixer_for(0x1111111111111111ULL);
+  const cs2::protect::Mixer second = cs2::protect::mixer_for(0x2222222222222222ULL);
+  check(first.multiplier != second.multiplier, "two seeds give two different multipliers");
+  check(first.xor_constant != second.xor_constant, "two seeds give two different xor constants");
+  check(first.rotate != second.rotate, "two seeds give two different rotations");
+  check(cs2::protect::mixer_for(0x5EED5EED5EED5EEDULL).multiplier ==
+            cs2::protect::mixer_for(0x5EED5EED5EED5EEDULL).multiplier,
+        "the same seed gives the same mixer");
+
+  // The properties the mixer has to have for every seed: the rotation is in
+  // [1, 63] (a rotation of 0 would make the `lshr` by 64 of the decode
+  // undefined behaviour), the multiplier is odd and the xor constant is not
+  // zero.
+  for (std::uint64_t seed = 0; seed < 1000; ++seed) {
+    const cs2::protect::Mixer mixer = cs2::protect::mixer_for(seed);
+    check(mixer.rotate >= 1 && mixer.rotate <= 63, "the rotation is in [1, 63]");
+    check(mixer.multiplier % 2 == 1, "the multiplier is odd");
+    check(mixer.xor_constant != 0, "the xor constant is not zero");
   }
 }
 
@@ -281,16 +384,12 @@ void test_coverage() {
 
 /// The mixer of the transform, in the test.
 ///
-/// The test decodes the descriptor with it, so a wrong index is caught even
-/// when the shape of the rewritten IR is right.
-constexpr std::uint64_t k_mix_multiplier = 0x9E3779B97F4A7C15ULL;
-constexpr std::uint64_t k_mix_xor = 0xBF58476D1CE4E5B9ULL;
-constexpr unsigned k_mix_rotate = 31;
-
-[[nodiscard]] auto mix64(std::uint64_t value) noexcept -> std::uint64_t {
-  value *= k_mix_multiplier;
-  value ^= k_mix_xor;
-  return (value << k_mix_rotate) | (value >> (64U - k_mix_rotate));
+/// The mixer is **per build**: it comes from the module's seed. The test
+/// derives it the way the plugin does, so that a mixer that drifts is caught
+/// even when the shape of the rewritten IR is right.
+[[nodiscard]] auto mixer_of(const cs2::protect::Config& config, const llvm::Module& module)
+    -> cs2::protect::Mixer {
+  return cs2::protect::mixer_for(cs2::protect::module_seed(config, module.getSourceFileName()));
 }
 
 /// A module with a caller that calls a target, and the four calls that the
@@ -478,11 +577,117 @@ void test_transform() {
   }
   check(cipher != 0, "the descriptor holds the plain index: it is not encrypted");
 
-  const std::uint64_t key = mix64(constant_value(*module, "cs2.protect.key0") ^
-                                  constant_value(*module, "cs2.protect.key1") ^
-                                  constant_value(*module, "cs2.protect.key2"));
+  // The mixer of the build: the globals hold its values, and the rotation
+  // is the one the decode emits.
+  const cs2::protect::Mixer mixer = mixer_of(config, *module);
+  check(mixer.rotate >= 1 && mixer.rotate <= 63, "the rotation is in [1, 63]");
+  check(constant_value(*module, "cs2.protect.mixmul") == mixer.multiplier,
+        "the global holds the multiplier of the build");
+  check(constant_value(*module, "cs2.protect.mixxor") == mixer.xor_constant,
+        "the global holds the xor constant of the build");
+
+  // The decode rotates by the rotation of the build: the `shl` and the
+  // `lshr` of the caller carry it.
+  llvm::Function* caller_function = module->getFunction("caller");
+  check(caller_function != nullptr, "the caller is still there");
+  if (caller_function != nullptr) {
+    bool saw_shift = false;
+    bool saw_opposite = false;
+    for (llvm::BasicBlock& block : *caller_function) {
+      for (llvm::Instruction& instruction : block) {
+        const auto* shift = llvm::dyn_cast<llvm::BinaryOperator>(&instruction);
+        if (shift == nullptr) {
+          continue;
+        }
+        const auto* amount = llvm::dyn_cast<llvm::ConstantInt>(shift->getOperand(1));
+        if (amount == nullptr) {
+          continue;
+        }
+        const auto value = amount->getZExtValue();
+        if (shift->getOpcode() == llvm::Instruction::Shl && value == mixer.rotate) {
+          saw_shift = true;
+        }
+        if (shift->getOpcode() == llvm::Instruction::LShr && value == 64U - mixer.rotate) {
+          saw_opposite = true;
+        }
+      }
+    }
+    check(saw_shift, "the decode shifts by the rotation of the build");
+    check(saw_opposite, "the decode shifts by 64 minus the rotation of the build");
+  }
+
+  const std::uint64_t key = mixer.mix64(constant_value(*module, "cs2.protect.key0") ^
+                                        constant_value(*module, "cs2.protect.key1") ^
+                                        constant_value(*module, "cs2.protect.key2"));
   check((cipher ^ key) == 0, "the decode does not yield the index of the target");
 }
+
+/// The layout -----------------------------------------------------------------
+
+/// The permutation of the module's function list is seeded.
+///
+/// The layout is the lever that moves the code in the image: the object
+/// writer emits the functions in the module's function list order, and the
+/// linker keeps the order of an object's sections.
+void test_layout_permutation() {
+  const std::vector<std::size_t> first = cs2::protect::layout_permutation(16, 0x1234ULL);
+  const std::vector<std::size_t> again = cs2::protect::layout_permutation(16, 0x1234ULL);
+  const std::vector<std::size_t> other = cs2::protect::layout_permutation(16, 0x5678ULL);
+  check(first == again, "the same seed gives the same permutation");
+  check(first != other, "two seeds give two different permutations");
+
+  // It is a permutation: every index appears exactly once, so no function is
+  // lost and none is duplicated.
+  for (const std::vector<std::size_t>* permutation : {&first, &other}) {
+    std::vector<bool> seen(16, false);
+    for (const std::size_t index : *permutation) {
+      check(index < 16, "the index is inside the range");
+      if (index < 16) {
+        check(!seen[index], "the index appears once");
+        seen[index] = true;
+      }
+    }
+  }
+
+  // The permutation of a module moves the functions and keeps every name.
+  llvm::LLVMContext context;
+  const auto module = build_transform_module(context);
+  if (module == nullptr) {
+    return;
+  }
+  std::vector<std::string> before;
+  for (llvm::Function& function : *module) {
+    before.push_back(function.getName().str());
+  }
+  const cs2::protect::LayoutResult result = cs2::protect::permute_layout(*module, 0xABCDULL);
+  check(result.functions == 5, "the module has five definitions");
+  check(result.moved > 0, "the permutation moved a function");
+
+  std::vector<std::string> after;
+  for (llvm::Function& function : *module) {
+    after.push_back(function.getName().str());
+  }
+  check(after.size() == before.size(), "the module has the same number of functions");
+  check(after != before, "the function list is in another order");
+
+  std::vector<std::string> sorted_before = before;
+  std::vector<std::string> sorted_after = after;
+  std::ranges::sort(sorted_before);
+  std::ranges::sort(sorted_after);
+  check(sorted_after == sorted_before, "the permutation lost or duplicated a function");
+
+  // The module is whole: a broken module is a miscompile.
+  std::string message;
+  llvm::raw_string_ostream stream(message);
+  check(!llvm::verifyModule(*module, &stream), "the permuted module verifies");
+  if (llvm::verifyModule(*module, &stream)) {
+    std::fprintf(stderr, "FAIL: the permuted module does not verify: %s\n", stream.str().c_str());
+  }
+  check(module->getFunction("target") != nullptr, "the module still knows its functions");
+  check(module->getFunction("caller") != nullptr, "the module still knows its caller");
+}
+
+/// The level gate -------------------------------------------------------------
 
 void test_level_gate() {
   llvm::LLVMContext context;
@@ -772,9 +977,10 @@ void test_transform_cross_module() {
       }
     }
   }
-  const std::uint64_t key = mix64(constant_value(*module, "cs2.protect.key0") ^
-                                  constant_value(*module, "cs2.protect.key1") ^
-                                  constant_value(*module, "cs2.protect.key2"));
+  const cs2::protect::Mixer mixer = mixer_of(config, *module);
+  const std::uint64_t key = mixer.mix64(constant_value(*module, "cs2.protect.key0") ^
+                                        constant_value(*module, "cs2.protect.key1") ^
+                                        constant_value(*module, "cs2.protect.key2"));
   check((cipher ^ key) == 0, "the decode does not yield the index of the declaration");
 
   // The state of the entry: it named a declaration and every call to it was
@@ -2025,17 +2231,21 @@ void test_string_decode_dominance() {
       continue;
     }
     check(tree.dominates(decode->getParent(), use->getParent()),
-          "the decode dominates the use of the other block");  }
+          "the decode dominates the use of the other block");
+  }
 }
 
 }  // namespace
 
 auto main() -> int {
   test_policy_reader();
+  test_mandatory_seed();
+  test_per_build_mixer();
   test_qualified_name();
   test_selection();
   test_coverage();
   test_transform();
+  test_layout_permutation();
   test_level_gate();
   test_level_gate_two_entries();
   test_vanished();

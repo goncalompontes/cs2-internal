@@ -176,6 +176,11 @@ struct TransformResult {
   std::uint64_t mix_multiplier{0};
   /// The xor constant of the mixer, as the call site uses it.
   std::uint64_t mix_xor{0};
+  /// The rotation of the mixer, as the call site uses it.
+  ///
+  /// It is the one value of the mixer that is in the instruction stream
+  /// (`rolq $imm8`), and it is in [1, 63].
+  unsigned mix_rotate{0};
   /// The cross-module routing of this module.
   CrossModuleState cross;
 };

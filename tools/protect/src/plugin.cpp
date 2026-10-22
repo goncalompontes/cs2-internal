@@ -40,7 +40,9 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "cipher.hpp"
 #include "config.hpp"
+#include "layout.hpp"
 #include "report.hpp"
 #include "selection.hpp"
 #include "transform.hpp"
@@ -245,6 +247,14 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
       cs2::protect::write_transform_report(module, result, settings);
     }
 
+    // The layout: the module's function list is permuted, so that the code
+    // of two builds with two seeds is not in the same place. It runs after
+    // the call encryption, and it runs in **every** module the plugin
+    // compiles -- a module the plugin does not compile keeps its layout.
+    const cs2::protect::LayoutResult layout = cs2::protect::permute_layout(
+        module, cs2::protect::module_seed(settings, module.getSourceFileName()));
+    cs2::protect::write_layout_report(module, layout);
+
     // The coverage: the final state of every policy entry. An entry whose
     // selected function did not survive to this phase is recorded as
     // vanished, and the whole-build check fails for it.
@@ -261,7 +271,13 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     protect.descriptor_size = result.descriptor_size;
     protect.mix_multiplier = result.mix_multiplier;
     protect.mix_xor = result.mix_xor;
+    protect.mix_rotate = result.mix_rotate;
     protect.key_parts.assign(result.key_parts.begin(), result.key_parts.end());
+    cs2::protect::CoverageLayout covered_layout;
+    covered_layout.permuted = true;
+    covered_layout.functions = layout.functions;
+    covered_layout.moved = layout.moved;
+    covered_layout.seed = layout.seed;
     const auto vm_coverage = cs2::protect::coverage_vm(vm);
     const std::vector<cs2::protect::CoverageString> covered =
         cs2::protect::coverage_strings(strings);
@@ -275,7 +291,7 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     }
     if (const auto error =
             cs2::protect::write_coverage(settings, module, entries, functions, protect, vm_coverage,
-                                         covered, salt, result.cross)) {
+                                         covered, salt, covered_layout, result.cross)) {
       llvm::errs() << "[cs2-protect] " << *error << "\n";
       llvm::report_fatal_error("cs2-protect: the coverage could not be written",
                                /*gen_crash_diag=*/false);

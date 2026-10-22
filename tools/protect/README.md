@@ -226,14 +226,37 @@ the **environment**, which the compiler process hands down unchanged:
 | Variable | Meaning |
 |---|---|
 | `CS2_PROTECT_CONFIG` | path of the JSON policy file. Absent ⇒ no policy |
-| `CS2_PROTECT_SEED` | hexadecimal seed. Absent ⇒ derived per function from the module id and the symbol |
+| `CS2_PROTECT_SEED` | hexadecimal seed. **Mandatory**: without it (and without the policy's `seed`) the plugin refuses to run |
 | `CS2_PROTECT_VERBOSE` | `1` ⇒ print the skipped functions and why |
 | `CS2_PROTECT_COVERAGE` | where the per-module coverage goes (default: under the temp directory) |
 | `CS2_PROTECT_SOURCE_ROOT` | the tree that is being built. **The checkers read it** (the plugin does not): the coverage of another tree is not counted (§9) |
 
-The seed precedence is `CS2_PROTECT_SEED` → the policy's `seed` → the
-derived per-function seed (FNV-1a over the module id and the symbol, so a
-build stays reproducible).
+The seed precedence is `CS2_PROTECT_SEED` → the policy's `seed`. There is
+**no third source**: the seed is mandatory, and the plugin refuses to run
+without one.
+
+```
+[cs2-protect] the protection needs a build seed: set CS2_PROTECT_SEED to a 64-bit
+hexadecimal value, or put a "seed" in the policy file. Without one the plugin falls back to a
+constant of the payload (an FNV-1a over the module id), and every build without a seed ships the
+same file.
+LLVM ERROR: cs2-protect: the configuration is invalid
+```
+
+The fallback is not "a default", it is a **constant of the payload**: the
+module id hashed with FNV-1a, the same in every build and in every version.
+Two builds without a seed are byte for byte the same file, and a release
+that ships it ships a signature. The gate is in `load_config()`
+(`src/config.cpp`), and the payload's wiring refuses to *configure* without
+one as well (`payload/meson.build`, the way it refuses to configure without
+a policy): a build that looks protected and is not is the failure mode this
+project exists to avoid.
+
+The seed is what the release process sets, and **two releases must not use
+the same one**: the seed fully determines the image (§16), so two builds
+with the same seed are the same file. The plugin cannot check it (it has no
+memory of the previous build), so the rule is procedural and the evidence is
+the coverage file, which records the seed.
 
 `CS2_PROTECT_COVERAGE` names the coverage directory outright — the escape
 hatch for a CI build. The plugin uses it as it is; without it, the coverage
@@ -278,6 +301,9 @@ leaves one) is trimmed on both sides.
   128-bit value) keeps its low 64 bits, and the plugin says so:
   `[cs2-protect] the policy's seed: the seed is 64 bits; the high bits of
   '0xA042…' are dropped`.
+* The seed is **mandatory**: the policy's `seed` or `CS2_PROTECT_SEED`, one
+  of the two (§4). The seed drives the protection's constants, its keys and
+  the layout of the image (§16).
 
 ### How the file is read
 
@@ -419,7 +445,8 @@ The transform phase prints what it did:
 
 ```
 [cs2-protect] solver.cpp: transform ?solve@aim@cs2@@YA?AUSolveResult@12@… (cs2::aim::solve) rewritten=14 skipped=81 indirect_parameter=9 external_callee=26 intrinsic_callee=44 invoke=2 cross_module=7
-[cs2-protect] solver.cpp: transform table=14 descriptor=18
+[cs2-protect] solver.cpp: transform table=14 descriptor=18 mixmul=0x1f8b3c5d7e9a2b4c mixxor=0x8e3d5f7a9b1c3d5e rotate=27
+[cs2-protect] solver.cpp: layout functions=69 moved=66 seed=0xf2ba62bd9b1ff889
 ```
 
 * `rewritten` — the calls that became indirect dispatches.
@@ -429,6 +456,13 @@ The transform phase prints what it did:
 * `cross_module` — the rewrites that were **cross-TU**: the calls the
   policy's `cross_module` list routed through the module's own table.
 * `table` and `descriptor` — the size of the two globals the module gained.
+* `mixmul`, `mixxor` and `rotate` — the **mixer of the build**: the
+  multiplier, the xor constant and the rotation the module's calls decode
+  with. They are per build (§10.2), and the report names them because the
+  payload check compares them with the image.
+* `layout functions=… moved=… seed=…` — the **permutation of the module's
+  function list** (§16): how many definitions the module has, how many of
+  them moved, and the seed the permutation came from.
 
 A selected function that did not survive to the late point is reported as
 `vanished`, and a level that is not implemented is reported as
@@ -555,6 +589,15 @@ The state of an entry is one of:
 The worst state wins, so that a failure is never masked by a match in
 another module.
 
+The `protect` line names what the call site decodes with: the size of the
+table, the size of the descriptor, the **mixer of the build** (the
+multiplier, the xor constant and the rotation) and the three parts of the
+key. The `layout` line names the **permutation of the module's function
+list**: the number of the definitions, the number of them that moved, and
+the seed it came from. Both lines are **new**: a coverage file of an older
+build has no `layout` line and no `rotate=` field, and a reader that does
+not know them still reads the file (`tools/protect/protect_checks.py`).
+
 The `cross_module` entries have their **own** vocabulary and their own
 priority, in their own lines:
 
@@ -652,8 +695,8 @@ globals:
 @cs2.protect.key0   = private unnamed_addr constant i64 <part>
 @cs2.protect.key1   = private unnamed_addr constant i64 <part>
 @cs2.protect.key2   = private unnamed_addr constant i64 <part>
-@cs2.protect.mixmul = private unnamed_addr constant i64 <the multiplier>
-@cs2.protect.mixxor = private unnamed_addr constant i64 <the xor constant>
+@cs2.protect.mixmul = private unnamed_addr constant i64 <the multiplier of the build>
+@cs2.protect.mixxor = private unnamed_addr constant i64 <the xor constant of the build>
 ```
 
 * the **table** holds the real pointers. The linker emits the DIR64 fixups
@@ -678,6 +721,76 @@ globals:
   coincidences. A constant in a global is written by the object writer, so
   it reaches the image bit for bit, and the payload check asserts that the
   image holds the constants the pass encrypted the descriptor with (§11).
+
+### The mixer is per build
+
+The multiplier, the xor constant and the **rotation** of the mixer are
+**derived from the module's seed**, the way the parts of the key already
+are (`src/cipher.hpp`: `mixer_for(seed)`). They were fixed constants until
+T24, and they were the protection's **only fixed bytes**: sixteen bytes at
+the same four addresses in every build and in every version — a signature an
+analyst reads in one instruction.
+
+The three values are not treated alike, and the difference is deliberate:
+
+| value | where it lives | why |
+|---|---|---|
+| the multiplier | a global, read with a **volatile** load | a 64-bit immediate in the instruction stream can be mis-materialised (§10.2) |
+| the xor constant | a global, read with a **volatile** load | the same |
+| the **rotation** | the instruction stream (a rotate or a shift, §12) | it is the one value that has to be in the code, and it is what makes the `.text` of two builds differ |
+
+The rotation is in **[1, 63]**: a rotation of 0 would make the `lshr` by 64
+of the decode undefined behaviour, and a rotation of 64 is not a rotation.
+The decode emits `shl` by the rotation and `lshr` by 64 minus the rotation,
+and the backend folds the pair into a single instruction — in **six**
+different ways (§12). A reader of the image that knows only `rolq $imm8`
+cannot see four of the sixty-three legal rotations, and the build of such a
+seed fails its own check.
+
+**What it does not buy.** It hides nothing: the analyst reads the rotation
+out of the instruction stream in one instruction, and the mixer out of the
+globals. It buys **the absence of a signature**, which is what the task is
+for.
+
+**The coupling this creates.** `mix64()` is shared by the call encryption
+and by the virtualizer's encoder, and the mixer is a **per-build** function
+now, so its rotation and its constants travel with the module's seed. The
+encoder derives them from the same seed (§14.5).
+
+**The seam for the interpreter (T20b, not written).** The interpreter has to
+decode with the mixer the pass encrypted with, and the values have to be
+**in the image**, in a form a runtime component can read. Today they are not,
+and the decision is where they go:
+
+* The **rotation** is an *immediate* in the instruction stream. Nothing in
+  the image holds it as a value a runtime component can read.
+* The **multiplier** and the **xor constant** are in the module's globals
+  (`cs2.protect.mixmul`, `cs2.protect.mixxor`), and those globals have
+  `PrivateLinkage`: they are local to the object, they are not in the
+  image's symbol table, they are not exported, and there are **four
+  different mixers in one image** (one per protected module).
+* The **coverage** names the mixer of every module, but the coverage is a
+  file on the build machine. It is not in the image, and a runtime
+  component cannot read it.
+
+**The decision: the pass emits the interpreter into the same module.** The
+interpreter is not a library that is linked in and looks the mixer up: it
+is emitted by the pass, into the module whose bytecode it decodes. It can
+therefore reference that module's private globals directly, and it carries
+the rotation as **its own immediate** — the same value the call site's
+decode uses. The seam is therefore: *the pass emits the interpreter, and the
+interpreter is emitted with the mixer values it must use*. A runtime
+component that is not in the module does not have to find the mixer: it is
+not a runtime lookup, it is a value the emitter puts there.
+
+**The container's header cannot carry the mixer.** The obvious place for a
+per-module mixer would be the header of the VM container, and it is the one
+place that cannot hold it: the container is encrypted **as a whole, the
+header included** (`src/vm_encode.cpp`: "the whole container, the header
+included, so that an analyst reads nothing but noise"). A mixer stored in
+the header would be a chicken-and-egg: the interpreter needs the mixer to
+*read* the header. The header must not be expected to carry the mixer, and
+T20b must not be planned around it.
 
 The call site becomes:
 
@@ -923,7 +1036,25 @@ python tools/protect/check_payload.py --protected build-payload-protect/payload.
 * the exception directory (`.pdata`) is there and well formed (the mapper
   registers the unwind table and treats its absence as fatal);
 * the **constants of the mixer** are in the read-only data of the image, and
-  hold exactly the values the pass encrypted the descriptor with;
+  hold exactly the values the pass encrypted the descriptor with. They are
+  **per build**, so the check reads them from the coverage — the coverage is
+  the contract ("the value the pass encrypted with");
+* the **rotation** of the mixer in the image's instruction stream is the one
+  of **its own module**: the check reads the rotate (or the shift the
+  backend spelled it as, §12) in front of every dispatch and compares it
+  with the `rotate=` of the coverage of the module the dispatch belongs to
+  (the modules of one build have different mixers, so "one of the rotations
+  of the build" would be a one-in-four test). The rotation is the only
+  per-build value of the protection that is in the code, and it is in
+  [1, 63]. The backend spells it in **six** ways, and the check has to read
+  all of them: a reader that knows only `rolq $imm8` cannot see the
+  rotations of 1, 61, 62 and 63, and the build of such a seed fails its own
+  check. The rotation the check reads is the first one **after** the last
+  read of a constant of the mixer — that is the decode's rotation, and not
+  an unrelated shift of the code around it;
+* the **layout** of every module with more than one definition moved: the
+  coverage names how many functions the pass permuted, and a module that
+  moved none is a module the pass did not permute;
 * the number of the **encrypted dispatches** is the number of the calls the
   pass reports having rewritten (read from the coverage files), and it is
   zero in the unprotected image;
@@ -1110,6 +1241,19 @@ are the ones the transform touched (the selected ones, and their callers,
 which no longer inline them), and the sections that grew are the ones that
 hold the new globals.
 
+`compare_builds.py --section <name>` compares **one section** of the two
+images and prints its size in both, the number of the bytes that differ and
+whether the two sections are identical. The exit code is 0 when they are
+identical and 1 when they differ. The linker's per-link stamps are
+normalised out, so the PDB path of the two builds is not a difference of
+the section. It is the measurement of the acceptance criterion (§16): the
+criterion is about the `.text` alone, and the whole-file comparison would be
+satisfied by a handful of bytes in the read-only data.
+
+```
+python tools/protect/compare_builds.py --section .text build-a/payload.dll build-b/payload.dll
+```
+
 The attribution is **by size**, not by content: the helper compares the
 sizes of the functions, so it cannot show that the unselected code is
 unchanged byte for byte. The differences are therefore *attributable* to the
@@ -1137,6 +1281,39 @@ changes the callers as well.
 | The SDK's `llvm::json::parse` keeps the **first** of two equal keys, Python's `json` keeps the **last** | a duplicated key is an error on both sides |
 | The X86 backend of the SDK's LLVM 22.1.8 **mis-materialises a 64-bit immediate** in the shape the transform emits (`xor i64 %mul, C` becomes `movabsq $C'`, one bit lost) | the constants of the mixer live in globals, and the payload check asserts that the image holds them (§10.2, §11) |
 | The backend turns the **last call of a function into a tail jump** (`jmpq *(%rX,%rY,8)`) | a dispatch is not always a `callq`: the check counts the tail jump as well, and tells it apart from a switch table jump by the decode in front of it (§11) |
+| The backend folds the `shl`/`lshr` pair of the mixer into a single rotate — and it spells the rotation in **six** ways | the rotation is the one per-build value of the mixer that is in the instruction stream, and the check has to read **all six** of them, or the build of a legal seed fails its own check (§11, §12) |
+| The **six** spellings of the rotation, measured over all sixty-three legal rotations | the rotation of 1 is `rolq %rax` (`48 d1 c0`), the rotations of 2 to 60 are `rolq $imm8` (`48 c1 c0 ib`), and the rotations of 61, 62 and 63 are `shrq $3`, `shrq $2` and `shrq %rax` — a shift to the right, not a rotate | see the note below |
+| The **object writer** emits the functions in the **module's function list** order, and the **linker** keeps the order of an object's sections | a pass that reorders the module's function list moves the code in the image (§16) |
+| **Renaming** the symbols per build moves **nothing**: the layout follows the definition order, not the name | the layout is changed by *reordering* the function list, not by renaming it (§16) |
+
+### The six spellings of the rotation
+
+The rotation of the mixer is the only value of the mixer that is in the
+instruction stream, and the X86 backend spells it in six ways. The table is
+**measured**: every one of the sixty-three legal rotations was put through
+the pass, the IR was compiled, and the instruction was read back.
+
+| the rotation | the instruction | the encoding | the size |
+|---|---|---|---|
+| 1 | `rolq %rax` | `48 d1 c0` | three bytes |
+| 2 to 60 | `rolq $imm8, %rax` | `48 c1 c0 ib` | four bytes |
+| 61 | `shrq $0x3, %rax` | `48 c1 e8 03` | four bytes |
+| 62 | `shrq $0x2, %rax` | `48 c1 e8 02` | four bytes |
+| 63 | `shrq %rax` | `48 d1 e8` | three bytes |
+
+The last three are **not** a rotate: they are a shift to the right, and the
+backend produced them by dropping the high term of the rotation. The drop is
+**harmless**, and the reason is the address computation: the decoded index
+reaches the table as `base + index * 8` in 64 bits, and the index's bits 61
+to 63 are lost in the multiplication — so the high term of the rotation,
+which reaches nothing but those bits, does not change the address the
+dispatch calls. The image is right; it is the *reader* that has to know
+that a shift to the right by 64 minus the rotation is the rotation.
+
+**The size matters**: the three-byte spellings and the four-byte ones make
+the code after the rotation shift, and the difference between two builds
+whose rotations are spelled differently is an order of magnitude larger than
+the difference between two builds whose rotations are not (§16).
 
 ## 13. Known limits of the build wiring
 
@@ -1188,6 +1365,33 @@ changes the callers as well.
   the **same length**: a path of a different length shifts the layout of
   the image, and the `.text` section is then genuinely different. The tool
   says so instead of pretending the two images are comparable.
+* **The shipped `policy.example.json` does not build a protected payload of
+  the current tree, and the operator's `policy.local.json` does not either.**
+  The two lists of a policy that builds have to agree with the payload's call
+  graph, and they have to be **kept** in step with it:
+
+  * the example's `cross_module` list names thirteen symbols, and six of them
+    (`cs2::aim::OccluderCell::lower_bound_distance`,
+    `cs2::aim::penetration_damage_at_target`, `cs2::aim::polygon_centroid`,
+    `cs2::aim::polygon_contains`, `cs2::aim::subtract_convex` and
+    `cs2::aim::yaw_scale`) are called by functions the example's `protect`
+    list does **not** select: an entry that named no declaration is a build
+    failure (§11), because an entry that protects nothing is a failure the
+    project exists to avoid;
+  * the operator's `policy.local.json` has the six `protect` entries the
+    example's `cross_module` list was written for, but no `cross_module` list
+    at all, and it fails the other way: the cross-TU callees a protected
+    function calls directly are the payload's own code, and that is a
+    failure too (§11);
+  * and a symbol that a protected function started to call since the list
+    was written (`cs2::aim::hitbox_valid`, in the tree of 2026-10-22) is
+    not in either list, so the protected function calls it directly and the
+    build fails.
+
+  A policy that builds needs **all three**: the `protect` entries, the
+  `cross_module` list of the symbols the protected functions call across
+  translation units, and neither of them a symbol that is gone. The
+  measurement of §16 uses such a policy.
 
 ## 14. The front end of the virtualizer
 
@@ -1431,17 +1635,25 @@ clear.
 **The keystream, exactly.** The word at the byte offset `n` is
 
 ```
-mix64(key + (n / 8) * 0x9E3779B97F4A7C15)
+mix64(key + (n / 8) * M)
 ```
 
-and the byte at the offset `n` is its `(n % 8)`-th byte, little
-endian. The mixer is
+where `M` is the **multiplier of the build**, and the byte at the offset `n`
+is its `(n % 8)`-th byte, little endian. The mixer is
 
 ```
-mix64(v) = rotl((v * 0x9E3779B97F4A7C15) ^ 0xBF58476D1CE4E5B9, 31)
+mix64(v) = rotl((v * M) ^ X, R)
 ```
 
-and the key is the xor of the **three** parts of the key, mixed: the
+where `M`, `X` and `R` are the multiplier, the xor constant and the
+rotation **of the build**: they come from the module's seed, the way the
+parts of the key do (`src/cipher.hpp`: `mixer_for(seed)`; the rotation is
+in [1, 63]). The encoder derives them from the module's seed, and the
+**interpreter** has to read them out of the image rather than assume them:
+the contract is "the value the pass encrypted with", and the coverage names
+it.
+
+The key is the xor of the **three** parts of the key, mixed: the
 parts come from `splitmix64` over the module seed, a part that is zero
 becomes one, and two equal parts are redrawn (they would cancel each
 other in the xor). The interpreter decrypts **on fetch**, so the blob
@@ -2094,4 +2306,128 @@ in the image, and `check_payload.py` says so -- with its coverage hash --
 instead of failing the build. A literal that is protected in every module
 and that is still in the image is the **tail merging** of the MSVC ABI, and
 the check says that too.
+
+## 16. The layout: the file on disk is not a signature
+
+The seed drives the protection's constants, its keys and its tables -- but
+until T24 it drove **nothing of the code**. The measurement is in
+[`docs/orchestration/spec-t24-protect-polymorphism.md`](../orchestration/spec-t24-protect-polymorphism.md)
+§1: two builds of the payload with two different seeds had a **byte
+identical `.text`** (1,707,008 bytes, 69.8 % of the file) and differed in
+441 bytes of `.rdata` -- the plugin's own globals. A scanner that hashed
+the code would have matched every build, and the mixer's two constants sat
+at the same four addresses in every build and in every version.
+
+### What the pass does
+
+At the end of the transform phase, the pass **permutes the module's
+function list** with a permutation derived from the module's seed, and it
+reports how many functions moved:
+
+```
+[cs2-protect] solver.cpp: layout functions=69 moved=66 seed=0xf2ba62bd9b1ff889
+```
+
+The permutation keeps **every name**, so the coverage, the report, the
+policy matching and the payload check (which works on addresses, not names)
+keep working untouched. That is the whole reason it is the chosen
+mechanism.
+
+**Why the permutation and not the renaming.** Both were measured:
+
+* the **object writer** emits the functions in the module's function list
+  order, and the **linker** keeps the order of an object's sections: a pass
+  that reorders the list moves the code in the image;
+* **renaming** the symbols per build moves **nothing**: the same bodies
+  with the names permuted give a byte identical image. The layout follows
+  the *definition* order, not the name.
+
+The permutation is a Fisher-Yates walk over the module's definitions, with
+the module's seed as its only input. A permutation that leaves the order
+unchanged is a no-op, so the pass swaps the first two definitions when the
+walk moved nothing: **a module with more than one definition always moves
+at least one function**, and the payload check asserts it (§11).
+
+### What it does not hide
+
+The code is **identical**, only its position in the file changes. An analyst
+reads the same functions. What the permutation buys is the absence of a
+**fixed-offset** signature, nothing else.
+
+**The reach is not bounded, and it is stated plainly.** The permutation is
+*inside* a translation unit: it moves a function within its own unit's block
+of code, so it moves the offsets of that unit's functions and the
+displacements of every reference to them. It is **not size-neutral**, and
+that is what the reach comes from: when a function moves, the encoded
+displacements of the references to it change, and a short jump that used to
+fit becomes a near jump. The permuted unit's block therefore changes
+**size**, and **everything after it shifts**.
+
+So the honest statement is: *the code the plugin does not compile is still
+the same code, with the same internal order, but its **offsets move** with
+everything else*. The MSVC STL's `vector_algorithms.obj` is 11.2 % of the
+`.text` and the imgui is 43 % of it, and **neither keeps its place**: a
+32-byte chunk of `imgui_draw.cpp.obj` — a unit the plugin never compiles —
+moves by 17,280 bytes between two builds of two seeds (the measurement is
+below). A signature that names the offset of an STL function, or of an imgui
+function, does **not** survive this task — not
+because the permutation reaches into the STL, but because everything after
+the first permuted unit shifted with it.
+
+What the permutation does **not** buy: a stable layout for the units the
+plugin does not compile. A quarter of the functions — **832 of the 3,371**
+the unwind table names — kept their address between the two builds, and
+they are the ones whose offset happened not to change: they are scattered
+over the image, not a block that kept its place. That is why the mixer's
+constants matter (§10.2): the *protection's* bytes are gone whatever the
+layout does.
+
+### The measurement
+
+The acceptance criterion is a **measurement**, not a promise: two builds
+with two seeds, compared per section.
+
+```
+python tools/protect/compare_builds.py --section .text \
+    build-payload-t24a/payload.dll build-payload-t24b/payload.dll
+```
+
+The floor of the criterion is 0.5 % of the section (8,645 bytes of
+1,729,024): a floor below it would be satisfied by the bytes of the
+rotation alone, which is not what the task is for.
+
+**What was measured** (the payload of this tree, 2026-10-22, two builds
+with the seeds `0x1111111111111111` and `0x2222222222222222`, the policy of
+the six `protect` entries of the operator's `policy.local.json` plus the
+`cross_module` list of `tools/protect/policy.example.json` — the example
+alone does not build, see §13):
+
+| what | measured |
+|---|---|
+| the `.text` of the two builds | **1,446,514 bytes differ — 83.66 % of the section** (the floor is 0.5 %) |
+| the modules the pass permuted | 75, with 3,153 definitions in all |
+| the definitions that moved | 3,084 (97.8 %); **no module with more than one definition moved none** |
+| the encrypted dispatches | **54**, and the pass reports 54 rewrites |
+| the mixer's contribution alone (the layout permutation neutralised) | **54 bytes of `.text`** (the rotation's immediate, one per dispatch site) and 677 bytes of `.rdata` |
+| the same, with a module whose rotation the backend spells differently | **449,234 bytes of `.text`** (25.98 % of the section) and 2,402 bytes of `.rdata` |
+| the code the plugin does **not** compile | a 32-byte chunk of `imgui_draw.cpp.obj` moved by **17,280 bytes**; **832 of the 3,371 unwind entries (24.68 %)** kept their address; the 16.34 % of the `.text` that stays byte-identical is scattered over **43,131 runs** |
+| two builds with the **same** seed | **0 bytes** differ apart from the linker's per-link stamps |
+
+**The mixer's contribution depends on the rotation, and the number above is
+a measurement, not a property.** The backend spells the rotation in six ways
+(§12), and the spellings have **different sizes**: a rotation of 2 to 60 is
+a four-byte `rolq $imm8`, a rotation of 61 or 62 is a four-byte
+`shrq $imm8`, and the rotations of 1 and 63 are three-byte instructions
+without an immediate at all. When the two builds spell it differently, the
+code after it shifts, and the difference is an order of magnitude larger:
+the second row is measured with the seeds `0x300000000000001a` (the
+rotations 1, 33, 39 and 41) and `0x3000000000000003` (the rotations 4, 35,
+40 and 63), and the first row with the seeds `0x1111111111111111` and
+`0x2222222222222222` (the rotations 25, 30, 47, 54 and 11, 11, 27, 50 —
+none of them one of the four). **Four of the sixty-three legal rotations**
+are spelled differently, so about one protected build in eight is the
+second case and not the first.
+
+The last row is the rule of §4: the seed still fully determines the image,
+and two releases must not share a seed.
 

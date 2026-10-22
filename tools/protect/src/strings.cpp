@@ -64,9 +64,9 @@ constexpr std::string_view k_blob_prefix = "cs2.protect.strblob.";
 /// computable at build time. The instance base is mixed into the *runtime*
 /// key and removed from it again (see the decode helper), because a
 /// per-injection value cannot key a value that is already in the file.
-[[nodiscard]] auto build_key(std::uint64_t seed0, std::uint64_t seed1, std::uint32_t index) noexcept
-    -> std::uint64_t {
-  return mix64(seed0 ^ seed1 ^ static_cast<std::uint64_t>(index));
+[[nodiscard]] auto build_key(const Mixer& mixer, std::uint64_t seed0, std::uint64_t seed1,
+                             std::uint32_t index) noexcept -> std::uint64_t {
+  return mixer.mix64(seed0 ^ seed1 ^ static_cast<std::uint64_t>(index));
 }
 
 /// The byte of the key stream at a position.
@@ -74,8 +74,9 @@ constexpr std::string_view k_blob_prefix = "cs2.protect.strblob.";
 /// The stream is a per-byte mix: the ciphertext is not the plaintext under
 /// any single build-time constant, and the bytes of two strings do not
 /// cancel each other.
-[[nodiscard]] auto stream_byte(std::uint64_t key, std::size_t position) noexcept -> std::uint8_t {
-  const std::uint64_t mixed = mix64(key + static_cast<std::uint64_t>(position));
+[[nodiscard]] auto stream_byte(const Mixer& mixer, std::uint64_t key, std::size_t position) noexcept
+    -> std::uint8_t {
+  const std::uint64_t mixed = mixer.mix64(key + static_cast<std::uint64_t>(position));
   return static_cast<std::uint8_t>((mixed >> 56U) & 0xFFU);
 }
 
@@ -93,17 +94,11 @@ constexpr std::string_view k_salt_proof_text = "cs2.protect.salt.proof";
 /// coverage alone does not yield the strings.
 ///
 /// The salt is the seed of the build: the environment's `CS2_PROTECT_SEED`
-/// when it is set, else the policy's `seed`. A build without a seed has no
-/// salt, and the digests are unsalted -- the coverage says so, and the
-/// check says so too.
+/// when it is set, else the policy's `seed`. The seed is mandatory, so the
+/// salt always exists -- but the reader of an older coverage has to cope
+/// with the unsalted digests, and so does this function.
 [[nodiscard]] auto build_salt(const Config& config) -> std::optional<std::uint64_t> {
-  if (config.seed.has_value()) {
-    return config.seed;
-  }
-  if (config.policy.has_value() && config.policy->seed.has_value()) {
-    return config.policy->seed;
-  }
-  return std::nullopt;
+  return build_seed(config);
 }
 
 /// The digest of a literal, salted with the build seed.
@@ -422,7 +417,7 @@ struct Decoder {
 /// task exists to prevent. A volatile load is never folded, and it keeps the
 /// image read-only.
 [[nodiscard]] auto make_decoder(llvm::Module& module, std::uint64_t seed0_value,
-                                std::uint64_t seed1_value) -> Decoder {
+                                std::uint64_t seed1_value, const Mixer& mixer) -> Decoder {
   llvm::LLVMContext& context = module.getContext();
   llvm::Type* i8_type = llvm::Type::getInt8Ty(context);
   llvm::Type* i32_type = llvm::Type::getInt32Ty(context);
@@ -439,10 +434,10 @@ struct Decoder {
       llvm::ConstantInt::get(i64_type, seed1_value), k_seed1_name);
   decoder.multiplier = new llvm::GlobalVariable(
       module, i64_type, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
-      llvm::ConstantInt::get(i64_type, k_mix_multiplier), k_multiplier_name);
+      llvm::ConstantInt::get(i64_type, mixer.multiplier), k_multiplier_name);
   decoder.xor_constant = new llvm::GlobalVariable(
       module, i64_type, /*isConstant=*/true, llvm::GlobalValue::PrivateLinkage,
-      llvm::ConstantInt::get(i64_type, k_mix_xor), k_xor_name);
+      llvm::ConstantInt::get(i64_type, mixer.xor_constant), k_xor_name);
   for (llvm::GlobalVariable* global :
        {decoder.seed0, decoder.seed1, decoder.multiplier, decoder.xor_constant}) {
     global->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
@@ -486,8 +481,8 @@ struct Decoder {
   llvm::Value* xor_constant =
       builder.CreateLoad(i64_type, decoder.xor_constant, /*isVolatile=*/true, "xorconstant");
   llvm::Value* xored = builder.CreateXor(product, xor_constant, "keyxor");
-  llvm::Value* low = builder.CreateShl(xored, k_mix_rotate, "keylow");
-  llvm::Value* high = builder.CreateLShr(xored, 64U - k_mix_rotate, "keyhigh");
+  llvm::Value* low = builder.CreateShl(xored, mixer.rotate, "keylow");
+  llvm::Value* high = builder.CreateLShr(xored, 64U - mixer.rotate, "keyhigh");
   llvm::Value* rotated = builder.CreateOr(low, high, "keyrotated");
   // The runtime key: the build key with the instance base mixed in. The base
   // is a per-injection value, and a value that is already in the file cannot
@@ -509,8 +504,8 @@ struct Decoder {
   llvm::Value* stream_product =
       loop_builder.CreateMul(stream_position, multiplier, "stream_product");
   llvm::Value* stream_xored = loop_builder.CreateXor(stream_product, xor_constant, "stream_xor");
-  llvm::Value* stream_low = loop_builder.CreateShl(stream_xored, k_mix_rotate);
-  llvm::Value* stream_high = loop_builder.CreateLShr(stream_xored, 64U - k_mix_rotate);
+  llvm::Value* stream_low = loop_builder.CreateShl(stream_xored, mixer.rotate);
+  llvm::Value* stream_high = loop_builder.CreateLShr(stream_xored, 64U - mixer.rotate);
   llvm::Value* stream = loop_builder.CreateOr(stream_low, stream_high, "stream");
   llvm::Value* key_byte = loop_builder.CreateTrunc(loop_builder.CreateLShr(stream, 56), i8_type);
   llvm::Value* plain = loop_builder.CreateXor(cipher, key_byte, "plain");
@@ -761,6 +756,11 @@ struct Decoder {
   const std::uint64_t seed0 = splitmix64(state);
   const std::uint64_t seed1 = splitmix64(state);
 
+  // The mixer: per build, like the seeds. The decode helper reads its
+  // multiplier and its xor constant from the globals below, and its rotation
+  // is the one the encoder encrypted with.
+  const Mixer mixer = mixer_for(module_seed(config, module.getSourceFileName()));
+
   Decoder decoder;
   std::uint32_t index = 0;
 
@@ -790,15 +790,15 @@ struct Decoder {
     const std::size_t size = bytes->size();
 
     // The ciphertext: the plaintext XORed with the key stream.
-    const std::uint64_t key = build_key(seed0, seed1, index);
+    const std::uint64_t key = build_key(mixer, seed0, seed1, index);
     std::vector<std::uint8_t> cipher;
     cipher.reserve(size);
     for (std::size_t byte = 0; byte < size; ++byte) {
-      cipher.push_back(static_cast<std::uint8_t>((*bytes)[byte] ^ stream_byte(key, byte)));
+      cipher.push_back(static_cast<std::uint8_t>((*bytes)[byte] ^ stream_byte(mixer, key, byte)));
     }
 
     if (decoder.function == nullptr) {
-      decoder = make_decoder(module, seed0, seed1);
+      decoder = make_decoder(module, seed0, seed1, mixer);
     }
 
     // The blob: the same type as the literal it replaces, so that the
