@@ -1225,3 +1225,7 @@ hitbox makes the measured probability a **lower bound** on the truth, so
 the count travels with the verdict and the status carries it as
 `mc_filtered` — a silent lower bound is a number the operator would read
 as exact.
+
+**The HUD line's buffer is 192 bytes.** The line carries the objective's
+name, the Monte-Carlo's marker and the two occlusion markers, and the old
+128-byte buffer cut the last of them off.

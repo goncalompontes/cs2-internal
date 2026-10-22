@@ -468,7 +468,12 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
   model_.hud.sections.push_back(local_section(snapshot));
   model_.hud.sections.push_back(players_section(snapshot));
   if (rage_status_provider_ != nullptr) {
-    char status[128] = {};
+    // The status line's buffer. **192 bytes**, not 128: the line carries the
+    // objective's name, the Monte-Carlo's marker (its measured probability or
+    // its refusal) and the two occlusion markers, and a 128-byte buffer cut
+    // the last of them off. The buffer is on the **stack** — the render thread
+    // must not allocate.
+    char status[192] = {};
     if (rage_status_provider_(rage_status_context_, status, sizeof(status))) {
       render::HudSection section;
       section.title = "rage";
