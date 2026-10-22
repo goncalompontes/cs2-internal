@@ -28,7 +28,9 @@
 #include "cs2/control/occlusion_query.hpp"
 #include "cs2/control/rage_config.hpp"
 #include "cs2/control/rage_objective.hpp"
+#include "cs2/control/rage_settings.hpp"
 #include "cs2/control/settings_access.hpp"
+#include "cs2/control/strafe_geometry.hpp"
 #include "cs2/control/trigger.hpp"
 #include "cs2/game/state_reader.hpp"
 
@@ -273,11 +275,21 @@ class Service {
   // (0 = none), held to trigger the solve. `autostop`/`autoscope` are modes
   // (0 = off, 1 = always while solving, 2 = only while firing); `autoreload` and
   // `only_visible` are flags.
+  //
+  // **`fields` and `source` are the ownership rule** (`cs2/control/
+  // rage_settings.hpp`). The menu publishes its **whole** block every frame, so
+  // a write that carried every field would overwrite the control channel's
+  // values on every frame — and the control channel is the only way to reach
+  // the Monte-Carlo objective, which the menu cannot select. So a write carries
+  // **only the fields its writer changed**: the fields it does not carry keep
+  // their value **and** their owner, and the status says which channel owns
+  // each field.
   void set_rage_features(bool on, int key, bool fire, int objective, int hitbox, float fov,
                          float min_damage, float min_hitchance, int autostop, int autoscope,
                          bool autoreload, bool only_visible, int mode, bool per_weapon,
                          const char* weapon, int config_op, std::uint32_t config_token, bool recoil,
-                         float stop_speed, bool backtrack) noexcept;
+                         float stop_speed, bool backtrack, std::uint32_t fields,
+                         RageSource source) noexcept;
 
   // Configure the triggerbot (`docs/ragebot.md` §"The trigger"): the `trigger`
   // control command and the payload's environment (`CS2_PAYLOAD_TRIGGER`) set the
@@ -457,6 +469,24 @@ class Service {
   // render thread. Uses the latest snapshot (the hitboxes are re-read fresh here) and the
   // occlusion hulls the hook just enumerated (`docs/ragebot-perf.md` §3.3).
   void rage_tick(const game::Snapshot& snapshot) noexcept;
+  // The **fire path** (`docs/ragebot.md` §"the fire path"): the gate that
+  // asks whether the weapon can take the shot at all, and the edge a
+  // semi-automatic weapon needs between two shots.
+  //
+  // It runs on the **game thread** (from `on_game_thread`, once per tick, so
+  // every command of the tick carries the same answer) and reads the weapon's
+  // state there — the clip, the reload, the deploy and the engine's own
+  // next-attack record. The decision is published to the `Input`, which puts
+  // the attack bit on the command.
+  void decide_rage_fire(const game::Snapshot& snapshot) noexcept;
+  // Forget the fire path's bookkeeping (the ragebot was switched off): the
+  // next shot starts a new edge, and the clip difference against the previous
+  // weapon is not a shot.
+  void reset_rage_fire() noexcept;
+  // The weapon's **fire state**, read fresh on the game thread: the clip, the
+  // reload flag, the deploy tick and the engine's own next-attack record.
+  void read_weapon_fire_state(const game::PlayerSnapshot& local,
+                              FireCapability& capability) const noexcept;
   static void game_thread_entry(void* context) noexcept;
   // The common `input`/`press`/`bhop` status payload.
   [[nodiscard]] Json input_status() noexcept;
@@ -593,7 +623,28 @@ class Service {
   std::mutex rage_config_mutex_;
   char rage_weapon_[24] = {};
   RageConfigStore rage_profiles_{};
-  void apply_rage_config_op(int op, const char* weapon) noexcept;
+  void apply_rage_config_op(int op, const char* weapon, RageSource source) noexcept;
+  // The ragebot's fields the **menu** owns: a set bit is the menu's, a clear bit
+  // is the control channel's.
+  //
+  // **Why it is tracked.** The menu publishes its whole block every frame, so
+  // "whose value is in force?" is a question the status has to answer: the
+  // control channel is the only way to reach the Monte-Carlo objective, so the
+  // operator has to be able to see that it *stuck* (the menu cannot show the
+  // objective at all).
+  std::atomic<std::uint32_t> rage_menu_fields_{0};
+  // The objective the **menu's tab is showing**: the block's own byte, which
+  // the menu's `Objective` combo displays.
+  //
+  // **Why it is tracked.** The menu cannot show the Monte-Carlo objective (it
+  // has three options), so after the control channel has set it the tab still
+  // reads "Hitchance" while a **different** objective is in force. The menu
+  // may not be touched to say so (the task's scope), so the **status** is
+  // where the difference is visible: `objective` is the objective in force,
+  // `menu_objective` is the one on the tab.
+  std::atomic<int> rage_menu_objective_{1};
+  // Note the ownership of the fields a write carried.
+  void note_rage_owner(std::uint32_t fields, RageSource source) noexcept;
   // The tuning actually used by the solve: the per-weapon profile when `per_weapon` is
   // on and the active weapon has one, else the global settings.
   struct RageTuning {
@@ -620,6 +671,32 @@ class Service {
   bool rage_scope_applied_ = false;
   std::atomic<std::uint64_t> rage_solves_{0};
   std::atomic<int> rage_last_target_{-1};
+  // The **fire path** (`docs/ragebot.md` §"the fire path"): the weapon's fire
+  // mode as the payload reads it, the gate's verdict, and the three counters
+  // the status reports.
+  //
+  //   * `rage_shots_` — the **engine's** shots: the clip fell while the
+  //     ragebot was pressing. (The counter that used to live in the `Input`
+  //     counted the *commands* the attack was asserted on — the ragebot's
+  //     attempts, not shots.)
+  //   * `rage_presses_` — the ragebot's **attempts**: the ticks the fire path
+  //     decided to assert the attack.
+  //   * `rage_edges_` — the **release->re-press edges** the fire path produced
+  //     (the shots a semi-automatic weapon needs; zero on a full-automatic
+  //     one, whose trigger stays down).
+  std::atomic<int> rage_fire_mode_{0};  // FireMode
+  std::atomic<int> rage_refusal_{0};    // FireRefusal
+  std::atomic<std::uint64_t> rage_shots_{0};
+  std::atomic<std::uint64_t> rage_presses_{0};
+  std::atomic<std::uint64_t> rage_edges_{0};
+  // The fire path's own bookkeeping (**the game thread only**): the last
+  // press (the edge's origin), the weapon and the clip the last tick saw (the
+  // engine's shot detector), and the previous decision.
+  std::uint64_t rage_last_press_us_{0};
+  std::uintptr_t rage_prev_weapon_{0};
+  ClipSample rage_prev_clip_{};
+  bool rage_prev_press_{false};
+  bool rage_withdrawn_{false};
   // Backtracking (`docs/ragebot.md` §8): how many solves chose a lag record over the
   // live pose, and the tick of the last chosen record (-1 = live).
   std::atomic<std::uint64_t> rage_backtracks_{0};

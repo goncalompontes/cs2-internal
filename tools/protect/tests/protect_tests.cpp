@@ -18,8 +18,10 @@
 //     level that is not implemented yet is refused, and a selected function
 //     that did not survive is reported.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -39,8 +41,11 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 
+#include "cipher.hpp"
 #include "config.hpp"
+#include "layout.hpp"
 #include "report.hpp"
 #include "selection.hpp"
 #include "strings.hpp"
@@ -119,6 +124,105 @@ void test_policy_reader() {
   if (seed.has_value() && seed->seed.has_value()) {
     check_equal(std::to_string(*seed->seed), "1311768467463790320",
                 "the low 64 bits of the seed are kept");
+  }
+}
+
+/// The mandatory seed ---------------------------------------------------------
+
+/// Sets an environment variable, for the tests.
+///
+/// The plugin reads its configuration from the environment, and the test has
+/// to set it: `setenv` is the POSIX spelling and `_putenv_s` the Windows
+/// one.
+void set_env(const char* name, const char* value) {
+#if defined(_WIN32)
+  _putenv_s(name, value);
+#else
+  setenv(name, value, 1);
+#endif
+}
+
+/// The seed is mandatory: the plugin refuses to run without one.
+///
+/// The fallback is not a default, it is a **constant of the payload**: two
+/// builds without a seed are byte for byte the same file. The failure has to
+/// be loud, and the message has to name both sources.
+void test_mandatory_seed() {
+  set_env("CS2_PROTECT_SEED", "");
+  set_env("CS2_PROTECT_CONFIG", "");
+  auto without = cs2::protect::load_config();
+  check(!without.has_value(), "the configuration without a seed is refused");
+  if (!without.has_value()) {
+    const std::string& message = without.error().message;
+    check(message.find("CS2_PROTECT_SEED") != std::string::npos,
+          "the message names the environment variable");
+    check(message.find("\"seed\"") != std::string::npos, "the message names the policy's seed");
+  }
+
+  // A policy that carries a seed: the configuration is accepted.
+  const std::filesystem::path directory =
+      std::filesystem::temp_directory_path() / "cs2-protect-tests-seed";
+  std::error_code error;
+  std::filesystem::remove_all(directory, error);
+  std::filesystem::create_directories(directory);
+  const std::filesystem::path policy = directory / "policy.json";
+  {
+    std::ofstream out(policy);
+    out << R"({"protect": [], "seed": "0x0123456789ABCDEF"})";
+  }
+  set_env("CS2_PROTECT_CONFIG", policy.string().c_str());
+  auto with_policy = cs2::protect::load_config();
+  check(with_policy.has_value(), "the policy's seed is enough");
+  if (with_policy.has_value()) {
+    const auto seed = cs2::protect::build_seed(*with_policy);
+    check(seed.has_value() && *seed == 0x0123456789ABCDEFULL,
+          "the policy's seed is the seed of the build");
+  }
+
+  // The environment wins over the policy: the environment is what the
+  // release process sets.
+  set_env("CS2_PROTECT_SEED", "0xFEDCBA9876543210");
+  auto with_both = cs2::protect::load_config();
+  check(with_both.has_value(), "the configuration with two seeds is accepted");
+  if (with_both.has_value()) {
+    const auto seed = cs2::protect::build_seed(*with_both);
+    check(seed.has_value() && *seed == 0xFEDCBA9876543210ULL,
+          "the environment wins over the policy");
+  }
+
+  // The environment is cleared again: the other tests read the
+  // configuration by hand.
+  set_env("CS2_PROTECT_SEED", "");
+  set_env("CS2_PROTECT_CONFIG", "");
+  std::filesystem::remove_all(directory, error);
+}
+
+/// The mixer ------------------------------------------------------------------
+
+/// The mixer is per build.
+///
+/// The multiplier, the xor constant and the rotation come from the module's
+/// seed: two builds with two seeds hold two different mixers, and the
+/// protection leaves no fixed byte in the image.
+void test_per_build_mixer() {
+  const cs2::protect::Mixer first = cs2::protect::mixer_for(0x1111111111111111ULL);
+  const cs2::protect::Mixer second = cs2::protect::mixer_for(0x2222222222222222ULL);
+  check(first.multiplier != second.multiplier, "two seeds give two different multipliers");
+  check(first.xor_constant != second.xor_constant, "two seeds give two different xor constants");
+  check(first.rotate != second.rotate, "two seeds give two different rotations");
+  check(cs2::protect::mixer_for(0x5EED5EED5EED5EEDULL).multiplier ==
+            cs2::protect::mixer_for(0x5EED5EED5EED5EEDULL).multiplier,
+        "the same seed gives the same mixer");
+
+  // The properties the mixer has to have for every seed: the rotation is in
+  // [1, 63] (a rotation of 0 would make the `lshr` by 64 of the decode
+  // undefined behaviour), the multiplier is odd and the xor constant is not
+  // zero.
+  for (std::uint64_t seed = 0; seed < 1000; ++seed) {
+    const cs2::protect::Mixer mixer = cs2::protect::mixer_for(seed);
+    check(mixer.rotate >= 1 && mixer.rotate <= 63, "the rotation is in [1, 63]");
+    check(mixer.multiplier % 2 == 1, "the multiplier is odd");
+    check(mixer.xor_constant != 0, "the xor constant is not zero");
   }
 }
 
@@ -281,16 +385,12 @@ void test_coverage() {
 
 /// The mixer of the transform, in the test.
 ///
-/// The test decodes the descriptor with it, so a wrong index is caught even
-/// when the shape of the rewritten IR is right.
-constexpr std::uint64_t k_mix_multiplier = 0x9E3779B97F4A7C15ULL;
-constexpr std::uint64_t k_mix_xor = 0xBF58476D1CE4E5B9ULL;
-constexpr unsigned k_mix_rotate = 31;
-
-[[nodiscard]] auto mix64(std::uint64_t value) noexcept -> std::uint64_t {
-  value *= k_mix_multiplier;
-  value ^= k_mix_xor;
-  return (value << k_mix_rotate) | (value >> (64U - k_mix_rotate));
+/// The mixer is **per build**: it comes from the module's seed. The test
+/// derives it the way the plugin does, so that a mixer that drifts is caught
+/// even when the shape of the rewritten IR is right.
+[[nodiscard]] auto mixer_of(const cs2::protect::Config& config, const llvm::Module& module)
+    -> cs2::protect::Mixer {
+  return cs2::protect::mixer_for(cs2::protect::module_seed(config, module.getSourceFileName()));
 }
 
 /// A module with a caller that calls a target, and the four calls that the
@@ -478,11 +578,581 @@ void test_transform() {
   }
   check(cipher != 0, "the descriptor holds the plain index: it is not encrypted");
 
-  const std::uint64_t key = mix64(constant_value(*module, "cs2.protect.key0") ^
-                                  constant_value(*module, "cs2.protect.key1") ^
-                                  constant_value(*module, "cs2.protect.key2"));
+  // The mixer of the build: the globals hold its values, and the rotation
+  // is the one the decode emits.
+  const cs2::protect::Mixer mixer = mixer_of(config, *module);
+  check(mixer.rotate >= 1 && mixer.rotate <= 63, "the rotation is in [1, 63]");
+  check(constant_value(*module, "cs2.protect.mixmul") == mixer.multiplier,
+        "the global holds the multiplier of the build");
+  check(constant_value(*module, "cs2.protect.mixxor") == mixer.xor_constant,
+        "the global holds the xor constant of the build");
+
+  // The decode rotates by the rotation of the build: the `shl` and the
+  // `lshr` of the caller carry it.
+  llvm::Function* caller_function = module->getFunction("caller");
+  check(caller_function != nullptr, "the caller is still there");
+  if (caller_function != nullptr) {
+    bool saw_shift = false;
+    bool saw_opposite = false;
+    for (llvm::BasicBlock& block : *caller_function) {
+      for (llvm::Instruction& instruction : block) {
+        const auto* shift = llvm::dyn_cast<llvm::BinaryOperator>(&instruction);
+        if (shift == nullptr) {
+          continue;
+        }
+        const auto* amount = llvm::dyn_cast<llvm::ConstantInt>(shift->getOperand(1));
+        if (amount == nullptr) {
+          continue;
+        }
+        const auto value = amount->getZExtValue();
+        if (shift->getOpcode() == llvm::Instruction::Shl && value == mixer.rotate) {
+          saw_shift = true;
+        }
+        if (shift->getOpcode() == llvm::Instruction::LShr && value == 64U - mixer.rotate) {
+          saw_opposite = true;
+        }
+      }
+    }
+    check(saw_shift, "the decode shifts by the rotation of the build");
+    check(saw_opposite, "the decode shifts by 64 minus the rotation of the build");
+  }
+
+  const std::uint64_t key = mixer.mix64(constant_value(*module, "cs2.protect.key0") ^
+                                        constant_value(*module, "cs2.protect.key1") ^
+                                        constant_value(*module, "cs2.protect.key2"));
   check((cipher ^ key) == 0, "the decode does not yield the index of the target");
 }
+
+/// The transform refuses a callee with an `sret` parameter on a target the
+/// narrowing was not measured on.
+///
+/// The rule is **target bound**: the evidence is the measurement of one
+/// backend on one target, and a rule that is not measured is not used. The
+/// refusal names the attribute.
+void test_transform_sret_other_target() {
+  llvm::LLVMContext context;
+  const auto module = build_transform_module(context);
+  if (module == nullptr) {
+    return;
+  }
+  // The module of the test has no target triple at all: the rule is closed
+  // there, and it is closed on every target but the one that was measured.
+  module->setTargetTriple(llvm::Triple("x86_64-unknown-linux-gnu"));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 1, "only the call to the target is rewritten");
+  check(result.functions[0].skipped.size() == 3, "three calls are skipped");
+  bool named = false;
+  for (const cs2::protect::CallSkipReason reason : result.functions[0].skipped) {
+    if (reason == cs2::protect::CallSkipReason::sret_parameter) {
+      named = true;
+    }
+  }
+  check(named, "the refusal names the sret parameter");
+  check_equal(cs2::protect::to_string(cs2::protect::CallSkipReason::sret_parameter),
+              "sret_parameter", "the reason of the refusal names the attribute");
+}
+
+/// The transform routes a callee that takes an `sret` parameter.
+///
+/// The call goes through a **thunk**: the thunk carries the `sret` attribute
+/// of the call and the hidden pointer, which it takes out of the cell of the
+/// scratch that the `sret` attribute names -- the first one here, the callee
+/// being a free function.
+void test_transform_sret() {
+  llvm::LLVMContext context;
+  const auto module = build_transform_module(context);
+  if (module == nullptr) {
+    return;
+  }
+  // The target the narrowing was measured on. The triple of a build carries
+  // the version of the toolchain, and the rule has to be open there too.
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+  check(cs2::protect::sret_routable(*module), "the sret parameter is routable on this target");
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc19.51.36252"));
+  check(cs2::protect::sret_routable(*module),
+        "the sret parameter is routable on the triple of a build");
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 2, "the target and the sret callee are rewritten");
+  check(result.functions[0].skipped.size() == 2, "the variadic and the musttail calls are skipped");
+  check(result.table_size == 2, "the table holds the two callees");
+  check(result.descriptor_size == 2, "the descriptor holds two slots");
+
+  // The thunk: the uniform signature, the hidden pointer out of the first
+  // cell of the scratch, and the call with the `sret` attribute.
+  llvm::Function* thunk = nullptr;
+  for (llvm::Function& function : *module) {
+    if (function.getName().starts_with("cs2.protect.thunk.")) {
+      thunk = &function;
+    }
+  }
+  check(thunk != nullptr, "the thunk of the sret call is emitted");
+  if (thunk == nullptr) {
+    return;
+  }
+  check(thunk->getReturnType()->isIntegerTy(64), "the thunk returns a 64-bit value");
+  check(thunk->arg_size() == 1, "the thunk takes one argument: the scratch");
+
+  const auto thunk_calls = calls_of(*thunk);
+  check(thunk_calls.size() == 1, "the thunk makes one call");
+  if (thunk_calls.size() == 1) {
+    const llvm::CallBase* call = thunk_calls[0];
+    check(call->getCalledFunction() == nullptr, "the call of the thunk is indirect");
+    check(call->getParamAttr(0, llvm::Attribute::StructRet).isValid(),
+          "the call of the thunk carries the sret attribute");
+    // The hidden pointer: the cell of the scratch that the `sret` attribute
+    // names -- the first one here -- unchanged.
+    const auto* load = llvm::dyn_cast<llvm::LoadInst>(call->getArgOperand(0));
+    check(load != nullptr, "the hidden pointer is loaded out of the scratch");
+    if (load != nullptr) {
+      check(load->getPointerOperand() == thunk->getArg(0),
+            "the hidden pointer is the cell of the scratch that the sret attribute names");
+    }
+  }
+
+  // The callee returns nothing: the thunk returns 0.
+  bool returns_zero = false;
+  for (const llvm::BasicBlock& block : *thunk) {
+    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator());
+    if (ret == nullptr || ret->getReturnValue() == nullptr) {
+      continue;
+    }
+    const auto* value = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue());
+    if (value != nullptr && value->isZero()) {
+      returns_zero = true;
+    }
+  }
+  check(returns_zero, "the thunk returns zero");
+
+  // The caller: the sret call goes through the thunk, and the scratch is in
+  // the caller's frame.
+  llvm::Function* caller = module->getFunction("caller");
+  check(caller != nullptr, "the caller is still there");
+  if (caller == nullptr) {
+    return;
+  }
+  const auto calls = calls_of(*caller);
+  check(calls.size() == 4, "the caller still makes four calls");
+  check(calls.size() > 2 && calls[2]->getCalledFunction() == thunk,
+        "the sret call goes through the thunk");
+  bool scratch_in_caller = false;
+  for (llvm::BasicBlock& block : *caller) {
+    for (llvm::Instruction& instruction : block) {
+      const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction);
+      if (alloca != nullptr && alloca->getAllocatedType()->isStructTy()) {
+        scratch_in_caller = true;
+      }
+    }
+  }
+  check(scratch_in_caller, "the scratch is in the caller's frame");
+
+  // The table holds the callee of the sret call: the thunk reaches it
+  // through the caller's own table.
+  llvm::GlobalVariable* table = module->getGlobalVariable("cs2.protect.table",
+                                                          /*AllowLocal=*/true);
+  check(table != nullptr, "the table global exists");
+  if (table != nullptr) {
+    const auto elements = elements_of(table->getInitializer());
+    check(elements.size() == 2, "the table holds two entries");
+    bool holds_sret = false;
+    for (const llvm::Constant* element : elements) {
+      if (element == module->getFunction("sret_target")) {
+        holds_sret = true;
+      }
+    }
+    check(holds_sret, "the table does not hold the sret callee");
+  }
+}
+
+/// The transform routes a callee whose hidden pointer is **not** the first
+/// parameter.
+///
+/// A member function takes the `this` pointer first, and the hidden pointer
+/// after it: the attribute is what says which parameter it is.
+void test_transform_sret_member() {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto module = llvm::parseAssemblyString(
+      "define void @member_target(ptr %this, ptr sret({ i64, i64, i64 }) %out) {\n"
+      "entry:\n"
+      "  store { i64, i64, i64 } zeroinitializer, ptr %out\n"
+      "  ret void\n"
+      "}\n"
+      "define void @caller(ptr %out) {\n"
+      "entry:\n"
+      "  call void @member_target(ptr null, ptr sret({ i64, i64, i64 }) %out)\n"
+      "  ret void\n"
+      "}\n",
+      error, context);
+  if (module == nullptr) {
+    std::fprintf(stderr, "FAIL: the member module does not parse\n");
+    ++g_failures;
+    return;
+  }
+  module->setModuleIdentifier("member.obj");
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 1, "the call is rewritten");
+  check(result.functions[0].skipped.empty(), "no call is skipped");
+
+  // The thunk: the hidden pointer is the **second** parameter, and the
+  // scratch holds it in the second cell.
+  llvm::Function* thunk = nullptr;
+  for (llvm::Function& function : *module) {
+    if (function.getName().starts_with("cs2.protect.thunk.")) {
+      thunk = &function;
+    }
+  }
+  check(thunk != nullptr, "the thunk of the sret call is emitted");
+  if (thunk == nullptr) {
+    return;
+  }
+  const auto calls = calls_of(*thunk);
+  check(calls.size() == 1, "the thunk makes one call");
+  if (calls.size() != 1) {
+    return;
+  }
+  const llvm::CallBase* call = calls[0];
+  check(call->getCalledFunction() == nullptr, "the call of the thunk is indirect");
+  check(call->getParamAttr(1, llvm::Attribute::StructRet).isValid(),
+        "the call of the thunk carries the sret attribute on the second parameter");
+  check(!call->getParamAttr(0, llvm::Attribute::StructRet).isValid(),
+        "the call of the thunk carries the sret attribute on the first parameter");
+  // The hidden pointer: the second cell of the scratch.
+  const auto* load = llvm::dyn_cast<llvm::LoadInst>(call->getArgOperand(1));
+  check(load != nullptr, "the hidden pointer is loaded out of the scratch");
+  if (load != nullptr) {
+    const auto* address = llvm::dyn_cast<llvm::GEPOperator>(load->getPointerOperand());
+    check(address != nullptr, "the hidden pointer is not the first cell of the scratch");
+    if (address != nullptr) {
+      check(
+          address->getNumIndices() == 2 &&
+              address->getOperand(2) == llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 1),
+          "the hidden pointer is not the second cell of the scratch");
+    }
+  }
+}
+
+/// A module with a struct-returning call **inside a catch handler**.
+///
+/// The handler is a funclet in the MSVC EH model: it is a separate
+/// machine-level function, and every call in it carries a `"funclet"(token
+/// ...)` operand bundle. The bundle is what tells LLVM's Windows-EH codegen
+/// that the call lives in a funclet.
+[[nodiscard]] auto build_functlet_module(llvm::LLVMContext& context)
+    -> std::unique_ptr<llvm::Module> {
+  static constexpr std::string_view k_ir = R"(
+declare i32 @__gxx_personality_v0(...)
+declare void @may_throw()
+declare void @external_sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x)
+
+define i32 @caller(i32 %x) personality ptr @__gxx_personality_v0 {
+entry:
+  %out = alloca { i64, i64, i64 }, align 8
+  invoke void @may_throw() to label %cont unwind label %catch.dispatch
+
+catch.dispatch:
+  %cs = catchswitch within none [label %handler] unwind to caller
+
+handler:
+  %cp = catchpad within %cs [ptr null, i32 64, ptr null]
+  call void @external_sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x) [ "funclet"(token %cp) ]
+  catchret from %cp to label %cont
+
+cont:
+  ret i32 0
+}
+)";
+  return build_module_from(context, k_ir, "funclet.obj");
+}
+
+/// The replacement call keeps the **operand bundles** of the call it
+/// replaces.
+///
+/// A catch handler is a funclet, and the calls in it carry a `"funclet"`
+/// bundle. Without the bundle the Windows-EH codegen mis-lowers the funclet:
+/// it drops the body after the prologue, never emits the parent's
+/// continuation, and the image traps. The **ordinary** path does not need
+/// this -- it mutates the call it rewrites, so the call keeps its bundles --
+/// but the thunk path builds a *new* call, and only the thunk path can lose
+/// them.
+void test_transform_sret_functlet() {
+  llvm::LLVMContext context;
+  const auto module = build_functlet_module(context);
+  if (module == nullptr) {
+    return;
+  }
+  // The target the narrowing was measured on: the rule is closed on every
+  // other one, and the call would not be rewritten at all.
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  policy.cross_module.push_back("external_sret_target");
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  check(selection.selected.size() == 1, "the caller is selected");
+  check(selection.cross_matches.size() == 1, "the cross_module entry named the declaration");
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 1, "the call in the funclet is rewritten");
+  check(result.functions[0].skipped.size() == 1, "the invoke of the import is skipped");
+
+  llvm::Function* caller = module->getFunction("caller");
+  check(caller != nullptr, "the caller is still there");
+  if (caller == nullptr) {
+    return;
+  }
+
+  // The catchpad of the handler: it is the token of the bundle.
+  llvm::Value* catchpad = nullptr;
+  for (llvm::BasicBlock& block : *caller) {
+    for (llvm::Instruction& instruction : block) {
+      if (auto* pad = llvm::dyn_cast<llvm::CatchPadInst>(&instruction)) {
+        catchpad = pad;
+      }
+    }
+  }
+  check(catchpad != nullptr, "the catchpad of the handler is still there");
+
+  // The call in the handler goes through the thunk, and the replacement call
+  // keeps the bundle of the call it replaces.
+  bool saw_thunk = false;
+  for (const llvm::CallBase* call : calls_of(*caller)) {
+    const llvm::Function* callee = call->getCalledFunction();
+    if (callee == nullptr || !callee->getName().starts_with("cs2.protect.thunk.")) {
+      continue;
+    }
+    saw_thunk = true;
+    const auto bundle = call->getOperandBundle("funclet");
+    check(bundle.has_value(),
+          "the replacement call lost the funclet bundle of the call it replaces: the backend "
+          "drops the body of the funclet and the image traps");
+    if (bundle.has_value()) {
+      check(bundle->isFuncletOperandBundle(), "the bundle of the replacement call is the funclet");
+      check(bundle->Inputs.size() == 1, "the funclet bundle carries one operand: the token");
+      check(catchpad != nullptr && bundle->Inputs[0].get() == catchpad,
+            "the token of the bundle is the catchpad of the handler");
+    }
+  }
+  check(saw_thunk, "the call in the funclet does not go through the thunk");
+}
+
+/// The transform still refuses the parameters an indirect call cannot carry.
+///
+/// The refusal **names** the attribute: a refusal that says "byval" is
+/// actionable, a refusal that says "indirect_parameter" is not.
+void test_transform_parameters() {
+  struct Case {
+    const char* ir;
+    cs2::protect::CallSkipReason reason;
+    const char* name;
+  };
+  const std::vector<Case> cases = {
+      {"declare void @callee(ptr byval({ i64, i64 }) %out)\n"
+       "define void @caller(ptr %out) {\n"
+       "entry:\n"
+       "  call void @callee(ptr byval({ i64, i64 }) %out)\n"
+       "  ret void\n"
+       "}\n",
+       cs2::protect::CallSkipReason::byval_parameter, "byval_parameter"},
+      {"declare void @callee(ptr inalloca({ i64, i64 }) %out)\n"
+       "define void @caller(ptr %out) {\n"
+       "entry:\n"
+       "  call void @callee(ptr inalloca({ i64, i64 }) %out)\n"
+       "  ret void\n"
+       "}\n",
+       cs2::protect::CallSkipReason::inalloca_parameter, "inalloca_parameter"},
+      {"declare void @callee(ptr preallocated({ i64, i64 }) %out)\n"
+       "define void @caller(ptr %out) {\n"
+       "entry:\n"
+       "  call void @callee(ptr preallocated({ i64, i64 }) %out)\n"
+       "  ret void\n"
+       "}\n",
+       cs2::protect::CallSkipReason::preallocated_parameter, "preallocated_parameter"},
+  };
+
+  for (const Case& item : cases) {
+    llvm::LLVMContext context;
+    llvm::SMDiagnostic error;
+    auto module = llvm::parseAssemblyString(item.ir, error, context);
+    if (module == nullptr) {
+      std::fprintf(stderr, "FAIL: the module of the case does not parse\n");
+      ++g_failures;
+      continue;
+    }
+    module->setModuleIdentifier("parameters.obj");
+    module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+    cs2::protect::Policy policy;
+    policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+    cs2::protect::Config config;
+    config.policy = policy;
+
+    const auto selection = cs2::protect::select_functions(*module, config);
+    cs2::protect::record_selection(*module, selection);
+    const auto recorded = cs2::protect::read_selection(*module);
+    const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+    check(result.functions.size() == 1, "the transform reports one function");
+    check(result.functions[0].rewritten == 0, "the call is not rewritten");
+    check(result.functions[0].skipped.size() == 1, "the call is skipped");
+    if (result.functions[0].skipped.size() == 1) {
+      check(result.functions[0].skipped[0] == item.reason,
+            "the refusal does not name the attribute");
+      check_equal(cs2::protect::to_string(item.reason), item.name,
+                  "the reason of the refusal names the attribute");
+    }
+  }
+}
+
+/// The transform refuses a callee that takes an `sret` parameter **and**
+/// returns a value: that is not a thing in the x64 ABI.
+void test_transform_sret_result() {
+  llvm::LLVMContext context;
+  llvm::Module module("sret-result.obj", context);
+  module.setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+  auto* result_type = llvm::StructType::get(
+      context, {llvm::Type::getInt64Ty(context), llvm::Type::getInt64Ty(context)});
+  auto* callee = llvm::Function::Create(
+      llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
+                              {llvm::PointerType::getUnqual(context)}, false),
+      llvm::GlobalValue::ExternalLinkage, "callee", &module);
+  callee->addParamAttr(0, llvm::Attribute::getWithStructRetType(context, result_type));
+  auto* caller = llvm::Function::Create(
+      llvm::FunctionType::get(llvm::Type::getVoidTy(context),
+                              {llvm::PointerType::getUnqual(context)}, false),
+      llvm::GlobalValue::ExternalLinkage, "caller", &module);
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", caller);
+  llvm::IRBuilder<> builder(entry);
+  llvm::CallInst* call = builder.CreateCall(callee, {caller->getArg(0)});
+  call->addParamAttr(0, llvm::Attribute::getWithStructRetType(context, result_type));
+  builder.CreateRet(llvm::ConstantInt::get(llvm::Type::getVoidTy(context), 0));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(module, config);
+  cs2::protect::record_selection(module, selection);
+  const auto recorded = cs2::protect::read_selection(module);
+  const auto result = cs2::protect::transform_module(module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 0, "the call is not rewritten");
+  check(result.functions[0].skipped.size() == 1, "the call is skipped");
+  if (result.functions[0].skipped.size() == 1) {
+    check(result.functions[0].skipped[0] == cs2::protect::CallSkipReason::sret_result,
+          "the refusal is not the one of a callee that returns a value");
+  }
+}
+
+/// The layout -----------------------------------------------------------------
+
+/// The permutation of the module's function list is seeded.
+///
+/// The layout is the lever that moves the code in the image: the object
+/// writer emits the functions in the module's function list order, and the
+/// linker keeps the order of an object's sections.
+void test_layout_permutation() {
+  const std::vector<std::size_t> first = cs2::protect::layout_permutation(16, 0x1234ULL);
+  const std::vector<std::size_t> again = cs2::protect::layout_permutation(16, 0x1234ULL);
+  const std::vector<std::size_t> other = cs2::protect::layout_permutation(16, 0x5678ULL);
+  check(first == again, "the same seed gives the same permutation");
+  check(first != other, "two seeds give two different permutations");
+
+  // It is a permutation: every index appears exactly once, so no function is
+  // lost and none is duplicated.
+  for (const std::vector<std::size_t>* permutation : {&first, &other}) {
+    std::vector<bool> seen(16, false);
+    for (const std::size_t index : *permutation) {
+      check(index < 16, "the index is inside the range");
+      if (index < 16) {
+        check(!seen[index], "the index appears once");
+        seen[index] = true;
+      }
+    }
+  }
+
+  // The permutation of a module moves the functions and keeps every name.
+  llvm::LLVMContext context;
+  const auto module = build_transform_module(context);
+  if (module == nullptr) {
+    return;
+  }
+  std::vector<std::string> before;
+  for (llvm::Function& function : *module) {
+    before.push_back(function.getName().str());
+  }
+  const cs2::protect::LayoutResult result = cs2::protect::permute_layout(*module, 0xABCDULL);
+  check(result.functions == 5, "the module has five definitions");
+  check(result.moved > 0, "the permutation moved a function");
+
+  std::vector<std::string> after;
+  for (llvm::Function& function : *module) {
+    after.push_back(function.getName().str());
+  }
+  check(after.size() == before.size(), "the module has the same number of functions");
+  check(after != before, "the function list is in another order");
+
+  std::vector<std::string> sorted_before = before;
+  std::vector<std::string> sorted_after = after;
+  std::ranges::sort(sorted_before);
+  std::ranges::sort(sorted_after);
+  check(sorted_after == sorted_before, "the permutation lost or duplicated a function");
+
+  // The module is whole: a broken module is a miscompile.
+  std::string message;
+  llvm::raw_string_ostream stream(message);
+  check(!llvm::verifyModule(*module, &stream), "the permuted module verifies");
+  if (llvm::verifyModule(*module, &stream)) {
+    std::fprintf(stderr, "FAIL: the permuted module does not verify: %s\n", stream.str().c_str());
+  }
+  check(module->getFunction("target") != nullptr, "the module still knows its functions");
+  check(module->getFunction("caller") != nullptr, "the module still knows its caller");
+}
+
+/// The level gate -------------------------------------------------------------
 
 void test_level_gate() {
   llvm::LLVMContext context;
@@ -772,9 +1442,10 @@ void test_transform_cross_module() {
       }
     }
   }
-  const std::uint64_t key = mix64(constant_value(*module, "cs2.protect.key0") ^
-                                  constant_value(*module, "cs2.protect.key1") ^
-                                  constant_value(*module, "cs2.protect.key2"));
+  const cs2::protect::Mixer mixer = mixer_of(config, *module);
+  const std::uint64_t key = mixer.mix64(constant_value(*module, "cs2.protect.key0") ^
+                                        constant_value(*module, "cs2.protect.key1") ^
+                                        constant_value(*module, "cs2.protect.key2"));
   check((cipher ^ key) == 0, "the decode does not yield the index of the declaration");
 
   // The state of the entry: it named a declaration and every call to it was
@@ -2025,17 +2696,27 @@ void test_string_decode_dominance() {
       continue;
     }
     check(tree.dominates(decode->getParent(), use->getParent()),
-          "the decode dominates the use of the other block");  }
+          "the decode dominates the use of the other block");
+  }
 }
 
 }  // namespace
 
 auto main() -> int {
   test_policy_reader();
+  test_mandatory_seed();
+  test_per_build_mixer();
   test_qualified_name();
   test_selection();
   test_coverage();
   test_transform();
+  test_transform_sret_other_target();
+  test_transform_sret();
+  test_transform_sret_member();
+  test_transform_sret_functlet();
+  test_transform_parameters();
+  test_transform_sret_result();
+  test_layout_permutation();
   test_level_gate();
   test_level_gate_two_entries();
   test_vanished();

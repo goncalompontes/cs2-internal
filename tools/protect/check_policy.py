@@ -13,7 +13,15 @@ reads the file with the LLVM SDK's JSON parser (which keeps the *first* of
 two equal keys); Python's `json` keeps the *last*. A duplicated key is
 therefore an error on both sides, with the same message.
 
+The script has a second mode, `--seed`: it prints the seed of the build (the
+environment's `CS2_PROTECT_SEED`, else the policy's `seed`) and fails when
+there is none. The wiring runs it at **configure** time, so that a protected
+build without a seed fails before it compiles anything. The rule is the
+plugin's, and the script is the only place that reads the policy for it: two
+readers of the policy are two rules that drift.
+
 Usage: check_policy.py [--policy FILE] [--coverage DIR] [--source-root DIR] [--output FILE]
+                        [--seed]
 
   --policy      the policy file (default: $CS2_PROTECT_CONFIG)
   --coverage    the coverage directory (default: $CS2_PROTECT_COVERAGE, else
@@ -21,6 +29,9 @@ Usage: check_policy.py [--policy FILE] [--coverage DIR] [--source-root DIR] [--o
   --source-root the tree that is being built (default: $CS2_PROTECT_SOURCE_ROOT);
                 the coverage of another tree is not counted
   --output      a stamp file to write when the check passes
+  --seed        print the seed of the build and exit: the exit code is 1 when
+                the build has no seed at all, and 2 when the seed or the
+                policy is malformed
 
 The coverage directory default is the same one the plugin computes, so the
 two agree without the build having to pass anything around.
@@ -75,6 +86,16 @@ STATE_PRIORITY = {
     "unimplemented": 3,
     "vanished": 4,
 }
+
+
+#: The exit code of the `--seed` mode when the build has no seed at all.
+EXIT_NO_SEED = 1
+
+#: The exit code of the `--seed` mode when the seed or the policy is
+#: malformed. It is not the exit code of the absence of a seed, because the
+#: two failures are told apart by the wiring: a malformed policy is the
+#: plugin's error to report, and it must not be hidden behind a seed error.
+EXIT_INVALID = 2
 
 
 def state_priority(state: str) -> int:
@@ -281,6 +302,109 @@ def prune_stale_coverage(coverage_dir: Path, policy_path: Path) -> int:
     return removed
 
 
+def read_the_policy(policy_path: str) -> tuple[dict[str, Any] | None, str]:
+    """The policy of the build, and the reason it cannot be read.
+
+    The plugin and this script must reject the same things: a duplicated
+    key, an unknown key, a malformed entry. The plugin reads the file with
+    the LLVM SDK's JSON parser (which keeps the *first* of two equal keys);
+    Python's `json` keeps the *last*. A duplicated key is therefore an error
+    on both sides, with the same message.
+
+    This is the **only** reader of the policy in the Python tools: the seed
+    of the build and the check of the entries read the same file with the
+    same rules, and two readers are two rules that drift.
+    """
+    policy_file = Path(policy_path)
+    try:
+        # "utf-8-sig" accepts the byte order mark that some Windows editors
+        # write; the plugin accepts and skips it too.
+        raw = json.loads(
+            policy_file.read_text(encoding="utf-8-sig"), object_pairs_hook=no_duplicate_keys
+        )
+    except (OSError, ValueError) as error:
+        return None, f"{policy_path}: {error}"
+    if not isinstance(raw, dict):
+        return None, f"{policy_path}: the policy file must contain a JSON object"
+    try:
+        check_policy_keys(raw)
+        policy_patterns(raw)
+        check_policy_values(raw)
+    except ValueError as error:
+        return None, f"{policy_path}: {error}"
+    return raw, ""
+
+
+def is_hexadecimal(text: str) -> bool:
+    """Whether the text is a hexadecimal seed, the way the plugin reads it.
+
+    The plugin reads a seed as a hexadecimal string with an optional `0x`
+    prefix (`src/config.cpp`: `parse_seed`), and it rejects everything else.
+    The probe has to accept exactly what the plugin accepts: a seed the
+    plugin rejects has to fail the **configure** step, where the message can
+    name it, and not the compile step.
+    """
+    digits = text
+    if len(digits) > 2 and digits[0] == "0" and digits[1] in "xX":
+        digits = digits[2:]
+    if not digits:
+        return False
+    return all(c in "0123456789abcdefABCDEF" for c in digits)
+
+
+def the_seed(policy_path: str) -> int:
+    """The seed of the build, and the reason there is none.
+
+    The rule is the plugin's (`src/config.cpp`): the **environment** wins
+    over the policy, and a seed is a **hexadecimal string**.
+
+    The probe accepts exactly what the plugin accepts, and it reports the
+    plugin's own errors: a policy the plugin rejects is the plugin's error to
+    report, and the probe must not hide it behind a seed error. That is why
+    the two failures have two exit codes.
+
+    The policy is only read when the seed has to come from it: the gate is
+    about the seed, and a malformed policy is the **plugin's** error, which
+    the plugin reports when it reads the file at compile time. The one case
+    the probe has to get right is the one where the policy is malformed
+    **and** there is no seed: the probe reads the policy then, and reports
+    the malformed policy instead of a missing seed.
+    """
+    seed = os.environ.get("CS2_PROTECT_SEED", "").strip()
+    if seed:
+        if not is_hexadecimal(seed):
+            print(f"CS2_PROTECT_SEED: the seed is not hexadecimal: '{seed}'", file=sys.stderr)
+            return EXIT_INVALID
+        sys.stdout.write(seed)
+        return 0
+
+    no_seed = (
+        "the build has no seed: set CS2_PROTECT_SEED to a 64-bit hexadecimal value, or put "
+        'a "seed" in the policy file'
+    )
+    if not policy_path:
+        print(no_seed, file=sys.stderr)
+        return EXIT_NO_SEED
+
+    raw, reason = read_the_policy(policy_path)
+    if raw is None:
+        # The policy is malformed. The plugin reports it with the same
+        # message, and the probe must not hide it behind a seed error.
+        print(reason, file=sys.stderr)
+        return EXIT_INVALID
+
+    policy_seed = raw.get("seed")
+    if policy_seed is None:
+        print(no_seed, file=sys.stderr)
+        return EXIT_NO_SEED
+    if not isinstance(policy_seed, str) or not is_hexadecimal(policy_seed):
+        print(f"CS2_PROTECT_CONFIG: {policy_path}: the seed is not hexadecimal: '{policy_seed}'",
+              file=sys.stderr)
+        return EXIT_INVALID
+    sys.stdout.write(policy_seed)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     # `set VAR=value && something` in cmd.exe leaves a trailing space in the
     # value; the plugin trims it as well, so the two agree on the path.
@@ -288,6 +412,7 @@ def main(argv: list[str]) -> int:
     coverage_dir: Path | None = None
     source_root: Path | None = None
     output: Path | None = None
+    seed_only = False
     args = list(argv)
     while args:
         arg = args.pop(0)
@@ -299,9 +424,16 @@ def main(argv: list[str]) -> int:
             source_root = Path(args.pop(0))
         elif arg == "--output" and args:
             output = Path(args.pop(0))
+        elif arg == "--seed":
+            seed_only = True
         else:
             print(f"check_policy: unknown argument '{arg}'", file=sys.stderr)
             return 2
+
+    if seed_only:
+        # The seed of the build: the wiring runs it at configure time, and
+        # the coverage of the build does not exist yet.
+        return the_seed(policy_path)
 
     if not policy_path:
         # No policy: the pass had nothing to select, so there is nothing to
@@ -309,26 +441,11 @@ def main(argv: list[str]) -> int:
         return 0
 
     policy_file = Path(policy_path)
-    try:
-        # "utf-8-sig" accepts the byte order mark that some Windows editors
-        # write; the plugin accepts and skips it too.
-        raw = json.loads(
-            policy_file.read_text(encoding="utf-8-sig"), object_pairs_hook=no_duplicate_keys
-        )
-    except (OSError, ValueError) as error:
-        print(f"check_policy: {policy_path}: {error}", file=sys.stderr)
+    raw, reason = read_the_policy(policy_path)
+    if raw is None:
+        print(f"check_policy: {reason}", file=sys.stderr)
         return 1
-    if not isinstance(raw, dict):
-        print(f"check_policy: {policy_path}: the policy file must contain a JSON object",
-              file=sys.stderr)
-        return 1
-    try:
-        check_policy_keys(raw)
-        patterns = policy_patterns(raw)
-        check_policy_values(raw)
-    except ValueError as error:
-        print(f"check_policy: {policy_path}: {error}", file=sys.stderr)
-        return 1
+    patterns = policy_patterns(raw)
 
     if coverage_dir is None:
         env = os.environ.get("CS2_PROTECT_COVERAGE", "").strip()

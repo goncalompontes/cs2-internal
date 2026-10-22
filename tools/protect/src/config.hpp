@@ -95,6 +95,15 @@ struct Config {
   std::filesystem::path coverage_dir;  ///< where the per-module coverage goes.
 };
 
+/// The seed of the build: the environment's, else the policy's.
+///
+/// The seed is **mandatory**. The protection's constants, its keys and its
+/// layout are derived from it, and the fallback -- the module id hashed with
+/// FNV-1a -- is a constant of the payload: two builds without a seed are
+/// byte for byte the same file. `load_config()` therefore refuses to run
+/// without one.
+[[nodiscard]] auto build_seed(const Config& config) noexcept -> std::optional<std::uint64_t>;
+
 /// A configuration problem. The plugin reports it and fails the compile.
 struct ConfigError {
   std::string message;

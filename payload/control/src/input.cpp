@@ -300,6 +300,12 @@ void Input::clear_rage_aim() noexcept {
   rage_stop_.store(false);
   rage_scope_.store(false);
   rage_reload_.store(false);
+  // The fire path's contribution goes with the aim: the ragebot must not hold
+  // the trigger while it is not aiming (`docs/ragebot.md` §"the fire path").
+  // The **changed** flag is the service's to publish (it knows the tick), so
+  // it is cleared here and the service sets it when it publishes.
+  rage_press_.store(false);
+  rage_press_changed_.store(false);
 }
 
 void Input::write_silent_angles(void* cmd, float pitch, float yaw, float roll) noexcept {
@@ -640,22 +646,30 @@ void Input::write_engine_buttons(std::uint64_t set_bits, std::uint64_t clear_bit
   if (set_bits == 0 && clear_bits == 0) {
     return;
   }
-  const std::uintptr_t pawn = local_pawn_.load();
-  if (pawn == 0) {
-    return;
-  }
-  std::uintptr_t services = 0;
-  if (!cs2::game::read(pawn + k_movement_services_offset, services) || services == 0) {
-    return;
-  }
-  auto* state = reinterpret_cast<std::uint64_t*>(services + k_services_button_offset);
-  if (!writable(reinterpret_cast<std::uintptr_t>(state), sizeof(std::uint64_t))) {
+  std::uint64_t* state = engine_button_state();
+  if (state == nullptr) {
     return;
   }
   *state = (*state | set_bits) & ~clear_bits;
 }
 
-void Input::rage_tick(std::uint8_t* cmd, const std::uint64_t* buttons) noexcept {
+auto Input::engine_button_state() noexcept -> std::uint64_t* {
+  const std::uintptr_t pawn = local_pawn_.load();
+  if (pawn == 0) {
+    return nullptr;
+  }
+  std::uintptr_t services = 0;
+  if (!cs2::game::read(pawn + k_movement_services_offset, services) || services == 0) {
+    return nullptr;
+  }
+  auto* state = reinterpret_cast<std::uint64_t*>(services + k_services_button_offset);
+  if (!writable(reinterpret_cast<std::uintptr_t>(state), sizeof(std::uint64_t))) {
+    return nullptr;
+  }
+  return state;
+}
+
+void Input::rage_tick(std::uint8_t* cmd) noexcept {
   if (!rage_active_.load()) {
     return;
   }
@@ -666,41 +680,6 @@ void Input::rage_tick(std::uint8_t* cmd, const std::uint64_t* buttons) noexcept 
   rage_silent_angles(pitch, yaw);
   write_silent_angles(cmd, pitch, yaw, 0.0F);
   rage_writes_.fetch_add(1);
-  if (buttons == nullptr) {
-    return;
-  }
-  // Mirror the (persistently asserted) attack, zoom and reload into the command's
-  // `CInButtonStatePB` so the sub-tick records agree with the legacy mask. A changed
-  // word is needed for the engine to see a fresh press edge (zoom/reload act on the
-  // edge), exactly as the attack does.
-  const auto base = *reinterpret_cast<std::uintptr_t*>(cmd + k_cmd_pb_offset + k_pb_base_offset);
-  const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
-  std::uint64_t extra = *buttons & button::k_attack;
-  if (rage_scope_.load()) {
-    // `IN_ATTACK2` (the right mouse) is what *triggers* the scope; `IN_ZOOM` is
-    // the engine's own zoom bit (`1 << 34`, see `strafe_geometry.hpp`'s
-    // `button` namespace). The engine's action table has no action that
-    // produces `IN_ZOOM` — it is in the "mod specific" range the engine
-    // populates itself — so the zoom bit is a state assertion, and the scope
-    // itself rides on `IN_ATTACK2`.
-    extra |= button::k_attack2 | button::k_zoom;
-  }
-  if (rage_reload_.load()) {
-    extra |= button::k_reload;
-  }
-  if (extra != 0 && writable(buttons_pb, k_buttonstate_values_offset + 16)) {
-    auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
-    state[0] = (state[0] & ~extra) | extra;  // held
-    state[1] = (state[1] & ~extra) | extra;  // changed (a press edge)
-    *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
-  }
-  // Also assert the extra buttons in the engine's own held-button word
-  // (`CInButtonState` at the movement services), which some weapon actions read
-  // instead of the command mask.
-  write_engine_buttons(extra, 0);
-  if ((*buttons & button::k_attack) != 0) {
-    rage_shots_.fetch_add(1);
-  }
 }
 
 void Input::set_strafe_config(float wishspeed, int subticks) noexcept {
@@ -1482,7 +1461,13 @@ void __fastcall Input::create_move_input_detour(void* self, int slot, char activ
   // The per-tick entry: write the command the game will simulate (fetched via
   // the same `GetUserCmd` chain the game uses), then re-assert the raw axes in
   // case the movement reads them after `CreateMove`.
-  input->apply(input->current_cmd());
+  //
+  // This is the command the engine has **just built** (slot 5 is the per-tick
+  // builder, `docs/re/angle-split.md` §"the order of the two `CreateMove`
+  // slots"), so its button mask is the **engine's own** — the fire path reads
+  // the player's own press of the attack button from it
+  // (`docs/ragebot.md` §"the fire path").
+  input->apply_simulated(input->current_cmd());
   input->write_raw_move();
   input->write_raw_angles();
 }
@@ -2595,6 +2580,14 @@ void Input::run_game_thread_sink_now() noexcept {
 }
 
 void Input::apply(void* cmd) noexcept {
+  apply_command(cmd, false);
+}
+
+void Input::apply_simulated(void* cmd) noexcept {
+  apply_command(cmd, true);
+}
+
+void Input::apply_command(void* cmd, bool fresh) noexcept {
   if (cmd == nullptr) {
     return;
   }
@@ -2624,42 +2617,134 @@ void Input::apply(void* cmd) noexcept {
   //    state and only writes the sub-tick table.
   auto* buttons = reinterpret_cast<std::uint64_t*>(bytes + k_cmd_buttons_offset);
   const std::uint64_t current = *buttons;
+  // The **player's own** press of the attack button: the engine's own mask,
+  // read **before** the payload's write.
+  //
+  // A command the payload has **not** put its own press on carries the
+  // engine's own mask — that is a **clean** reading. A command the payload
+  // **has** pressed carries the payload's own press as well, and once both are
+  // set the player's press and the payload's press cannot be told apart, so
+  // the reading comes from the **cache** instead.
+  //
+  // The cache is per **command number** (`CUserCmd::nSequenceNumber`): the
+  // engine builds a **new** command every tick, so every tick brings a clean
+  // reading, and the slot-25 copy of the same command reuses the tick's
+  // reading. Without the cache the payload would read **its own** press back
+  // as the player's — and a withdrawal would then never clear the bit, which
+  // is exactly the release the edge needs (`docs/ragebot.md` §"the fire path").
+  const auto command_number = *reinterpret_cast<const std::uint32_t*>(bytes + k_cmd_number_offset);
+  const bool observed_attack = (current & button::k_attack) != 0;
+  // What the payload knows about the **player's own** press. It can be
+  // **unknown**: the copy of a command the payload has written to carries the
+  // payload's own press, and the payload cannot tell the two apart. An
+  // unknown reading never **removes** the attack bit — the bit is cleared
+  // only on the strength of a reading that is **known** to be the player's own
+  // state (`strafe_geometry.hpp`'s `PlayerPress`).
+  const cs2::control::PlayerPress player_press =
+      fire_commands_.read(command_number, observed_attack, fresh);
+  rage_player_press_.store(static_cast<std::uint8_t>(player_press));
   // The features' buttons: the triggerbot's own hold, plus the ragebot's
-  // assists. The ragebot's attack is a **persistent** press while a solve is
-  // active — a payload feature (like the movement features) that must hold on
-  // *every* command the engine simulates, not just the command `rage_tick`
-  // happens to see. Verified subtlety: pressing attack only on the command whose
-  // history we wrote that tick let a shot be released on a command the silent
-  // write had not reached, so it followed the camera (the auto-fire timing
-  // bug). A persistent press is exactly why manual `press("attack")` always hit.
+  // assists. The ragebot's **attack** is not one of them: it is a
+  // **decision** the service publishes on the game's thread
+  // (`docs/ragebot.md` §"the fire path"). The fire path asks whether the
+  // weapon can take the shot at all, and — on a semi-automatic weapon —
+  // whether the engine has seen the **release** it needs between two shots.
+  // The decision is made once per tick, so every command of the tick carries
+  // the same answer.
+  //
+  // The ragebot's contribution is **replaceable**: the command's attack bit is
+  // *recomputed* from its contributors for every command, so a withdrawal
+  // really removes the payload's own press — while the **player's** own press
+  // (a contributor of its own) survives untouched. A feature that releases
+  // the attack button must not take the player's own press of the same button
+  // away, and it does not: the composition *replaces* the payload's own bit
+  // and leaves the player's alone.
   const bool rage_solved = rage_active_.load();
-  const bool rage_firing = rage_solved && rage_fire_.load();
-  std::uint64_t feature_bits = feature_mask_.load();
-  if (rage_firing) {
-    feature_bits |= button::k_attack;
-  }
+  const bool rage_press =
+      cs2::control::rage_attack_press(rage_solved, rage_fire_.load(), rage_press_.load());
+  const std::uint64_t control_set = set_mask_.load();
+  const std::uint64_t control_clear = clear_mask_.load();
+  const std::uint64_t feature_bits = feature_mask_.load();
   // Auto-scope / auto-reload (common ragebot assists, `docs/ragebot.md`): hold zoom
   // and/or reload while a solve is active. The engine ignores zoom on a weapon that
   // cannot scope; reload is a no-op when the clip is full.
   // The scope is triggered by `IN_ATTACK2` (the right mouse); `IN_ZOOM` is the
   // engine's own zoom bit (`1 << 34`) and no client action produces it, so it
   // only states the scope the attack2 press has already asked for.
+  std::uint64_t assists = 0;
   if (rage_solved && rage_scope_.load()) {
-    feature_bits |= button::k_attack2 | button::k_zoom;
+    assists |= button::k_attack2 | button::k_zoom;
   }
   if (rage_solved && rage_reload_.load()) {
-    feature_bits |= button::k_reload;
+    assists |= button::k_reload;
   }
-  const std::uint64_t value = cs2::control::compose_button_mask(
-      current, set_mask_.load(), clear_mask_.load(), feature_bits, usercmd_backend);
-  if (value != current) {
-    *buttons = value;
+  // The control channel's own press of the attack button — a contributor of
+  // its own, so the ragebot's withdrawal does not take it away. The
+  // composition applies the control channel's own **release** (the operator's
+  // release) on top of it: the release removes the control channel's
+  // contribution, and only that one.
+  const bool control_attack = cs2::control::button_reaches_command(
+                                  cs2::control::ButtonPath::control_command, usercmd_backend) &&
+                              (control_set & button::k_attack) != 0;
+  // The PB's own words: what the engine wrote into the command's
+  // `CInButtonStatePB`. They are the payload's **starting point**, and the
+  // payload writes the attack bit into them (the release the engine has to
+  // see).
+  const auto base = *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset + k_pb_base_offset);
+  const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
+  // The words themselves, or **null** when the PB is not writable. One guard,
+  // one place: the write below is guarded by the very same condition, and by
+  // nothing else — a guard of the form "there is something to write" is what
+  // skipped the release.
+  auto* pb_words = writable(buttons_pb, k_buttonstate_values_offset + 16)
+                       ? reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset)
+                       : nullptr;
+  const std::uint64_t pb_held = pb_words != nullptr ? pb_words[0] : 0;
+  const std::uint64_t pb_changed = pb_words != nullptr ? pb_words[1] : 0;
+  const cs2::control::FireWriteInputs write_inputs{
+      .current_mask = current,
+      .control_set = control_set,
+      .control_clear = control_clear,
+      .feature_mask = feature_bits | assists,
+      .usercmd_backend = usercmd_backend,
+      .player = player_press,
+      .control_attack = control_attack,
+      .rage_press = rage_press,
+      .attack_changed = rage_press_changed_.load(std::memory_order_relaxed),
+      .assists = assists,
+      .pb_held = pb_held,
+      .pb_changed = pb_changed,
+  };
+  // **The three channels**, and the write that reaches them:
+  //
+  //   * the command's own mask (`cmd + 0x60`) — the attack bit is *replaced*,
+  //     so a withdrawal is a release;
+  //   * the PB's `CInButtonStatePB` — the **held** word follows the command's
+  //     mask, and the **changed** word carries the attack edge;
+  //   * the movement services' `CInButtonState` — the **held** word follows
+  //     the command's mask, so a withdrawal clears it.
+  //
+  // The write is **one call** (`strafe_geometry.hpp`'s `apply_fire_write`): the
+  // composition and the write are the same step, so a call site that computes
+  // the mask and then ignores it cannot exist. The host test drives that
+  // function and reads the bytes back.
+  const cs2::control::FireWritePorts ports{
+      .mask = buttons,
+      .pb = pb_words,
+      .pb_has_bits = pb_words != nullptr ? reinterpret_cast<std::uint32_t*>(
+                                               buttons_pb + k_buttonstate_has_bits_offset)
+                                         : nullptr,
+      .engine = engine_button_state(),
+  };
+  const cs2::control::FireWrite write =
+      cs2::control::apply_fire_write(ports, write_inputs, fire_commands_, command_number);
+  if (write.command_mask != current) {
     writes_.fetch_add(1);
   }
   bhop_tick(cmd,
             reinterpret_cast<std::uint8_t*>(
                 *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset + k_pb_base_offset)),
-            value);
+            write.command_mask);
 
   // 2. Analog move. Two things can swallow a command-side write: the engine
   //    re-derives `base->forwardmove` from the raw input (`CCSGOInput + 0x270`,
@@ -2828,10 +2913,13 @@ void Input::apply(void* cmd) noexcept {
     write_silent_angles(cmd, angle_pitch_.load(), angle_yaw_.load(), angle_roll_.load());
   }
 
-  // 6. Ragebot: the render-thread solve written as the silent sub-tick aim, plus
-  //    the optional attack. Independent of the control backend (like the movement
-  //    features) — nothing is written unless a solve is active.
-  rage_tick(bytes, buttons);
+  // 6. Ragebot: the render-thread solve written as the silent sub-tick aim. The
+  //    **attack** is written in step 1 (the fire path's write), so the command's
+  //    attack bit is *replaced* rather than merged — that is what makes the
+  //    ragebot's withdrawal a real release. Independent of the control backend
+  //    (like the movement features) — nothing is written unless a solve is
+  //    active.
+  rage_tick(bytes);
 }
 
 auto Input::on_ground() const noexcept -> bool {

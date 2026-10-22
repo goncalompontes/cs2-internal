@@ -315,7 +315,20 @@ void write_transform_report(const llvm::Module& module, const TransformResult& r
   }
 
   llvm::errs() << "[cs2-protect] " << tag << ": transform table=" << result.table_size
-               << " descriptor=" << result.descriptor_size << "\n";
+               << " descriptor=" << result.descriptor_size
+               << " mixmul=" << hex_seed(result.mix_multiplier)
+               << " mixxor=" << hex_seed(result.mix_xor) << " rotate=" << result.mix_rotate << "\n";
+}
+
+void write_layout_report(const llvm::Module& module, const LayoutResult& result) {
+  const std::string module_id = module.getSourceFileName();
+  const std::string_view tag = module_tag(module_id);
+
+  // The layout: the module's function list was permuted, so the code of two
+  // builds with two seeds is not in the same place. The numbers say how much
+  // moved: a module with one definition has nothing to permute.
+  llvm::errs() << "[cs2-protect] " << tag << ": layout functions=" << result.functions
+               << " moved=" << result.moved << " seed=" << hex_seed(result.seed) << "\n";
 }
 
 void write_vm_report(const llvm::Module& module, const std::vector<VmFunction>& functions,
@@ -493,8 +506,8 @@ auto write_coverage(const Config& config, const llvm::Module& module,
                     const std::vector<CoverageEntry>& entries,
                     const std::vector<CoverageFunction>& functions, const CoverageProtect& protect,
                     std::span<const CoverageVm> vm, const std::vector<CoverageString>& strings,
-                    std::string_view strings_salt, const CrossModuleState& cross)
-    -> std::optional<std::string> {
+                    std::string_view strings_salt, const CoverageLayout& layout,
+                    const CrossModuleState& cross) -> std::optional<std::string> {
   if (!config.policy) {
     return std::nullopt;
   }
@@ -539,9 +552,24 @@ auto write_coverage(const Config& config, const llvm::Module& module,
     text += " descriptor=" + std::to_string(protect.descriptor_size);
     text += " multiplier=" + hex_seed(protect.mix_multiplier);
     text += " xor=" + hex_seed(protect.mix_xor);
+    // The rotation is the one value of the mixer that is in the instruction
+    // stream, and the payload check reads it out of the disassembly.
+    text += " rotate=" + std::to_string(protect.mix_rotate);
     for (const std::uint64_t part : protect.key_parts) {
       text += " key=" + hex_seed(part);
     }
+    text += "\n";
+  }
+  // The layout: the permutation of the module's function list. The line is
+  // written whenever the permutation ran -- a module with no definition has
+  // one too, so that a reader can tell "the module has no definition" from
+  // "the build did not permute anything". The line is new: a coverage file
+  // of an older build has none, and a reader that does not know it still
+  // reads the file.
+  if (layout.permuted) {
+    text += "layout functions=" + std::to_string(layout.functions);
+    text += " moved=" + std::to_string(layout.moved);
+    text += " seed=" + hex_seed(layout.seed);
     text += "\n";
   }
   for (const CoverageEntry& entry : entries) {
@@ -676,7 +704,7 @@ auto write_coverage(const Config& config, const llvm::Module& module,
 auto write_coverage(const Config& config, const llvm::Module& module, const SelectionResult& result)
     -> std::optional<std::string> {
   return write_coverage(config, module, coverage_entries(result), {}, CoverageProtect{}, {}, {}, {},
-                        CrossModuleState{});
+                        CoverageLayout{}, CrossModuleState{});
 }
 
 }  // namespace cs2::protect

@@ -84,9 +84,13 @@
   `Π(1 − t(u)·mod/m_flPenetration)` — **no rays** (host test `aim-occlusion`). The
   payload enumerates the solids with `CGamePhysicsQueryInterface::EntitiesInBox`
   (`payload/control/occlusion_query.cpp`, the `walls: true` arg), wrapped in
-  `diag::call_guarded` — a setjmp/longjmp recovery guard, because the manually-mapped
-  payload has no exception tables (a wrong engine ABI faults back instead of killing
-  the process). **The record → shape chain is resolved live** (`docs/re/occlusion.md`):
+  `diag::call_guarded` — a setjmp/longjmp recovery guard: a wrong engine ABI
+  faults back instead of killing the process (the injector registers the payload's
+  `.pdata`, and the guard's vectored handler recovers a fault on the armed
+  thread). The guard's limits: one in-flight guarded call per process, the
+  recoverable codes only, a fault on **another** thread is not guarded, and the
+  recovery skips the guarded call's cleanups. **The record → shape chain is
+  resolved live** (`docs/re/occlusion.md`):
   the record's `+0x58` is a **`CPhysicsBody`**, `body+8` is its data, `data+0x68` the
   shape array (`data+0x60` the count) of `IPhysicsShape`s (`+0x18` type 2 hull,
   `+0xC0` `RnHull_t*`). Entity bodies get the world transform from
@@ -459,7 +463,9 @@ save/restore the engine stream) to keep predictions exact.
    `client_base + 0x1ace848`, mask `0x1c1003`) and a static default at
    `+0x221f070`. Still needs: a dumper **signature** for the singleton + the trace
    function (ADR-0012), the `Ray_t`/`CGameTrace` layouts, then live validation
-   (a wrong call faults the process — the payload has no exception tables). A
+   (a wrong call **faults back** — the injector registers the payload's
+    `.pdata`, and the guard's vectored handler recovers a fault on the armed
+    thread). A
    first step is per-hitbox **visibility** (one trace eye → hitbox centre; drop
    fully-occluded boxes).
 3. **Weapon profile polish.** `m_flRange` / `m_nDamage` are wired; the pellet
@@ -1229,3 +1235,673 @@ as exact.
 **The HUD line's buffer is 192 bytes.** The line carries the objective's
 name, the Monte-Carlo's marker and the two occlusion markers, and the old
 128-byte buffer cut the last of them off.
+
+## 15. Who owns the rage settings — the menu or the control channel
+
+> Added 2026-10-22 — task T40
+> (`docs/orchestration/spec-t40-control-owns-settings.md`).
+> **The control channel's settings survive the menu now.** Before this, the
+> overlay's settings sink re-applied the **whole** rage group on every
+> publication — and the menu publishes its block every frame — so whatever the
+> control channel had set was overwritten within a second:
+>
+> ```
+> cs2_rage {objective: "expected"}   ->  the answer says  objective: "expected"
+> cs2_rage {}          (a second)   ->  the answer says  objective: "hitchance"
+> ```
+>
+> The Monte-Carlo objective (§14.1) is reachable **only** over the control
+> channel, so the feature was unreachable in practice: the operator selected
+> it and a frame later it was gone.
+
+### 15.1 The rule
+
+> **The overlay's settings apply a rage field only when the operator has
+> actually changed that field in the menu.**
+
+The decision is a **pure** comparison over two snapshots of the wire's rage
+group (`cs2/control/rage_settings.hpp`, host-tested by
+`control-rage-settings`):
+
+* `rage_settings_from_wire(block)` — the block's rage group as a snapshot;
+* `rage_changed_fields(published, last_view)` — the fields whose values
+  differ, one bit per field;
+* the **last view** is the menu's last published group. It is updated
+  **after** the apply, so the next publication compares against what was
+  actually applied.
+
+The **first** publication applies **everything** (there is no earlier view to
+compare against); every later one applies only the fields the operator moved.
+The write carries that mask, so the service applies only the masked fields —
+the others keep their value **and** their owner.
+
+**Which field is applied is decided per field, not per group.** When the
+operator changes the FOV in the menu, the FOV is applied and the control
+channel's objective stays in force; when the operator changes the objective,
+the objective is applied and the menu's value wins. The alternative (apply the
+whole group on any change) would have reverted the Monte-Carlo objective the
+moment the operator touched any other rage slider — and the menu cannot show
+that it did.
+
+**The rule's limit: an action that leaves the value unchanged is invisible.**
+
+The rule decides "the operator changed this field" from the **value**, and
+Dear ImGui's widgets write the block **only when the action changes it**: the
+objective's combo writes its index only when the selection differs
+(`payload/third_party/imgui/imgui_widgets.cpp` — `Selectable(...) &&
+*current_item != i`).
+
+So **an action that leaves the displayed value unchanged is invisible to the
+rule**: the block does not change, the mask is empty, and nothing is applied.
+
+Concretely: with the control channel on the Monte-Carlo objective, the menu's
+`Objective` combo still reads **Hitchance** (the menu has three options and
+cannot show the Monte-Carlo one). Clicking **Hitchance** — the entry the
+combo already shows — changes nothing, so **the Monte-Carlo objective stays
+in force** and the menu's tab and the ragebot disagree. **The menu's value
+takes effect when the operator picks a different value**: pick *Damage* first,
+then pick *Hitchance* back, and the menu owns the objective again.
+
+A real fix would need the operator's **action** rather than the value — Dear
+ImGui has it (`MarkItemEdited` / `IsItemDeactivatedAfterEdit`) — but the menu
+is **out of scope** for this task (the spec's §3, "the wire block and the
+menu"), so the difference is reported in the **status** instead:
+`objective` is the objective **in force**, `menu_objective` is the one the
+menu's tab is **showing**, and `objective_source` says who owns it (§15.4).
+
+**The first publication is a window, and it is one frame wide.**
+
+The **first** publication applies **everything** (there is no earlier view to
+compare against). The window is the time between the control channel coming up
+and the menu's **first** published frame: the payload's control thread starts
+before the game's first `Present`, so a `rage` command that arrives inside
+that window is undone by the first publication — the whole group is applied,
+the operator's fields and the control channel's alike.
+
+The window is **one frame** wide (about 16 ms at 60 fps), but the harness can
+lose it: it injects the payload and sends the command immediately, and the
+command can land inside the window.
+
+**The mitigation: re-assert the objective after the first frame.** Send the
+`rage` command again once the payload is up (the scenario's first `state` or
+`wait_for` answer is enough to know) — the second command is outside the
+window, and it sticks.
+
+**The movement group still has the old shape.**
+
+The rule is about the **rage** group only. The menu still re-applies the
+**auto-strafe** and the **bhop** on every published frame, so a control-side
+`strafe`/`bhop` set is corrected on the next frame
+(`docs/control-harness.md` §"Where the movement features are controlled"). The
+ESP and the chams are driven from the block itself, so the `settings` route
+still works for them.
+
+### 15.2 The fields the comparison covers
+
+| the wire's field | the rule's bit | |
+|---|---|---|
+| `rage` | `RAGE_FIELD_ENABLED` | the ragebot's switch |
+| `rage_key` | `RAGE_FIELD_KEY` | the trigger key |
+| `rage_fire` | `RAGE_FIELD_FIRE` | the auto-fire switch |
+| `rage_objective` | `RAGE_FIELD_OBJECTIVE` | **the objective** |
+| `rage_hitbox` | `RAGE_FIELD_HITBOX` | the hitbox filter |
+| `rage_fov` | `RAGE_FIELD_FOV` | the target cone |
+| `rage_min_damage` | `RAGE_FIELD_MIN_DAMAGE` | the damage gate |
+| `rage_min_hitchance` | `RAGE_FIELD_MIN_HITCHANCE` | the hitchance gate |
+| `rage_autostop` | `RAGE_FIELD_AUTOSTOP` | the auto-stop mode |
+| `rage_autoscope` | `RAGE_FIELD_AUTOSCOPE` | the auto-scope mode |
+| `rage_autoreload` | `RAGE_FIELD_AUTORELOAD` | the auto-reload switch |
+| `rage_only_visible` | `RAGE_FIELD_ONLY_VISIBLE` | the visible-only switch |
+| `rage_mode` | `RAGE_FIELD_MODE` | the trigger's mode |
+| `rage_per_weapon` | `RAGE_FIELD_PER_WEAPON` | the per-weapon switch |
+| `rage_weapon` | `RAGE_FIELD_WEAPON` | the profile's weapon key |
+| `rage_recoil` | `RAGE_FIELD_RECOIL` | the recoil compensation |
+| `rage_stop_speed` | `RAGE_FIELD_STOP_SPEED` | the auto-stop speed |
+| `rage_backtrack` | `RAGE_FIELD_BACKTRACK` | the backtracking switch |
+
+**The one-shot op is not compared.** `rage_config_op` and `rage_config_token`
+are a *request* ("save this profile"), not a setting: the service's own token
+makes each request fire exactly once, so the op is delivered on every write
+rather than compared. The control channel has no op of its own in the block,
+so the op cannot clobber anything. The host test reads `wire.hpp` and fails
+when a rage field is neither compared nor excluded on purpose — a field left
+out of the comparison is a field that keeps clobbering the control channel.
+
+**The weapon's key is compared as a name, not as bytes.** The block's field is
+a fixed 24-byte buffer, and the menu's text field writes the string and its
+NUL but leaves the bytes after the NUL as they were — a stale byte is not a
+change of the value.
+
+### 15.3 Does the menu republish a recomputed value?
+
+**No — and that is what makes the rule work.** A naive "did it change?"
+comparison would report a recomputed value as a change on **every**
+publication, and the fix would not have worked at all. The findings:
+
+* **Dear ImGui's widgets write the block only when the operator acts on
+  them.** A slider writes its value back while it is being *dragged*
+  (`SliderBehaviorT` writes `*v` only when the item is active), a combo only
+  when an item is *selected*, a check box only on a click, and a text field
+  only when it is edited. The menu's float-slider helper does not touch the
+  value at all (the host test reads `menu_pages.hpp` and proves it).
+* **The one widget that writes unconditionally is the combo's byte wrapper**
+  (`index = current`), and it pulls an **out-of-range** byte back into the
+  widget's range. For an in-range byte it writes the **same** value, so the
+  comparison reports nothing. For an out-of-range byte (a corrupt block, or a
+  control client that wrote one into the block) the pull-back is a change
+  **once**, and the value it writes is the one the next publication carries —
+  so the rule converges instead of degenerating into "always changed".
+
+So the menu's value is the value the callback last saw, and "the operator
+changed this field" is decided by the value, not by the fact that the block
+was published again.
+
+### 15.4 Which channel owns the objective
+
+The service records the owner of each rage field: the menu's bits are set by
+the menu's write and cleared by the control channel's. The status carries:
+
+| the status's key | what it says |
+|---|---|
+| `objective` | the objective **in force**, by name (the per-weapon profile's when one is active) |
+| `objective_value` | the effective objective's value |
+| `objective_global` | the **global** objective — the setting the two channels write |
+| `objective_source` | who owns the objective **in force**: `"menu"`, `"control"` or `"profile"` |
+| `objective_global_source` | who owns the **global** objective: `"menu"` or `"control"` |
+| `menu_objective` | the objective the **menu's tab is showing** |
+| `menu_fields` | the rage fields the **menu** owns, comma-separated; a field that is not in the list belongs to the control channel |
+
+**The scope is in the key's name.** `objective` is the **effective** objective
+(the per-weapon profile's when one is in force), so `objective_source` is the
+owner of *that* one; `objective_global` is the setting the two channels write,
+so `objective_global_source` is its owner. With a per-weapon profile in force
+the two objectives differ — the profile's objective comes from the profile
+file, so no channel owns it and `objective_source` reads `"profile"`.
+
+**`menu_objective` is the mismatch's alarm.** The menu has three options and
+cannot show the Monte-Carlo one, so after the control channel has set it the
+tab still reads "Hitchance" while a **different** objective is in force.
+`objective` is what runs, `menu_objective` is what the tab reads: the two
+differ when the control channel owns the objective — and when the operator's
+own click did not change the value (§15.1). The menu cannot show the
+difference itself (this task may not touch the menu), so the **status** is
+where it is visible.
+
+**`menu_fields` is the ownership map, not a log of recent edits.** A field is
+in it when the **menu** owns it — that is, when the last write to it came
+from the menu. The first publication applies the whole group, so right after
+the payload starts the list holds every field the menu has written (all but
+the ones the control channel has taken since); it shrinks as the control
+channel takes fields over, because a `rage` command clears the bits it writes.
+
+**A `settings set` writes the block, not the service's rage state — and it
+is a no-op on a value the block already holds.** The control channel's
+`settings` command merges into the **menu's block**, so the value it writes is
+the menu's from then on (the menu owns it, and the status says so) — **but
+only when the write changes the block's value.** A `settings set` whose value
+the block already holds writes nothing, so the rule sees no change, nothing is
+applied, and the field keeps the **control channel's** value. So `settings
+set` cannot clear a rage field the control channel owns; use the `rage`
+command (`rage {fov: 0}`), which writes the ragebot's own state. Before this
+change the menu re-applied the whole block every frame, so `settings set` was
+authoritative for every rage field.
+
+### 15.5 The files
+
+| file | what |
+|---|---|
+| `payload/control/include/cs2/control/rage_settings.hpp` | the **pure rule**: the snapshot, the comparison, the field bits, the owner |
+| `payload/control/tests/test_control_rage_settings.cpp` | the rule's host test (`control-rage-settings`) |
+| `payload/src/payload_main.cpp` | the sink: the comparison, the last view, the masked write |
+| `payload/control/src/service.cpp` | the masked write, the owner, the status's new keys |
+
+**The wire block and the menu are not touched.** The block's version is not
+bumped: it is shared between two separately compiled binaries, and a version
+bump is a silent-corruption risk.
+
+### 15.6 The operator's live check
+
+**This is the operator's** — the agent cannot see the screen, and the live run
+is the one thing static review cannot close.
+
+With the payload injected and the game in a map:
+
+```
+{"id": 1, "cmd": "rage", "args": {"objective": "monte_carlo"}}
+{"id": 2, "cmd": "rage", "args": {}}
+```
+
+The second request must answer **`"objective": "monte_carlo"`** (and
+`"objective_source": "control"`), seconds after the first — before this, it
+answered `"hitchance"`. Through the harness the same check is:
+
+```python
+game.rage(objective="monte_carlo")   # -> objective == "monte_carlo"
+# ... a second later
+game.rage()                          # -> objective == "monte_carlo"   (was "hitchance")
+```
+
+The MCP tool `cs2_rage` takes the same arguments
+(`cs2_rage {"objective": "monte_carlo"}`, then `cs2_rage {}`).
+
+**If the payload was injected a moment ago**, send the `rage` command a
+**second** time: the first publication applies the whole group, and a command
+that lands before it is undone (§15.1). A command sent after the first
+rendered frame sticks.
+
+**The other half of the rule**: with the objective still in force, change a
+*different* rage field in the menu (the FOV slider) — the objective must
+**stay** `"monte_carlo"`, `objective_source` must stay `"control"`, and
+`menu_fields` must list the FOV but **not** the objective (the objective is
+the control channel's).
+
+**And the menu's own objective — with the caveat the rule has.** The menu's
+value takes effect when the operator picks a **different** value than the one
+on screen (§15.1): an action that leaves the displayed value unchanged is
+invisible to the rule. The menu cannot show the Monte-Carlo objective, so its
+`Objective` combo still reads **Hitchance** while `monte_carlo` is in force,
+and clicking **Hitchance** does **not** take the objective back.
+
+So the check is **two steps, in this order**:
+
+1. set the menu's objective to **Damage** — it must become the menu's
+   (`objective_source: "menu"`, the objective appears in `menu_fields`, and
+   `objective` reads `"damage"`);
+2. set it back to **Hitchance** — the same again (`objective` reads
+   `"hitchance"`).
+
+**What the status says in between** — the operator's cue that the tab and the
+ragebot disagree:
+
+| the key | the reading |
+|---|---|
+| `objective` | what **runs** (`"monte_carlo"`) |
+| `menu_objective` | what the **tab shows** (`"hitchance"`) |
+| `objective_source` | who owns the objective in force (`"control"`) |
+| `objective_global_source` | who owns the global objective (`"control"`) |
+
+`objective` and `menu_objective` differing is the mismatch, made visible:
+the menu cannot show it itself (§15.4).
+
+
+
+## 16. The fire path — the edge and the gate
+
+> **The one-line version:** the ragebot used to hold `IN_ATTACK` down on
+> **every** command while a solve was active, so a **semi-automatic** weapon
+> (a pistol, the R8, the scout) fired **once** and never again — the engine
+> needs a release→re-press **edge**. And nothing in the fire path asked
+> whether the shot could be taken at all: the clip, the fire interval, the
+> weapon's state and the fire mode were all unread.
+
+Both defects were reported by the operator by **playing the game** on
+2026-10-22 and then verified in the code
+(`docs/orchestration/spec-t37-fire-path.md`).
+
+### 16.1 What the payload reads, and where from
+
+Every field is read through the generated client schema
+(`payload/sdk/schemas/client_dll.hpp`, ADR-0001) — never through a
+hard-coded offset. The offsets live in two places, each with the schema
+lookup and this build's value as the fallback:
+
+| field | class | what it means |
+|---|---|---|
+| `m_bIsFullAuto` | `CCSWeaponBaseVData` | the weapon's **fire mode**: it fires while the trigger is held, or it fires once per press |
+| `m_flCycleTime` | `CCSWeaponBaseVData` | the weapon's **fire interval** in seconds (the fallback for the engine's own record) |
+| `m_iClip1` | `C_BasePlayerWeapon` | the rounds in the **clip** |
+| `m_bInReload` | `C_CSWeaponBase` | the weapon is **reloading** — the engine ignores the trigger |
+| `m_nDeployTick` | `C_CSWeaponBase` | the weapon's **deploy tick** — while it is in the future the weapon is still being deployed |
+| `m_nNextPrimaryAttackTick` | `C_BasePlayerWeapon` | the engine's **own** record of the tick at which the weapon may fire again |
+| `m_nTickBase` | `CBasePlayerController` | the tick the client is simulating — the clock the record above is written in |
+
+**Why `m_nNextPrimaryAttackTick` and not `m_flFireInterval` /
+`m_flRefireTime`.** The specification listed three candidates "the schema
+has all three". It does not: in this build's schema `m_flFireInterval`
+belongs to `PointAngularVelocitySensor` and `m_flRefireTime` to
+`TimerEntity` — **neither is a weapon field**. The weapon's own rate record
+is `m_nNextPrimaryAttackTick`, and it is the field the engine itself
+consults before it takes a shot, so it is the one the fire path uses. The
+VData's `m_flCycleTime` is kept as the **fallback** for the case where that
+record cannot be read.
+
+**`m_flCycleTime` is a firing-mode float *pair*.** The schema types it as
+`FiringModeFloat` (`0x738` and `0x73c`, two floats), and the dump does not
+describe the struct's members, so **which** of the two the engine uses for the
+weapon's mode is not established by the repo. The payload reads the **first**
+one — that is the payload's reading, not a claim about the engine's. The
+value is only kept when it is plausible: no weapon fires slower than 20 ms or
+faster than two seconds.
+
+**The rate is read fresh, on the game thread.** The VData's fields (the fire
+mode, the cycle time) are stable and travel in the snapshot; the weapon
+*instance*'s fields (the clip, the reload, the deploy, the next-attack tick)
+are read **in the command path's tick**, where the weapon's state is
+readable. A stale readiness record would let the ragebot press *inside* the
+interval — on a semi-automatic weapon that is **the shot being wasted** — so
+it is read per tick, not per frame.
+
+### 16.2 The edge — the release a semi-automatic weapon needs
+
+**The rule.** On a **semi-automatic** weapon (and on a weapon whose fire mode
+is **unknown**), the ragebot's shots are separate shots: after a press, the
+ragebot **withdraws** its attack contribution and keeps it withdrawn until
+the weapon is ready again, so the engine sees a **release→re-press edge**
+between two shots.
+
+**When does it release?** On the first tick after the press, and then for as
+long as the weapon is not ready. The window is deliberately longer than one
+command tick (two ticks, `k_fire_release_window`): the release must be
+visible on a command the engine **simulates**, and the tick boundary and the
+command boundary are not the same instant.
+
+**Why "until the weapon is ready again" and not "for one tick"?** The
+engine's own next-attack record is the weapon's rate, so re-pressing on the
+first tick the weapon is ready costs no rate at all. Releasing for a fixed
+one tick would re-press *inside* the interval on a fast weapon and waste the
+shot.
+
+**Why not on a full-automatic weapon?** A full-automatic weapon fires
+*while the trigger is held* — the engine's rate governs it, and the edge
+would only cost a tick per shot. So the trigger stays down there, and the
+behaviour is unchanged from before this section.
+
+#### The withdrawal is real: the attack bit is **replaced**, not merged
+
+The repo's rule (`strafe_geometry.hpp`'s `compose_button_mask`): *the
+features' bits are only ever **set**, never cleared — a feature that releases
+the attack button must not take the player's own press of the same button
+away.*
+
+That rule protects the **player's** press. It does not say that the payload
+may never take **its own** press back — and it must be able to: a
+contribution that can only be *added* can never be *removed*, so a withdrawal
+would leave the press on the command and the engine would never see the
+release. (The composition was add-only until this section, and that is
+exactly why the ragebot could not withdraw: the command it re-wrote every
+tick still carried the press of the tick before.)
+
+So the command's attack bit is the one bit that is **replaced**, and it is
+recomputed from its **contributors** for every command
+(`compose_command_mask`):
+
+| contributor | what it is | survives the ragebot's withdrawal |
+|---|---|---|
+| the **player** | the engine's own mask, read **before** the payload's write — and what the payload **knows** about it (see below: it can be **unknown**) | **yes** |
+| the **control channel** | an explicit `press("attack")` | **yes** |
+| the **triggerbot** | its own hold (a feature bit) | **yes** |
+| the **ragebot** | the fire path's decision for this command | **no** — this is the one that is withdrawn |
+
+The features' **other** bits are still only ever set, never cleared. Only the
+attack bit is replaced, and only because the ragebot's contribution to it has
+to be replaceable.
+
+#### An **unknown** reading never removes the bit
+
+The player's own press is the one contributor the payload has to **read**, and
+the reading is not always a fact: the engine **reuses** the command objects
+and the payload writes to two commands per tick, so a command can carry the
+payload's own press as well — and then the player's press and the payload's
+press cannot be told apart.
+
+So the reading is **three-valued** (`PlayerPress`): `held`, `released`, and
+**`unknown`**. And the invariant is:
+
+> An **unknown** reading never **removes** the attack bit. The bit is cleared
+> only on the strength of a reading that is **known** to be the player's own
+> state.
+
+An unknown reading leaves the command's own attack bit **as it is** — the
+payload never takes away a bit it cannot prove it set — and the other
+contributors (the control channel, the triggerbot, the fire path) still
+apply. The cost is that the **release** can be a tick late on a command the
+payload cannot read; the benefit is that the player's own press is never
+swallowed. *When in doubt, do not fire* applies to the **player's** press
+symmetrically.
+
+**A clear bit is a fact.** The payload never clears the engine's own attack
+bit (that is the invariant above), so a command whose attack bit is **clear**
+says the player is not pressing — on a copy as well as on the command the
+engine has just built. Only a **set** bit can be ambiguous.
+
+#### The control channel's own **release**
+
+The operator's `release("attack")` removes **the control channel's own**
+contribution — and only that one. The **player's** own press and the
+**features'** bits are only ever set, never cleared (the repo's rule), so the
+triggerbot's hold and the ragebot's press survive it. (Before this rule the
+release cancelled them as well, which changed the **triggerbot** — a feature
+this task does not own — and left the operator with a silently silenced
+weapon: the refusal still read `ok`, because the fire path's *decision* was
+still "press". The default backend is `console`, where the control's masks
+never reach the command at all, so the blast radius was the `usercmd` backend
+only.)
+
+#### The engine's own press is read **per command**
+
+The payload writes to **two** commands per tick — the slot-25 copy of the
+command (`create_move`) and the slot-5 command the engine has just built
+(`create_move_input`) — and the engine **reuses** the command objects: a
+command the payload wrote last tick still carries the payload's own press.
+Reading the mask naively would therefore read the **payload's own press back
+as the player's**, and the withdrawal would never clear the bit.
+
+The payload caches what it knows about the engine's own attack bit **per
+command number** (`CUserCmd::nSequenceNumber`, `FireCommandCache`):
+
+| the command | the reading |
+|---|---|
+| the engine has **just built** it (the slot-5 command) | the mask is the engine's own — a **clean** reading: `held` when the attack bit is set, `released` when it is clear |
+| a command the payload has **not** put its own press on | the same: a clean reading, refreshed |
+| a command the payload **has** pressed | **not** clean: the reading is the one taken before the payload's write |
+| the **copy** of a command the cache has not seen | **unknown** when the attack bit is set (the copy may carry the payload's own press), `released` when it is clear |
+
+The cache never answers with a **stale** value: a command's reading is either
+clean, or the one taken before the payload wrote to it. (The earlier version
+answered a copy it did not know with the last **clean** reading it had — a
+value from an earlier tick — and the payload's replacement of the attack bit
+took that stale answer for the player's own state: the player's own press was
+**deleted** from the command, from the PB's held word and from the movement
+services' word. The status line's `player?` is what that case looks like now.)
+
+**The premise, and where it holds.** "A command the payload has not pressed
+carries the engine's own mask" is established for the command the engine has
+**just built** — the engine builds it, so its mask is the engine's own — and
+it is **not** established for the **copy**: the engine copies the command the
+payload has just written to, so the copy may carry the payload's own press.
+That is why the copy's reading is **unknown** when the attack bit is set, and
+why the payload does not depend on the order of the two slots (which was
+never observed at runtime, `docs/re/angle-split.md`).
+
+**What happens when the player holds attack.** Then the engine's own mask
+carries the attack bit on every command, so the engine sees **one continuous
+press**: the semi-automatic weapon fires **once**, exactly as it does for a
+human who holds the trigger. **The edge is then the player's to make, not the
+ragebot's** — the ragebot's withdrawal cannot take the player's press away
+(that is the rule above), so it cannot manufacture an edge the player has
+removed. The status says so: `player` on the HUD line, and `player_attack` in
+the `rage` command's JSON.
+
+### 16.3 The gate — can the weapon take the shot?
+
+The gate is evaluated on the **game thread**, once per tick, and its verdict
+is published to the command path. The conditions, **in the order the code
+checks them** — the first one that blocks is the one the operator is told
+about:
+
+| condition | refusal | why |
+|---|---|---|
+| no active solve | `no-solve` | the ragebot is not aiming at anybody |
+| the fire path is **disabled** | `fire-off` | the operator's `fire` toggle is off, or the visibility gate (`only_visible`) refused the shot — a different fact from "no solve" |
+| the clip could **not** be read | `clip-unknown` | the payload does not know whether the weapon can shoot — *when in doubt, do not fire* |
+| the clip is empty | `no-ammo` | the shot cannot be fired; the auto-reload assist already holds `IN_RELOAD` |
+| the weapon is reloading | `reloading` | the engine ignores the trigger |
+| the weapon is still being deployed | `deploying` | same |
+| the deliberate release the edge needs | `edge` | not a block: the fire path is *choosing* to release so the next shot is a new edge |
+| the weapon's fire interval has not elapsed | `interval` | the shot would be dropped by the engine — and on a semi-automatic weapon a press inside the interval is **the shot being wasted** |
+| the weapon's rate could not be read at all | `rate-unknown` | neither the engine's record nor the VData's cycle time was available: the rate is *unknown*, which is not the same fact as "the interval has not elapsed" |
+
+**The "unknown" degradation.** A weapon whose VData could not be read has an
+**unknown** fire mode. The fire path then treats it as **semi-automatic** —
+the conservative direction: the re-press edge costs at most a tick per shot
+and is always correct, while a held trigger on a semi-automatic weapon fires
+**once** and never again. The status says `unknown`; it never guesses `auto`.
+
+**The rate's two sources.** The engine's own record
+(`m_nNextPrimaryAttackTick`) is authoritative. When it cannot be read, the
+VData's cycle time is the fallback. When **neither** is available the gate
+refuses the shot — and it says `rate-unknown`, not `interval`: a refusal the
+operator cannot act on is a silent refusal with a name on it. *A gate that is
+wrong in the "don't fire" direction is safe; a gate that is wrong in the
+"fire" direction is not.*
+
+### 16.4 What the operator sees
+
+The HUD line (`rage: …`) and the `rage` command's JSON carry the fire path's
+verdict. The line:
+
+```
+rage: AIM tgt 12 box 1 obj hitchance s12 p13 e12 semi ok
+```
+
+| field | meaning |
+|---|---|
+| `tgt` / `box` | the target's index and the hitbox |
+| `obj` | the objective's name |
+| `s` | the **engine's** shots — the clip fell while the ragebot was pressing |
+| `p` | the ragebot's **attempts** — the ticks the fire path decided to assert the attack |
+| `e` | the release→re-press **edges** the fire path produced |
+| `semi` / `auto` / `unknown` | the weapon's fire mode as the payload reads it |
+| `ok` / `no-solve` / `fire-off` / `clip-unknown` / `no-ammo` / `reloading` / `deploying` / `edge` / `interval` / `rate-unknown` | the gate's verdict: `ok` when the shot can be taken, the blocking condition's name when it cannot |
+| `player` | the **player** is holding the trigger — the engine sees one continuous press, so the edge is the player's to make |
+| `player?` | the payload **cannot tell** whether the player is holding the trigger (its own press may be on the command it is reading) — the bit is left alone in that case, never removed |
+
+**The line fits the HUD's buffer.** The HUD's rage line has a **192-byte**
+buffer (`payload/features/src/overlay.cpp`), and the line must fit it in the
+**worst** case — every field at its longest. The fields that do not fit are
+the aim **writes** and the **backtracks**: they are diagnostics, and they are
+in the `rage` command's JSON (`writes`, `backtracks`) instead. The `fire`
+toggle is not on the line either: the refusal says `fire-off` when the fire
+path is disabled, which is the same fact and costs less. The host test drives
+every field to its longest and measures the line (**186** characters, with
+`player?` and `rate-unknown` as the longest ones).
+
+The JSON carries the same facts under `shots`, `presses`, `edges`,
+`fire_mode`, `fire_refusal`, `player_attack` and `player_press`, plus
+`writes` and `backtracks`.
+
+**`player_attack` and `player_press`.** `player_attack` is the **bool**: the
+player is *known* to be holding the trigger. `player_press` is the same fact
+with all three states: `"held"`, `"released"` or `"unknown"` (the payload
+cannot tell the player's own press from its own — and an unknown reading
+never removes the attack bit, so the player's press is safe either way).
+
+**`shots` changed meaning.** The counter that used to answer `shots` counted
+the **commands** the attack was asserted on — the ragebot's *attempts*, not
+shots (on a full-automatic weapon it grew at the tick rate). It is now the
+**engine's** shots, detected by the clip falling, and the attempts are
+`presses`.
+
+**A reload is not a shot, and a failed read is not a shot.** The detector
+needs **both** clip readings to be known and **neither** to be a reload: a
+manual reload empties the magazine (30 → 0 → 30), and a **failed** read (a
+stale weapon entity, a weapon switch between the snapshot and the read)
+reads as zero. Neither is the engine's shot.
+
+**`e` is not always zero.** On a full-automatic weapon the trigger stays
+down, so there is no edge — but an automatic weapon whose clip empties
+produces a withdrawal (`no-ammo`), and the next press after the reload counts
+as an edge.
+
+### 16.5 What the host proves and what only the game can prove
+
+**The host tests prove that the payload *emits* the edge** — and they drive
+the **whole wiring**, not a neighbour of it:
+
+| what | the test |
+|---|---|
+| the **decision** — the edge, the gate, the fire mode, the refusals | `decide_fire` is a pure function (`cs2/control/strafe_geometry.hpp`), and the test drives it |
+| the **write** — the command's mask, the PB's button words and the movement services' word | `apply_fire_write` is the payload's own write, and the test drives it against plain memory and reads the **bytes** back |
+| the **edge on the command** | the test drives the payload's own per-tick loop: press → withdraw → press, and asserts that the command's attack bit goes **1 → 0 → 1** |
+| the **player's press survives** | the same loop, with the player holding the trigger: the withdrawal must leave the bit set |
+| the **unknown reading** | the cache's three-valued reading, and the invariant: an unknown reading leaves the command's attack bit **as it is** — the review's own probe (the **copy first**, the player pressing) must show `attack=1` |
+| the **command cache** | `FireCommandCache` is a pure class, and the test drives it |
+| the **shot counter** | `is_engine_shot` is a pure function: a reload and a failed read are not shots |
+| the **status line** | `format_rage_status` is a pure function, and the test drives every field to its longest |
+| the **wiring** | the test reads the payload's own source (`input.cpp`), **anchored** to `Input::apply_command`, and asserts that the write is the pure function's, that all three channels are **passed**, that the ragebot's press is the **service's decision**, and that the player's own press is what the cache knows |
+
+The last one is what catches the breaks the reviews named: a ragebot that
+holds `IN_ATTACK` down on every command (the original defect), a withdrawal
+that takes the player's own press away (the rule the repo states), a write
+that is computed and then **ignored**, and a channel that is **dropped** are
+all one line away from the pure functions, and the pure functions' tests
+cannot see a line that is not called. The check is **anchored**: the
+statements have to be inside `Input::apply_command` itself, so a neighbouring
+occurrence elsewhere in the file cannot satisfy it, and they have to be
+**present** — a channel that is not written fails the check.
+
+The **behavioural** test is the other half: the payload's write is one call
+(`apply_fire_write`), the test drives that call with the three channels as
+plain memory, and asserts what each of them carries. A call site that
+composes the mask and then ignores it cannot exist, because the composition
+**is** the write.
+
+**They cannot prove that the engine *honours* the edge.** Whether a
+semi-automatic weapon really needs a release→re-press, and whether the engine
+reads the release from the command's mask, from the PB's button state or from
+the movement services' held word, is **engine behaviour**: only the
+operator's live run can show it.
+
+#### The three channels, and what each of them carries
+
+| channel | what the payload writes | the release |
+|---|---|---|
+| the command's legacy mask (`cmd + 0x60`) | the attack bit, **replaced** by the contributors | the bit goes to **zero** |
+| the PB's `CInButtonStatePB` | the **held** word (`buttonstate1`) follows the command's mask — **always**, not only when there is something else to write; the **changed** word (`buttonstate2`) carries the attack on a press and on a withdrawal | the held word goes to **zero** |
+| the movement services' `CInButtonState` (word 0) | the **held** word follows the command's mask — **always** | the word goes to **zero** |
+
+So the release is written to **all three** — and the earlier claim was false
+for two of them, because the PB's block was guarded by "there is something to
+write" and the movement services' word was only ever *set*.
+
+**The PB's changed word is a best-effort mirror, not a proven edge channel.**
+The engine's own edge machine is not fully re-derived: the press edge is
+`FUN_1804c0f10(&svc->m_nButtonState, bit)`, a three-word machine
+(`edge = C || (A && B)`: held now, changed since the command start, pressed and
+released). The payload writes the PB's changed word when **its own**
+contribution changed — a press or a withdrawal — because a release is a change
+too. Which of the three channels the engine's edge machine actually reads is
+**not** established: the operator observed a semi-automatic weapon firing
+**once** under the old code, so the engine evidently does not take the press
+edge from the PB's changed word. The release that matters is the **held** word
+going to zero, on all three channels — which the fix does deliver.
+
+### 16.6 The known limits
+
+- **A burst weapon is treated as semi-automatic.** `m_bHasBurstMode` is not
+  read, so a weapon with a burst mode (the Tec-9, the R8) is classified
+  `semi` and the edge is required between its shots. The burst's own
+  repetition is the engine's.
+- **The rate's tick comparison is conservative.** The client's tick base is
+  the tick it is simulating, and the engine's record is a tick at least that
+  far ahead, so the gate can be **late** by a tick but never early.
+- **The shot attribution is a best guess.** `shots` counts the clip falling
+  while the ragebot was pressing; with the player firing as well, the two
+  cannot be told apart. `presses` and `player_attack` are there to read it.
+- **The decision is made once per tick**, so every command of the tick
+  carries the same answer. Which of the two commands the engine reads first
+  is not observed at runtime (`docs/re/angle-split.md`): slot 5 runs first
+  and slot 25 second, but the engine's own ordering of the two slots follows
+  from the signatures, not from a measurement.
+- **The engine's own press is read per command.** A command the payload has
+  already put its own press on is not a clean reading, so the cached value is
+  used for it. The engine builds a new command every tick, so the reading is
+  refreshed every tick. The **copy** of a command the cache has not seen is
+  the exception: its reading is **unknown** when the attack bit is set (the
+  copy may carry the payload's own press), and an unknown reading leaves the
+  bit **as it is** — so the player's own press is never removed, and the
+  release can be a tick late on that command. Which of the two slots runs
+  first is not observed at runtime, so the payload does not depend on it.
+- **Whether the engine honours the edge is engine behaviour** — the host
+  tests prove the payload *emits* it, the operator's live run proves the
+  engine *reads* it.

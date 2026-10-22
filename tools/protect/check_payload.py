@@ -67,11 +67,10 @@ from pathlib import Path
 from typing import NamedTuple
 
 from protect_checks import (
-    MIX_MULTIPLIER,
-    MIX_XOR,
     Coverage,
     Failure,
     DispatchSite,
+    Mixer,
     PeImage,
     count_dispatches,
     default_coverage_dir,
@@ -90,15 +89,7 @@ EXCEPTION_DIRECTORY = 3
 #: The base relocation directory of a PE.
 BASE_RELOCATION_DIRECTORY = 5
 
-#: The reason a cross-TU callee may stay direct without failing the build.
-#:
-#: The `sret` rule is not narrowed by this task (that is the other half of
-#: the cross-TU work): a callee that returns a big aggregate keeps its
-#: `sret` parameter, and the call stays direct. The check names those
-#: callees instead of failing on them.
-SRET_REASON = "indirect_parameter"
-
-#: The reasons a `cross_module` entry cannot route a callee.
+#: The reasons a cross-TU callee cannot be routed, whatever the policy says.
 #:
 #: The routing replaces the callee of a call with a value read from the
 #: table of the caller. It cannot reproduce a variadic call, a tail call or
@@ -106,10 +97,17 @@ SRET_REASON = "indirect_parameter"
 #: properties stays direct -- and no `cross_module` entry will ever route
 #: it. The advice the check gives has to say so: an advice that says "add
 #: it to the list" sends the operator in a circle.
+#:
+#: The `sret` parameter is **not** one of them: the rule is narrowed, and a
+#: callee that returns an aggregate is routed through a thunk.
 UNROUTABLE_REASONS = {
     "variadic_callee": "the callee is variadic",
     "musttail": "the call is a tail call",
     "optnone_callee": "the callee is `optnone`",
+    "byval_parameter": "the callee has a `byval` parameter: the caller copies the argument",
+    "inalloca_parameter": "the callee has an `inalloca` parameter: the frame is the caller's",
+    "preallocated_parameter": "the callee has a `preallocated` parameter: the frame is the "
+    "caller's",
 }
 
 #: A symbol of a `llvm-nm` listing: "0000000000000000 T ?solve@aim@cs2@@…".
@@ -231,7 +229,7 @@ def check_unwind_table(image: PeImage) -> int:
     return entries
 
 
-def check_constants(image: PeImage, sites: list[DispatchSite]) -> None:
+def check_constants(image: PeImage, mixers: list[Mixer]) -> None:
     """The constants of the mixer have to be in the read-only data.
 
     The call site reads them from the globals of the image, so the value the
@@ -241,18 +239,99 @@ def check_constants(image: PeImage, sites: list[DispatchSite]) -> None:
     bit of a 64-bit immediate in the shape the transform emits -- and the
     dispatch would then reach a wrong address without a crash. The constant
     is therefore in the data of the image, and the data holds it exactly.
+
+    The constants are **per build**: the coverage names them, and the image
+    has to hold the ones the coverage names.
     """
     data = image.section_of(".rdata")
     check(data is not None, "the image has no read-only data section")
     assert data is not None
     blob = image.data[data.raw_offset : data.raw_offset + data.raw_size]
-    for name, expected in (("the multiplier", MIX_MULTIPLIER), ("the xor constant", MIX_XOR)):
-        needle = expected.to_bytes(8, "little")
+    for mixer in mixers:
+        for name, expected in (("the multiplier", mixer.multiplier),
+                               ("the xor constant", mixer.xor_constant)):
+            needle = expected.to_bytes(8, "little")
+            check(
+                needle in blob,
+                f"{name} (0x{expected:016x}) is not in the read-only data of the image: the call "
+                "site does not read it from a global, and the backend may have materialised it "
+                "as a different value",
+            )
+
+
+def check_rotations(image: PeImage, sites: list[DispatchSite],
+                    coverage: list[Coverage]) -> None:
+    """The rotation of every dispatch has to be the one of **its own module**.
+
+    The multiplier and the xor constant live in the data of the image, but the
+    **rotation** is the one value of the mixer that is in the instruction
+    stream (`rolq $imm8`, or the `D1` form the backend folds a rotation by
+    one into). It is what makes the `.text` of two builds with two seeds
+    differ, and the check has to prove that the image's instruction stream
+    uses the rotation the pass encrypted with.
+
+    The modules of one build have **different** mixers, so the rotation of a
+    dispatch has to be the one of the module the dispatch belongs to -- and
+    not one of the rotations of the build: with four modules that would be a
+    one-in-four test. The module is found the way the decode finds it, by the
+    constants the dispatch reads.
+    """
+    for entry in coverage:
+        if entry.table_size == 0:
+            # A module with nothing protected: it has no `protect` line, and
+            # no rotation to check.
+            continue
+        rotate = entry.mix_rotate
+        if rotate < 1 or rotate > 63:
+            raise Failure(
+                f"the coverage '{entry.path.name}' names the rotation {rotate}, and it is not in "
+                "[1, 63]: a rotation of 0 makes the `lshr` by 64 of the decode undefined "
+                "behaviour"
+            )
+    for site in sites:
+        if site.rotation is None:
+            raise Failure(
+                f"the dispatch at 0x{site.address:x} has no rotation in front of it: the "
+                "instruction stream does not hold the rotation of the mixer"
+            )
+        if site.rotation < 1 or site.rotation > 63:
+            raise Failure(
+                f"the dispatch at 0x{site.address:x} rotates by {site.rotation}, and it is not "
+                "in [1, 63]"
+            )
+        found = entry_of_site(image, site, coverage)
+        if found is None:
+            raise Failure(
+                f"the dispatch at 0x{site.address:x} has no coverage: the image and the coverage "
+                "do not belong to the same build"
+            )
         check(
-            needle in blob,
-            f"{name} (0x{expected:016x}) is not in the read-only data of the image: the call "
-            "site does not read it from a global, and the backend may have materialised it "
-            "as a different value",
+            site.rotation == found.mix_rotate,
+            f"the dispatch at 0x{site.address:x} rotates by {site.rotation}, and the module it "
+            f"belongs to ('{found.path.name}') encrypted with {found.mix_rotate}: the image does "
+            "not use the rotation the pass encrypted with",
+        )
+
+
+def check_layout(coverage: list[Coverage]) -> None:
+    """Every module with more than one definition has to have moved one.
+
+    The permutation of the function list is what makes the `.text` of two
+    builds with two seeds differ. A module that has more than one definition
+    and moved none is a module the pass did not permute -- and the report of
+    the pass is the evidence the check reads.
+    """
+    for entry in coverage:
+        if not entry.layout_present:
+            # A coverage of an older build: it has no layout line, and the
+            # check cannot say anything about the layout.
+            continue
+        if entry.layout_functions < 2:
+            continue
+        check(
+            entry.layout_moved > 0,
+            f"the coverage '{entry.path.name}' names {entry.layout_functions} definitions and "
+            f"{entry.layout_moved} moved: the layout of the module was not permuted",
         )
 
 
@@ -359,11 +438,15 @@ def entry_of_site(image: PeImage, site: DispatchSite, coverage: list[Coverage]) 
 
 
 def mixed_key(entry: Coverage) -> int:
-    """The mixed key of a module: what the call site xors the descriptor with."""
+    """The mixed key of a module: what the call site xors the descriptor with.
+
+    The mixer is the one of the module: the coverage names it, and it is
+    the one the pass encrypted the descriptor with.
+    """
     key = 0
     for part in entry.key_parts:
         key ^= part
-    return mix64(key)
+    return mix64(key, entry.mixer())
 
 
 def tables_of(image: PeImage, entry: Coverage, slot: int) -> list[int]:
@@ -458,8 +541,9 @@ def resolve_site(image: PeImage, site: DispatchSite, entry: Coverage) -> int | N
     """The address the dispatch at a site calls, or None when it does not decode.
 
     The decode is the one the call site performs: the key is the xor of the
-    three key constants, the mixer is the one of the plugin, and the index
-    selects the entry of the table.
+    three key constants, the mixer is the one of the plugin -- the one the
+    coverage names, which is the one the pass encrypted the descriptor with
+    -- and the index selects the entry of the table.
     """
     mixed = mixed_key(entry)
 
@@ -696,15 +780,10 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
     the payload's own code, and the edge is still a direct call in the
     image.
 
-    The `sret` edges are excepted: this task does not narrow the `sret`
-    rule, so a callee that returns a big aggregate keeps its direct call.
-    The check names those callees instead of failing on them.
-
-    The exception is decided per **(module, symbol)** pair, not per symbol:
-    the coverage of one module is the evidence of that module, and two
-    modules may disagree about a callee. A symbol that one module excepts
-    and another module refuses for another reason is a failure, whatever
-    the order the coverage files are read in.
+    **Nothing is excepted.** The `sret` edges used to be excepted by name:
+    the rule that refused a callee with an `sret` parameter is narrowed, the
+    struct-returning calls go through a thunk, and there is nothing left to
+    except.
 
     The number of the calls it left alone is returned too: the operator
     sees the CRT's symbols that the image still calls directly.
@@ -722,7 +801,6 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
         per_symbol.setdefault(symbol, []).append(reason)
 
     failures: list[tuple[str, str]] = []
-    excepted: list[str] = []
     left_alone = 0
     for symbol in sorted(per_symbol):
         module_reasons = per_symbol[symbol]
@@ -733,11 +811,10 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
             continue
         # The reasons are sorted, so the one that is named does not depend
         # on the order the coverage files were read in.
-        refused = sorted({reason for reason in module_reasons if reason != SRET_REASON})
+        refused = sorted(set(module_reasons))
         if refused:
             failures.append((symbol, refused[0]))
             continue
-        excepted.append(symbol)
 
     if failures:
         names = ", ".join(f"{symbol} ({reason})" for symbol, reason in failures)
@@ -746,12 +823,12 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
             f"{len(failures)} cross-TU callees that a protected function calls directly are "
             f"the payload's own code: {names}. {advice}"
         )
-    if excepted:
+    if not per_symbol:
         print(
-            f"check_payload: {len(excepted)} cross-TU callees stay direct because of the "
-            "`sret` rule (this task does not narrow it): " + ", ".join(excepted)
+            "check_payload: no cross-TU callee of a protected function stayed direct: "
+            "the cross-TU edges of the protected functions are all routed"
         )
-    return len(excepted), left_alone
+    return 0, left_alone
 
 
 def advice_for(reason: str) -> str:
@@ -766,12 +843,38 @@ def advice_for(reason: str) -> str:
       routing cannot reproduce a variadic call, a tail call or a call to an
       `optnone` function. No `cross_module` entry will ever route it, and
       an advice that says "add it to the list" sends the operator in a
-      circle.
+      circle;
+    * a callee with a `sret` parameter stays direct only when the module's
+      target is not the one the narrowing was measured on.
+    * a callee the policy names may still stay direct for a reason the
+      plugin reported under the **old** name `indirect_parameter`: that was
+      the name of the rule that refused a `byval` / `sret` / `inalloca` /
+      `preallocated` parameter. A coverage file written by a plugin of
+      before this task still carries it, and the advice has to say what it
+      means.
     """
     if reason in UNROUTABLE_REASONS:
         return (
             f"The routing cannot bypass `{reason}` ({UNROUTABLE_REASONS[reason]}): the edge "
             "stays direct, and no `cross_module` entry will route it."
+        )
+    if reason == "indirect_parameter":
+        return (
+            "The callee has a `byval` / `sret` / `inalloca` / `preallocated` parameter: the "
+            "indirect signature cannot carry it. This is the name the plugin used before the "
+            "`sret` edges were routed: the `sret` case goes through a thunk now, and the other "
+            "three stay refused. The `cross_module` list already names the callee, and adding it "
+            "again will not help."
+        )
+    if reason == "sret_parameter":
+        return (
+            "The `sret` parameter is routable on `x86_64-pc-windows-msvc` only: the module's "
+            "target is not the one the narrowing was measured on."
+        )
+    if reason == "sret_result":
+        return (
+            "The callee takes an `sret` parameter **and** returns a value: that is not a thing "
+            "in the x64 ABI."
         )
     return (
         "A callee that is not in the policy's `cross_module` list is refused with "
@@ -1200,20 +1303,9 @@ def main(argv: list[str]) -> int:
         entries = check_unwind_table(protected)
         print(f"check_payload: the unwind table has {entries} entries")
 
-        protected_sites = find_dispatch_sites(disassemble(args.objdump, args.protected),
-                                              protected.image_base, protected)
-        if unprotected is not None:
-            plain_sites = find_dispatch_sites(disassemble(args.objdump, args.unprotected),
-                                              unprotected.image_base, unprotected)
-            print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
-                  f"dispatches, the unprotected one {len(plain_sites)}")
-            check(len(plain_sites) == 0, "the unprotected image has an encrypted dispatch")
-        else:
-            print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
-                  "dispatches")
-
-        check_constants(protected, protected_sites)
-
+        # The coverage comes first: the constants of the mixer are per
+        # build, and the check has to know them to tell a dispatch from a
+        # switch table jump and to decode the descriptor.
         files: list[Coverage] = []
         if coverage_dir and policy:
             read = read_coverage(coverage_dir, policy, source_root)
@@ -1239,6 +1331,30 @@ def main(argv: list[str]) -> int:
                 "coverage of a build is written by the plugin while it compiles; re-run the "
                 "Meson configure step and the build.",
             )
+
+        # The mixers the coverage names: the values the pass encrypted the
+        # descriptors with.
+        mixers = [entry.mixer() for entry in files if entry.table_size > 0]
+        mixer_values = {value for mixer in mixers for value in (mixer.multiplier,
+                                                                mixer.xor_constant)}
+
+        protected_sites = find_dispatch_sites(disassemble(args.objdump, args.protected),
+                                              protected.image_base, protected, mixer_values)
+        if unprotected is not None:
+            plain_sites = find_dispatch_sites(disassemble(args.objdump, args.unprotected),
+                                              unprotected.image_base, unprotected)
+            print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
+                  f"dispatches, the unprotected one {len(plain_sites)}")
+            check(len(plain_sites) == 0, "the unprotected image has an encrypted dispatch")
+        else:
+            print(f"check_payload: the protected image has {len(protected_sites)} encrypted "
+                  "dispatches")
+
+        if mixers:
+            check_constants(protected, mixers)
+            check_rotations(protected, protected_sites, files)
+
+        if files:
             expected = reported_rewrites(files)
             check(
                 len(protected_sites) == expected,
@@ -1248,6 +1364,7 @@ def main(argv: list[str]) -> int:
             print(f"check_payload: the pass reported {expected} rewrites, and the image has them")
             resolved = check_dispatch_targets(protected, protected_sites, files)
             print(f"check_payload: {resolved} dispatches decode to a callee of the image")
+            check_layout(files)
 
             # The cross-TU edges: a protected function must not call the
             # payload's own code directly, and a `cross_module` entry must
@@ -1276,10 +1393,10 @@ def main(argv: list[str]) -> int:
                     "reported as passed"
                 )
             check_cross_module_entries(files, symbols)
-            excepted, left_alone = check_direct_callees(files, symbols)
+            left_alone = check_direct_callees(files, symbols)
             print(
                 f"check_payload: {len(symbols)} symbols of the payload's own libraries; "
-                f"{excepted} cross-TU callees stay direct because of the `sret` rule, and "
+                f"no cross-TU callee of a protected function stayed direct, and "
                 f"{left_alone} direct calls name a symbol the payload does not own"
             )
 

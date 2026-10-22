@@ -22,18 +22,20 @@ Usage: coverage_test.py
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import io
+import os
 import shutil
 import struct
 import sys
 import tempfile
+import unittest.mock
 from collections.abc import Callable
 from pathlib import Path
 
 # The readers are shared with the checkers, and the checkers put the
 # directory of the tool on the path.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import check_policy  # noqa: E402
 import check_payload  # noqa: E402
@@ -46,6 +48,14 @@ from protect_checks import (  # noqa: E402
     mix64,
     read_coverage,
 )
+from support import (  # noqa: E402
+    IMAGE_BASE,
+    RDATA_RVA,
+    TEXT_RVA,
+    digest_of,
+    synthetic_image,
+    write_coverage,
+)
 
 
 class TestFailure(Exception):
@@ -56,44 +66,6 @@ def check(condition: bool, what: str) -> None:
     """Fails the test with a message that says what did not hold."""
     if not condition:
         raise TestFailure(what)
-
-
-def digest_of(data: bytes) -> str:
-    """The digest of a file, as the plugin spells it (upper case)."""
-    return hashlib.sha256(data).hexdigest().upper()
-
-
-def write_coverage(path: Path, policy_digest: str, source: Path, rewritten: int,
-                   vm: str | None = None, cross: str | None = None,
-                   direct: str | None = None, cross_rewritten: int = 0) -> None:
-    """Writes a coverage file the way the plugin writes it.
-
-    The `vm` line is the verdict of the virtualizer's analysis. It is
-    optional: a coverage file of an older build has none, and a reader that
-    does not know the section still reads the file.
-
-    The `cross` and the `direct` lines are the cross-module routing: the
-    state of every `cross_module` entry and the cross-TU callees that
-    stayed direct. They are optional in the same way.
-    """
-    body = (
-        f"policy-sha256 {policy_digest}\n"
-        f"module {source.name}\n"
-        f"source-path {source.as_posix()}\n"
-        f"source-sha256 {digest_of(source.read_bytes())}\n"
-        "protect table=2 descriptor=3 multiplier=0x9e3779b97f4a7c15 "
-        "xor=0xbf58476d1ce4e5b9 key=0x1 key=0x2 key=0x3\n"
-        "entry matched cs2::aim::solve\n"
-        f"fn ?solve rewritten={rewritten} skipped=0 cross={cross_rewritten}\n"
-    )
-    if vm is not None:
-        body += vm
-    if cross is not None:
-        body += cross
-    if direct is not None:
-        body += direct
-    path.write_text(body + f"content-sha256 {digest_of(body.encode('utf-8'))}\n",
-                    encoding="utf-8")
 
 
 def write_string_coverage(path: Path, policy_digest: str, source: Path,
@@ -148,18 +120,32 @@ def check_the_readers(root: Path) -> None:
 
     # The coverage of this build.
     write_coverage(coverage / "0x1.cov", policy_digest, tree / "payload" / "solver.cpp", 7,
-                   "vm ?solve verdict=virtualizable slots=42 frame=3072 bytecode=268 "
-                   "instructions=57 calls=17\n",
-                   "cross matched cs2::aim::DamageField::add ?add@DamageField@aim@cs2@@QEAA...\n"
-                   "cross blocked:indirect_parameter cs2::aim::project_capsule "
-                   "?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ\n"
-                   "cross unmatched cs2::aim::never_called\n",
-                   "direct ?atan2f external_callee\n"
-                   "direct ?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ indirect_parameter\n",
-                   3)
+                   vm="vm ?solve verdict=virtualizable slots=42 frame=3072 bytecode=268 "
+                      "instructions=57 calls=17\n",
+                   layout="layout functions=42 moved=40 seed=0x0123456789abcdef\n",
+                   cross="cross matched cs2::aim::DamageField::add "
+                         "?add@DamageField@aim@cs2@@QEAA...\n"
+                         "cross blocked:byval_parameter cs2::aim::project_capsule "
+                         "?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ\n"
+                         "cross unmatched cs2::aim::never_called\n",
+                   direct="direct ?atan2f external_callee\n"
+                          "direct ?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ byval_parameter\n",
+                   cross_rewritten=3)
     # The coverage of another worktree that shares the policy. It has no
-    # `vm` line: it is the coverage of an older build.
-    write_coverage(coverage / "0x2.cov", policy_digest, other, 3)
+    # `vm` line, no `layout` line and no rotation in its `protect` line:
+    # it is the coverage of an older build, and a reader has to read it.
+    old_body = (
+        f"policy-sha256 {policy_digest}\n"
+        f"module {other.name}\n"
+        f"source-path {other.as_posix()}\n"
+        f"source-sha256 {digest_of(other.read_bytes())}\n"
+        "protect table=2 descriptor=3 multiplier=0x9e3779b97f4a7c15 "
+        "xor=0xbf58476d1ce4e5b9 key=0x1 key=0x2 key=0x3\n"
+        "entry matched cs2::aim::solve\n"
+        "fn ?solve rewritten=3 skipped=0\n"
+    )
+    (coverage / "0x2.cov").write_text(
+        old_body + f"content-sha256 {digest_of(old_body.encode('utf-8'))}\n", encoding="utf-8")
     # A file whose count is not a number.
     (coverage / "0x3.cov").write_text(
         f"policy-sha256 {policy_digest}\nsource-path "
@@ -223,7 +209,7 @@ def check_the_readers(root: Path) -> None:
         f"the reader did not read the state of the cross_module entry: {states}",
     )
     check(
-        states.get("cs2::aim::project_capsule") == "blocked:indirect_parameter",
+        states.get("cs2::aim::project_capsule") == "blocked:byval_parameter",
         f"the reader did not read the blocked state: {states}",
     )
     check(
@@ -238,7 +224,7 @@ def check_the_readers(root: Path) -> None:
     direct = read.files[0].direct_callees()
     check(direct.get("?atan2f") == "external_callee",
           f"the reader did not read the direct callee: {direct}")
-    check(direct.get("?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ") == "indirect_parameter",
+    check(direct.get("?project_capsule@aim@cs2@@YA?AUPolygon@12@XZ") == "byval_parameter",
           f"the reader did not read the reason of the direct callee: {direct}")
     check(read.files[0].cross_rewritten == 3, "the reader did not read the cross rewrites")
 
@@ -248,6 +234,35 @@ def check_the_readers(root: Path) -> None:
     check(not old.malformed, f"a coverage file without a vm section is malformed: {old.malformed}")
     check(old.intact, "a coverage file without a vm section is not intact")
     check(old.vm == {}, "a coverage file without a vm section has verdicts")
+
+    # The mixer of the build: the multiplier, the xor constant and the
+    # rotation are per build, and the coverage names them.
+    mixer = read.files[0].mixer()
+    check(mixer.multiplier == 0x9E3779B97F4A7C15, "the reader did not read the multiplier")
+    check(mixer.xor_constant == 0xBF58476D1CE4E5B9, "the reader did not read the xor constant")
+    check(mixer.rotate == 31, "the reader did not read the rotation")
+
+    # The layout: the permutation of the module's function list. The section
+    # is new, and a coverage file of an older build has none.
+    check(read.files[0].layout_present, "the reader did not see the layout section")
+    check(read.files[0].layout_functions == 42, "the reader did not read the number of the "
+                                                  "definitions")
+    check(read.files[0].layout_moved == 40, "the reader did not read the number of the moved "
+                                            "definitions")
+    check(old.layout_functions == 0, "a coverage file of an older build has a layout")
+    check(not old.layout_present, "a coverage file of an older build has a layout section")
+    check(old.mix_rotate == 0, "a coverage file of an older build has a rotation")
+
+    # A module with **no definition** has a layout line too: the reader has
+    # to tell "the module has no definition" from "the build did not
+    # permute anything".
+    empty = root / "empty-layout"
+    empty.mkdir()
+    write_coverage(empty / "0x1.cov", policy_digest, tree / "payload" / "solver.cpp", 0,
+                   layout="layout functions=0 moved=0 seed=0x0\n")
+    entry = Coverage(empty / "0x1.cov")
+    check(entry.layout_present, "a module with no definition has no layout section")
+    check(entry.layout_functions == 0, "a module with no definition has definitions")
 
     # The same holds for the cross-module sections: a coverage file of an
     # older build has no `cross` line, no `direct` line and no `cross=` key,
@@ -323,49 +338,6 @@ def check_the_image_reader() -> None:
         raise TestFailure(f"the reader accepted {data!r} as a PE image")
 
 
-#: The image base of the synthetic image the table test builds.
-IMAGE_BASE = 0x180000000
-
-#: The RVA of the `.text` section of the synthetic image.
-TEXT_RVA = 0x1000
-
-#: The RVA of the `.rdata` section of the synthetic image.
-RDATA_RVA = 0x2000
-
-
-def synthetic_image(rdata: bytes) -> bytes:
-    """A PE image with a `.text` section and a `.rdata` section.
-
-    The image is the smallest one the reader of the check accepts: the
-    tests of the table lookup need a `.text` (the code addresses of the
-    table have to be in it) and a `.rdata` (the table and its descriptor).
-    """
-    text = bytes(0x100)
-    headers = bytearray(0x200)
-    headers[0:2] = b"MZ"
-    struct.pack_into("<I", headers, 0x3C, 0x80)
-    headers[0x80:0x84] = b"PE\0\0"
-    coff = 0x84
-    struct.pack_into("<H", headers, coff, 0x8664)        # the machine
-    struct.pack_into("<H", headers, coff + 2, 2)         # the number of sections
-    struct.pack_into("<H", headers, coff + 16, 0xF0)     # the size of the optional header
-    optional = coff + 20
-    struct.pack_into("<H", headers, optional, 0x20B)     # PE32+
-    struct.pack_into("<Q", headers, optional + 24, IMAGE_BASE)
-    struct.pack_into("<I", headers, optional + 108, 16)  # the number of the directories
-    table = optional + 0xF0
-    sections = ((".text", TEXT_RVA, len(text), len(headers)),
-                (".rdata", RDATA_RVA, len(rdata), len(headers) + len(text)))
-    for index, (name, rva, size, offset) in enumerate(sections):
-        header = table + index * 40
-        headers[header:header + len(name)] = name.encode("ascii")
-        struct.pack_into("<IIII", headers, header + 8, size, rva, size, offset)
-    body = bytearray(headers)
-    body += text
-    body += rdata
-    return bytes(body)
-
-
 def check_the_table_lookup(root: Path) -> None:
     """The table of a module is found, and it is the module's **own** table.
 
@@ -402,8 +374,9 @@ def check_the_table_lookup(root: Path) -> None:
     entry = Coverage(coverage / "0x1.cov")
     check(entry.intact, "the coverage of the table test is not intact")
 
-    # The key the call site mixes: the xor of the three parts of the key.
-    mixed = mix64(0x1 ^ 0x2 ^ 0x3)
+    # The key the call site mixes: the xor of the three parts of the key,
+    # through the mixer the coverage names.
+    mixed = mix64(0x1 ^ 0x2 ^ 0x3, entry.mixer())
 
     def code(offset: int) -> int:
         """A code address of the `.text` section."""
@@ -487,8 +460,9 @@ def check_the_payload_rules(root: Path) -> None:
       define is **stale** -- the function is gone, and the entry protects
       nothing;
     * a protected function may not call the payload's own code **directly**.
-      The `sret` edges are the only exception: this task does not narrow
-      the `sret` rule.
+      **Nothing is excepted**: the `sret` edges used to be excepted by
+      name, the rule that refused them is narrowed, and the
+      struct-returning calls go through a thunk.
 
     The test drives them with the coverage a plugin would write, so that a
     rule that rots (a rule that is neutered, or one that stops reading the
@@ -543,15 +517,23 @@ def check_the_payload_rules(root: Path) -> None:
     # failure -- the callee is the payload's own code.
     expect_failure(check_direct_callees,
                    with_direct("0x3.cov", "?own@aim@cs2@@YAXXZ", "external_callee"), payload)
-    # The `sret` edges are excepted: the rule is not narrowed by this task.
-    expect_success(check_direct_callees,
-                   with_direct("0x4.cov", "?sret@aim@cs2@@YAXXZ", "indirect_parameter"), payload)
+    # **Nothing is excepted.** The `sret` edges used to be excepted by
+    # name: a callee that stayed direct for a reason the routing cannot
+    # bypass is a failure too.
+    expect_failure(check_direct_callees,
+                   with_direct("0x4.cov", "?sret@aim@cs2@@YAXXZ", "byval_parameter"), payload)
     # A callee the payload does not own is an import or a CRT symbol: it is
     # left alone, and the check says how many it left alone.
     excepted, left_alone = check_direct_callees(
         with_direct("0x5.cov", "?atan2f", "external_callee"), payload)
     check(excepted == 0, f"the check excepted {excepted} callees, not 0")
     check(left_alone == 1, f"the check left {left_alone} callees alone, not 1")
+    # No direct callee at all: the check says so, and it does not print a
+    # stale entry.
+    excepted, left_alone = check_direct_callees(
+        with_cross("0x9.cov", "?own@aim@cs2@@YAXXZ"), payload)
+    check(excepted == 0, f"the check excepted {excepted} callees, not 0")
+    check(left_alone == 0, f"the check left {left_alone} callees alone, not 0")
 
     # The advice names the reason: a callee that the routing cannot route
     # is not fixed by adding it to the `cross_module` list.
@@ -567,10 +549,27 @@ def check_the_payload_rules(root: Path) -> None:
     else:
         raise TestFailure("a variadic callee did not fail the check")
 
-    # The exception is decided per (module, symbol): a symbol that one
-    # module excepts and another module refuses is a failure, whatever the
-    # order the coverage files are read in.
-    both = (with_direct("0x7.cov", "?own@aim@cs2@@YAXXZ", "indirect_parameter")
+    # The **old** name of the refusal -- the one a coverage file written by
+    # the plugin of before the `sret` edges carries -- is still read, and the
+    # advice says what it means. The generic advice ("add it to the
+    # `cross_module` list") is wrong for it: the list already names the
+    # callee.
+    try:
+        check_direct_callees(
+            with_direct("0xA.cov", "?own@aim@cs2@@YAXXZ", "indirect_parameter"), payload)
+    except Failure as error:
+        message = str(error)
+        check("indirect_parameter" in message,
+              f"the advice does not name the reason of the refusal: {message}")
+        check("add it to the list" not in message,
+              f"the advice sends the operator in a circle: {message}")
+    else:
+        raise TestFailure("a callee with the old reason name did not fail the check")
+
+    # The decision is per (module, symbol): a symbol that one module
+    # reports with one reason and another module with another one is a
+    # failure, whatever the order the coverage files are read in.
+    both = (with_direct("0x7.cov", "?own@aim@cs2@@YAXXZ", "byval_parameter")
             + with_direct("0x8.cov", "?own@aim@cs2@@YAXXZ", "external_callee", other))
     expect_failure(check_direct_callees, both, payload)
     expect_failure(check_direct_callees, list(reversed(both)), payload)
@@ -602,7 +601,7 @@ def check_the_cross_module_rule(root: Path) -> None:
     # The entry was seen, but the call to it could not be routed: the build
     # has to fail, and the reason has to be named.
     write_coverage(target, policy_digest, source, 7,
-                   cross="cross blocked:indirect_parameter cs2::aim::DamageField::add "
+                   cross="cross blocked:byval_parameter cs2::aim::DamageField::add "
                          "?add@DamageField@aim@cs2@@QEAA...\n")
     status = run_check_policy(policy, coverage)
     check(status == 1, f"a blocked cross_module entry did not fail the build (status {status})")
@@ -621,6 +620,85 @@ def check_the_cross_module_rule(root: Path) -> None:
     check(status == 0, f"a routed cross_module entry failed the build (status {status})")
 
 
+def run_seed_probe(seed: str, policy: Path | None) -> tuple[int, str, str]:
+    """Runs the seed probe and returns its exit code, its output and its error."""
+    environment = {"CS2_PROTECT_SEED": seed, "CS2_PROTECT_CONFIG": "" if policy is None else str(policy)}
+    out = io.StringIO()
+    err = io.StringIO()
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(contextlib.redirect_stdout(out))
+        stack.enter_context(contextlib.redirect_stderr(err))
+        for name, value in environment.items():
+            stack.enter_context(unittest.mock.patch.dict(os.environ, {name: value}))
+        try:
+            status = check_policy.main(["--seed"])
+        except Exception as error:  # noqa: BLE001 - a probe that crashes accepted nothing
+            return 3, out.getvalue(), f"{err.getvalue()}the probe crashed: {error}"
+    return status, out.getvalue(), err.getvalue()
+
+
+def check_the_seed_probe(root: Path) -> None:
+    """The seed probe accepts what the plugin accepts, and no more.
+
+    The probe is the wiring's gate: a protected build without a seed has to
+    fail the **configure** step, and a seed the plugin rejects has to fail
+    there too -- a policy with an integer seed or with a seed that is not
+    hexadecimal passes the configure and fails the compile, which is the
+    failure the probe exists to prevent.
+
+    A malformed policy is the **plugin's** error to report, and the probe
+    must not hide it behind a seed error: the two failures have two exit
+    codes.
+    """
+    good = root / "seed-good.json"
+    good.write_text('{"protect": [], "seed": "0xabc123"}\n', encoding="utf-8")
+    number = root / "seed-number.json"
+    number.write_text('{"protect": [], "seed": 123}\n', encoding="utf-8")
+    text = root / "seed-text.json"
+    text.write_text('{"protect": [], "seed": "zzz"}\n', encoding="utf-8")
+    unknown = root / "seed-unknown.json"
+    unknown.write_text('{"protect": [], "protext": []}\n', encoding="utf-8")
+
+    # The seed of the policy is the seed of the build.
+    status, out, _ = run_seed_probe("", good)
+    check(status == 0, f"the probe rejected the seed of the policy (status {status})")
+    check(out.strip() == "0xabc123", f"the probe printed '{out.strip()}', not the seed")
+
+    # The environment wins over the policy.
+    status, out, _ = run_seed_probe("0x1111111111111111", good)
+    check(status == 0, f"the probe rejected the seed of the environment (status {status})")
+    check(out.strip() == "0x1111111111111111",
+          f"the probe printed '{out.strip()}', not the seed of the environment")
+
+    # No seed at all: the build has no seed, and that is the failure the
+    # wiring reports.
+    status, _, err = run_seed_probe("", None)
+    check(status == 1, f"a build without a seed was not refused (status {status})")
+    check("no seed" in err, f"the probe did not say that there is no seed: {err}")
+
+    # A seed the plugin rejects: the probe refuses it too, and it says why.
+    status, _, err = run_seed_probe("zzz", None)
+    check(status == 2, f"a seed that is not hexadecimal was not refused (status {status})")
+    check("not hexadecimal" in err, f"the probe did not name the bad seed: {err}")
+
+    status, _, err = run_seed_probe("", number)
+    check(status == 2, f"a policy with an integer seed was not refused (status {status})")
+    check("hexadecimal string" in err, f"the probe did not name the bad seed: {err}")
+
+    status, _, err = run_seed_probe("", text)
+    check(status == 2, f"a policy with a seed that is not hexadecimal was not refused "
+                       f"(status {status})")
+    check("not hexadecimal" in err, f"the probe did not name the bad seed: {err}")
+
+    # A malformed policy is the plugin's error, and it is not hidden behind
+    # a seed error.
+    status, _, err = run_seed_probe("", unknown)
+    check(status == 2, f"a policy with an unknown key was not refused (status {status})")
+    check("unknown key in the policy file" in err,
+          f"the probe did not report the unknown key: {err}")
+    check("no seed" not in err, f"the probe hid the malformed policy behind a seed error: {err}")
+
+
 def main() -> int:
     try:
         check_the_image_reader()
@@ -630,6 +708,7 @@ def main() -> int:
             check_the_cross_module_rule(root)
             check_the_payload_rules(root)
             check_the_table_lookup(root)
+            check_the_seed_probe(root)
         finally:
             shutil.rmtree(root, ignore_errors=True)
     except TestFailure as error:

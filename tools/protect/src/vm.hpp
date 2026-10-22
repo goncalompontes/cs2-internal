@@ -185,8 +185,8 @@ enum class VmRefusal : std::uint8_t {
   indirect_call,            ///< it makes an indirect call: there is no relocatable
                             ///< address for the pool.
   indirect_parameter,       ///< a callee has a `byval` / `sret` / `inalloca` /
-                            ///< `preallocated` parameter: Windows x64 rejects these
-                            ///< in an indirect signature.
+                            ///< `preallocated` parameter: the interpreter's
+                            ///< uniform signature cannot carry them.
   musttail,                 ///< the tail-call contract does not survive the rewrite.
   volatile_access,          ///< a volatile access: the ordering guarantees are not
                             ///< modelled.

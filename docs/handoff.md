@@ -555,7 +555,63 @@ the accuracy work (spread/records, trace cross-validation).
   tier0 TLS**: the allocator (`FUN_1801ffe10` = `*(*(GS:[0x58]) + _tls_index*8) + …`)
   faults with `read addr=0x40`. Fix (done): a `GameThreadSink` on `Input`; the
   CreateMove hook (`Input::apply`) runs the query. `diag::call_guarded`
-  (VEH + `setjmp/longjmp`, no unwind tables needed) is the safety net and is proven.
+  (VEH + `setjmp/longjmp`) is the safety net: it recovers the process from a
+  fault inside the call, logs it, and returns a failure. The `longjmp` unwinds
+  the frames it leaves, so the payload's unwind tables have to be registered —
+  the injector does that (`RtlAddFunctionTable`). The guard is proven by
+  `payload/diag/tests/test_diag_guard.cpp`, which is built with **clang-cl**
+  (the compiler the payload ships with): ten deliberate faults, ten
+  recoveries, the process alive. It was **not** proven before: the handler was
+  `noexcept`, and a `noexcept` frame is not `nounwind` — clang-cl gives it a
+  C++ exception-handler unwind record whose cleanup action is
+  `std::terminate`, so the `longjmp` out of it ran that cleanup and killed the
+  process with 0xC0000409 instead of recovering (the recovery was not to be
+  relied on: of the twelve faults it saw, it recovered eight and lost the
+  payload four — see below).
+  **It had fired.** The payload's own log (`%LOCALAPPDATA%\cs2-internal\cs2-payload.log`,
+  measured 2026-10-22) carries 199 `[crash] handler installed` lines and
+  **12 `[crash] guarded` lines** — all of them `EXCEPTION_ACCESS_VIOLATION`,
+  and they split **four deaths and eight recoveries**:
+  * **Four died.** Each of the four is preceded by a live `[state]` line and
+    followed **immediately** by a fresh `[crash] handler installed`: the
+    process died and was re-injected. Three of them fault at the tier0
+    allocator (`tier0+0x1ffe29`, `read addr=0x40` — the fault the guard was
+    written for); the fourth is a null read (`read addr=0x0`).
+  * **Eight recovered.** Each of the eight is preceded **immediately** by a
+    `[crash] handler installed` — they are injections #190–#199, the last ten
+    in the log — and followed by the payload's own live output (`[state]`,
+    `presenting frames`): the process was alive and rendering. Their
+    signature is different: a null-pointer access (`addr=0x0`) whose fault
+    frames are in ntdll (`#0 ntdll+0xcc196`, `#1 ntdll+0xcb935`,
+    `#2 ntdll+0x164e3e`).
+
+  So the safety net was missing, and its absence cost the game **four**
+  times — not the eleven this branch's commit message (`1695973`) claims:
+  that count matched a *later* injection's line, because the handler writes
+  its stack frames **before** it dies and the scan has to skip them.
+
+  **Which build the eight came from — measured, not inferred.** The injector
+  was run from the integration tree (`cd C:\Users\gpmpo\cs2-internal;
+  build-injector\injector.exe cs2.exe build-payload\payload.dll`), and the
+  **last injection of any kind was at 02:10:57** on 2026-10-22 (the boot
+  file's last entry is pid 49028, and the injector's own output for that
+  minute says `injector: target pid 49028`). The fix's commit is at **06:01**
+  and its build at **06:26** — *after every one of the twelve* — and the
+  integration tree's handler still spells `noexcept` (this branch is not
+  merged). **So the eight recoveries came from the broken handler.**
+
+  That is worth saying plainly, because it cuts both ways:
+  * they are **not** evidence that the fixed guard has already recovered real
+    faults in the live game — **it has never run in the game**;
+  * they **are** evidence that the broken guard was not uniformly fatal: the
+    same `noexcept` handler **recovered eight times and killed the payload
+    four times**. The measurable difference is the signature — the four
+    deaths are the tier0 allocator fault (`read addr=0x40`, the payload's own
+    engine call), and the eight recoveries are a null access three frames
+    down in ntdll, called from the game's own code. The log does not say
+    *why* the two behave differently; what it says is that the broken guard's
+    behaviour depended on what the fault hit, and the fix removes that
+    dependence.
 - **The game relaunch is flaky** — the map load sometimes crashes on startup; just
   run `scripts/run-scenario.py` again.
 - The game auto-updated mid-session: `client.dll` sha `659940c1…` (was `44af2aa0…`);
@@ -610,8 +666,9 @@ resolved from a live call site: `TraceShapeWithSortedResults` =
 `*client_base + 0x221f058`, filter vtable `+0x1ace848`, mask `0x1c1003`, static
 default filter at `+0x221f070` (`docs/re/aim.md` §"The call convention, pinned from
 a live site"). It was **not** wired up: it needs a dumper signature for the
-singleton + the function (ADR-0012) and live validation, and a wrong call aborts
-the process (the payload has no exception tables), so it deserves its own pass.
+singleton + the function (ADR-0012) and live validation, and a wrong call has
+to go through `cs2::diag::call_guarded` (the payload's only recovery
+mechanism), so it deserves its own pass.
 
 **Tooling added:** `scripts/capture-screen.ps1` and `scripts/capture-game.ps1`
 capture the interactive session (run them via a scheduled task —
@@ -834,7 +891,8 @@ change that wedged the game under Wine/Proton (ADR-0017)**.
 - **State introspection** — local player + every player (health, armor, team,
   weapon, ammo, origin/eye/velocity/angles), live-verified on the updated build.
 - **Payload plumbing** — injector `.pdata` registration (`RtlAddFunctionTable`,
-  ~2043 entries), per-thread TLS bootstrap for the manually-mapped image
+  ~2043 entries; load-bearing: the guard's `longjmp` unwinds the frames it
+  leaves), per-thread TLS bootstrap for the manually-mapped image
   (`payload/tls`), `NtCreateThreadEx(SKIP_THREAD_ATTACH)` thread helper, crash
   handler + freeze watchdog (`payload/diag`).
 - **RE** — the game's present is `CRenderContextBase::Present`

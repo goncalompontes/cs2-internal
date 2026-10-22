@@ -38,25 +38,49 @@ namespace cs2::protect {
 
 /// Why a call was not rewritten.
 enum class CallSkipReason : std::uint8_t {
-  variadic_callee,     ///< the callee is variadic: the indirect call cannot
-                       ///< reproduce the variadic ABI.
-  indirect_parameter,  ///< the callee has a `byval` / `sret` / `inalloca` /
-                       ///< `preallocated` parameter: Windows x64 rejects
-                       ///< these in an indirect signature.
-  musttail,            ///< the call is a `musttail` call: a tail call cannot
-                       ///< become an indirect call.
-  external_callee,     ///< the callee is not defined in this module: it is an
-                       ///< import, and it is in the import table anyway.
-  intrinsic_callee,    ///< the callee is a compiler intrinsic.
-  optnone_callee,      ///< the callee is `optnone`: rewriting it would defeat
-                       ///< the `optnone` intent.
-  invoke,              ///< the call is an `invoke`: the pass does not model the
-                       ///< EH edges yet.
-  indirect_callee,     ///< the call is already indirect: there is nothing to
-                       ///< hide.
+  variadic_callee,         ///< the callee is variadic: the indirect call cannot
+                           ///< reproduce the variadic ABI.
+  byval_parameter,         ///< the callee has a `byval` parameter: the caller
+                           ///< copies the argument onto the callee's stack, and
+                           ///< the uniform signature of the dispatch cannot
+                           ///< express the copy.
+  inalloca_parameter,      ///< the callee has an `inalloca` parameter: the
+                           ///< callee's frame is allocated by the caller, and the
+                           ///< size and the layout are part of the call.
+  preallocated_parameter,  ///< the callee has a `preallocated` parameter: like
+                           ///< `inalloca`, the frame is the caller's.
+  sret_parameter,          ///< the callee has an `sret` parameter and the target
+                           ///< is not the one the narrowing was measured on.
+  sret_result,             ///< the callee has an `sret` parameter **and** returns
+                           ///< a value: not a thing in the x64 ABI.
+  musttail,                ///< the call is a `musttail` call: a tail call cannot
+                           ///< become an indirect call.
+  external_callee,         ///< the callee is not defined in this module: it is an
+                           ///< import, and it is in the import table anyway.
+  intrinsic_callee,        ///< the callee is a compiler intrinsic.
+  optnone_callee,          ///< the callee is `optnone`: rewriting it would
+                           ///< defeat the `optnone` intent.
+  invoke,                  ///< the call is an `invoke`: the pass does not model the
+                           ///< EH edges yet.
+  indirect_callee,         ///< the call is already indirect: there is nothing to
+                           ///< hide.
 };
 
 [[nodiscard]] auto to_string(CallSkipReason reason) noexcept -> const char*;
+
+/// The target the `sret` narrowing was measured on.
+///
+/// The SDK's `llc` accepts an indirect `sret` call on
+/// `x86_64-pc-windows-msvc`, with the same register placement as the direct
+/// call. The rule stays closed on every other target: fail closed, and honest
+/// about what was verified.
+inline constexpr std::string_view k_sret_target = "x86_64-pc-windows-msvc";
+
+/// Whether the `sret` parameter of a callee is routable in this module.
+///
+/// The narrowing is **target bound**: the evidence is the measurement of one
+/// backend on one target, and a rule that is not measured is not used.
+[[nodiscard]] auto sret_routable(const llvm::Module& module) -> bool;
 
 /// Why a call is not rewritten, if it is not.
 ///
@@ -66,7 +90,14 @@ enum class CallSkipReason : std::uint8_t {
 /// The rules are **exported**, because the gate of the virtualizer has to
 /// reach the same verdict for the same call: a rule that is written twice
 /// drifts, and the two copies report different reasons for one call.
-[[nodiscard]] auto skip_reason(const llvm::CallBase& call) -> std::optional<CallSkipReason>;
+///
+/// The `sret_routable` flag is the one rule that depends on the *target*
+/// rather than on the call: the `sret` parameter of a callee is routable
+/// only where the narrowing was measured, and the virtualizer's uniform
+/// signature cannot express the hidden pointer at all -- so the virtualizer
+/// passes `false` and keeps its refusal.
+[[nodiscard]] auto skip_reason(const llvm::CallBase& call, bool sret_routable)
+    -> std::optional<CallSkipReason>;
 
 /// Why a call to a **routable** declaration is not rewritten, if it is not.
 ///
@@ -75,7 +106,8 @@ enum class CallSkipReason : std::uint8_t {
 /// a relocatable pointer to the external symbol. Every other rule still
 /// applies, and the rules are the ones of `skip_reason` -- a second copy of
 /// them would drift.
-[[nodiscard]] auto skip_reason_routed(const llvm::CallBase& call) -> std::optional<CallSkipReason>;
+[[nodiscard]] auto skip_reason_routed(const llvm::CallBase& call, bool sret_routable)
+    -> std::optional<CallSkipReason>;
 
 /// The state of a `cross_module` entry in one module.
 enum class CrossState : std::uint8_t {
@@ -176,6 +208,11 @@ struct TransformResult {
   std::uint64_t mix_multiplier{0};
   /// The xor constant of the mixer, as the call site uses it.
   std::uint64_t mix_xor{0};
+  /// The rotation of the mixer, as the call site uses it.
+  ///
+  /// It is the one value of the mixer that is in the instruction stream
+  /// (`rolq $imm8`), and it is in [1, 63].
+  unsigned mix_rotate{0};
   /// The cross-module routing of this module.
   CrossModuleState cross;
 };

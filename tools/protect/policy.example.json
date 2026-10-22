@@ -1,7 +1,11 @@
 {
   "protect": [
     "cs2::aim::solve",
-    { "symbol": "cs2::game::StateReader::*", "module": "state_reader.cpp", "level": "call" }
+    "cs2::aim::solve_backtrack",
+    "cs2::aim::DamageField::hit_probability",
+    "cs2::aim::occlude_polygon",
+    "cs2::aim::project_capsule",
+    "cs2::aim::penetration_survival"
   ],
   "cross_module": [
     "cs2::aim::DamageField::add",
@@ -11,10 +15,24 @@
     "cs2::aim::DamageField::base_value_at",
     "cs2::aim::DamageField::value_at_pellets",
     "cs2::aim::DamageField::hit_probability",
+    "cs2::aim::DamageField::argmax_hit_probability",
+    "cs2::aim::DamageField::argmax_hitchance",
+    "cs2::aim::DamageField::argmax_expected",
+    "cs2::aim::DamageField::argmax_pellets",
+    "cs2::aim::DamageField::argmax_damage",
+    "cs2::aim::Basis::unproject",
     "cs2::aim::OccluderCell::lower_bound_distance",
+    "cs2::aim::OccluderCell::ray_span",
+    "cs2::aim::hitbox_valid",
+    "cs2::aim::occlude_polygon",
     "cs2::aim::penetration_damage_at_target",
     "cs2::aim::polygon_contains",
     "cs2::aim::polygon_centroid",
+    "cs2::aim::prepare_convex_clipper",
+    "cs2::aim::project_capsule",
+    "cs2::aim::project_obb",
+    "cs2::aim::solve_montecarlo",
+    "cs2::aim::spread_kernel",
     "cs2::aim::subtract_convex",
     "cs2::aim::yaw_scale"
   ],

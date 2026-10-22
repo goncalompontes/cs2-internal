@@ -194,7 +194,10 @@ pointer, then per query filters the cached hulls by the eye→target AABB (cap 5
   `*(data+0x68)` array read is the one that works live.
 - Do **not** call a per-shape vtable slot you have not validated: calling
   `shape->[0x50]` on every brush (it is a collision routine for hull shapes)
-  aborted the process.
+  faulted. **Today** that fault is survivable — the call goes through
+  `cs2::diag::call_guarded`, the guard logs it and returns a failure — but
+  the guard is a safety net, not a licence: a call that faults inside the
+  engine's own code is still a wrong call.
 - A namespace-scope `std::vector` / a function-local `static` adds a CRT import
   (`SleepConditionVariableSRW`) the manual-map injector cannot resolve — keep
   payload globals POD.
@@ -318,7 +321,19 @@ So a payload implementation is: read `*(client_base + 0x2227058)`, build a filte
 which takes two box corners: `FUN_1809dbd20(this, box_min, box_max, filter,
 contents, results, flag)`), then walk the `0x70`-stride records.
 
-> **Risk.** The payload has no exception tables — a wrong ABI aborts the process.
+> **Risk.** A wrong ABI used to abort the process. **Not any more:** the
+> injector registers the payload's `.pdata` (`RtlAddFunctionTable`), so the
+> image *does* have exception tables, and the engine calls go through
+> `cs2::diag::call_guarded`, whose vectored handler recovers a fault on the
+> armed thread, logs it, and returns a failure.
+>
+> **The guard's limits, so the risk is not read as a licence:** one in-flight
+> guarded call per process (a second concurrent one is refused); only the
+> recoverable codes (`EXCEPTION_ACCESS_VIOLATION` and friends); only a fault
+> **on the thread that entered the guard** (a fault on another thread is not
+> guarded); and the recovery is a `longjmp`, so the guarded call's cleanups
+> are skipped — the guarded call must not own resources.
+>
 > Validate the first call (`EntitiesInBox` with the static filter, count the
 > records) before projecting anything, and derive signatures rather than
 > hard-coding RVAs (ADR-0012).

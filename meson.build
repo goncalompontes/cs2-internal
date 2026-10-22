@@ -347,6 +347,26 @@ test('control-rage-objective', control_rage_objective_test,
   args : [meson.current_source_dir()],
 )
 
+# The ragebot's settings **ownership rule** (T40): the pure comparison that
+# decides whether the operator changed a rage field, the wire's rage group as a
+# snapshot, and the field names the status reports. The rule is pure, so the
+# test compiles the header alone; it reads `wire.hpp` to prove the comparison
+# covers every rage field the wire owns, and it reads the payload's entry point
+# and the service to prove the wiring (the sink consults the rule before it
+# applies, and the service applies only the fields the write carries).
+control_rage_settings_test = executable('control_rage_settings_test',
+  files(
+    'payload/control/tests/test_control_rage_settings.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+    include_directories('overlay/include'),
+  ],
+)
+test('control-rage-settings', control_rage_settings_test,
+  args : [meson.current_source_dir()],
+)
+
 # The per-weapon rage profile's **line codec** (`cs2/control/rage_config.hpp`):
 # the text format of `cs2-rage.cfg` is a property of the file, not of the file
 # system, so the codec is pure and the host test drives it — the round trip
@@ -525,21 +545,52 @@ test('control-trace-probe', control_trace_probe_test,
   args : [meson.current_source_dir()],
 )
 
-# The fault guard the probe's engine call runs under. The payload has no
-# registered exception tables, so the guard (the vectored handler +
-# `setjmp`/`longjmp`) is the only thing between a wrong engine ABI and a dead
-# game. The test proves it: a call that deliberately faults is caught and
-# reported, and the process keeps running.
-control_trace_probe_guard_test = executable('control_trace_probe_guard_test',
+# The payload's fault guard (`cs2::diag::call_guarded`).
+#
+# The guard is the payload's only safety net for an engine call that faults,
+# and what it does depends on the **compiler**: a `noexcept` vectored handler
+# is not `nounwind` -- clang-cl gives its frame a C++ exception-handler unwind
+# record whose cleanup action is `std::terminate`, and the `longjmp` out of
+# that frame runs the action, so the process dies with 0xC0000409. That is
+# clang-cl's behaviour -- clang-cl is the compiler the payload ships with --
+# and not MSVC's: under `cl.exe` the same source recovers.
+#
+# **How the test is run.** The test is registered in **two** builds, and both
+# of them have to be run:
+#
+#   meson test -C build          # this copy (the host build)
+#   meson test -C build-payload  # the payload's own clang-cl build
+#
+# The host copy's behavioural half is only meaningful in a **clang-cl host
+# build**: with `cl.exe` the guard recovers either way, so the half cannot see
+# the defect. This repository's host build is clang-cl (CI sets
+# `CC=clang-cl`/`CXX=clang-cl`), which is why the host copy is worth
+# registering -- and why the defect survived: **there was no test at all**,
+# not because the compiler was wrong.
+#
+# The payload's own copy (`payload/diag/meson.build`) is the one that ships,
+# and it is registered in the payload's build whether or not that build is a
+# cross build -- the test runs wherever the build machine can run the
+# binaries.
+diag_guard_test = executable('diag_guard_test',
   files(
-    'payload/control/tests/test_control_trace_probe_guard.cpp',
+    'payload/diag/tests/test_diag_guard.cpp',
+    'payload/diag/src/crash_handler.cpp',
+    'payload/diag/src/text.cpp',
+    'payload/game/src/log.cpp',
+    'payload/game/src/module.cpp',
+    'payload/game/src/memory.cpp',
   ),
   include_directories : [
-    include_directories('payload/control/include'),
+    include_directories('payload/diag/include'),
+    include_directories('payload/game/include'),
+    core_inc,
   ],
-  dependencies : control_host_dep,
 )
-test('control-trace-probe-guard', control_trace_probe_guard_test)
+test('diag-guard', diag_guard_test,
+  # The source check reads the payload's own sources.
+  args : [meson.current_source_dir() / 'payload'],
+)
 
 # The feature settings foundation: the wire <-> config conversion and the
 # config store's round trip. The settings block is a POD and the conversion is
