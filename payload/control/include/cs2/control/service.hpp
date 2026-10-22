@@ -643,7 +643,7 @@ class Service {
   //     (the shots a semi-automatic weapon needs; zero on a full-automatic
   //     one, whose trigger stays down).
   std::atomic<int> rage_fire_mode_{0};  // FireMode
-  std::atomic<int> rage_refusal_{0};   // FireRefusal
+  std::atomic<int> rage_refusal_{0};    // FireRefusal
   std::atomic<std::uint64_t> rage_shots_{0};
   std::atomic<std::uint64_t> rage_presses_{0};
   std::atomic<std::uint64_t> rage_edges_{0};

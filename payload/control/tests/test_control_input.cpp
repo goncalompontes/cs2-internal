@@ -734,6 +734,9 @@ void test_the_fire_path_wiring_is_the_pure_write(const std::filesystem::path& ro
   // The PB's button state is written **unconditionally**: the release has to
   // reach it even when there is nothing else to write.
   assert(code.find("state[0]=write.pb_held") != std::string::npos);
+  // ... and the write is guarded by **writability alone**: a guard of the
+  // form "there is something to write" is exactly what skipped the release.
+  assert(code.find("&&writable(buttons_pb") == std::string::npos);
 }
 
 // The repository's root, so the test can read the payload's own source.

@@ -824,7 +824,7 @@ struct FireDecision {
 /// costs at most a tick per shot and is always correct, while a held trigger
 /// on a semi-automatic weapon fires **once** and never again.
 [[nodiscard]] inline constexpr auto classify_fire_mode(bool full_auto_known,
-                                                        bool full_auto) noexcept -> FireMode {
+                                                       bool full_auto) noexcept -> FireMode {
   if (!full_auto_known) {
     return FireMode::unknown;
   }
@@ -984,8 +984,8 @@ struct AttackContributors {
 };
 
 /// The command's attack bit, from its contributors.
-[[nodiscard]] inline constexpr auto compose_attack_bit(const AttackContributors& contributors) noexcept
-    -> std::uint64_t {
+[[nodiscard]] inline constexpr auto compose_attack_bit(
+    const AttackContributors& contributors) noexcept -> std::uint64_t {
   return (contributors.player || contributors.control || contributors.trigger || contributors.rage)
              ? button::k_attack
              : 0ULL;
@@ -1000,15 +1000,12 @@ struct AttackContributors {
 /// could never remove the payload's own press. The contributors carry the
 /// player's own press and the triggerbot's hold, so neither of them is taken
 /// away.
-[[nodiscard]] inline constexpr auto compose_command_mask(std::uint64_t current_mask,
-                                                          std::uint64_t control_set,
-                                                          std::uint64_t control_clear,
-                                                          std::uint64_t feature_mask,
-                                                          bool usercmd_backend,
-                                                          const AttackContributors& contributors) noexcept
-    -> std::uint64_t {
-  std::uint64_t value = compose_button_mask(current_mask, control_set, control_clear, feature_mask,
-                                             usercmd_backend);
+[[nodiscard]] inline constexpr auto compose_command_mask(
+    std::uint64_t current_mask, std::uint64_t control_set, std::uint64_t control_clear,
+    std::uint64_t feature_mask, bool usercmd_backend,
+    const AttackContributors& contributors) noexcept -> std::uint64_t {
+  std::uint64_t value =
+      compose_button_mask(current_mask, control_set, control_clear, feature_mask, usercmd_backend);
   // The control channel's own **release** takes the button away entirely —
   // that is the operator's release, and it outranks the contributors.
   if (button_reaches_command(ButtonPath::control_command, usercmd_backend) &&
@@ -1028,7 +1025,7 @@ struct AttackContributors {
 /// that holds `IN_ATTACK` on **every** command — the original defect — is one
 /// `&&` away, and the host test has to catch it.
 [[nodiscard]] inline constexpr auto rage_attack_press(bool solved, bool fire_enabled,
-                                                       bool press) noexcept -> bool {
+                                                      bool press) noexcept -> bool {
   return solved && fire_enabled && press;
 }
 
@@ -1188,16 +1185,17 @@ struct FireWrite {
 ///     carries the attack whenever it is asserted or has changed;
 ///   * the **movement services'** `CInButtonState` — the **held** word follows
 ///     the command's mask, so a withdrawal clears it.
-[[nodiscard]] inline constexpr auto compose_fire_write(const FireWriteInputs& in) noexcept -> FireWrite {
+[[nodiscard]] inline constexpr auto compose_fire_write(const FireWriteInputs& in) noexcept
+    -> FireWrite {
   const AttackContributors contributors{
       .player = in.player_attack,
       .control = in.control_attack,
       .trigger = (in.feature_mask & button::k_attack) != 0,
       .rage = in.rage_press,
   };
-  const std::uint64_t command_mask = compose_command_mask(
-      in.current_mask, in.control_set, in.control_clear, in.feature_mask, in.usercmd_backend,
-      contributors);
+  const std::uint64_t command_mask =
+      compose_command_mask(in.current_mask, in.control_set, in.control_clear, in.feature_mask,
+                           in.usercmd_backend, contributors);
   const std::uint64_t attack = command_mask & button::k_attack;
   // The PB's **held** word follows the command's mask exactly. The attack bit
   // is *replaced*, so the ragebot's withdrawal clears it: the engine's own
@@ -1255,7 +1253,7 @@ struct ClipSample {
 /// So the detector needs **both** readings to be known and **neither** to be a
 /// reload.
 [[nodiscard]] inline constexpr auto is_engine_shot(const ClipSample& previous,
-                                                    const ClipSample& current) noexcept -> bool {
+                                                   const ClipSample& current) noexcept -> bool {
   if (!previous.known || !current.known) {
     return false;
   }
@@ -1317,14 +1315,13 @@ struct RageStatusFields {
   if (out == nullptr || size == 0) {
     return 0;
   }
-  const int written =
-      std::snprintf(out, size, "rage: %s tgt %d box %d obj %s%s s%llu p%llu e%llu %s %s %s%s%s%s",
-                    fields.aim, fields.target, fields.hitbox, fields.objective, fields.monte_carlo,
-                    static_cast<unsigned long long>(fields.shots),
-                    static_cast<unsigned long long>(fields.presses),
-                    static_cast<unsigned long long>(fields.edges), fields.fire_mode,
-                    fields.fire_refusal, fields.stop, fields.occlusion_query,
-                    fields.occlusion_candidates, fields.player_attack);
+  const int written = std::snprintf(
+      out, size, "rage: %s tgt %d box %d obj %s%s s%llu p%llu e%llu %s %s %s%s%s%s", fields.aim,
+      fields.target, fields.hitbox, fields.objective, fields.monte_carlo,
+      static_cast<unsigned long long>(fields.shots),
+      static_cast<unsigned long long>(fields.presses),
+      static_cast<unsigned long long>(fields.edges), fields.fire_mode, fields.fire_refusal,
+      fields.stop, fields.occlusion_query, fields.occlusion_candidates, fields.player_attack);
   return written < 0 ? 0 : static_cast<std::size_t>(written);
 }
 

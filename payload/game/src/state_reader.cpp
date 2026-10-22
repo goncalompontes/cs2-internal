@@ -309,9 +309,13 @@ auto StateReader::read_player(int index, std::uintptr_t controller) const -> Pla
         player.weapon_fire_mode_known =
             cs2::game::read(player.weapon_vdata + vdata.full_auto, full_auto);
         player.weapon_full_auto = full_auto != 0;
-        // `m_flCycleTime` — the weapon's fire interval in seconds. The value is
-        // a **firing-mode** float (the engine picks the one its mode uses), so
-        // it is only kept when it is plausible: no weapon fires slower than
+        // `m_flCycleTime` — the weapon's fire interval in seconds. The field is
+        // a **firing-mode** float *pair* (`FiringModeFloat`: `0x738` and
+        // `0x73c`), and the schema dump does not describe the struct's members,
+        // so which of the two the engine uses for the weapon's mode is **not**
+        // established by the repo. The payload reads the **first** one — that
+        // is the payload's reading, not a claim about the engine's. The value
+        // is only kept when it is plausible: no weapon fires slower than
         // 20 ms or faster than two seconds.
         float cycle = 0.0F;
         if (cs2::game::read(player.weapon_vdata + vdata.cycle_time, cycle)) {

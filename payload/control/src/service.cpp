@@ -85,8 +85,7 @@ auto weapon_fire_offsets() -> const WeaponFireOffsets& {
       .clip1 = schema_field("C_BasePlayerWeapon", "m_iClip1", 0x1928),
       .in_reload = schema_field("C_CSWeaponBase", "m_bInReload", 0x1a3c),
       .deploy_tick = schema_field("C_CSWeaponBase", "m_nDeployTick", 0x1a40),
-      .next_attack_tick =
-          schema_field("C_BasePlayerWeapon", "m_nNextPrimaryAttackTick", 0x1918),
+      .next_attack_tick = schema_field("C_BasePlayerWeapon", "m_nNextPrimaryAttackTick", 0x1918),
       .tick_base = schema_field("CBasePlayerController", "m_nTickBase", 0x6b8),
   };
   return offsets;
@@ -2602,8 +2601,7 @@ void Service::decide_rage_fire(const game::Snapshot& snapshot) noexcept {
     // The weapon's **fire mode**, from the weapon's VData (`m_bIsFullAuto`).
     // An unreadable VData leaves the mode **unknown**, and the fire path
     // treats an unknown weapon as **semi-automatic** — the conservative mode.
-    capability.mode =
-        classify_fire_mode(local.weapon_fire_mode_known, local.weapon_full_auto);
+    capability.mode = classify_fire_mode(local.weapon_fire_mode_known, local.weapon_full_auto);
     // The weapon's fire interval (`m_flCycleTime`) — the fallback for the
     // engine's own readiness record.
     capability.interval = local.weapon_cycle_time;
@@ -2624,8 +2622,7 @@ void Service::decide_rage_fire(const game::Snapshot& snapshot) noexcept {
   //
   // A **new weapon** starts with a clip of its own: the difference against
   // the previous weapon's clip is not a shot.
-  const std::uintptr_t weapon =
-      snapshot.local.has_value() ? snapshot.local->weapon_entity : 0;
+  const std::uintptr_t weapon = snapshot.local.has_value() ? snapshot.local->weapon_entity : 0;
   const bool new_weapon = weapon != rage_prev_weapon_;
   rage_prev_weapon_ = weapon;
   const ClipSample clip{
@@ -2778,19 +2775,22 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
       .edges = rage_edges_.load(std::memory_order_relaxed),
       .fire_mode =
           fire_mode_name(static_cast<FireMode>(rage_fire_mode_.load(std::memory_order_relaxed))),
-      .fire_refusal =
-          fire_refusal_name(static_cast<FireRefusal>(rage_refusal_.load(std::memory_order_relaxed))),
+      .fire_refusal = fire_refusal_name(
+          static_cast<FireRefusal>(rage_refusal_.load(std::memory_order_relaxed))),
       .stop = input_.rage_stop() ? " stop" : "",
-      .occlusion_query = rage_occlusion_query_complete_.load(std::memory_order_relaxed)
-                             ? ""
-                             : " occ-inc",
-      .occlusion_candidates = rage_occlusion_candidates_complete_.load(std::memory_order_relaxed)
-                                  ? ""
-                                  : " occ-cap",
+      .occlusion_query =
+          rage_occlusion_query_complete_.load(std::memory_order_relaxed) ? "" : " occ-inc",
+      .occlusion_candidates =
+          rage_occlusion_candidates_complete_.load(std::memory_order_relaxed) ? "" : " occ-cap",
       .player_attack = input_.rage_player_attack() ? " player" : "",
   };
-  format_rage_status(fields, out, size);
-  return true;
+  // The line's length: the format is the pure function's, and the host test
+  // measures the **worst** case against the HUD's 192-byte buffer
+  // (`docs/ragebot.md` §"the fire path").
+  const std::size_t written = format_rage_status(fields, out, size);
+  // The line is produced even when it does not fit: the caller draws what
+  // fits, and the format is sized so that it always does.
+  return written > 0;
 }
 
 // --- The ESP's out-of-module data providers --------------------------------
@@ -3476,17 +3476,19 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   // ragebot was pressing. (The counter that used to answer this key counted
   // the *commands* the attack was asserted on: the ragebot's attempts, not
   // shots. `presses` is that number now.)
-  payload.set("shots", Json::number(static_cast<double>(rage_shots_.load(std::memory_order_relaxed))));
+  payload.set("shots",
+              Json::number(static_cast<double>(rage_shots_.load(std::memory_order_relaxed))));
   payload.set("presses",
               Json::number(static_cast<double>(rage_presses_.load(std::memory_order_relaxed))));
-  payload.set("edges", Json::number(static_cast<double>(rage_edges_.load(std::memory_order_relaxed))));
+  payload.set("edges",
+              Json::number(static_cast<double>(rage_edges_.load(std::memory_order_relaxed))));
   // The weapon's fire mode as the payload reads it ("auto", "semi",
   // "unknown") and the gate's verdict: "ok" when the shot can be taken, the
   // blocking condition's name when it cannot.
   payload.set("fire_mode", Json::string(std::string(fire_mode_name(static_cast<FireMode>(
-                          rage_fire_mode_.load(std::memory_order_relaxed))))));
+                               rage_fire_mode_.load(std::memory_order_relaxed))))));
   payload.set("fire_refusal", Json::string(std::string(fire_refusal_name(static_cast<FireRefusal>(
-                             rage_refusal_.load(std::memory_order_relaxed))))));
+                                  rage_refusal_.load(std::memory_order_relaxed))))));
   // The **player** is holding the attack button: the engine then sees one
   // continuous press, so the edge is the player's to make, not the ragebot's.
   payload.set("player_attack", Json::boolean(input_.rage_player_attack()));

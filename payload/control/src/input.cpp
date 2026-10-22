@@ -2624,8 +2624,7 @@ void Input::apply_command(void* cmd, bool fresh) noexcept {
   // reading. Without the cache the payload would read **its own** press back
   // as the player's — and a withdrawal would then never clear the bit, which
   // is exactly the release the edge needs (`docs/ragebot.md` §"the fire path").
-  const auto command_number =
-      *reinterpret_cast<const std::uint32_t*>(bytes + k_cmd_number_offset);
+  const auto command_number = *reinterpret_cast<const std::uint32_t*>(bytes + k_cmd_number_offset);
   const bool observed_attack = (current & button::k_attack) != 0;
   const cs2::control::FireCommandCache::Reading reading =
       fire_commands_.read(command_number, observed_attack, fresh);
@@ -2667,16 +2666,16 @@ void Input::apply_command(void* cmd, bool fresh) noexcept {
   }
   // The control channel's own press of the attack button — a contributor of
   // its own, so the ragebot's withdrawal does not take it away.
-  const bool control_attack =
-      cs2::control::button_reaches_command(cs2::control::ButtonPath::control_command,
-                                            usercmd_backend) &&
-      (control_set & button::k_attack) != 0 && (control_clear & button::k_attack) == 0;
+  const bool control_attack = cs2::control::button_reaches_command(
+                                  cs2::control::ButtonPath::control_command, usercmd_backend) &&
+                              (control_set & button::k_attack) != 0 &&
+                              (control_clear & button::k_attack) == 0;
   // The PB's own words: what the engine wrote into the command's
   // `CInButtonStatePB`. They are the payload's **starting point**, and the
   // payload writes the attack bit into them (the release the engine has to
   // see).
   const auto base = *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset + k_pb_base_offset);
-  const auto buttons_pb = *reinterpret_cast<std::uintptr_t>(base + k_base_buttons_pb_offset);
+  const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
   std::uint64_t pb_held = 0;
   std::uint64_t pb_changed = 0;
   if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {

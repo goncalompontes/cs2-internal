@@ -1270,6 +1270,14 @@ consults before it takes a shot, so it is the one the fire path uses. The
 VData's `m_flCycleTime` is kept as the **fallback** for the case where that
 record cannot be read.
 
+**`m_flCycleTime` is a firing-mode float *pair*.** The schema types it as
+`FiringModeFloat` (`0x738` and `0x73c`, two floats), and the dump does not
+describe the struct's members, so **which** of the two the engine uses for the
+weapon's mode is not established by the repo. The payload reads the **first**
+one — that is the payload's reading, not a claim about the engine's. The
+value is only kept when it is plausible: no weapon fires slower than 20 ms or
+faster than two seconds.
+
 **The rate is read fresh, on the game thread.** The VData's fields (the fire
 mode, the cycle time) are stable and travel in the snapshot; the weapon
 *instance*'s fields (the clip, the reload, the deploy, the next-attack tick)
@@ -1303,14 +1311,51 @@ shot.
 would only cost a tick per shot. So the trigger stays down there, and the
 behaviour is unchanged from before this section.
 
-**The release is scoped to the ragebot's own contribution.** The features'
-bits are only ever **set**, never cleared: *"a feature that releases the
-attack button must not take the player's own press of the same button
-away"*. The ragebot therefore **withdraws** its contribution — it simply
-does not put the attack bit on the command — and the engine's own mask (the
-player's own press) is left untouched. The command's `CInButtonState`
-follows the mask exactly, so the withdrawal is a **release** the engine can
-see, and the player's press is still there.
+#### The withdrawal is real: the attack bit is **replaced**, not merged
+
+The repo's rule (`strafe_geometry.hpp`'s `compose_button_mask`): *the
+features' bits are only ever **set**, never cleared — a feature that releases
+the attack button must not take the player's own press of the same button
+away.*
+
+That rule protects the **player's** press. It does not say that the payload
+may never take **its own** press back — and it must be able to: a
+contribution that can only be *added* can never be *removed*, so a withdrawal
+would leave the press on the command and the engine would never see the
+release. (The composition was add-only until this section, and that is
+exactly why the ragebot could not withdraw: the command it re-wrote every
+tick still carried the press of the tick before.)
+
+So the command's attack bit is the one bit that is **replaced**, and it is
+recomputed from its **contributors** for every command
+(`compose_command_mask`):
+
+| contributor | what it is | survives the ragebot's withdrawal |
+|---|---|---|
+| the **player** | the engine's own mask, read **before** the payload's write | **yes** |
+| the **control channel** | an explicit `press("attack")` | **yes** |
+| the **triggerbot** | its own hold (a feature bit) | **yes** |
+| the **ragebot** | the fire path's decision for this command | **no** — this is the one that is withdrawn |
+
+The features' **other** bits are still only ever set, never cleared. Only the
+attack bit is replaced, and only because the ragebot's contribution to it has
+to be replaceable.
+
+#### The engine's own press is read **per command**
+
+The payload writes to **two** commands per tick — the slot-25 copy of the
+command (`create_move`) and the slot-5 command the engine has just built
+(`create_move_input`) — and the engine **reuses** the command objects: a
+command the payload wrote last tick still carries the payload's own press.
+Reading the mask naively would therefore read the **payload's own press back
+as the player's**, and the withdrawal would never clear the bit.
+
+The payload caches the engine's own attack bit **per command number**
+(`CUserCmd::nSequenceNumber`, `FireCommandCache`): a command the payload has
+**not** written its own press to yet carries the engine's own mask — that is a
+**clean** reading — and the engine builds a **new** command every tick, so the
+reading is clean and fresh every tick. The slot-25 copy of the command reuses
+the tick's reading.
 
 **What happens when the player holds attack.** Then the engine's own mask
 carries the attack bit on every command, so the engine sees **one continuous
@@ -1318,24 +1363,27 @@ press**: the semi-automatic weapon fires **once**, exactly as it does for a
 human who holds the trigger. **The edge is then the player's to make, not the
 ragebot's** — the ragebot's withdrawal cannot take the player's press away
 (that is the rule above), so it cannot manufacture an edge the player has
-removed. The status says so: `player-attack` on the HUD line, and
-`player_attack` in the `rage` command's JSON.
+removed. The status says so: `player` on the HUD line, and `player_attack` in
+the `rage` command's JSON.
 
 ### 15.3 The gate — can the weapon take the shot?
 
 The gate is evaluated on the **game thread**, once per tick, and its verdict
-is published to the command path. The conditions, in the order the status
-reports them (the first one that blocks is the one the operator is told
-about):
+is published to the command path. The conditions, **in the order the code
+checks them** — the first one that blocks is the one the operator is told
+about:
 
 | condition | refusal | why |
 |---|---|---|
+| no active solve | `no-solve` | the ragebot is not aiming at anybody |
+| the fire path is **disabled** | `fire-off` | the operator's `fire` toggle is off, or the visibility gate (`only_visible`) refused the shot — a different fact from "no solve" |
+| the clip could **not** be read | `clip-unknown` | the payload does not know whether the weapon can shoot — *when in doubt, do not fire* |
 | the clip is empty | `no-ammo` | the shot cannot be fired; the auto-reload assist already holds `IN_RELOAD` |
 | the weapon is reloading | `reloading` | the engine ignores the trigger |
 | the weapon is still being deployed | `deploying` | same |
-| the weapon's fire interval has not elapsed | `interval` | the shot would be dropped by the engine — and on a semi-automatic weapon a press inside the interval is **the shot being wasted** |
 | the deliberate release the edge needs | `edge` | not a block: the fire path is *choosing* to release so the next shot is a new edge |
-| no active solve | `no-solve` | the ragebot is not aiming at anybody |
+| the weapon's fire interval has not elapsed | `interval` | the shot would be dropped by the engine — and on a semi-automatic weapon a press inside the interval is **the shot being wasted** |
+| the weapon's rate could not be read at all | `rate-unknown` | neither the engine's record nor the VData's cycle time was available: the rate is *unknown*, which is not the same fact as "the interval has not elapsed" |
 
 **The "unknown" degradation.** A weapon whose VData could not be read has an
 **unknown** fire mode. The fire path then treats it as **semi-automatic** —
@@ -1346,30 +1394,43 @@ and is always correct, while a held trigger on a semi-automatic weapon fires
 **The rate's two sources.** The engine's own record
 (`m_nNextPrimaryAttackTick`) is authoritative. When it cannot be read, the
 VData's cycle time is the fallback. When **neither** is available the gate
-refuses the shot (`interval`): *a gate that is wrong in the "don't fire"
-direction is safe; a gate that is wrong in the "fire" direction is not.*
+refuses the shot — and it says `rate-unknown`, not `interval`: a refusal the
+operator cannot act on is a silent refusal with a name on it. *A gate that is
+wrong in the "don't fire" direction is safe; a gate that is wrong in the
+"fire" direction is not.*
 
 ### 15.4 What the operator sees
 
 The HUD line (`rage: …`) and the `rage` command's JSON carry the fire path's
-verdict. The line's tail:
+verdict. The line:
 
 ```
-… s12 p13 e12 bt0 fire 1 semi ok stop
+rage: AIM tgt 12 box 1 obj hitchance s12 p13 e12 semi ok
 ```
 
 | field | meaning |
 |---|---|
+| `tgt` / `box` | the target's index and the hitbox |
+| `obj` | the objective's name |
 | `s` | the **engine's** shots — the clip fell while the ragebot was pressing |
 | `p` | the ragebot's **attempts** — the ticks the fire path decided to assert the attack |
-| `e` | the **release→re-press edges** the fire path produced (zero on a full-automatic weapon, whose trigger stays down) |
-| `fire 1` | the ragebot's fire is enabled |
+| `e` | the release→re-press **edges** the fire path produced |
 | `semi` / `auto` / `unknown` | the weapon's fire mode as the payload reads it |
-| `ok` / `no-ammo` / `reloading` / `deploying` / `interval` / `edge` / `no-solve` | the gate's verdict: `ok` when the shot can be taken, the blocking condition's name when it cannot |
-| `player-attack` | the **player** is holding the trigger — the engine sees one continuous press, so the edge is the player's to make |
+| `ok` / `no-solve` / `fire-off` / `clip-unknown` / `no-ammo` / `reloading` / `deploying` / `edge` / `interval` / `rate-unknown` | the gate's verdict: `ok` when the shot can be taken, the blocking condition's name when it cannot |
+| `player` | the **player** is holding the trigger — the engine sees one continuous press, so the edge is the player's to make |
+
+**The line fits the HUD's buffer.** The HUD's rage line has a **192-byte**
+buffer (`payload/features/src/overlay.cpp`), and the line must fit it in the
+**worst** case — every field at its longest. The fields that do not fit are
+the aim **writes** and the **backtracks**: they are diagnostics, and they are
+in the `rage` command's JSON (`writes`, `backtracks`) instead. The `fire`
+toggle is not on the line either: the refusal says `fire-off` when the fire
+path is disabled, which is the same fact and costs less. The host test drives
+every field to its longest and measures the line (**185** characters).
 
 The JSON carries the same facts under `shots`, `presses`, `edges`,
-`fire_mode`, `fire_refusal` and `player_attack`.
+`fire_mode`, `fire_refusal` and `player_attack`, plus `writes` and
+`backtracks`.
 
 **`shots` changed meaning.** The counter that used to answer `shots` counted
 the **commands** the attack was asserted on — the ragebot's *attempts*, not
@@ -1377,23 +1438,56 @@ shots (on a full-automatic weapon it grew at the tick rate). It is now the
 **engine's** shots, detected by the clip falling, and the attempts are
 `presses`.
 
+**A reload is not a shot, and a failed read is not a shot.** The detector
+needs **both** clip readings to be known and **neither** to be a reload: a
+manual reload empties the magazine (30 → 0 → 30), and a **failed** read (a
+stale weapon entity, a weapon switch between the snapshot and the read)
+reads as zero. Neither is the engine's shot.
+
+**`e` is not always zero.** On a full-automatic weapon the trigger stays
+down, so there is no edge — but an automatic weapon whose clip empties
+produces a withdrawal (`no-ammo`), and the next press after the reload counts
+as an edge.
+
 ### 15.5 What the host proves and what only the game can prove
 
-**The host tests prove that the payload *emits* the edge**: the decision is a
-pure function (`cs2/control/strafe_geometry.hpp`'s fire path), and the test
-drives it — the fire mode's classification, the edge between two shots on a
-semi-automatic weapon, the gate's every blocking condition, the unknown
-mode's conservative path, and the rule that the ragebot's withdrawal never
-clears the player's own press.
+**The host tests prove that the payload *emits* the edge** — and they drive
+the **whole wiring**, not a neighbour of it:
+
+| what | the test |
+|---|---|
+| the **decision** — the edge, the gate, the fire mode, the refusals | `decide_fire` is a pure function (`cs2/control/strafe_geometry.hpp`), and the test drives it |
+| the **write** — the command's mask, the PB's button words and the movement services' word | `compose_fire_write` is a pure function, and the payload calls **it** |
+| the **edge on the command** | the test drives the payload's own per-tick loop: press → withdraw → press, and asserts that the command's attack bit goes **1 → 0 → 1** |
+| the **player's press survives** | the same loop, with the player holding the trigger: the withdrawal must leave the bit set |
+| the **command cache** | `FireCommandCache` is a pure class, and the test drives it |
+| the **shot counter** | `is_engine_shot` is a pure function: a reload and a failed read are not shots |
+| the **status line** | `format_rage_status` is a pure function, and the test drives every field to its longest |
+| the **wiring** | the test reads the payload's own source (`input.cpp`) and asserts that the composition is the pure function's, that the ragebot's press is the **service's decision**, and that the player's own press is the engine's own bit |
+
+The last one is what catches the two breaks the review named: a ragebot that
+holds `IN_ATTACK` down on every command (the original defect) and a
+withdrawal that takes the player's own press away (the rule the repo states)
+are both one line away from the pure functions, and the pure functions'
+tests cannot see a line that is not called.
 
 **They cannot prove that the engine *honours* the edge.** Whether a
-semi-automatic weapon really needs a release→re-press, and whether the
-engine reads the release from the command's mask, from the PB's button state
-or from the movement services' held word, is **engine behaviour**: only the
-operator's live run can show it. The payload writes the release to **all
-three** places (the command's mask, the PB's `CInButtonState` and the
-movement services' held word), so the engine sees it whichever one it
-reads.
+semi-automatic weapon really needs a release→re-press, and whether the engine
+reads the release from the command's mask, from the PB's button state or from
+the movement services' held word, is **engine behaviour**: only the
+operator's live run can show it.
+
+#### The three channels, and what each of them carries
+
+| channel | what the payload writes | the release |
+|---|---|---|
+| the command's legacy mask (`cmd + 0x60`) | the attack bit, **replaced** by the contributors | the bit goes to **zero** |
+| the PB's `CInButtonStatePB` | the **held** word (`buttonstate1`) follows the command's mask — **always**, not only when there is something else to write; the **changed** word (`buttonstate2`) carries the attack on a press and on a withdrawal | the held word goes to **zero** |
+| the movement services' `CInButtonState` (word 0) | the **held** word follows the command's mask — **always** | the word goes to **zero** |
+
+So the release is written to **all three** — and the earlier claim was false
+for two of them, because the PB's block was guarded by "there is something to
+write" and the movement services' word was only ever *set*.
 
 ### 15.6 The known limits
 
@@ -1407,7 +1501,15 @@ reads.
 - **The shot attribution is a best guess.** `shots` counts the clip falling
   while the ragebot was pressing; with the player firing as well, the two
   cannot be told apart. `presses` and `player_attack` are there to read it.
-- **The decision is made once per tick**, so the command the slot-25 hook
-  writes (a copy of the command) can carry the previous tick's answer. The
-  command the movement services simulate carries the current one.
-
+- **The decision is made once per tick**, so every command of the tick
+  carries the same answer. Which of the two commands the engine reads first
+  is not observed at runtime (`docs/re/angle-split.md`): slot 5 runs first
+  and slot 25 second, but the engine's own ordering of the two slots follows
+  from the signatures, not from a measurement.
+- **The engine's own press is read per command.** A command the payload has
+  already put its own press on is not a clean reading, so the cached value is
+  used for it. The engine builds a new command every tick, so the reading is
+  refreshed every tick.
+- **Whether the engine honours the edge is engine behaviour** — the host
+  tests prove the payload *emits* it, the operator's live run proves the
+  engine *reads* it.
