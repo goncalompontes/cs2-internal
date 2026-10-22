@@ -371,6 +371,45 @@ void test_the_rule_covers_the_wires_rage_fields(const std::string& root) {
   expect(named == cs2::control::RAGE_FIELD_ALL, "the named fields are every field");
 }
 
+// The rule's **contract**, end to end: the control channel's value survives
+// the menu's next frame, and the menu's value wins when the operator changes
+// the field.
+//
+// This is the rule used the way the sink uses it (compare the published group
+// against the last view, apply the fields that moved), so it pins the
+// behaviour the spec asks for — not the wiring, which the source checks below
+// cover.
+void test_the_rule_keeps_the_control_channels_value() {
+  // The control channel set the objective (the Monte-Carlo one — the menu
+  // cannot select it).
+  int in_force = 3;
+  // The menu's last view of the block: the hitchance.
+  const auto view = default_snapshot();
+  // The menu publishes its block again, unchanged.
+  const auto published = default_snapshot();
+  const std::uint32_t unchanged = cs2::control::rage_changed_fields(published, view);
+  if ((unchanged & cs2::control::RAGE_FIELD_OBJECTIVE) != 0) {
+    in_force = published.objective;
+  }
+  expect(in_force == 3, "the control channel's objective survives the menu's next frame");
+  // The operator changes **another** field in the menu.
+  auto other = published;
+  other.fov = 90.0F;
+  const std::uint32_t elsewhere = cs2::control::rage_changed_fields(other, published);
+  if ((elsewhere & cs2::control::RAGE_FIELD_OBJECTIVE) != 0) {
+    in_force = other.objective;
+  }
+  expect(in_force == 3, "the control channel's objective survives a change to another field");
+  // The operator changes the objective itself: the menu's value wins.
+  auto edited = published;
+  edited.objective = 0;
+  const std::uint32_t moved = cs2::control::rage_changed_fields(edited, published);
+  if ((moved & cs2::control::RAGE_FIELD_OBJECTIVE) != 0) {
+    in_force = edited.objective;
+  }
+  expect(in_force == 0, "the menu's objective wins when the operator changes it");
+}
+
 // The status says **which channel owns the objective**.
 void test_the_status_names_the_owner() {
   expect(cs2::control::rage_owner_name(cs2::control::RAGE_FIELD_OBJECTIVE,
@@ -506,6 +545,7 @@ auto main(int argc, char** argv) -> int {
   test_an_unchanged_block_reports_nothing();
   test_the_menus_recompute_converges();
   test_the_weapon_key_is_compared_as_a_name();
+  test_the_rule_keeps_the_control_channels_value();
   test_the_status_names_the_owner();
 
   if (argc >= 2) {
