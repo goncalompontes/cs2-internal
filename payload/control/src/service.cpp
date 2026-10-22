@@ -1331,18 +1331,6 @@ void Service::set_rage_features(bool on, int key, bool fire, int objective, int 
   if ((fields & RAGE_FIELD_OBJECTIVE) != 0) {
     rage_objective_.store(objective);
   }
-  // **The objective the menu's tab is showing.** The menu cannot show the
-  // Monte-Carlo objective, so the tab and the ragebot can disagree — and the
-  // menu may not be touched to say so. The status is where the difference is
-  // visible (`objective` is the objective in force, `menu_objective` is the
-  // one on the tab), so the menu's own value is recorded on **every** menu
-  // write, masked or not.
-  //
-  // Only the menu's write records it: the control channel's write carries the
-  // service's own value, which is not what the tab shows.
-  if (source == RageSource::menu) {
-    rage_menu_objective_.store(objective, std::memory_order_relaxed);
-  }
   if ((fields & RAGE_FIELD_HITBOX) != 0) {
     rage_hitbox_.store(hitbox);
   }
@@ -1387,6 +1375,18 @@ void Service::set_rage_features(bool on, int key, bool fire, int objective, int 
     if (weapon != nullptr) {
       rage_weapon_key(weapon, rage_weapon_, sizeof(rage_weapon_));
     }
+  }
+  // **The objective the menu's tab is showing.** The menu cannot show the
+  // Monte-Carlo objective, so the tab and the ragebot can disagree — and the
+  // menu may not be touched to say so. The status is where the difference is
+  // visible (`objective` is the objective in force, `menu_objective` is the
+  // one on the tab), so the menu's own value is recorded on **every** menu
+  // write, masked or not.
+  //
+  // Only the menu's write records it: the control channel's write carries the
+  // service's own value, which is not what the tab shows.
+  if (source == RageSource::menu) {
+    rage_menu_objective_.store(objective, std::memory_order_relaxed);
   }
   // The ownership: the fields this write carried belong to its writer now.
   note_rage_owner(fields, source);
