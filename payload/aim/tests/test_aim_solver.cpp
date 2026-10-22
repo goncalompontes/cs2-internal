@@ -406,6 +406,13 @@ auto main() -> int {
     expect(!filtered.monte_carlo_refusal.has_value(), "the scene is not refused");
     expect(filtered.monte_carlo.has_value() && filtered.monte_carlo->probability > 0.0F,
            "the good target is still found");
+    // **The filter's count travels with the verdict**: a dropped hitbox makes
+    // the measured probability a **lower bound** on the truth, and a silent
+    // lower bound is a number the operator would read as exact.
+    expect(filtered.monte_carlo.has_value() && filtered.monte_carlo->filtered_hitboxes == 1,
+           "the verdict says how many hitboxes the filter dropped");
+    expect(result.monte_carlo.has_value() && result.monte_carlo->filtered_hitboxes == 0,
+           "a clean scene drops nothing");
 
     // --- the refusal: the weapon's pattern is not modelled ------------------
     // The shotgun's pellet pattern table is not modelled, so the core refuses —

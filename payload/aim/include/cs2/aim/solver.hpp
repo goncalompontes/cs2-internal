@@ -114,6 +114,15 @@ struct MonteCarloVerdict {
   int target = -1;        // the target of the nearest hit
   int hitgroup = 0;       // the hitgroup of the nearest hit
   bool can_kill = false;  // does the attributed damage reach the target's health?
+  // How many hitboxes the **filter** dropped for the core.
+  //
+  // The reader does not validate the shape it reads, so a malformed hitbox
+  // (a capsule with a radius of zero) reaches the solver; the core refuses a
+  // scene that holds one, so the objective filters the set for the core
+  // (`docs/ragebot.md` §13.3). **The number is published**, because a dropped
+  // hitbox makes the measured probability a **lower bound** on the truth — and
+  // a silent lower bound is a number the operator would read as exact.
+  int filtered_hitboxes = 0;
 };
 
 struct SolveResult {

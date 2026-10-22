@@ -51,6 +51,11 @@ namespace {
     }
     hitboxes = std::span<const Hitbox>{filtered};
   }
+  // **How many the filter dropped.** A dropped hitbox makes the measured
+  // probability a **lower bound** on the truth, so the count travels with the
+  // verdict (`MonteCarloVerdict::filtered_hitboxes`): a silent lower bound is
+  // a number the operator would read as exact.
+  const int filtered_hitboxes = static_cast<int>(input.hitboxes.size() - hitboxes.size());
   if (hitboxes.empty()) {
     result.monte_carlo_refusal = MonteCarloError::no_hitboxes;
     return field.argmax_damage();
@@ -89,7 +94,8 @@ namespace {
                                          .seed_source = choice->chance.source,
                                          .target = choice->target,
                                          .hitgroup = choice->hitgroup,
-                                         .can_kill = choice->can_kill};
+                                         .can_kill = choice->can_kill,
+                                         .filtered_hitboxes = filtered_hitboxes};
   return choice->aim;
 }
 

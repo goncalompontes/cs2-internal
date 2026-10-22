@@ -725,6 +725,9 @@ class AimResult(TypedDict):
     mc_target: int
     mc_hitgroup: int
     mc_can_kill: bool
+    #: How many hitboxes the filter dropped for the core (a dropped hitbox
+    #: makes the measured probability a lower bound on the truth).
+    mc_filtered: int
     #: The seed policy's name (``"sequence"`` or ``"angle_grid"``).
     mc_seed: str
     #: Whether the seed's sequence is a **fallback** (the prediction tick
@@ -814,6 +817,9 @@ class RageResult(TypedDict, total=False):
     mc_hits: int
     #: Whether the damage attributed to the target reaches its health.
     mc_can_kill: bool
+    #: How many hitboxes the filter dropped for the core (a dropped hitbox
+    #: makes the measured probability a lower bound on the truth).
+    mc_filtered: int
     #: The reason the solver refused (empty when it did not).
     mc_refusal: str
     #: Whether the solve fell back to another objective.

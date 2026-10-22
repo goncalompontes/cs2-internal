@@ -2391,6 +2391,7 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
       state.hitgroup = result.monte_carlo->hitgroup;
       state.hits = result.monte_carlo->hits;
       state.can_kill = result.monte_carlo->can_kill;
+      state.filtered_hitboxes = result.monte_carlo->filtered_hitboxes;
     } else {
       state.refusal = result.monte_carlo_refusal.has_value()
                           ? static_cast<int>(*result.monte_carlo_refusal)
@@ -3009,6 +3010,8 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
     payload.set("mc_target", Json::number(static_cast<double>(result.monte_carlo->target)));
     payload.set("mc_hitgroup", Json::number(static_cast<double>(result.monte_carlo->hitgroup)));
     payload.set("mc_can_kill", Json::boolean(result.monte_carlo->can_kill));
+    payload.set("mc_filtered",
+                Json::number(static_cast<double>(result.monte_carlo->filtered_hitboxes)));
     const int seed = static_cast<int>(result.monte_carlo->seed_source);
     payload.set("mc_seed", Json::string(std::string(seed_source_name(seed))));
     // **The seed's disclosure** (`docs/ragebot.md` §13.7): under the `sequence`
@@ -3274,6 +3277,7 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
     payload.set("mc_hitgroup", Json::number(static_cast<double>(state.hitgroup)));
     payload.set("mc_hits", Json::number(static_cast<double>(state.hits)));
     payload.set("mc_can_kill", Json::boolean(state.can_kill));
+    payload.set("mc_filtered", Json::number(static_cast<double>(state.filtered_hitboxes)));
     const int refusal = state.refusal;
     payload.set(
         "mc_refusal",

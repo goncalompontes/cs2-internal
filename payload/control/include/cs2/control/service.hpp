@@ -534,6 +534,9 @@ class Service {
     int hitgroup = 0;              // the hitgroup of the nearest hit
     int hits = 0;                  // how many of the samples hit
     bool can_kill = false;         // does the attributed damage reach the target's health?
+    // How many hitboxes the filter dropped for the core: a dropped hitbox
+    // makes the measured probability a **lower bound** on the truth.
+    int filtered_hitboxes = 0;
   };
   mutable std::mutex rage_mc_mutex_;
   MonteCarloState rage_mc_state_{};

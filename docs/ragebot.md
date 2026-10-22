@@ -1217,3 +1217,11 @@ stamps the hitboxes with the index of the target it chose, and the health
 entry is built from that same index, so the Monte-Carlo's can-kill key works
 in the `aim` path too (it was dead there: `mc_target` was always -1 and
 `mc_can_kill` always false).
+
+**A dropped hitbox is visible.** The reader does not validate the shape it
+reads, so a malformed hitbox reaches the solver; the core refuses a scene
+that holds one, so the objective filters the set for the core. A dropped
+hitbox makes the measured probability a **lower bound** on the truth, so
+the count travels with the verdict and the status carries it as
+`mc_filtered` — a silent lower bound is a number the operator would read
+as exact.
