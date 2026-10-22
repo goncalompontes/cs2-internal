@@ -18,12 +18,14 @@ string literals, and analyses whether a function *could* be virtualized.
 | **T19** — the call encryption | **merged** | a direct call to a same-module callee becomes an indirect dispatch through an encrypted descriptor; relocation-safe |
 | **T20a** — the virtualizer's front end | **merged** | the ISA (one `isa.def`), the fail-closed gate, the IR→bytecode lowering, the encoder (encrypted, per-build opcode permutation). **Read-only**: the image does not change |
 | **T21** — the string encryption | **merged** | the string selection, the gate, the encryption, the decode emitted into the using function, the salted coverage, the image scan — **and the measurement that says the strings do not leave the image** (§3.2) |
-| **T23a** — the cross-TU routing | **in review** | a call to a declaration the policy's `cross_module` list names goes through the caller's own table; the dispatch count 37 → 51 |
-| **T24** — the per-build polymorphism | **in flight** | the seed becomes mandatory, the mixer's constants and rotation become per-build, the pass permutes the module's function list |
+| **T23a** — the cross-TU routing | **merged** | a call to a declaration the policy's `cross_module` list names goes through the caller's own table; the dispatch count **37 → 51**; the 14 cross-TU edges of the aim graph (4 of them EH edges) leave the image |
+| **T24** — the per-build polymorphism | **in review** | the seed becomes mandatory, the mixer's constants and rotation become per-build, the pass permutes the module's function list: **83.53 %** of the `.text` differs between two seeded builds |
+| **T23b** — the `sret` edges | **specced** | the last 12 cross-TU edges: T19's refusal of a struct-returning callee is a *policy*, not a limit of the target (`llc` accepts an indirect `sret` call) |
+| **T22** — the integrity check | **specced** | a post-link binder and a run-time self-check: anti-tamper, not anti-reversal |
 
 **T20b (the interpreter) and T20c (the VM in the payload) are deferred** — the
 gate measured the eligible set and it is **empty** for the payload's real code
-(§3.1). T22 (integrity) and T23b (the `sret` edges) are not started.
+(§3.1).
 
 ## 2. Where the work is
 
@@ -92,13 +94,24 @@ the "strings leave the image" follow-up was **dropped** rather than scheduled.
 Of the 332 call sites of the six protected functions, 37 are rewritten and 295
 are skipped — but 179 of those are **intrinsics** and 59 are **CRT calls**.
 The hole that matters is **26 cross-TU call sites to 24 payload functions**:
-the aim graph. T23a closes the 14 ordinary ones; T23b (the `sret` edges) is
-not started.
+the aim graph. **T23a closes 14 of them** (4 of them EH edges, which the
+review verified at run time: the exception is still caught through the
+rewritten indirect `invoke`). **T23b** closes the 12 `sret` ones.
+
+**And the edges that are not protected are not "hidden".** The same symbols
+are still called **directly** from the *unprotected* functions - the reviewer
+proved it at the object level (24 `REL32` relocations against
+`?polygon_contains`, `?polygon_centroid` and `?yaw_scale` in
+`src_field.cpp.obj`). The check now **measures and reports** that number
+(46 on the merged tree) rather than claiming the edges are gone: the pass
+rewrites the calls of the *selected* functions, and only those.
 
 And the seed: two builds with different seeds differ in **441 bytes** of
 `.rdata` and **not one byte** of the 1.7 MB `.text` — so a scanner that hashed
 the code would match every build. Two builds with **no** seed are
-byte-identical: the fallback is a constant of the payload. That is T24.
+byte-identical: the fallback is a constant of the payload. That is T24, and
+it is in review: **83.53 %** of the `.text` now differs between two seeded
+builds.
 
 ## 4. The environment
 
