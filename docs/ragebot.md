@@ -961,3 +961,271 @@ a cone 2.4× tighter than the Gaussian's).
 > narrowed instead (`artifacts/*` plus `!artifacts/live-heatmap.json`), so the tree
 > no longer contradicts its own ignore rule and a new artifact is still ignored
 > (the review's m11).
+
+## 14. The live Monte-Carlo objective (alongside, not instead)
+
+> Added 2026-10-21 — task T35 (`docs/orchestration/spec-t35-montecarlo-live.md`).
+> **The core is in the live path now.** `AimObjective::monte_carlo` is selectable
+> from the control channel and from the per-weapon profile, so the operator can
+> live-test the Monte-Carlo solver against the damage-field one. The four
+> existing objectives (`damage`, `hitchance`, `expected`, `pellets`) are
+> **unchanged** and stay selectable — the host test proves it against the
+> field's own optima (`aim-solver`), not by assertion.
+
+### 14.1 How to select it
+
+The objective is selected over the **control channel** (`rage`) or from the
+**per-weapon profile** (the `objective` byte in `cs2-rage.cfg`):
+
+```json
+{"command": "rage", "args": {"objective": "monte_carlo"}}
+{"command": "rage", "args": {"objective": "hitchance"}}
+```
+
+The names, the values and the seed policy's names are **pure rules**
+(`cs2/control/rage_objective.hpp`) and they are host-tested
+(`control-rage-objective`): the `rage` command maps a name to the profile's
+byte, the `aim` command maps a name to the solver's `AimObjective`, and the
+status maps the byte back to a name. The service's call sites **use** those
+rules — a source check in the same test proves they do not re-implement the
+mapping inline.
+
+| name | the profile's byte | the `aim` command's objective |
+|---|---|---|
+| `damage` | 0 | `AimObjective::damage` |
+| `hitchance` | 1 | `AimObjective::hitchance` |
+| `expected` | 2 | `AimObjective::expected` |
+| `monte_carlo` | 3 | `AimObjective::monte_carlo` |
+| `pellets` | — (the default) | `AimObjective::pellets` |
+
+**An unknown name selects the hitchance** — the value the control channel has
+always used for a name it did not know. So a typo cannot silently switch the
+solver, and it cannot silently switch it to the *new* objective either.
+
+The per-weapon profile's `objective` byte round-trips through a save and a load
+(`control-rage-config`), and **a garbage byte in a config file loads as the
+documented safe default** — never as an arbitrary objective.
+
+### 14.2 The numbers mean something different — read this before comparing
+
+**This is the most important thing to know about the new objective.** The two
+solvers report the *same field names* with *different meanings*.
+
+| | the old objectives | the Monte-Carlo objective |
+|---|---|---|
+| `hitchance` | a **Gaussian mass** over the field, whose σ is **√6 too wide** (`docs/research/aim-objective-math.md` §"the √6 sigma") | the **measured** chance that the shot hits: the fraction of the samples that hit |
+| `value` | the damage of a shot that **hits** (the field's value at the aim) | the **expected** damage: a miss contributes 0 |
+
+The two consequences for the gates:
+
+* **`min_hitchance` passes more shots under the Monte-Carlo objective.** For a
+  head-sized target the truth is **0.777** and the old model reports **0.221** —
+  the old gate was asking for a *much* higher true probability than its number
+  suggested. The same operator value therefore blocks far less under the
+  Monte-Carlo objective. To keep the old strictness, raise the value to about
+  the truth (**0.78** for that head-sized case), not the 0.22 the old model
+  showed.
+* **`min_damage` blocks more shots under the Monte-Carlo objective.** A 50 % hit
+  chance on 100 damage reports **50**, not 100. So a `min_damage` tuned against
+  the old objective (which saw the *hit* damage) is too high here: lower it, or
+  read it as "the damage I expect".
+
+The status says which objective produced the numbers (§14.6), so the two are
+never confused.
+
+### 14.3 The seed context: the tick, and the sequence's fallback
+
+The Monte-Carlo solver needs a **sequence** number and a **tick**
+(`cs2/aim/montecarlo.hpp`).
+
+* The **tick** is the prediction tick the service already works with: the local
+  controller's `m_nTickBase`, the tick the client is simulating
+  (`docs/re/lagcomp.md`). It is exact.
+* The **sequence** is the command's sequence number — the thing
+  `MD5_PseudoRandom(sequence)` is derived from (`docs/re/aim.md` §"The seed").
+  **It is not reachable from where the service sits.** The `Input` module owns
+  the `CUserCmd` pointer and exposes no accessor for the command's number, and
+  the one that exists (`bhop_cmd_number`) is refreshed by the **bunnyhop assist**
+  alone — so it is zero when the assist is off and stale when it is on. A number
+  that is the game's own must not be presented as such, so the **documented
+  fallback** is used: the prediction tick stands in for the command number (the
+  seeds are `md5(tick + i)` — the same structure, a tick instead of a command).
+  The status says so: `mc_seed_fallback` is **true** and `mc_seed_note` names
+  the reason.
+
+The **seed policy** is selectable the same way the objective is:
+
+```json
+{"command": "rage", "args": {"seed": "angle_grid"}}
+```
+
+| policy | the number means | the status |
+|---|---|---|
+| `sequence` (the default) | the **expectation over the next N shots** | `mc_seed_fallback: true` — the tick stands in for the command number |
+| `angle_grid` | the **probability over the shot that would be taken** | `mc_seed_fallback: false`, and `mc_seed_note` says the numbers are **indicative, not exact** |
+
+### 14.4 The weapon's pattern: the revolver's `1 - r²`
+
+The core's `spread_kernel` takes the weapon's **pattern** as a required
+argument — there is no default, because a default would drop the revolver's
+`r → 1 - r²` transform without a word (§13.2). `WeaponProfile` carries the
+weapon *type* only, and a revolver is type 3 like every rifle, so the pattern
+cannot be inferred from it.
+
+**The rule is keyed on the designer name** (`cs2/control/rage_objective.hpp`):
+`weapon_revolver` gets the revolver's pattern, every other name gets the
+standard one. The name is what the game's own `PlayerSnapshot::weapon` carries
+(`weapon_ak47`, `weapon_revolver`, …).
+
+**A weapon the payload could not name** (an empty designer name) gets the
+standard pattern: it is the pattern every weapon except the revolver uses, so
+it is the conservative choice. The status carries the weapon's name, so an
+operator can always see which weapon was classified.
+
+### 14.5 The sample count is 64
+
+The **default is 64** — the only count that fits the frame budget at a
+live-sized hitbox set (57 hitboxes for three targets; 128 is over the 12 ms
+guard and 256 is over the tick, §13.6). A different count must be an
+**explicit** choice:
+
+```json
+{"command": "rage", "args": {"samples": 128}}
+```
+
+and the status always shows the count in force (`mc_samples`).
+
+**The cost with the backtracking pass.** One Monte-Carlo solve is ~4.3 ms at a
+live-sized set (§13.6), and the backtracking pass is a **full solve per pose**.
+With `backtrack=1` the Monte-Carlo objective therefore costs `poses × ~4.3 ms`
+per tick, which does **not** fit the 12 ms guard. Turn the backtracking off
+while live-testing the Monte-Carlo objective.
+
+### 14.6 What the status shows
+
+The `rage` command's payload carries the objective **by name** (not by number —
+the numbers mean different things under each objective, §14.2) and the
+Monte-Carlo's own state:
+
+| field | what it is |
+|---|---|
+| `objective` | the objective's **name** (`"monte_carlo"`, `"hitchance"`, …) |
+| `objective_value` | the profile's byte (0…3) |
+| `mc_samples` | the sample count in force (**64** by default) |
+| `mc_seed` | the seed policy (`"sequence"` / `"angle_grid"`) |
+| `mc_seed_fallback` | whether the seed's sequence is the fallback (**true** under `sequence`) |
+| `mc_seed_note` | what the number means, and whether it is exact |
+| `mc_hitchance` | the Monte-Carlo's measured probability |
+| `mc_expected_damage` | the Monte-Carlo's expected damage |
+| `mc_target` | the target the nearest hit named |
+| `mc_refusal` | the reason the solver refused ("" when it did not) |
+| `mc_fallback` | **true** when the aim came from the `damage` objective instead |
+| `mc_valid` | whether the last solve produced a Monte-Carlo verdict |
+
+**A refusal is never silent.** When the Monte-Carlo solver refuses — the
+weapon's pattern is not modelled (the shotgun, the machineguns), the sample
+count is not positive, the scene is malformed — the objective falls back to
+`damage` (the cheapest, always-available one) and the **reason** lands in
+`mc_refusal` with `mc_fallback: true`. The one-line HUD status carries the
+objective's name as well (`obj monte_carlo`).
+
+The `aim` command (the one-shot probe) reports the same verdict in its own
+payload: `mc_samples`, `mc_hits`, `mc_hitchance`, `mc_expected_damage`,
+`mc_target`, `mc_hitgroup`, `mc_can_kill`, `mc_seed`, `mc_refusal`.
+
+### 14.7 The limits
+
+The two limits of §13.7 are the live objective's limits too:
+
+* **The hitbox geometry only.** The Monte-Carlo solver does not model the
+  world: it scores the hitboxes, not the walls. Whether the shot is *visible*
+  (or penetrates a wall) is still the existing machinery's job — the candidate
+  set is the field's **occlusion-filtered** cells, and the `only_visible` gate
+  still uses the field's `penetrated` flag.
+* **The stand-in hash.** Under the `angle_grid` policy the seed is a function
+  of a hash that is **ours**, not the engine's unreverse-engineered
+  `get_tick_view_angles`. The numbers that policy produces are **indicative,
+  not exact**.
+
+And the two the live path adds:
+
+* **The seed's sequence is a fallback** (§14.3): the tick stands in for the
+  command's sequence number, and the status says so.
+* **The `√6` σ correction is not applied** — it is still blocked on the
+  `sqrt(r)` RE question (§13.7). It does not matter for the Monte-Carlo
+  objective (the kernel is sampled, not blurred), but it is why the *old*
+  objective's numbers are not comparable with the new one's.
+
+### 14.8 The files
+
+| file | what |
+|---|---|
+| `payload/aim/include/cs2/aim/solver.hpp` | the `monte_carlo` objective, the `SolveInput`'s Monte-Carlo parameters, the verdict and the refusal |
+| `payload/aim/src/solver.cpp` | the dispatch: the core's input, the search over the field's cells, the fallback |
+| `payload/aim/tests/test_aim_solver.cpp` | the objective's host test (`aim-solver`) |
+| `payload/control/include/cs2/control/rage_objective.hpp` | the **pure rules**: the names, the values, the seed policy, the weapon's pattern |
+| `payload/control/tests/test_control_rage_objective.cpp` | their host test (`control-rage-objective`) |
+| `payload/control/src/service.cpp` | the live path: the objective switch, the seed context, the health, the status |
+| `payload/control/include/cs2/control/rage_config.hpp` | the profile's `objective` byte and the line codec |
+| `payload/control/tests/test_control_rage_config.cpp` | the profile's round trip (`control-rage-config`) |
+
+### 14.9 The review round (2026-10-22)
+
+The adversarial review of T35 found four majors and a dozen minors. The fixes
+that change what the operator sees are here; the rest are in the ledger
+(`docs/known-issues.md` §13).
+
+**The status names the *effective* objective.** With a per-weapon profile the
+solve runs the **profile's** objective, not the global one, so `objective` is
+the effective one and `objective_global` is the setting; `objective_value` is
+the effective objective's byte.
+
+**The status carries the verdict's whole shape.** `mc_can_kill`, `mc_hitgroup`
+and `mc_hits` are there now (they were only in the `aim` command's payload),
+and the verdict is published as **one value** — a reader can never see a
+half-published verdict, so a refusal can no longer be hidden by a torn read.
+
+**The `aim` command's payload carries the seed's disclosure**
+(`mc_seed_fallback`, `mc_seed_note`) and the sample count's note.
+
+**The HUD line carries the Monte-Carlo's marker.** `obj monte_carlo mc83%` is
+the measured probability; `mc-refused` says the solver refused and the aim
+came from the `damage` objective (§2.4: a fallback must never be silent, and
+the HUD is where the operator actually looks). The line's tail no longer
+carries the backtracking record and the occluder count — both are in the
+`rage` command's JSON status — so the line still fits its 128-byte buffer.
+
+**The sample count behaves the same way in both entry points.** A count
+outside 1..256 is **ignored** (the count in force is unchanged) and
+`mc_samples_note` says so; a count above 64 is honoured, and the note says it
+does not fit the tick.
+
+**The backtracking budget is visible.** `backtrack_over_budget` is true when
+the last tick skipped the backtracking because the frame had already blown
+the 12 ms guard — otherwise the operator sees the backtrack counter stop
+incrementing with no explanation.
+
+**The `aim` command's Monte-Carlo kernel is never degenerate.** The weapon's
+spread, its inaccuracy and its type always come from the game (the caller's
+profile sets only the damage model), so a probe with `damage=36` measures a
+real weapon's spread instead of a perfect one. The weapon type falls back to
+the snapshot's own read when the VData could not be read, so a shotgun is
+refused rather than scored with the standard pattern.
+
+**The health list and the hitboxes speak about the same target.** The reader
+stamps the hitboxes with the index of the target it chose, and the health
+entry is built from that same index, so the Monte-Carlo's can-kill key works
+in the `aim` path too (it was dead there: `mc_target` was always -1 and
+`mc_can_kill` always false).
+
+**A dropped hitbox is visible.** The reader does not validate the shape it
+reads, so a malformed hitbox reaches the solver; the core refuses a scene
+that holds one, so the objective filters the set for the core. A dropped
+hitbox makes the measured probability a **lower bound** on the truth, so
+the count travels with the verdict and the status carries it as
+`mc_filtered` — a silent lower bound is a number the operator would read
+as exact.
+
+**The HUD line's buffer is 192 bytes.** The line carries the objective's
+name, the Monte-Carlo's marker and the two occlusion markers, and the old
+128-byte buffer cut the last of them off.
