@@ -447,6 +447,20 @@ class Service {
   // render thread. Uses the latest snapshot (the hitboxes are re-read fresh here) and the
   // occlusion hulls the hook just enumerated (`docs/ragebot-perf.md` §3.3).
   void rage_tick(const game::Snapshot& snapshot) noexcept;
+  // The **fire path** (`docs/ragebot.md` §"the fire path"): the gate that
+  // asks whether the weapon can take the shot at all, and the edge a
+  // semi-automatic weapon needs between two shots.
+  //
+  // It runs on the **game thread** (from `on_game_thread`, once per tick, so
+  // every command of the tick carries the same answer) and reads the weapon's
+  // state there — the clip, the reload, the deploy and the engine's own
+  // next-attack record. The decision is published to the `Input`, which puts
+  // the attack bit on the command.
+  void decide_rage_fire(const game::Snapshot& snapshot) noexcept;
+  // The weapon's **fire state**, read fresh on the game thread: the clip, the
+  // reload flag, the deploy tick and the engine's own next-attack record.
+  void read_weapon_fire_state(const game::PlayerSnapshot& local,
+                              FireCapability& capability) const noexcept;
   static void game_thread_entry(void* context) noexcept;
   // The common `input`/`press`/`bhop` status payload.
   [[nodiscard]] Json input_status() noexcept;
@@ -610,6 +624,32 @@ class Service {
   bool rage_scope_applied_ = false;
   std::atomic<std::uint64_t> rage_solves_{0};
   std::atomic<int> rage_last_target_{-1};
+  // The **fire path** (`docs/ragebot.md` §"the fire path"): the weapon's fire
+  // mode as the payload reads it, the gate's verdict, and the three counters
+  // the status reports.
+  //
+  //   * `rage_shots_` — the **engine's** shots: the clip fell while the
+  //     ragebot was pressing. (The counter that used to live in the `Input`
+  //     counted the *commands* the attack was asserted on — the ragebot's
+  //     attempts, not shots.)
+  //   * `rage_presses_` — the ragebot's **attempts**: the ticks the fire path
+  //     decided to assert the attack.
+  //   * `rage_edges_` — the **release->re-press edges** the fire path produced
+  //     (the shots a semi-automatic weapon needs; zero on a full-automatic
+  //     one, whose trigger stays down).
+  std::atomic<int> rage_fire_mode_{0};  // FireMode
+  std::atomic<int> rage_refusal_{0};   // FireRefusal
+  std::atomic<std::uint64_t> rage_shots_{0};
+  std::atomic<std::uint64_t> rage_presses_{0};
+  std::atomic<std::uint64_t> rage_edges_{0};
+  // The fire path's own bookkeeping (the **game thread** only): the last
+  // press (the edge's origin), the weapon and the clip the last tick saw (the
+  // engine's shot detector), and the previous decision.
+  std::uint64_t rage_last_press_us_{0};
+  std::uintptr_t rage_prev_weapon_{0};
+  int rage_prev_clip_{0};
+  bool rage_prev_press_{false};
+  bool rage_withdrawn_{false};
   // Backtracking (`docs/ragebot.md` §8): how many solves chose a lag record over the
   // live pose, and the tick of the last chosen record (-1 = live).
   std::atomic<std::uint64_t> rage_backtracks_{0};

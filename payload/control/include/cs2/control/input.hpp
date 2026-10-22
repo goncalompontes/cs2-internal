@@ -734,9 +734,25 @@ class Input {
   // even when the trigger is not engaged.
   void clear_rage_aim_keep_aux() noexcept {
     rage_active_.store(false);
+    rage_press_.store(false);
   }
   void set_rage_fire(bool on) noexcept {
     rage_fire_.store(on);
+  }
+  // The **fire path's** decision (`docs/ragebot.md` §"the fire path"): whether
+  // the ragebot contributes the attack bit to the command.
+  //
+  // The decision is made by the service on the **game thread** — it reads the
+  // weapon's state there — and it is made **once per tick**, so every command
+  // of the tick carries the same answer. The ragebot's contribution is
+  // **scoped**: withdrawing it leaves the engine's own mask alone, so the
+  // player's own press of the attack button survives (`strafe_geometry.hpp`'s
+  // `compose_button_mask` only ever *adds* the features' bits).
+  void set_rage_fire_press(bool press) noexcept {
+    rage_press_.store(press);
+  }
+  [[nodiscard]] bool rage_fire_press() const noexcept {
+    return rage_press_.load();
   }
   // The common ragebot assists, applied while a solve is active (`docs/ragebot.md`):
   // auto-stop (hold still for accuracy), auto-scope (press zoom), auto-reload. Owned by
@@ -775,8 +791,15 @@ class Input {
   [[nodiscard]] std::uint64_t rage_writes() const noexcept {
     return rage_writes_.load();
   }
-  [[nodiscard]] std::uint64_t rage_shots() const noexcept {
-    return rage_shots_.load();
+  // The **player's own** press of the attack button: the engine's own mask,
+  // read before the payload's write.
+  //
+  // It matters because the ragebot's release is **scoped to its own
+  // contribution**: with the player holding the trigger, the engine sees one
+  // continuous press and the semi-automatic weapon fires once — the edge is
+  // then the **player's** to make, and the status says so.
+  [[nodiscard]] bool rage_player_attack() const noexcept {
+    return rage_player_attack_.load();
   }
   [[nodiscard]] std::uint64_t rage_stops() const noexcept {
     return rage_stops_.load();
@@ -1297,7 +1320,13 @@ class Input {
   std::atomic<bool> rage_recoil_{false};
   std::atomic<float> rage_stop_speed_{0.0F};
   std::atomic<std::uint64_t> rage_writes_{0};
-  std::atomic<std::uint64_t> rage_shots_{0};
+  // The fire path's decision (the service publishes it once per tick) and the
+  // player's own press of the attack button (read from the engine's own mask
+  // before the payload's write, cached per command — the hook runs more than
+  // once per command).
+  std::atomic<bool> rage_press_{false};
+  std::atomic<bool> rage_player_attack_{false};
+  std::uint32_t rage_player_cmd_number_{0};
   std::atomic<std::uint64_t> rage_stops_{0};
   // Record-based bunnyhop: diagnostics + the per-command decision cache (the hook
   // can run more than once per frame, and the `fresh` phase must only be sampled

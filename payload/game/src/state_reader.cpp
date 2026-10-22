@@ -33,6 +33,11 @@ auto field(std::string_view class_target, std::string_view field_target, std::ui
 #endif
 }
 
+// The same lookup for the weapon's data block (`CCSWeaponBaseVData`).
+auto vdata_field(std::string_view field_target, std::uint32_t fallback) -> std::uint32_t {
+  return field("CCSWeaponBaseVData", field_target, fallback);
+}
+
 // Read a resolved global pointer by offset name (e.g. "entity_list").
 auto global(std::uintptr_t client_base, std::string_view name) -> std::uintptr_t {
   const OffsetInfo* info = find_offset(name);
@@ -62,6 +67,33 @@ template <typename T>
     return fallback;
   }
   return value;
+}
+
+// The weapon's **data block** (`CCSWeaponBaseVData`): the fire mode
+// (`m_bIsFullAuto`), the fire interval (`m_flCycleTime`) and the weapon type.
+//
+// The offsets come from the generated client schema (ADR-0001) with this
+// build's values as the fallbacks. They are resolved **once**: the lookup
+// walks the schema's class table, and the reader runs for every player on
+// every frame.
+//
+// The holder is a **function-local static**: the payload is manually mapped, so
+// a namespace-scope object would need the CRT's static-init pass, which a
+// mapped image never gets. A function-local static is initialised on first
+// use, on the thread that gets there first.
+struct VDataOffsets {
+  std::uint32_t weapon_type = 0x520;
+  std::uint32_t full_auto = 0x72d;
+  std::uint32_t cycle_time = 0x738;
+};
+
+auto vdata_offsets() -> const VDataOffsets& {
+  static const VDataOffsets offsets{
+      .weapon_type = vdata_field("m_WeaponType", 0x520),
+      .full_auto = vdata_field("m_bIsFullAuto", 0x72d),
+      .cycle_time = vdata_field("m_flCycleTime", 0x738),
+  };
+  return offsets;
 }
 
 }  // namespace
@@ -264,9 +296,27 @@ auto StateReader::read_player(int index, std::uintptr_t controller) const -> Pla
       // `C_BaseEntity::m_nSubclassID` (+0x08) is the weapon's
       // `CCSWeaponBaseVData*` (`docs/re/aim.md`; the ragebot's damage model).
       player.weapon_vdata = read_or<std::uintptr_t>(weapon + 0x388, 0);
-      // `CCSWeaponBaseVData::m_WeaponType` (+0x520) — the ragebot excludes non-firearms.
+      // The weapon's **fire capability** (`docs/ragebot.md` §"the fire path").
       if (player.weapon_vdata != 0) {
-        player.weapon_type = read_or<std::int32_t>(player.weapon_vdata + 0x520, -1);
+        const VDataOffsets& vdata = vdata_offsets();
+        // `CCSWeaponBaseVData::m_WeaponType` — the ragebot excludes non-firearms.
+        player.weapon_type = read_or<std::int32_t>(player.weapon_vdata + vdata.weapon_type, -1);
+        // `m_bIsFullAuto` — the weapon's fire mode. The mode is only **known**
+        // when the field could be read: a VData that could not be read leaves
+        // the mode "unknown", and the fire path then treats the weapon as
+        // **semi-automatic** (the conservative mode).
+        std::uint8_t full_auto = 0;
+        player.weapon_fire_mode_known =
+            cs2::game::read(player.weapon_vdata + vdata.full_auto, full_auto);
+        player.weapon_full_auto = full_auto != 0;
+        // `m_flCycleTime` — the weapon's fire interval in seconds. The value is
+        // a **firing-mode** float (the engine picks the one its mode uses), so
+        // it is only kept when it is plausible: no weapon fires slower than
+        // 20 ms or faster than two seconds.
+        float cycle = 0.0F;
+        if (cs2::game::read(player.weapon_vdata + vdata.cycle_time, cycle)) {
+          player.weapon_cycle_time = (cycle > 0.02F && cycle < 2.0F) ? cycle : 0.0F;
+        }
       }
     }
   }

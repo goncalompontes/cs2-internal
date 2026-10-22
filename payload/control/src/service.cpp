@@ -20,8 +20,13 @@
 #include "cs2/control/snapshot_json.hpp"
 #include "cs2/diag/watchdog.hpp"
 #include "cs2/game/log.hpp"
+#include "cs2/game/memory.hpp"
 #include "cs2/game/snapshot.hpp"
 #include "cs2/tls/bootstrap.hpp"
+#if __has_include("schemas/client_dll.hpp")
+#include "schemas/client_dll.hpp"
+#define CS2_CONTROL_HAVE_CLIENT_SCHEMA 1
+#endif
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -34,6 +39,58 @@ Service::~Service() {
 }
 
 namespace {
+
+// Resolve a field offset from the generated client schema (ADR-0001), the
+// same pattern the state reader uses. The fallback covers a build whose
+// schema dump is older than the field, and a fresh checkout with no schema
+// dump at all.
+auto schema_field(std::string_view class_target, std::string_view field_target,
+                  std::uint32_t fallback) -> std::uint32_t {
+#if defined(CS2_CONTROL_HAVE_CLIENT_SCHEMA)
+  const std::uint32_t offset =
+      cs2::sdk::schemas::client_dll::field_offset_by_target(class_target, field_target);
+  return offset != 0 ? offset : fallback;
+#else
+  (void)class_target;
+  (void)field_target;
+  return fallback;
+#endif
+}
+
+// The weapon's **fire state** offsets (`docs/ragebot.md` §"the fire path").
+//
+// They are resolved **once**: the lookup walks the schema's class table, and
+// the fire path reads them on every tick.
+//
+// The holder is a **function-local static**: the payload is manually mapped, so
+// a namespace-scope object would need the CRT's static-init pass, which a
+// mapped image never gets. A function-local static is initialised on first
+// use, on the thread that gets there first.
+struct WeaponFireOffsets {
+  // `C_BasePlayerWeapon::m_iClip1` — the rounds in the clip.
+  std::uint32_t clip1 = 0x1928;
+  // `C_CSWeaponBase::m_bInReload` — the weapon is reloading.
+  std::uint32_t in_reload = 0x1a3c;
+  // `C_CSWeaponBase::m_nDeployTick` — the weapon's deploy tick.
+  std::uint32_t deploy_tick = 0x1a40;
+  // `C_BasePlayerWeapon::m_nNextPrimaryAttackTick` — the engine's own record of
+  // the tick at which the weapon may fire again.
+  std::uint32_t next_attack_tick = 0x1918;
+  // `CBasePlayerController::m_nTickBase` — the tick the client is simulating.
+  std::uint32_t tick_base = 0x6b8;
+};
+
+auto weapon_fire_offsets() -> const WeaponFireOffsets& {
+  static const WeaponFireOffsets offsets{
+      .clip1 = schema_field("C_BasePlayerWeapon", "m_iClip1", 0x1928),
+      .in_reload = schema_field("C_CSWeaponBase", "m_bInReload", 0x1a3c),
+      .deploy_tick = schema_field("C_CSWeaponBase", "m_nDeployTick", 0x1a40),
+      .next_attack_tick =
+          schema_field("C_BasePlayerWeapon", "m_nNextPrimaryAttackTick", 0x1918),
+      .tick_base = schema_field("CBasePlayerController", "m_nTickBase", 0x6b8),
+  };
+  return offsets;
+}
 
 // The payload's millisecond clock — the same clock the event log stamps the
 // captured events with, so the sound provider's ages are real.
@@ -1836,9 +1893,18 @@ void Service::on_game_thread() noexcept {
     return;
   }
   if (!have_snapshot) {
+    // No snapshot: the weapon's state is unknown, so the fire path stands
+    // down — a fire path that cannot see the weapon must not assert the
+    // attack. The aim and the assists are left alone.
+    input_.set_rage_fire_press(false);
     return;
   }
   rage_tick(snapshot);
+  // The **fire path**'s decision (`docs/ragebot.md` §"the fire path"), made
+  // once per tick on the game's thread, where the weapon's state is readable.
+  // It runs **after** the solve, so the decision knows whether there is an aim
+  // to fire at.
+  decide_rage_fire(snapshot);
 }
 
 void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
@@ -2469,6 +2535,121 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   }
 }
 
+void Service::read_weapon_fire_state(const game::PlayerSnapshot& local,
+                                     FireCapability& capability) const noexcept {
+  // No weapon: the capability stays empty, and the gate refuses the shot
+  // (the clip is zero).
+  if (local.weapon_entity == 0) {
+    return;
+  }
+  const WeaponFireOffsets& offsets = weapon_fire_offsets();
+  // The clip (`m_iClip1`) — the shot cannot be fired without a round.
+  std::int32_t clip = 0;
+  if (cs2::game::read(local.weapon_entity + offsets.clip1, clip)) {
+    capability.clip = clip;
+  }
+  // The reload (`m_bInReload`) — the engine ignores the trigger.
+  std::uint8_t reloading = 0;
+  if (cs2::game::read(local.weapon_entity + offsets.in_reload, reloading)) {
+    capability.reloading = reloading != 0;
+  }
+  // The tick the client is simulating (`m_nTickBase`): the clock the engine's
+  // own next-attack record is written in.
+  std::int32_t tick_base = 0;
+  const bool tick_known = local.controller != 0 &&
+                          cs2::game::read(local.controller + offsets.tick_base, tick_base) &&
+                          tick_base > 0;
+  // The deploy (`m_nDeployTick`): the weapon is still being deployed while
+  // its deploy tick is in the future. When the tick could not be read the
+  // condition is left alone — the engine's own next-attack record already
+  // covers the deploy, and a wrong "deploying" would stop the fire entirely.
+  std::int32_t deploy_tick = 0;
+  if (tick_known && cs2::game::read(local.weapon_entity + offsets.deploy_tick, deploy_tick)) {
+    capability.deploying = deploy_tick > tick_base;
+  }
+  // The engine's **own** readiness record (`m_nNextPrimaryAttackTick`): the
+  // tick at which the weapon may fire again. It is the field the engine
+  // itself checks before it takes a shot, so it is authoritative — a press
+  // inside the interval is **the shot being wasted**.
+  //
+  // The comparison is deliberately on the **safe** side: the client's tick
+  // base is the tick it is simulating, and the record is a tick at least that
+  // far ahead, so a weapon that is not ready yet is never called ready.
+  std::int32_t next_attack = 0;
+  const bool next_known =
+      cs2::game::read(local.weapon_entity + offsets.next_attack_tick, next_attack);
+  capability.ready_known = next_known && tick_known;
+  capability.ready = capability.ready_known && next_attack <= tick_base;
+}
+
+void Service::decide_rage_fire(const game::Snapshot& snapshot) noexcept {
+  // The ragebot wants to fire: a solve is active and the fire is enabled.
+  const bool want = input_.rage_active() && input_.rage_fire();
+  FireCapability capability{};
+  if (snapshot.local.has_value()) {
+    const game::PlayerSnapshot& local = *snapshot.local;
+    // The weapon's **fire mode**, from the weapon's VData (`m_bIsFullAuto`).
+    // An unreadable VData leaves the mode **unknown**, and the fire path
+    // treats an unknown weapon as **semi-automatic** — the conservative mode.
+    capability.mode =
+        classify_fire_mode(local.weapon_fire_mode_known, local.weapon_full_auto);
+    // The weapon's fire interval (`m_flCycleTime`) — the fallback for the
+    // engine's own readiness record.
+    capability.interval = local.weapon_cycle_time;
+    // The weapon's volatile state, read **here**, on the game's thread.
+    read_weapon_fire_state(local, capability);
+  }
+  rage_fire_mode_.store(static_cast<int>(capability.mode), std::memory_order_relaxed);
+
+  // The **engine's** shots: the clip falls when the weapon fires. The count is
+  // the engine's, not the ragebot's — the payload claims a shot only when the
+  // clip fell while the ragebot was pressing. (With the player firing as
+  // well, the attribution is the payload's best guess: the status says how
+  // many the ragebot caused, and the press counter says how many it tried.)
+  //
+  // A **new weapon** starts with a clip of its own: the difference against
+  // the previous weapon's clip is not a shot.
+  const std::uintptr_t weapon =
+      snapshot.local.has_value() ? snapshot.local->weapon_entity : 0;
+  const bool new_weapon = weapon != rage_prev_weapon_;
+  rage_prev_weapon_ = weapon;
+  if (!new_weapon && capability.clip < rage_prev_clip_ && rage_prev_press_) {
+    rage_shots_.fetch_add(1, std::memory_order_relaxed);
+  }
+  rage_prev_clip_ = capability.clip;
+
+  // The **edge**: the time since the ragebot's last press. The release the
+  // edge needs is measured against it.
+  const std::uint64_t now = now_us();
+  const float elapsed =
+      rage_last_press_us_ == 0
+          ? 1000.0F
+          : static_cast<float>(static_cast<double>(now - rage_last_press_us_) / 1.0e6);
+  FireInputs inputs{};
+  inputs.want = want;
+  inputs.capability = capability;
+  inputs.elapsed = elapsed;
+  const FireDecision decision = decide_fire(inputs);
+
+  // The counters: the withdrawals (the edge's release half) and the re-presses
+  // (the edge's second half — a **new** shot on a semi-automatic weapon).
+  if (!decision.press && rage_prev_press_) {
+    rage_withdrawn_ = true;
+  } else if (decision.press && rage_withdrawn_) {
+    rage_edges_.fetch_add(1, std::memory_order_relaxed);
+    rage_withdrawn_ = false;
+  }
+  if (decision.press) {
+    rage_presses_.fetch_add(1, std::memory_order_relaxed);
+    rage_last_press_us_ = now;
+  }
+  rage_prev_press_ = decision.press;
+  rage_refusal_.store(static_cast<int>(decision.refusal), std::memory_order_relaxed);
+  // The decision is published to the input path: it is made **once per tick**,
+  // so every command of the tick carries the same answer.
+  input_.set_rage_fire_press(decision.press);
+}
+
 auto Service::read_hitboxes(std::uintptr_t pawn, game::HitboxCapsule* out, int max) const noexcept
     -> int {
   if (out == nullptr || max <= 0 || pawn == 0) {
@@ -2534,15 +2715,30 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
   // things the 128-byte buffer truncates — so the record and the occluder
   // count (both in the `rage` command's JSON status) are left out to make
   // room for the Monte-Carlo's marker.
+  //
+  // The **fire path**'s three facts are on the line too (`docs/ragebot.md`
+  // §"the fire path"): the weapon's fire mode as the payload reads it ("auto",
+  // "semi", "unknown"), whether the fire path can shoot right now and — when
+  // it cannot — **which condition blocked it**, and the counters (the
+  // **engine's** shots, the ragebot's presses and the release->re-press
+  // edges).
+  const char* mode =
+      fire_mode_name(static_cast<FireMode>(rage_fire_mode_.load(std::memory_order_relaxed)));
+  const char* refusal =
+      fire_refusal_name(static_cast<FireRefusal>(rage_refusal_.load(std::memory_order_relaxed)));
   std::snprintf(
-      out, size, "rage: %s target %d box %d obj %s%s w%llu s%llu bt%llu fire %d%s%s%s",
+      out, size,
+      "rage: %s target %d box %d obj %s%s w%llu s%llu p%llu e%llu bt%llu fire %d %s %s%s%s%s%s",
       input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(), objective, mc,
       static_cast<unsigned long long>(input_.rage_writes()),
-      static_cast<unsigned long long>(input_.rage_shots()),
-      static_cast<unsigned long long>(rage_backtracks_.load()), input_.rage_fire() ? 1 : 0,
-      input_.rage_stop() ? " stop" : "",
+      static_cast<unsigned long long>(rage_shots_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(rage_presses_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(rage_edges_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(rage_backtracks_.load()), input_.rage_fire() ? 1 : 0, mode,
+      refusal, input_.rage_stop() ? " stop" : "",
       rage_occlusion_query_complete_.load(std::memory_order_relaxed) ? "" : " occlusion-incomplete",
-      rage_occlusion_candidates_complete_.load(std::memory_order_relaxed) ? "" : " occlusion-cap");
+      rage_occlusion_candidates_complete_.load(std::memory_order_relaxed) ? "" : " occlusion-cap",
+      input_.rage_player_attack() ? " player-attack" : "");
   return true;
 }
 
@@ -3224,7 +3420,25 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   payload.set("hitbox", Json::number(static_cast<double>(input_.rage_hitbox())));
   payload.set("solves", Json::number(static_cast<double>(rage_solves_.load())));
   payload.set("writes", Json::number(static_cast<double>(input_.rage_writes())));
-  payload.set("shots", Json::number(static_cast<double>(input_.rage_shots())));
+  // The **fire path**'s counters and verdict (`docs/ragebot.md` §"the fire
+  // path"). `shots` is the **engine's** shots — the clip fell while the
+  // ragebot was pressing. (The counter that used to answer this key counted
+  // the *commands* the attack was asserted on: the ragebot's attempts, not
+  // shots. `presses` is that number now.)
+  payload.set("shots", Json::number(static_cast<double>(rage_shots_.load(std::memory_order_relaxed))));
+  payload.set("presses",
+              Json::number(static_cast<double>(rage_presses_.load(std::memory_order_relaxed))));
+  payload.set("edges", Json::number(static_cast<double>(rage_edges_.load(std::memory_order_relaxed))));
+  // The weapon's fire mode as the payload reads it ("auto", "semi",
+  // "unknown") and the gate's verdict: "ok" when the shot can be taken, the
+  // blocking condition's name when it cannot.
+  payload.set("fire_mode", Json::string(std::string(fire_mode_name(static_cast<FireMode>(
+                          rage_fire_mode_.load(std::memory_order_relaxed))))));
+  payload.set("fire_refusal", Json::string(std::string(fire_refusal_name(static_cast<FireRefusal>(
+                             rage_refusal_.load(std::memory_order_relaxed))))));
+  // The **player** is holding the attack button: the engine then sees one
+  // continuous press, so the edge is the player's to make, not the ragebot's.
+  payload.set("player_attack", Json::boolean(input_.rage_player_attack()));
   payload.set("occluders", Json::number(static_cast<double>(rage_occluders_.load())));
   payload.set("occlusion_query_complete",
               Json::boolean(rage_occlusion_query_complete_.load(std::memory_order_relaxed)));

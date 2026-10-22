@@ -300,6 +300,9 @@ void Input::clear_rage_aim() noexcept {
   rage_stop_.store(false);
   rage_scope_.store(false);
   rage_reload_.store(false);
+  // The fire path's contribution goes with the aim: the ragebot must not hold
+  // the trigger while it is not aiming (`docs/ragebot.md` §"the fire path").
+  rage_press_.store(false);
 }
 
 void Input::write_silent_angles(void* cmd, float pitch, float yaw, float roll) noexcept {
@@ -675,7 +678,11 @@ void Input::rage_tick(std::uint8_t* cmd, const std::uint64_t* buttons) noexcept 
   // edge), exactly as the attack does.
   const auto base = *reinterpret_cast<std::uintptr_t*>(cmd + k_cmd_pb_offset + k_pb_base_offset);
   const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
-  std::uint64_t extra = *buttons & button::k_attack;
+  // The attack the command carries: the ragebot's own press **and** the
+  // player's own press, merged in the command's mask. The ragebot withdraws
+  // only **its own** contribution, so the player's press is never taken away.
+  const std::uint64_t attack = *buttons & button::k_attack;
+  std::uint64_t assists = 0;
   if (rage_scope_.load()) {
     // `IN_ATTACK2` (the right mouse) is what *triggers* the scope; `IN_ZOOM` is
     // the engine's own zoom bit (`1 << 34`, see `strafe_geometry.hpp`'s
@@ -683,24 +690,36 @@ void Input::rage_tick(std::uint8_t* cmd, const std::uint64_t* buttons) noexcept 
     // produces `IN_ZOOM` — it is in the "mod specific" range the engine
     // populates itself — so the zoom bit is a state assertion, and the scope
     // itself rides on `IN_ATTACK2`.
-    extra |= button::k_attack2 | button::k_zoom;
+    assists |= button::k_attack2 | button::k_zoom;
   }
   if (rage_reload_.load()) {
-    extra |= button::k_reload;
+    assists |= button::k_reload;
   }
-  if (extra != 0 && writable(buttons_pb, k_buttonstate_values_offset + 16)) {
+  if ((attack | assists) != 0 && writable(buttons_pb, k_buttonstate_values_offset + 16)) {
     auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
-    state[0] = (state[0] & ~extra) | extra;  // held
-    state[1] = (state[1] & ~extra) | extra;  // changed (a press edge)
+    // The **held** word follows the command's mask exactly. That is what makes
+    // the ragebot's withdrawal a **release** the engine can see: the weapon's
+    // own held state goes to zero for one command, and the next press is a new
+    // edge — the edge a semi-automatic weapon needs (`docs/ragebot.md`
+    // §"the fire path"). The player's own press is in the mask, so it stays.
+    state[0] = (state[0] & ~button::k_attack) | attack;
+    // The **changed** word carries the press edge: it is set whenever the
+    // attack is asserted.
+    if (attack != 0) {
+      state[1] = (state[1] & ~button::k_attack) | button::k_attack;
+    }
+    if (assists != 0) {
+      state[0] = (state[0] & ~assists) | assists;
+      state[1] = (state[1] & ~assists) | assists;
+    }
     *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
   }
   // Also assert the extra buttons in the engine's own held-button word
   // (`CInButtonState` at the movement services), which some weapon actions read
-  // instead of the command mask.
-  write_engine_buttons(extra, 0);
-  if ((*buttons & button::k_attack) != 0) {
-    rage_shots_.fetch_add(1);
-  }
+  // instead of the command mask. The attack bit follows the command's mask
+  // there too: the ragebot's withdrawal **clears** it (that is the release)
+  // and the player's own press — which is in the mask — sets it again.
+  write_engine_buttons(attack | assists, ~attack & button::k_attack);
 }
 
 void Input::set_strafe_config(float wishspeed, int subticks) noexcept {
@@ -2624,18 +2643,34 @@ void Input::apply(void* cmd) noexcept {
   //    state and only writes the sub-tick table.
   auto* buttons = reinterpret_cast<std::uint64_t*>(bytes + k_cmd_buttons_offset);
   const std::uint64_t current = *buttons;
+  // The **player's own** press of the attack button: the engine's own mask,
+  // read **before** the payload's write. The hook runs more than once per
+  // command, and the payload's own press would otherwise be read back as the
+  // player's — so the reading is cached per command number (the same signal
+  // the bhop's phase correction uses).
+  const auto command_number =
+      *reinterpret_cast<const std::uint32_t*>(bytes + k_cmd_number_offset);
+  if (command_number != rage_player_cmd_number_) {
+    rage_player_cmd_number_ = command_number;
+    rage_player_attack_.store((current & button::k_attack) != 0);
+  }
   // The features' buttons: the triggerbot's own hold, plus the ragebot's
-  // assists. The ragebot's attack is a **persistent** press while a solve is
-  // active — a payload feature (like the movement features) that must hold on
-  // *every* command the engine simulates, not just the command `rage_tick`
-  // happens to see. Verified subtlety: pressing attack only on the command whose
-  // history we wrote that tick let a shot be released on a command the silent
-  // write had not reached, so it followed the camera (the auto-fire timing
-  // bug). A persistent press is exactly why manual `press("attack")` always hit.
+  // assists. The ragebot's attack is a **decision** the service publishes on
+  // the game's thread (`docs/ragebot.md` §"the fire path"): the fire path
+  // asks whether the weapon can take the shot at all, and — on a
+  // semi-automatic weapon — whether the engine has seen the **release** it
+  // needs between two shots. The decision is made once per tick, so every
+  // command of the tick carries the same answer.
+  //
+  // The ragebot's contribution is **scoped**: when it withdraws, it simply
+  // does not add the bit, so the engine's own mask (the player's own press)
+  // is untouched — a feature that releases the attack button must not take
+  // the player's own press of the same button away.
   const bool rage_solved = rage_active_.load();
   const bool rage_firing = rage_solved && rage_fire_.load();
+  const bool rage_press = rage_firing && rage_press_.load();
   std::uint64_t feature_bits = feature_mask_.load();
-  if (rage_firing) {
+  if (rage_press) {
     feature_bits |= button::k_attack;
   }
   // Auto-scope / auto-reload (common ragebot assists, `docs/ragebot.md`): hold zoom

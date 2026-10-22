@@ -61,6 +61,17 @@ struct PlayerSnapshot {
   // 0 knife, 1 pistol, 2 smg, 3 rifle, 4 shotgun, 5 sniper, 6 machinegun, 7 c4, 8 taser,
   // 9 grenade, 10 equipment, … -1 when unknown. The ragebot only solves real firearms.
   int weapon_type = -1;
+  // The active weapon's **fire capability** (`docs/ragebot.md` §"the fire path").
+  //
+  // `m_bIsFullAuto` on the weapon's VData: the weapon's fire mode.
+  // `weapon_fire_mode_known` is false when the VData could not be read at all —
+  // the fire path then treats the weapon as **semi-automatic** (the conservative
+  // mode) and the status says "unknown" rather than guessing.
+  bool weapon_full_auto = false;
+  bool weapon_fire_mode_known = false;
+  // `m_flCycleTime` on the weapon's VData: the weapon's fire interval in
+  // seconds (0 when it could not be read, or when the value is not plausible).
+  float weapon_cycle_time = 0.0F;
   // The current recoil punch (`m_pAimPunchServices` -> `m_predictableBaseAngle`), in
   // degrees, used for recoil compensation. Pitch is up-positive.
   float aim_punch_pitch = 0.0F;
