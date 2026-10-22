@@ -278,6 +278,10 @@ def check_rotations(image: PeImage, sites: list[DispatchSite],
     constants the dispatch reads.
     """
     for entry in coverage:
+        if entry.table_size == 0:
+            # A module with nothing protected: it has no `protect` line, and
+            # no rotation to check.
+            continue
         rotate = entry.mix_rotate
         if rotate < 1 or rotate > 63:
             raise Failure(

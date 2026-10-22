@@ -752,10 +752,42 @@ for.
 **The coupling this creates.** `mix64()` is shared by the call encryption
 and by the virtualizer's encoder, and the mixer is a **per-build** function
 now, so its rotation and its constants travel with the module's seed. The
-encoder derives them from the same seed (§14.5), and the **interpreter**
-(T20b, not written) has to read the rotation and the constants out of the
-image rather than assume them: the contract is "the value the pass
-encrypted with", and the coverage names it.
+encoder derives them from the same seed (§14.5).
+
+**The seam for the interpreter (T20b, not written).** The interpreter has to
+decode with the mixer the pass encrypted with, and the values have to be
+**in the image**, in a form a runtime component can read. Today they are not,
+and the decision is where they go:
+
+* The **rotation** is an *immediate* in the instruction stream. Nothing in
+  the image holds it as a value a runtime component can read.
+* The **multiplier** and the **xor constant** are in the module's globals
+  (`cs2.protect.mixmul`, `cs2.protect.mixxor`), and those globals have
+  `PrivateLinkage`: they are local to the object, they are not in the
+  image's symbol table, they are not exported, and there are **four
+  different mixers in one image** (one per protected module).
+* The **coverage** names the mixer of every module, but the coverage is a
+  file on the build machine. It is not in the image, and a runtime
+  component cannot read it.
+
+**The decision: the pass emits the interpreter into the same module.** The
+interpreter is not a library that is linked in and looks the mixer up: it
+is emitted by the pass, into the module whose bytecode it decodes. It can
+therefore reference that module's private globals directly, and it carries
+the rotation as **its own immediate** — the same value the call site's
+decode uses. The seam is therefore: *the pass emits the interpreter, and the
+interpreter is emitted with the mixer values it must use*. A runtime
+component that is not in the module does not have to find the mixer: it is
+not a runtime lookup, it is a value the emitter puts there.
+
+**The container's header cannot carry the mixer.** The obvious place for a
+per-module mixer would be the header of the VM container, and it is the one
+place that cannot hold it: the container is encrypted **as a whole, the
+header included** (`src/vm_encode.cpp`: "the whole container, the header
+included, so that an analyst reads nothing but noise"). A mixer stored in
+the header would be a chicken-and-egg: the interpreter needs the mixer to
+*read* the header. The header must not be expected to carry the mixer, and
+T20b must not be planned around it.
 
 The call site becomes:
 
@@ -1005,10 +1037,17 @@ python tools/protect/check_payload.py --protected build-payload-protect/payload.
   **per build**, so the check reads them from the coverage — the coverage is
   the contract ("the value the pass encrypted with");
 * the **rotation** of the mixer in the image's instruction stream is the one
-  the coverage names: the check reads the `rolq $imm8` in front of every
-  dispatch and compares it with the coverage's `rotate=`. The rotation is
-  the only per-build value of the protection that is in the code, and it is
-  in [1, 63];
+  of **its own module**: the check reads the rotate in front of every
+  dispatch and compares it with the `rotate=` of the coverage of the module
+  the dispatch belongs to (the modules of one build have different mixers,
+  so "one of the rotations of the build" would be a one-in-four test). The
+  rotation is the only per-build value of the protection that is in the
+  code, and it is in [1, 63]. The X86 backend spells it in **three** ways
+  -- `rolq $imm8` for a rotation of 2 to 62, and `rolq %rax` (a rotation of
+  1) and `rorq %rax` (a rotation of 63), which have **no immediate at all**
+  -- and the check has to read all three: a reader that knows only
+  `rolq $imm8` cannot see two of the sixty-three legal rotations, and the
+  build of such a seed fails its own check;
 * the **layout** of every module with more than one definition moved: the
   coverage names how many functions the pass permuted, and a module that
   moved none is a module the pass did not permute;
@@ -2254,14 +2293,29 @@ The code is **identical**, only its position in the file changes. An analyst
 reads the same functions. What the permutation buys is the absence of a
 **fixed-offset** signature, nothing else.
 
-**The reach is bounded, and it is stated plainly.** The permutation is
-*inside* a translation unit: it moves a function within its own unit's
-block of code, so it moves the offsets of that unit's functions and the
-displacements of every reference to them. The units the plugin does not
-compile -- the MSVC STL's `vector_algorithms.obj` is 11.2 % of the
-`.text` -- keep their offsets, and a signature that names an STL function's
-offset survives this task. That is why the mixer's constants matter
-(§10.2): the *protection's* bytes are gone whatever the layout does.
+**The reach is not bounded, and it is stated plainly.** The permutation is
+*inside* a translation unit: it moves a function within its own unit's block
+of code, so it moves the offsets of that unit's functions and the
+displacements of every reference to them. It is **not size-neutral**, and
+that is what the reach comes from: when a function moves, the encoded
+displacements of the references to it change, and a short jump that used to
+fit becomes a near jump. The permuted unit's block therefore changes
+**size**, and **everything after it shifts**.
+
+So the honest statement is: *the code the plugin does not compile is still
+the same code, with the same internal order, but its **offsets move** with
+everything else*. The MSVC STL's `vector_algorithms.obj` is 11.2 % of the
+`.text` and the imgui is 43 % of it, and **neither keeps its place**: the
+imgui's code moves by hundreds of kilobytes between two builds of two seeds
+(the measurement is below). A signature that names the offset of an STL
+function, or of an imgui function, does **not** survive this task — not
+because the permutation reaches into the STL, but because everything after
+the first permuted unit shifted with it.
+
+What the permutation does **not** buy: a stable layout for the units the
+plugin does not compile, and a *partial* immunity for the part of the image
+that lies before every permuted unit. That is why the mixer's constants
+matter (§10.2): the *protection's* bytes are gone whatever the layout does.
 
 ### The measurement
 
