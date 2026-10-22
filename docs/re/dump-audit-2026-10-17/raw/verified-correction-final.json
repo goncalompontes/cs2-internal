@@ -1,0 +1,77 @@
+[
+  {
+    "ea": "0x338222",
+    "bytes": "c5ea58c9",
+    "asm": "vaddss  xmm1, xmm2, xmm1"
+  },
+  {
+    "ea": "0x338226",
+    "bytes": "c5fa1015aaacb000",
+    "asm": "vmovss  xmm2, cs:dword_E42ED8"
+  },
+  {
+    "ea": "0x33822e",
+    "bytes": "c5f82ed1",
+    "asm": "vucomiss xmm2, xmm1"
+  },
+  {
+    "ea": "0x338232",
+    "bytes": "7617",
+    "asm": "jbe     short loc_33824B"
+  },
+  {
+    "ea": "0x338234",
+    "bytes": "48c70600000000",
+    "asm": "mov     qword ptr [rsi], 0"
+  },
+  {
+    "ea": "0x33823b",
+    "bytes": "c7460800000000",
+    "asm": "mov     dword ptr [rsi+8], 0"
+  },
+  {
+    "ea": "0x338242",
+    "bytes": "c5f857c0",
+    "asm": "vxorps  xmm0, xmm0, xmm0"
+  },
+  {
+    "ea": "0x338246",
+    "bytes": "c4413057c9",
+    "asm": "vxorps  xmm9, xmm9, xmm9"
+  },
+  {
+    "ea": "0x33824b",
+    "bytes": "84c0",
+    "asm": "test    al, al"
+  },
+  {
+    "ea": "0x33824d",
+    "bytes": "7412",
+    "asm": "jz      short loc_338261"
+  },
+  {
+    "ea": "0x33824f",
+    "bytes": "c5f858c0",
+    "asm": "vaddps  xmm0, xmm0, xmm0"
+  },
+  {
+    "ea": "0x338253",
+    "bytes": "c5f81306",
+    "asm": "vmovlps qword ptr [rsi], xmm0"
+  },
+  {
+    "ea": "0x338257",
+    "bytes": "c4c13258c1",
+    "asm": "vaddss  xmm0, xmm9, xmm9"
+  },
+  {
+    "ea": "0x33825c",
+    "bytes": "c5fa114608",
+    "asm": "vmovss  dword ptr [rsi+8], xmm0"
+  },
+  {
+    "ea": "0x338261",
+    "bytes": "488b442478",
+    "asm": "mov     rax, [rsp+168h+var_F0]"
+  }
+]

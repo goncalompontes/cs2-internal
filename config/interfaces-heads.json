@@ -1,0 +1,6 @@
+{
+  "_comment": "CreateInterface head globals per module (VA). Statically NULL; populated at load. Use with: cs2-dumper --interfaces-global <addr>",
+  "client.dll": "0x1827946c8",
+  "engine2.dll": "0x1806972b8",
+  "schemasystem.dll": "0x180072030"
+}

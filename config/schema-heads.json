@@ -1,0 +1,5 @@
+{
+  "_comment": "CSchemaSystem global per module (VA at image base 0x180000000). Read *global -> CSchemaSystem*. Used by scripts/calibrate-live.sh.",
+  "client.dll": "0x182793aa0",
+  "schemasystem.dll": "0x1800715e0"
+}

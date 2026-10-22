@@ -1,0 +1,5 @@
+{
+  "result": "None",
+  "stdout": "{\"input\": \"C:\\\\Users\\\\ollim\\\\Desktop\\\\ida\\\\cs2_212C3300000.bin\", \"idb\": \"C:\\\\Users\\\\ollim\\\\Desktop\\\\ida\\\\cs2_212C3300000.bin.i64\", \"sha256\": \"b\\\"2$`D\\\\x83H\\\\x1cW\\\\xa1\\\\x8c\\\\xcf\\\\xb2\\\\x04H\\\\xa5\\\\xe64\\\\xa9X4!\\\\xab\\\\xfa\\\\xc3\\\\xa2q+\\\\xba\\\\\\\\\\\\xc7\\\\x7f'\\\"\", \"ranges\": [[\"0x50fb10\", \"0x510ffe\"], [\"0x51dac0\", \"0x51df05\"]]}\n",
+  "stderr": ""
+}

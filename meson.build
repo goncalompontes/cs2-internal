@@ -1,0 +1,201 @@
+project('cs2-internal', 'cpp',
+  version : '0.1.0',
+  meson_version : '>=1.3',
+  default_options : [
+    'warning_level=3',
+    'buildtype=debugoptimized',
+  ])
+
+# C++23 dialect. Meson's built-in cpp_std option does not list 'c++23' for the
+# MSVC-style drivers (clang-cl / cl.exe), so the flag is selected explicitly.
+# The spellings below avoid Meson's "use the built-in cpp_std option" warning:
+#   - GNU-like drivers accept the long form `--std=c++23` (GCC and Clang);
+#   - clang-cl / cl.exe accept the dash form `-std:c++latest` (C++23 and later).
+cpp = meson.get_compiler('cpp')
+if cpp.get_id() == 'msvc' or cpp.get_id() == 'clang-cl'
+  add_project_arguments('-std:c++latest', language : 'cpp')
+else
+  add_project_arguments('--std=c++23', language : 'cpp')
+endif
+
+# Host-side (Linux) tools, tests and helpers live here.
+# The payload is a separate Meson project under payload/ and is
+# cross-compiled for Windows (see toolchain/).
+subdir('tools')
+
+# Platform-independent manual-map core (built natively here for its tests, and
+# cross-compiled into the payload).
+subdir('payload/loader')
+
+# Hook engine (built natively here for its tests).
+subdir('payload/hooks')
+
+# World-to-screen projection math (header-only, platform-independent), built
+# natively so the matrix convention has a host regression test.
+game_matrix_test = executable('game_matrix_test', 'payload/game/tests/test_matrix.cpp',
+  include_directories : include_directories('payload/game/include'),
+)
+test('game-matrix', game_matrix_test)
+
+# Ragebot aim geometry (the angular chart, hulls, optima) — platform-independent,
+# built natively so the aim model has a host regression test.
+aim_geometry_test = executable('aim_geometry_test',
+  files(
+    'payload/aim/tests/test_aim_geometry.cpp',
+    'payload/aim/src/geometry.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-geometry', aim_geometry_test)
+
+aim_field_test = executable('aim_field_test',
+  files(
+    'payload/aim/tests/test_aim_field.cpp',
+    'payload/aim/src/geometry.cpp',
+    'payload/aim/src/field.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-field', aim_field_test)
+
+aim_solver_test = executable('aim_solver_test',
+  files(
+    'payload/aim/tests/test_aim_solver.cpp',
+    'payload/aim/src/geometry.cpp',
+    'payload/aim/src/field.cpp',
+    'payload/aim/src/hitbox.cpp',
+    'payload/aim/src/solver.cpp',
+    'payload/aim/src/ballistics.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-solver', aim_solver_test)
+
+aim_records_test = executable('aim_records_test',
+  files(
+    'payload/aim/tests/test_aim_records.cpp',
+    'payload/aim/src/records.cpp',
+    'payload/aim/src/hitbox.cpp',
+    'payload/aim/src/geometry.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('aim-records', aim_records_test)
+
+# Control-channel core (ADR-0020): the platform-independent parts of
+# payload/control (JSON value, `wait_for` predicate, snapshot serialization are
+# built here; the pipe/console/thread parts are Windows-only and live in the
+# payload subproject).
+control_core_test = executable('control_core_test',
+  files(
+    'payload/control/tests/test_control_core.cpp',
+    'payload/control/src/json.cpp',
+    'payload/control/src/predicate.cpp',
+    'payload/control/src/snapshot_json.cpp',
+    'payload/control/src/event_ring.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('control-core', control_core_test)
+
+# --- Generated C++ SDK headers -------------------------------------------
+# Render payload/sdk/*.hpp from the calibration dumps in calibration/. The
+# generator is the Rust dumper, built on demand by scripts/gen-sdk.py. With
+# -Dlive_calibration=true the script refreshes the dumps from a running target
+# first (see scripts/calibrate-live.sh).
+if get_option('sdk_gen')
+  gen_sdk = find_program('scripts/gen-sdk.py')
+  dump_dir = meson.current_source_dir() / 'calibration'
+  sdk_dir = meson.current_source_dir() / 'payload' / 'sdk'
+
+  gen_cmd = [gen_sdk, dump_dir, sdk_dir, '@OUTPUT@']
+  if get_option('live_calibration')
+    gen_cmd = [gen_sdk, '--live', dump_dir, sdk_dir, '@OUTPUT@']
+  endif
+
+  sdk_headers = custom_target('sdk-headers',
+    output : 'sdk-headers.stamp',
+    command : gen_cmd,
+    build_always_stale : true,
+    console : true,
+    build_by_default : true,
+  )
+
+  # A dependency that carries the generated include dir and the generation
+  # order, so consumers (tests, and the payload) build against fresh headers.
+  sdk_dep = declare_dependency(
+    include_directories : include_directories('payload' / 'sdk'),
+    sources : sdk_headers,
+  )
+  sdk_consumer = executable('sdk-consumer', 'tools/sdk_consumer.cpp',
+    dependencies : sdk_dep,
+  )
+  test('sdk-consumer', sdk_consumer)
+endif
+
+# Quick self-check so `meson test` is meaningful from day one.
+test('host-probe', host_probe)
+
+# Recovered autostop math, independent of the injected runtime.
+aim_autostop_test = executable('aim_autostop_test',
+  files('payload/aim/tests/test_autostop.cpp','payload/aim/src/autostop.cpp'),
+  include_directories : include_directories('payload/aim/include'),
+)
+test('aim-autostop', aim_autostop_test)
+
+if host_machine.system() == 'windows'
+  aim_autostop_input_test = executable('aim_autostop_input_test',
+    files('payload/aim/tests/test_autostop_input.cpp',
+          'payload/aim/src/autostop.cpp','payload/control/src/autostop_input.cpp'),
+    include_directories : [include_directories('payload/aim/include'),
+      include_directories('payload/control/include'),include_directories('payload/game/include')],
+  )
+  test('aim-autostop-input', aim_autostop_input_test)
+endif
+
+aim_heatmap_test = executable('aim_heatmap_test',
+  files('payload/aim/tests/test_heatmap.cpp','payload/aim/src/geometry.cpp',
+        'payload/aim/src/field.cpp','payload/aim/src/hitbox.cpp',
+        'payload/aim/src/ballistics.cpp','payload/aim/src/solver.cpp'),
+  include_directories : [include_directories('payload/aim/include'),
+                         include_directories('payload/game/include')],
+)
+test('aim-heatmap', aim_heatmap_test)
+
+aim_options_test = executable('aim_options_test',
+  files('payload/control/tests/test_aim_options.cpp','payload/control/src/json.cpp',
+        'payload/control/src/aim_options.cpp','payload/aim/src/geometry.cpp',
+        'payload/aim/src/hitbox.cpp','payload/aim/src/ballistics.cpp'),
+  include_directories : [include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),include_directories('payload/control/include')],
+)
+test('aim-options', aim_options_test)
+
+aim_target_charts_test = executable('aim_target_charts_test',
+  files('payload/aim/tests/test_target_charts.cpp','payload/aim/src/reader.cpp', 'payload/game/src/schema.cpp',
+        'payload/aim/src/geometry.cpp','payload/aim/src/field.cpp','payload/aim/src/hitbox.cpp',
+        'payload/aim/src/ballistics.cpp','payload/aim/src/solver.cpp'),
+  include_directories : [include_directories('payload/aim/include'),
+                         include_directories('payload/game/include')],
+)
+test('aim-target-charts', aim_target_charts_test)
+
+nl_movement_test = executable('nl_movement_test',
+  files('payload/aim/tests/test_nl_movement.cpp','payload/aim/src/nl_movement.cpp'),
+  include_directories : [include_directories('payload/aim/include'),include_directories('payload/game/include')])
+test('nl-movement', nl_movement_test)

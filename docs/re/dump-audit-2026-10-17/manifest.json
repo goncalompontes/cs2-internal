@@ -1,0 +1,24 @@
+{
+  "dump_sha256": "3224604483481c57a18ccfb20448a5e634a9583421abfac3a2712bba5cc77f27",
+  "client_path": "F:\\SteamLibrary\\steamapps\\common\\Counter-Strike Global Offensive\\game\\csgo\\bin\\win64\\client.dll",
+  "client_sha256": "659940c1db362ed981d1df10637cec8c2a3d99409b77fc3b73e435e4649e36b0",
+  "original_external_callbacks": {
+    "0x7ffcef4a8db0": "unmapped in dump",
+    "0x7ffcef4a3e50": "unmapped in dump"
+  },
+  "verified_dump_sites": {
+    "target_contact": "0x2f1389: hit record +0x12",
+    "contact_type": "0x2f13a0..0x2f13c4",
+    "command_angles": "0x50858e..0x508598",
+    "attack_state": "0x510bc4..0x510c20",
+    "timed_correction": "0x50fe03,0x50fe46,0x33824f"
+  },
+  "current_native_sites": {
+    "bullet_loop": "0x885710",
+    "per_contact_penetration": "0x8a1820",
+    "command_consumer": "0xd02130",
+    "attack_index_presence": "0xd02833,0xd028f8",
+    "recoil_query": "0x852de0",
+    "timed_correction": "0x84d8b0"
+  }
+}

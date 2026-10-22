@@ -1,0 +1,21 @@
+[package]
+name = "cs2-dumper"
+version = "0.1.0"
+edition = "2021"
+description = "External offset/interface/schema dumper"
+license = "MIT"
+
+[[bin]]
+name = "cs2-dumper"
+path = "src/main.rs"
+
+[lib]
+name = "cs2_dumper"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+goblin = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

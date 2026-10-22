@@ -1,0 +1,77 @@
+{
+  "synthetic": false,
+  "pid": 32456,
+  "nonce": "92266d40-bb87-4cb6-823b-7343f48a7cc0",
+  "hook_disabled": true,
+  "extra_applied": 1,
+  "immediate_deltas": {
+    "command": 1,
+    "tickbase": 1,
+    "processed": 1,
+    "server_executed": 0,
+    "network_time": 0.03125,
+    "penalty": -0.013271361589431763,
+    "inaccuracy": -0.013271361589431763
+  },
+  "air_component_before": 0,
+  "air_component_after": 0,
+  "movement_component_before": 0,
+  "movement_component_after": 0,
+  "spread_before": 0.001500000013038516,
+  "spread_after": 0.001500000013038516,
+  "server_execution_observed": true,
+  "server_execution_delay_ms_approx": 31,
+  "neighboring_normal_calls": 7,
+  "neighboring_normal_deltas": [
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ]
+  ],
+  "fit": {
+    "pairs": 26,
+    "baseline": 0.00490000201934292,
+    "per_tick_retention": 0.9021886387027015,
+    "recovery_time_seconds": 0.3495318800169137,
+    "rms": 1.552233297637607e-09,
+    "estimated_updates_to_0_041_from_measured_pre_value": 13,
+    "estimated_updates_to_0_041_from_0_125": 12
+  },
+  "scope": "One landing, one extra command iteration. Fit is a local constant-state model, not proof of a larger accepted shift or zero spread.",
+  "queue_lag_observation": {
+    "prior_120ms_commands_minus_server_executed": 1,
+    "followup_typical_commands_minus_server_executed": 2,
+    "scope": "Five-second observation; pacing causality and longer-term correction not established"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // Built-in LSP: clangd auto-installs for C/C++ (Meson emits
+  // compile_commands.json), pyright for Python, rust-analyzer for Rust.
+  "lsp": true,
+
+  "mcp": {
+    "timeout": {
+      // REA boots Ghidra, which is slow on first startup.
+      "startup": 120000
+    },
+    "servers": {
+      // Static RE is provided by the global `rea` server (see
+      // ~/.config/opencode/opencode.jsonc on the host). This project carries
+      // no local copy of Ghidra.
+      //
+      // Token-cheap structural code views (AST-first). Resolved from PATH so
+      // the same config works on Linux and Windows (treesitter-mcp[.exe]).
+      "treesitter": {
+        "type": "local",
+        "command": ["treesitter-mcp"]
+      }
+    }
+  }
+}

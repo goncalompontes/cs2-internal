@@ -1,0 +1,538 @@
+{
+  "correction_calls": [
+    [
+      "0x50fdc1",
+      "lea     rcx, [rbx+5A0h]"
+    ],
+    [
+      "0x50fdc8",
+      "lea     rax, [rbx+590h]"
+    ],
+    [
+      "0x50fdcf",
+      "lea     rdx, [rbx+584h]"
+    ],
+    [
+      "0x50fdd6",
+      "vmovss  xmm3, dword ptr [rbx+580h]"
+    ],
+    [
+      "0x50fdde",
+      "mov     r8d, [rbx+57Ch]"
+    ],
+    [
+      "0x50fde5",
+      "vmovd   [rsp+140h+var_108], xmm10"
+    ],
+    [
+      "0x50fdeb",
+      "mov     [rsp+140h+var_110], r15d"
+    ],
+    [
+      "0x50fdf0",
+      "mov     [rsp+140h+var_118], rax"
+    ],
+    [
+      "0x50fdf5",
+      "mov     [rsp+140h+var_120], rdx"
+    ],
+    [
+      "0x50fdfa",
+      "mov     [rsp+140h+var_100], 1"
+    ],
+    [
+      "0x50fdff",
+      "lea     rdx, [rbp+0C0h+var_C8]"
+    ],
+    [
+      "0x50fe03",
+      "call    sub_3375A0;"
+    ],
+    [
+      "0x50fe08",
+      "lea     rcx, [rbx+5E8h]"
+    ],
+    [
+      "0x50fe0f",
+      "lea     rax, [rbx+5DCh]"
+    ],
+    [
+      "0x50fe16",
+      "mov     r8d, [rbx+5D8h]"
+    ],
+    [
+      "0x50fe1d",
+      "vmovd   [rsp+140h+var_108], xmm10"
+    ],
+    [
+      "0x50fe23",
+      "mov     [rsp+140h+var_110], r15d"
+    ],
+    [
+      "0x50fe28",
+      "lea     rdx, qword_F0AC08"
+    ],
+    [
+      "0x50fe2f",
+      "mov     [rsp+140h+var_118], rdx"
+    ],
+    [
+      "0x50fe34",
+      "mov     [rsp+140h+var_120], rax"
+    ],
+    [
+      "0x50fe39",
+      "mov     [rsp+140h+var_100], 1"
+    ],
+    [
+      "0x50fe3e",
+      "lea     rdx, [rbp+0C0h+var_F0]"
+    ],
+    [
+      "0x50fe42",
+      "vxorps  xmm3, xmm3, xmm3"
+    ],
+    [
+      "0x50fe46",
+      "call    sub_3375A0;"
+    ],
+    [
+      "0x50fe4b",
+      "vmovsd  xmm0, [rbp+0C0h+var_C8]"
+    ],
+    [
+      "0x50fe50",
+      "vmovsd  xmm1, [rbp+0C0h+var_F0]"
+    ],
+    [
+      "0x50fe55",
+      "vmovss  xmm2, [rbp+0C0h+var_C0]"
+    ],
+    [
+      "0x50fe5a",
+      "vaddss  xmm11, xmm2, [rbp+0C0h+var_E8]"
+    ],
+    [
+      "0x50fe5f",
+      "movzx   eax, byte ptr [rbx+1EBh]"
+    ],
+    [
+      "0x50fe66",
+      "test    al, al"
+    ],
+    [
+      "0x50fe68",
+      "jnz     short loc_50FE73"
+    ],
+    [
+      "0x50fe6a",
+      "cmp     byte ptr [rbx+6930h], 0"
+    ],
+    [
+      "0x50fe71",
+      "jz      short loc_50FE80"
+    ],
+    [
+      "0x50fe73",
+      "vaddps  xmm0, xmm0, xmm1"
+    ],
+    [
+      "0x50fe77",
+      "vsubps  xmm9, xmm9, xmm0"
+    ],
+    [
+      "0x50fe7b",
+      "jmp     loc_510008"
+    ],
+    [
+      "0x50fe80",
+      "mov     [rbp+0C0h+var_E0], r12"
+    ],
+    [
+      "0x50fe84",
+      "vmulss  xmm6, xmm9, cs:dword_E08658"
+    ],
+    [
+      "0x50fe8c",
+      "vmovaps xmm0, xmm6; x"
+    ],
+    [
+      "0x50fe90",
+      "call    Math_CosF_RE"
+    ],
+    [
+      "0x50fe95",
+      "vmovaps xmm7, xmm0"
+    ],
+    [
+      "0x50fe99",
+      "vmovaps xmm0, xmm6; x"
+    ],
+    [
+      "0x50fe9d",
+      "call    Math_SinF_RE"
+    ],
+    [
+      "0x50fea2",
+      "vmovaps xmm1, xmm7"
+    ],
+    [
+      "0x50fea6",
+      "call    Math_Atan2_Thunk"
+    ],
+    [
+      "0x50feab",
+      "mov     rax, qword ptr cs:xmmword_1752680+8"
+    ],
+    [
+      "0x50feb2",
+      "mov     r14, qword ptr cs:xmmword_1752680"
+    ],
+    [
+      "0x50feb9",
+      "mov     rdi, rax"
+    ],
+    [
+      "0x50febc",
+      "sub     rdi, r14"
+    ],
+    [
+      "0x50febf",
+      "sar     rdi, 2"
+    ],
+    [
+      "0x50fec3",
+      "test    rdi, rdi"
+    ],
+    [
+      "0x50fec6",
+      "jle     short loc_50FF2D"
+    ],
+    [
+      "0x50fec8",
+      "vmovaps xmm6, xmm0"
+    ],
+    [
+      "0x50fecc",
+      "vmovss  xmm10, cs:dword_E08658"
+    ],
+    [
+      "0x50fed4",
+      "mov     r13, rdi"
+    ],
+    [
+      "0x50fed7",
+      "jmp     short loc_50FEE8"
+    ],
+    [
+      "0x50fee0",
+      "mov     rdi, r13"
+    ],
+    [
+      "0x50fee3",
+      "test    r13, r13"
+    ],
+    [
+      "0x50fee6",
+      "jle     short loc_50FF26"
+    ],
+    [
+      "0x50fee8",
+      "shr     r13, 1"
+    ],
+    [
+      "0x50feeb",
+      "vmulss  xmm7, xmm10, dword ptr [r14+r13*4]"
+    ],
+    [
+      "0x50fef1",
+      "vmovaps xmm0, xmm7; x"
+    ],
+    [
+      "0x50fef5",
+      "call    Math_CosF_RE"
+    ],
+    [
+      "0x50fefa",
+      "vmovaps xmm8, xmm0"
+    ],
+    [
+      "0x50fefe",
+      "vmovaps xmm0, xmm7; x"
+    ],
+    [
+      "0x50ff02",
+      "call    Math_SinF_RE"
+    ],
+    [
+      "0x50ff07",
+      "vmovaps xmm1, xmm8"
+    ],
+    [
+      "0x50ff0b",
+      "call    Math_Atan2_Thunk"
+    ]
+  ],
+  "correction_final": [
+    [
+      "0x3397a0",
+      "sub     rsp, 28h"
+    ],
+    [
+      "0x3397a4",
+      "lea     rax, unk_EA2D98"
+    ],
+    [
+      "0x3397ab",
+      "mov     cs:qword_176FD50, rax"
+    ],
+    [
+      "0x3397b2",
+      "mov     eax, cs:dword_1773D18"
+    ],
+    [
+      "0x3397b8",
+      "mov     ecx, cs:dword_174B2D8"
+    ],
+    [
+      "0x3397be",
+      "mov     rdx, gs:58h"
+    ],
+    [
+      "0x3397c7",
+      "mov     rcx, [rdx+rcx*8]"
+    ],
+    [
+      "0x3397cb",
+      "cmp     eax, [rcx+4]"
+    ],
+    [
+      "0x3397d1",
+      "jg      short loc_339833"
+    ],
+    [
+      "0x3397d3",
+      "mov     rdx, qword ptr cs:xmmword_1773D00+8"
+    ],
+    [
+      "0x3397da",
+      "cmp     rdx, cs:qword_1773D10"
+    ],
+    [
+      "0x3397e1",
+      "jz      short loc_3397F7"
+    ],
+    [
+      "0x3397e3",
+      "lea     rax, qword_176FD50"
+    ],
+    [
+      "0x3397ea",
+      "mov     [rdx], rax"
+    ],
+    [
+      "0x3397ed",
+      "add     qword ptr cs:xmmword_1773D00+8, 8"
+    ],
+    [
+      "0x3397f5",
+      "jmp     short loc_33980A"
+    ],
+    [
+      "0x3397f7",
+      "lea     rcx, xmmword_1773D00"
+    ],
+    [
+      "0x3397fe",
+      "lea     r8, qword_176FD50"
+    ],
+    [
+      "0x339805",
+      "call    sub_DE550"
+    ],
+    [
+      "0x33980a",
+      "lea     rax, unk_EC72A8"
+    ],
+    [
+      "0x339811",
+      "mov     cs:qword_176FD50, rax"
+    ],
+    [
+      "0x339818",
+      "mov     cs:qword_176FD58, 0"
+    ],
+    [
+      "0x339823",
+      "lea     rcx, sub_33A000"
+    ],
+    [
+      "0x33982a",
+      "add     rsp, 28h"
+    ],
+    [
+      "0x33982e",
+      "jmp     sub_AB1F7C"
+    ],
+    [
+      "0x339833",
+      "lea     rcx, dword_1773D18"
+    ],
+    [
+      "0x33983a",
+      "call    sub_AB1A88"
+    ],
+    [
+      "0x33983f",
+      "cmp     cs:dword_1773D18, 0FFFFFFFFh"
+    ],
+    [
+      "0x339846",
+      "jnz     short loc_3397D3"
+    ],
+    [
+      "0x339848",
+      "lea     rcx, sub_DE4B0"
+    ],
+    [
+      "0x33984f",
+      "call    sub_AB1F7C"
+    ],
+    [
+      "0x339854",
+      "lea     rcx, dword_1773D18"
+    ],
+    [
+      "0x33985b",
+      "call    sub_AB1B40"
+    ],
+    [
+      "0x339860",
+      "jmp     loc_3397D3"
+    ],
+    [
+      "0x339870",
+      "sub     rsp, 28h"
+    ],
+    [
+      "0x339874",
+      "lea     rax, unk_EA2D98"
+    ],
+    [
+      "0x33987b",
+      "mov     cs:qword_176F5B0, rax"
+    ],
+    [
+      "0x339882",
+      "mov     eax, cs:dword_1773D18"
+    ],
+    [
+      "0x339888",
+      "mov     ecx, cs:dword_174B2D8"
+    ],
+    [
+      "0x33988e",
+      "mov     rdx, gs:58h"
+    ],
+    [
+      "0x339897",
+      "mov     rcx, [rdx+rcx*8]"
+    ],
+    [
+      "0x33989b",
+      "cmp     eax, [rcx+4]"
+    ],
+    [
+      "0x3398a1",
+      "jg      short loc_339903"
+    ],
+    [
+      "0x3398a3",
+      "mov     rdx, qword ptr cs:xmmword_1773D00+8"
+    ],
+    [
+      "0x3398aa",
+      "cmp     rdx, cs:qword_1773D10"
+    ],
+    [
+      "0x3398b1",
+      "jz      short loc_3398C7"
+    ],
+    [
+      "0x3398b3",
+      "lea     rax, qword_176F5B0"
+    ],
+    [
+      "0x3398ba",
+      "mov     [rdx], rax"
+    ],
+    [
+      "0x3398bd",
+      "add     qword ptr cs:xmmword_1773D00+8, 8"
+    ],
+    [
+      "0x3398c5",
+      "jmp     short loc_3398DA"
+    ],
+    [
+      "0x3398c7",
+      "lea     rcx, xmmword_1773D00"
+    ],
+    [
+      "0x3398ce",
+      "lea     r8, qword_176F5B0"
+    ],
+    [
+      "0x3398d5",
+      "call    sub_DE550"
+    ],
+    [
+      "0x3398da",
+      "lea     rax, unk_EC7278"
+    ],
+    [
+      "0x3398e1",
+      "mov     cs:qword_176F5B0, rax"
+    ],
+    [
+      "0x3398e8",
+      "mov     cs:qword_176F5B8, 0"
+    ],
+    [
+      "0x3398f3",
+      "lea     rcx, sub_339940"
+    ],
+    [
+      "0x3398fa",
+      "add     rsp, 28h"
+    ],
+    [
+      "0x3398fe",
+      "jmp     sub_AB1F7C"
+    ],
+    [
+      "0x339903",
+      "lea     rcx, dword_1773D18"
+    ],
+    [
+      "0x33990a",
+      "call    sub_AB1A88"
+    ],
+    [
+      "0x33990f",
+      "cmp     cs:dword_1773D18, 0FFFFFFFFh"
+    ],
+    [
+      "0x339916",
+      "jnz     short loc_3398A3"
+    ],
+    [
+      "0x339918",
+      "lea     rcx, sub_DE4B0"
+    ],
+    [
+      "0x33991f",
+      "call    sub_AB1F7C"
+    ]
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "client_sha256": "659940c1db362ed981d1df10637cec8c2a3d99409b77fc3b73e435e4649e36b0",
+  "spread_getter_rva": "0x80d490",
+  "spread_field": "CCSWeaponBaseVData::m_flSpread",
+  "spread_offset": "0x750",
+  "mode_field": "C_CSWeaponBase::m_weaponMode",
+  "mode_offset": "0x1a00",
+  "rejected_previous_getter_rva": "0x80c890",
+  "rejected_previous_getter_field_offset": "0x748",
+  "validation": "data-only relocated PE metadata and code operands, no client code executed"
+}

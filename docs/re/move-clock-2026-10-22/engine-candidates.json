@@ -1,0 +1,102 @@
+{
+  "module": "F:\\SteamLibrary\\steamapps\\common\\Counter-Strike Global Offensive\\game\\bin\\win64\\engine2.dll",
+  "sha256": "6456df18d8f954394024c2c07da8c848df15a5ace74ce7390d78970ceb39ee21",
+  "image_base": "0x180000000",
+  "references": [
+    {
+      "name": "ClientSendMove",
+      "at": "0x64cd5",
+      "owner": [
+        "0x64ae0",
+        "0x64cfd"
+      ]
+    },
+    {
+      "name": "OnClientProcessGameInput",
+      "at": "0x1b8efb",
+      "owner": [
+        "0x1b89a0",
+        "0x1b89c5"
+      ]
+    },
+    {
+      "name": "OnClientAdvanceTick",
+      "at": "0x1d4229",
+      "owner": [
+        "0x1d38a0",
+        "0x1d38c5"
+      ]
+    },
+    {
+      "name": "OnClientProcessGameInput",
+      "at": "0x1d42d7",
+      "owner": [
+        "0x1d38a0",
+        "0x1d38c5"
+      ]
+    },
+    {
+      "name": "OnClientAdvanceTick",
+      "at": "0x225478",
+      "owner": [
+        "0x223c30",
+        "0x223c59"
+      ]
+    },
+    {
+      "name": "OnClientProcessGameInput",
+      "at": "0x22562b",
+      "owner": [
+        "0x223c30",
+        "0x223c59"
+      ]
+    },
+    {
+      "name": "OnClientPreSimulate",
+      "at": "0x22593a",
+      "owner": [
+        "0x223c30",
+        "0x223c59"
+      ]
+    },
+    {
+      "name": "ClientCommandTick",
+      "at": "0x228b15",
+      "owner": [
+        "0x228ae0",
+        "0x228b30"
+      ]
+    },
+    {
+      "name": "ClientSimulateTick",
+      "at": "0x229b17",
+      "owner": [
+        "0x228e00",
+        "0x22b95a"
+      ]
+    }
+  ],
+  "verified_candidate": {
+    "rva": "0x228ae0",
+    "end_rva": "0x228c97",
+    "profile": "ClientCommandTick",
+    "abi": "void(object*, int count_minus_one)",
+    "count_semantics": "negative => no inner iterations; otherwise count+1",
+    "network_client_member": "wrapper+0x130",
+    "network_client_primary_vtable": "0x540bc8",
+    "stages": {
+      "0x260": "0x63e10",
+      "0x268": "0x63f30",
+      "0x288": "0x64120"
+    },
+    "direct_call_sites": [
+      "0x229480",
+      "0x229abe",
+      "0x229f89",
+      "0x22a0e4",
+      "0x22bafd"
+    ],
+    "live_game_hooked": false,
+    "server_accepted_tickbase_shift_verified": false
+  }
+}

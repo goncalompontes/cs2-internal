@@ -1,0 +1,135 @@
+{
+  "dump_sha256": "3224604483481c57a18ccfb20448a5e634a9583421abfac3a2712bba5cc77f27",
+  "imagebase": "0x0",
+  "source_functions": [
+    "0x4cf450",
+    "0x4cfd70",
+    "0x4c4b4b",
+    "0x4cbf10"
+  ],
+  "complete_original_prediction_recovered": false,
+  "native_bridge": "Controller tick-base phase + ModernJump current-command records; immediate grounded fallback; one native press; analytic air look-ahead",
+  "raw_files": [
+    {
+      "name": "0x4ba8f0.c",
+      "sha256": "53f5389df6ec53db3a9d6ef5f81fb42daed6221b26d684642975173528346624"
+    },
+    {
+      "name": "0x4ba8f0.json",
+      "sha256": "d5e987911f9dd3f334659f636197ea46db61d41271e0ab7f27e01dc1d177a9ed"
+    },
+    {
+      "name": "0x4bb440.c",
+      "sha256": "65c06086aa82357ffd06b0d03f77d452014207879683c500733ccbdafb0b66b9"
+    },
+    {
+      "name": "0x4bb440.json",
+      "sha256": "506e896dabd82c920804d0b5d1d2998a917235f79cf34451917b69b55c7992a5"
+    },
+    {
+      "name": "0x4bdab0.c",
+      "sha256": "3e82bb2876a38de019b97866a25f4f3925b2a1f35dc4b4052745ac8b0186130a"
+    },
+    {
+      "name": "0x4bdab0.json",
+      "sha256": "e00dfdaeeda2f72d26a654fac2e51b8cf2985ab6d84eeaa8655c3308824740bb"
+    },
+    {
+      "name": "0x4cbeb0.c",
+      "sha256": "94f7e82083d8f791baaa2e6008cbbb5e344aa1a1ea3bd38696563a0750cfb95c"
+    },
+    {
+      "name": "0x4cbf10.c",
+      "sha256": "3ff5d343f64c851f0287d2d66d5e935a995bc91ebe0c2e925ce58550de6aac02"
+    },
+    {
+      "name": "0x4cc790.c",
+      "sha256": "6be9f31809a0b6bce5ec2016b35d12fff66238e56b3f77efb5546421d928a9c5"
+    },
+    {
+      "name": "0x4cc790.json",
+      "sha256": "c446be79448d784e2b0ae47ef2ec020721fa13f21fc44eb38aba49475f3ea969"
+    },
+    {
+      "name": "0x4cf450.c",
+      "sha256": "e9f751cde7ec885e152d93be0354bf2401cb8cb9ac69d1c09942dea619e41b77"
+    },
+    {
+      "name": "0x4cf450.json",
+      "sha256": "665d94ce53edf36463fb97a1ed08b5f4f56f09b066e7f0b2c5c866c9711965d4"
+    },
+    {
+      "name": "0x51b480.c",
+      "sha256": "fcefe383bd2c41bbb0328b94c1f25e8828d1ad6df6801dbe9bc04b55ca017bb5"
+    },
+    {
+      "name": "0x51b480.json",
+      "sha256": "580e3c1ccc47e45700c397bff0fba31e8861859f4045cbb2f29beb2ff0ca2b78"
+    },
+    {
+      "name": "0x52cd20.c",
+      "sha256": "b1551e28bcba5b3c24a6b0f56eafc04aad633cf8838536032a2fa57cc5afecde"
+    },
+    {
+      "name": "0x52cd20.json",
+      "sha256": "11fa80e6d2a1d68dd5501aa1661cde7593fa640fec353bb995d88b0623374c53"
+    },
+    {
+      "name": "air-constants.json",
+      "sha256": "9359814f5e61ecbf3447fb5e52192928b964d24494882aeea7ec5aae4dca701e"
+    },
+    {
+      "name": "air-steer.asm",
+      "sha256": "dd727893addfded1097b569371019ff21e8d849b39e22fac83ade40f0f49f441"
+    },
+    {
+      "name": "air-tail.asm",
+      "sha256": "a165d557ba848fc71e73ee46562943eadd84ef010595bae1e5b954f2b5e9b1f5"
+    },
+    {
+      "name": "air-wrapper.asm",
+      "sha256": "84e3fdb11a7afb5c63b10b9b876c7a919cbdb2fd2fcff529b97cf4e2e2600985"
+    },
+    {
+      "name": "asin-thunk.asm",
+      "sha256": "e4d662302fe0f493340d3028d04c064b492affcab396ba19a2b3e561b15de583"
+    },
+    {
+      "name": "hop-neighborhood.asm",
+      "sha256": "304465a43a8dc3c62b2388dd4f6549ea199c791d3abf84dc07dc444922419c7f"
+    },
+    {
+      "name": "jump-a.asm",
+      "sha256": "1fa84c71940a72ac5416a32c107ea6afeef95b0c87abf36006090b6c728d4637"
+    },
+    {
+      "name": "jump-b.asm",
+      "sha256": "54010ad1ae713e54b6eedbd81494892e36d5dced022a7e2f238c5c28780612d2"
+    },
+    {
+      "name": "jump-c.asm",
+      "sha256": "b6a1687f7a88a8c2583dac212ff7981ac5ed81f54c7d6038c7a75c41531692f3"
+    },
+    {
+      "name": "jump-d.asm",
+      "sha256": "e783106b5dab8421eacf52d45d9023284d1b4a7dfccdce6096f8d44076c9189c"
+    },
+    {
+      "name": "math-angle.c",
+      "sha256": "09fe433210277b74bad976a0b92cea1e9eddbaa040cac330f759d3fd1e398a51"
+    },
+    {
+      "name": "movement-entry.asm",
+      "sha256": "35ffcd761008b2c3911a7a720f94262c69192bd1ce54bee52cfdf1e95ee4f9c1"
+    },
+    {
+      "name": "movement-main.asm",
+      "sha256": "bd633c3ac0324201e76fa47793cc207f0410885fce443d67ae33741cd444440e"
+    },
+    {
+      "name": "subtick-constants.json",
+      "sha256": "4e61df97184201cfd1f331ec006d14c9d9320f50ec9b7a15e32724eacc7d5fa6"
+    }
+  ],
+  "native_adapter_revision": "2026-10-17 counter-limit: restored WASD assistance; native allow_counter=false; previous-impulse reconciliation; separate strafe/autostop diagnostics"
+}

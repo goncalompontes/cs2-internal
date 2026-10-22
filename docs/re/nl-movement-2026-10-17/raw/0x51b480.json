@@ -1,0 +1,4 @@
+{
+  "addr": "0x51b480",
+  "code": "void __fastcall sub_51B480(\n        double a1,\n        double a2,\n        double a3,\n        double a4,\n        double a5,\n        double a6,\n        __m128 _XMM6,\n        __m128 _XMM7,\n        __int64 a9,\n        __int64 a10,\n        __int64 a11,\n        __int64 _RCX)\n{\n  __asm /*0x51b489*/\n  {\n    vmovaps [rsp+78h+var_38], xmm8\n    vmovaps [rsp+78h+var_48], xmm7\n    vmovaps [rsp+78h+var_58], xmm6\n    vmovss xmm0, cs:dword_E98F40\n    vucomiss xmm0, dword ptr [rcx+1CCh]\n  }\n  __asm\n  {\n    vmovaps xmm6, [rsp+78h+var_58]\n    vmovaps xmm7, [rsp+78h+var_48]\n    vmovaps xmm8, [rsp+78h+var_38]\n  }\n}"
+}

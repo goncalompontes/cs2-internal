@@ -1,0 +1,14 @@
+{
+  "samples": 135,
+  "active_samples": 67,
+  "camera_restoration_verified": 135,
+  "counter_wish_max": 0,
+  "autostop_samples": 0,
+  "source_minus_processed": {
+    "1": 19,
+    "0": 48
+  },
+  "model_gain_mean": 3.712441629438258,
+  "sampling": "asynchronous 100ms client snapshots; not per-command/server-authoritative",
+  "user_report": "first-person weapon/viewmodel jitter and weak gain"
+}

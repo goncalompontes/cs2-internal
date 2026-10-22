@@ -1,0 +1,26 @@
+{
+  "observation": "User debug screenshot: service call succeeded but output stayed (0,0,0)",
+  "class": ".?AVCCSPlayer_WeaponServices@@",
+  "vtable_rva": "0x1c14c78",
+  "obsolete_slot": 29,
+  "obsolete_function_rva": "0x912b80",
+  "obsolete_function_behavior": "calls state update helpers and uses its own stack output; does not preserve or fill the caller vector",
+  "current_slot": 32,
+  "current_function_rva": "0xa7fd00",
+  "current_abi": "Vec3* function(weapon_services, Vec3* output); consumes returned pointer",
+  "engine_callers": [
+    "0xd1e8a3",
+    "0x8ca361",
+    "0x942082"
+  ],
+  "callee": "owner pawn virtual +0x568, current C_CSPlayerPawn RVA 0x93c660; normal branch delegates to origin + view offset at 0x15fab0",
+  "runtime_binding": "unique verified wrapper signature, then match function identity in live service vtable; validate owner and result",
+  "regressions": [
+    "stale slot 29 trap never called",
+    "verified getter resolved at another slot",
+    "returned vector pointer may differ from supplied output storage",
+    "invalid result still blocks firing"
+  ],
+  "in_game_new_build_verified": false,
+  "client_sha256": "659940c1db362ed981d1df10637cec8c2a3d99409b77fc3b73e435e4649e36b0"
+}
