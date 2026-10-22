@@ -19,7 +19,34 @@ meson test -C build
 BIN=toolchain/msvc/bin/x64 . toolchain/msvcenv-native.sh
 meson setup build-payload payload --cross-file toolchain/windows-msvc.ini
 meson compile -C build-payload
+meson test -C build-payload
 ```
+
+## The tests, and which build runs them
+
+Two builds, two copies of the same test, and **both are run**:
+
+```sh
+meson test -C build          # the host copy
+meson test -C build-payload  # the payload's own clang-cl build
+```
+
+The payload's copy is the one that ships with the payload, and it is the one
+built with the compiler the payload ships with (**clang-cl**). The host copy
+is the same source in the host project; its **behavioural** half is only
+meaningful in a **clang-cl** host build — with `cl.exe` the guard recovers
+either way, so the half cannot see the defect (and this repository's host
+suite *is* clang-cl: CI sets `CC=clang-cl`/`CXX=clang-cl`).
+
+The payload's copy is registered whenever the build machine can run the
+binaries (`meson.can_run_host_binaries()`), so the CI job — which configures
+the payload as a cross build with `toolchain/windows-msvc.ini` **on a Windows
+runner** — registers and runs it too. A cross build to a foreign system does
+not.
+
+`payload/diag/tests/test_diag_guard.cpp` is the fault guard's own test: ten
+deliberate faults, ten recoveries, the process alive; plus a source check
+that the tree holds exactly **one** recovery mechanism.
 
 ## Component layout
 
@@ -50,10 +77,9 @@ meson compile -C build-payload
   executable-memory/protection helpers (host-tested).
 - `payload/game` — state introspection: safe in-process reads
   (`ReadProcessMemory` on self, so an invalid pointer fails instead of faulting
-  — a fault is only survivable inside `cs2::diag::call_guarded`, and a read
-  needs no call at all), module lookup, the paged
-  entity identity table (`EntitySystem`), and `StateReader` (local player +
-  every player). Field offsets come from the generated schema (ADR-0001);
+  — and a read never faults at all, so it needs no guard), module lookup, the
+  paged entity identity table (`EntitySystem`), and `StateReader` (local player
+  + every player). Field offsets come from the generated schema (ADR-0001);
   players are enumerated by matching the local pawn's vtable rather than a
   hard-coded per-build RVA.
 - `payload/features` — `Overlay` builds a `render::OverlayModel` from a
@@ -84,12 +110,14 @@ meson compile -C build-payload
   mechanism: `cs2::diag::call_guarded` runs an engine call under a vectored
   handler plus `setjmp`/`longjmp`, so a fault inside the call is logged and the
   process survives instead of dying. The handler that owns the jump is **not**
-  `noexcept`: a `noexcept` frame is `nounwind`, and the `longjmp` out of it
-  runs the frame's `std::terminate` cleanup and kills the process with
+  `noexcept`: a `noexcept` frame is not `nounwind` — clang-cl gives it a C++
+  exception-handler unwind record whose cleanup action is `std::terminate`,
+  and the `longjmp` out of it runs that action, so the process dies with
   0xC0000409 instead of recovering (clang-cl, the compiler the payload ships
-  with). `payload/diag/tests/test_diag_guard.cpp` is built with clang-cl and
-  proves it — ten deliberate faults, ten recoveries, the process alive. The
-  guard's limits (one guarded call at a time, the faulting thread only, the
+  with; the plain handler's record has no handler at all, flags `0x0`).
+  `payload/diag/tests/test_diag_guard.cpp` is built with clang-cl and proves
+  it — ten deliberate faults, ten recoveries, the process alive. The guard's
+  limits (one guarded call at a time, the faulting thread only, the
   recoverable codes, no resources in the guarded call) are in
   `payload/diag/include/cs2/diag/crash_handler.hpp`.
 - `injector` — manual-map injector (`injector.exe`, Windows x64) run inside the

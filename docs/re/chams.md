@@ -497,9 +497,9 @@ is **resolved**, not asserted:
    `scripts/calibrate-live.py` (which now calibrates `scenesystem.dll` too).
 2. `game::find_module("scenesystem.dll")` — the module the offset belongs to.
 3. The **20 bytes at the resolved address** are read through the fault-safe
-   reader (`game::read_bytes` — the payload is manually mapped without
-   registered exception tables, so a bad address must never fault) and
-   compared with the prologue above.
+   reader (`game::read_bytes` — the injector registers the payload's
+   `.pdata`, so the image *does* have exception tables, and a bad address
+   must never fault) and compared with the prologue above.
 
 Only then is the entry patched. The rule itself is the pure function
 `cs2::features::hook_target::decide`
