@@ -19,16 +19,30 @@ diag_dep = declare_dependency(
 #
 # The guard is the payload's only safety net for an engine call that faults,
 # and **what it does depends on the compiler**: a `noexcept` vectored handler
-# is `nounwind`, and the `longjmp` out of a `nounwind` frame runs the frame's
-# `std::terminate` cleanup instead of recovering, so the process dies with
-# 0xC0000409. That is clang-cl's behaviour -- clang-cl is the compiler the
-# payload ships with -- and not MSVC's, so a test built with `cl.exe` passes
-# either way and can never see the defect.
+# is not `nounwind` -- clang-cl gives its frame a C++ exception-handler unwind
+# record whose cleanup action is `std::terminate`, and the `longjmp` out of
+# that frame runs the action, so the process dies with 0xC0000409. That is
+# clang-cl's behaviour -- clang-cl is the compiler the payload ships with --
+# and not MSVC's: under `cl.exe` the same source recovers.
 #
-# The test therefore lives in the **payload's own build** (clang-cl) and runs
-# there. The host build registers the same test for the source check, but the
-# behavioural half is only meaningful here.
-if not meson.is_cross_build()
+# **How the test is run.** It is registered in **two** builds, and both of them
+# have to be run:
+#
+#   meson test -C build          # the host copy (the root meson.build)
+#   meson test -C build-payload  # this copy -- the payload's own clang-cl build
+#
+# The host copy's behavioural half is only meaningful in a **clang-cl host
+# build** (with `cl.exe` the guard recovers either way); this repository's host
+# build is clang-cl, which is why the host copy is worth registering. The
+# defect survived because **there was no test at all**, not because the
+# compiler was wrong.
+#
+# The copy here is the one that ships with the payload, so it is registered
+# whenever the build machine can run the binaries: a cross build that still
+# runs on the build machine (the CI job configures the payload with
+# `toolchain/windows-msvc.ini` on a Windows runner) registers it, and a cross
+# build to a foreign system does not.
+if not meson.is_cross_build() or meson.can_run_host_binaries()
   diag_guard_test = executable('diag_guard_test',
     files('tests/test_diag_guard.cpp'),
     dependencies : diag_dep,

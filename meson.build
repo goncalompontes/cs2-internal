@@ -523,18 +523,29 @@ test('control-sound', control_sound_test)
 #
 # The guard is the payload's only safety net for an engine call that faults,
 # and what it does depends on the **compiler**: a `noexcept` vectored handler
-# is `nounwind`, and the `longjmp` out of a `nounwind` frame runs the frame's
-# `std::terminate` cleanup instead of recovering, so the process dies with
-# 0xC0000409. Under MSVC's `cl.exe` the same source recovers, so a host test
-# built with `cl.exe` passes either way and could never have caught the
-# defect -- which is why the defect survived: the host suite was the only
-# suite there was.
+# is not `nounwind` -- clang-cl gives its frame a C++ exception-handler unwind
+# record whose cleanup action is `std::terminate`, and the `longjmp` out of
+# that frame runs the action, so the process dies with 0xC0000409. That is
+# clang-cl's behaviour -- clang-cl is the compiler the payload ships with --
+# and not MSVC's: under `cl.exe` the same source recovers.
 #
-# The behavioural half therefore also lives in the **payload's own build**
-# (clang-cl, the compiler the payload ships with) and runs there
-# (`meson test -C build-payload`). This registration keeps the source check --
-# the tree must hold exactly one recovery mechanism -- in the host suite, and
-# runs the behaviour too wherever the host compiler is clang-cl.
+# **How the test is run.** The test is registered in **two** builds, and both
+# of them have to be run:
+#
+#   meson test -C build          # this copy (the host build)
+#   meson test -C build-payload  # the payload's own clang-cl build
+#
+# The host copy's behavioural half is only meaningful in a **clang-cl host
+# build**: with `cl.exe` the guard recovers either way, so the half cannot see
+# the defect. This repository's host build is clang-cl (CI sets
+# `CC=clang-cl`/`CXX=clang-cl`), which is why the host copy is worth
+# registering -- and why the defect survived: **there was no test at all**,
+# not because the compiler was wrong.
+#
+# The payload's own copy (`payload/diag/meson.build`) is the one that ships,
+# and it is registered in the payload's build whether or not that build is a
+# cross build -- the test runs wherever the build machine can run the
+# binaries.
 diag_guard_test = executable('diag_guard_test',
   files(
     'payload/diag/tests/test_diag_guard.cpp',
