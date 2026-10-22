@@ -383,3 +383,83 @@ plus the scenario suite (the MCP tools' advertised schema).
 
 **What is not:** the live run. The operator's steps are in
 `docs/operator-live-check.md` §6.
+
+
+---
+
+## 14. The settings sink clobbered the control channel's rage values (2026-10-22)
+
+> Added with task T40
+> (`docs/orchestration/spec-t40-control-owns-settings.md`). **Fixed on the
+> branch `feat/t40-control-owns-settings`** — the rule, the status's new keys
+> and the host test are in `docs/ragebot.md` §15. **The live run is still the
+> operator's**: nothing below has been exercised in the game.
+
+### 14.1 The finding
+
+The overlay's settings sink (`payload/src/payload_main.cpp`,
+`on_movement_settings`) re-applied the **whole** rage group on **every**
+publication, and the menu publishes its block every frame — so whatever the
+control channel had set was overwritten within a second:
+
+```
+cs2_rage {objective: "expected"}   ->  the answer says  objective: "expected"
+cs2_rage {}          (a second)   ->  the answer says  objective: "hitchance"
+```
+
+**It was not specific to the objective.** Every rage field the wire owns was
+clobbered the same way (`enabled`, `key`, `fire`, `objective`, `hitbox`, `fov`,
+`min_damage`, `min_hitchance`, `autostop`, `autoscope`, `autoreload`,
+`only_visible`, `mode`, `per_weapon`, `recoil`, `stop_speed`, `backtrack`), so
+the harness's control of the ragebot was transient for all of them.
+
+**It made the T35 feature unreachable.** The Monte-Carlo objective is
+selectable **only** over the control channel (the menu has no such option, by
+design), so the operator selected it and a frame later it was gone: the
+feature T35 shipped was inert in practice.
+
+**How it was found:** by the operator trying to use the feature in a live
+game on 2026-10-22, and by the orchestrator chasing why the objective would
+not stick. This ledger had no entry for it (a grep for `clobber`,
+`settings sink`, `on_movement_settings` and the wire/objective pairing
+returned nothing) — the repo did not know about it.
+
+### 14.2 The fix
+
+The rule, the fields, the recomputed-value question and the status's new keys
+are in `docs/ragebot.md` §15. In short: the sink compares the block's rage
+group against the menu's **last view** and writes only the fields the operator
+changed; the service applies only the fields the write carries; the status
+carries `objective_source` and `menu_fields`.
+
+**The wire block and the menu are not touched**, and the block's version is
+not bumped: it is shared between two separately compiled binaries, and a
+version bump is a silent-corruption risk.
+
+### 14.3 The tests
+
+The host test `control-rage-settings`
+(`payload/control/tests/test_control_rage_settings.cpp`) covers the rule, and
+every check in it was **broken on purpose** in a scratch copy to prove it can
+fail:
+
+| the break | the check that caught it |
+|---|---|
+| the sink applies the whole group on every publication (the defect) | "the sink consults the rule before it applies" |
+| the sink consults the rule but the write ignores it | "the write carries the fields the operator changed" |
+| the comparison forgets a field | "… is a field the rule covers" |
+| the comparison always reports every field | "an unchanged block reports nothing" |
+| the objective is reported as changed on every publication | "the pull-back converges: the next publication reports nothing" |
+| the weapon's bytes are compared instead of its name | "a stale byte after the NUL is not a change of the name" |
+| the ownership is inverted | "a set bit means the menu owns the field" |
+| a rage field is added to the wire and the rule does not cover it | "every rage field the wire owns is either compared or excluded on purpose" |
+| the service stores a field without a mask | "the service masks every rage field" |
+| the status stops saying who owns the objective | "the status says which channel owns the objective" |
+| the menu's float slider writes the block back | "the menu's float slider does not write the value back" |
+
+**What is verified:** the host tests — `control-rage-settings` (the rule, the
+coverage, the wiring) and the rest of the suite (`meson test`, 60 tests), plus
+the payload, the overlay and the injector builds.
+
+**What is not:** the live run. The operator's steps are in
+`docs/operator-live-check.md` §6.

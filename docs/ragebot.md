@@ -1229,3 +1229,145 @@ as exact.
 **The HUD line's buffer is 192 bytes.** The line carries the objective's
 name, the Monte-Carlo's marker and the two occlusion markers, and the old
 128-byte buffer cut the last of them off.
+
+## 15. Who owns the rage settings — the menu or the control channel
+
+> Added 2026-10-22 — task T40
+> (`docs/orchestration/spec-t40-control-owns-settings.md`).
+> **The control channel's settings survive the menu now.** Before this, the
+> overlay's settings sink re-applied the **whole** rage group on every
+> publication — and the menu publishes its block every frame — so whatever the
+> control channel had set was overwritten within a second:
+>
+> ```
+> cs2_rage {objective: "expected"}   ->  the answer says  objective: "expected"
+> cs2_rage {}          (a second)   ->  the answer says  objective: "hitchance"
+> ```
+>
+> The Monte-Carlo objective (§14.1) is reachable **only** over the control
+> channel, so the feature was unreachable in practice: the operator selected
+> it and a frame later it was gone.
+
+### 15.1 The rule
+
+> **The overlay's settings apply a rage field only when the operator has
+> actually changed that field in the menu.**
+
+The decision is a **pure** comparison over two snapshots of the wire's rage
+group (`cs2/control/rage_settings.hpp`, host-tested by
+`control-rage-settings`):
+
+* `rage_settings_from_wire(block)` — the block's rage group as a snapshot;
+* `rage_changed_fields(published, last_view)` — the fields whose values
+  differ, one bit per field;
+* the **last view** is the menu's last published group. It is updated
+  **after** the apply, so the next publication compares against what was
+  actually applied.
+
+The **first** publication applies **everything** (there is no earlier view to
+compare against); every later one applies only the fields the operator moved.
+The write carries that mask, so the service applies only the masked fields —
+the others keep their value **and** their owner.
+
+**Which field is applied is decided per field, not per group.** When the
+operator changes the FOV in the menu, the FOV is applied and the control
+channel's objective stays in force; when the operator changes the objective,
+the objective is applied and the menu's value wins. The alternative (apply the
+whole group on any change) would have reverted the Monte-Carlo objective the
+moment the operator touched any other rage slider — and the menu cannot show
+that it did.
+
+### 15.2 The fields the comparison covers
+
+| the wire's field | the rule's bit | |
+|---|---|---|
+| `rage` | `RAGE_FIELD_ENABLED` | the ragebot's switch |
+| `rage_key` | `RAGE_FIELD_KEY` | the trigger key |
+| `rage_fire` | `RAGE_FIELD_FIRE` | the auto-fire switch |
+| `rage_objective` | `RAGE_FIELD_OBJECTIVE` | **the objective** |
+| `rage_hitbox` | `RAGE_FIELD_HITBOX` | the hitbox filter |
+| `rage_fov` | `RAGE_FIELD_FOV` | the target cone |
+| `rage_min_damage` | `RAGE_FIELD_MIN_DAMAGE` | the damage gate |
+| `rage_min_hitchance` | `RAGE_FIELD_MIN_HITCHANCE` | the hitchance gate |
+| `rage_autostop` | `RAGE_FIELD_AUTOSTOP` | the auto-stop mode |
+| `rage_autoscope` | `RAGE_FIELD_AUTOSCOPE` | the auto-scope mode |
+| `rage_autoreload` | `RAGE_FIELD_AUTORELOAD` | the auto-reload switch |
+| `rage_only_visible` | `RAGE_FIELD_ONLY_VISIBLE` | the visible-only switch |
+| `rage_mode` | `RAGE_FIELD_MODE` | the trigger's mode |
+| `rage_per_weapon` | `RAGE_FIELD_PER_WEAPON` | the per-weapon switch |
+| `rage_weapon` | `RAGE_FIELD_WEAPON` | the profile's weapon key |
+| `rage_recoil` | `RAGE_FIELD_RECOIL` | the recoil compensation |
+| `rage_stop_speed` | `RAGE_FIELD_STOP_SPEED` | the auto-stop speed |
+| `rage_backtrack` | `RAGE_FIELD_BACKTRACK` | the backtracking switch |
+
+**The one-shot op is not compared.** `rage_config_op` and `rage_config_token`
+are a *request* ("save this profile"), not a setting: the service's own token
+makes each request fire exactly once, so the op is delivered on every write
+rather than compared. The control channel has no op of its own in the block,
+so the op cannot clobber anything. The host test reads `wire.hpp` and fails
+when a rage field is neither compared nor excluded on purpose — a field left
+out of the comparison is a field that keeps clobbering the control channel.
+
+**The weapon's key is compared as a name, not as bytes.** The block's field is
+a fixed 24-byte buffer, and the menu's text field writes the string and its
+NUL but leaves the bytes after the NUL as they were — a stale byte is not a
+change of the value.
+
+### 15.3 Does the menu republish a recomputed value?
+
+**No — and that is what makes the rule work.** A naive "did it change?"
+comparison would report a recomputed value as a change on **every**
+publication, and the fix would not have worked at all. The findings:
+
+* **Dear ImGui's widgets write the block only when the operator acts on
+  them.** A slider writes its value back while it is being *dragged*
+  (`SliderBehaviorT` writes `*v` only when the item is active), a combo only
+  when an item is *selected*, a check box only on a click, and a text field
+  only when it is edited. The menu's float-slider helper does not touch the
+  value at all (the host test reads `menu_pages.hpp` and proves it).
+* **The one widget that writes unconditionally is the combo's byte wrapper**
+  (`index = current`), and it pulls an **out-of-range** byte back into the
+  widget's range. For an in-range byte it writes the **same** value, so the
+  comparison reports nothing. For an out-of-range byte (a corrupt block, or a
+  control client that wrote one into the block) the pull-back is a change
+  **once**, and the value it writes is the one the next publication carries —
+  so the rule converges instead of degenerating into "always changed".
+
+So the menu's value is the value the callback last saw, and "the operator
+changed this field" is decided by the value, not by the fact that the block
+was published again.
+
+### 15.4 Which channel owns the objective
+
+The service records the owner of each rage field: the menu's bits are set by
+the menu's write and cleared by the control channel's. The status carries:
+
+| the status's key | what it says |
+|---|---|
+| `objective_source` | `"menu"` or `"control"` — who owns the **global** objective |
+| `menu_fields` | the rage fields the **menu** owns, comma-separated; a field that is not in the list belongs to the control channel |
+
+The global objective is the one the two channels write; with a per-weapon
+profile the solve runs the **profile's** objective instead (`objective` is the
+effective one, `objective_global` the setting), and the profile's objective
+comes from the profile file — it has no channel owner.
+
+**A `settings set` writes the block, not the service's rage state.** The
+control channel's `settings` command merges into the **menu's block**, so the
+value it writes is the menu's from then on (the menu owns it, and the status
+says so). The `rage` command is the channel that writes the ragebot's own
+state, and it is the one that owns the fields it changes.
+
+### 15.5 The files
+
+| file | what |
+|---|---|
+| `payload/control/include/cs2/control/rage_settings.hpp` | the **pure rule**: the snapshot, the comparison, the field bits, the owner |
+| `payload/control/tests/test_control_rage_settings.cpp` | the rule's host test (`control-rage-settings`) |
+| `payload/src/payload_main.cpp` | the sink: the comparison, the last view, the masked write |
+| `payload/control/src/service.cpp` | the masked write, the owner, the status's new keys |
+
+**The wire block and the menu are not touched.** The block's version is not
+bumped: it is shared between two separately compiled binaries, and a version
+bump is a silent-corruption risk.
+

@@ -302,7 +302,12 @@ auto parse_trigger_env() noexcept -> cs2::control::TriggerConfig {
 
 // The overlay menu's `Movement`/`Ragebot` tabs write the shared settings; the
 // publisher calls this on every published frame, and the payload's features follow (so
-// the menu is the single owner).
+// the menu is the single owner of the block).
+//
+// **The ragebot's settings are the exception**: the control channel drives the
+// ragebot too, and it is the only way to reach the Monte-Carlo objective (the
+// menu has no such option), so the sink applies only the rage fields the
+// operator actually changed — see `docs/ragebot.md` §15.
 void on_movement_settings(void* context, const cs2::overlay::wire::Settings& settings) noexcept {
   auto* runtime = static_cast<Runtime*>(context);
   // Work on a copy: in the in-process path `settings` **is** the menu's live
