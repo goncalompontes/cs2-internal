@@ -9,7 +9,8 @@
 > only removed when the fix is **merged and re-reviewed**. A finding that is
 > known and not fixed is a known defect, not a surprise.
 
-Last updated: 2026-10-21, after the first live run.
+Last updated: 2026-10-22, after the chams' two merges and the Monte-Carlo's
+review round.
 
 ---
 
@@ -26,7 +27,7 @@ payload was injected once and the game was driven from the agent session.
 | **L6** | nit | **The dumper binary in `external/dumper/target/release/` is gitignored and goes stale.** A stale copy there makes the new `scenario-resolve-offsets-offline` suite fail (it runs the real binary and asks it for `--list-signature-modules`, which the old binary does not have) — with the *host* suite otherwise green. The cure: `cargo build --release` and copy the exe over. | the gitignored artefact | **not fixed — deferred** |
 | **L7** | nit | **The cs2 MCP server loaded the scenario modules when it started**, so it still runs the pre-merge code: the new `bot-match` flow (the new keys `round`, `waited_s`, `team_joined`) and any new scenario (the hit log's) are invisible to `cs2_run_scenario` until the server is restarted. The repository's own runner picks them up at once: `python scripts\run-scenario.py <name>`. | the MCP server | **not fixed — deferred** |
 | **L2** | minor | **`strafe_ignored_during_window: -18`** — a counter that goes **negative**. | the strafe's status | — (not yet assigned) |
-| **L3** | minor | The `bot-match` scenario **returns during the freeze/buy window** (`screen: "buy-time"`), so the operator has to wait by hand; and the team join happens late (as a side effect of driving to a live round). | `scripts/scenario/awaiting.py` | **`feat/t31-bot-match-live`** (in flight) |
+| **L3** | minor | The `bot-match` scenario **returns during the freeze/buy window** (`screen: "buy-time"`), so the operator has to wait by hand; and the team join happens late (as a side effect of driving to a live round). | `scripts/scenario/awaiting.py` | **merged** (`f2b3a50`) — **without an adversarial review** (§10), so §9's rule is not satisfied and the row **stays** |
 | **L4** | nit | The payload's log has **no rotation** — 65 MB of accumulated history from three days. The growth rate is fine (113 B/s). | `%LOCALAPPDATA%\cs2-internal\cs2-payload.log` | — |
 
 **What the live run confirmed as working:** the auto-strafe accelerates
@@ -39,12 +40,36 @@ hook fires; the offsets refresh offline reproduces the dump exactly.
 
 ---
 
-## 2. The camera crash — the root cause, and the one that is still live
+## 2. The camera crash — the root cause, and the live run it still needs
 
-| # | severity | finding | where | fix |
-|---|---|---|---|---|
-| **C1** | **blocker (live)** | **The third-person camera crashes the game.** `0xc0000005`, reading `0xffffffffffffffff`, at an address **inside the payload**, right after "[cs2-features] third person: the camera update is hooked". The cause is the **`thread_local` re-entrancy guard in the detour**: the payload is **manually mapped**, the loader never runs for it, the image's TLS index is **154** (above the 64 inline slots `cs2::tls::ensure_thread_tls` supports — it returns at `bootstrap.cpp:49`), so the guard's read dereferences uninitialised TEB memory. **The address is *not* stale**: `client.dll + 0xB62A20` is a valid 3789-byte function on the live build. | `payload/features/src/thirdperson.cpp:39` | **`feat/t27-thirdperson-crash`** (the fix round is in review; **until it is merged the camera must stay off**) |
-| **C2** | major | The replacement guard (the per-owner one) had **two blockers** in review: the refusal depended on the slot scan order (a same-thread recursion could slip through) and a double claim leaked a slot, so a thread that was **not** recursing could be refused forever. The shipped 8-thread test was **flaky** (49 failures in 3000 runs). | `payload/features/include/cs2/features/recursion_guard.hpp` | **`feat/t27-thirdperson-crash`** (the fix round: a two-pass `try_enter`, `compare_exchange_strong`; 3000 rounds with 0 failures) |
+The camera crashed the game: `0xc0000005`, reading `0xffffffffffffffff`, at
+an address **inside the payload**, right after "[cs2-features] third person:
+the camera update is hooked". The cause was the **`thread_local` re-entrancy
+guard in the detour** — the payload is **manually mapped**, the loader never
+runs for it, the image's TLS index is **154** (above the 64 inline slots
+`cs2::tls::ensure_thread_tls` supports — it returns at `bootstrap.cpp:49`),
+so the guard's read dereferences uninitialised TEB memory. The address was
+**not** stale: `client.dll + 0xB62A20` is a valid 3789-byte function on the
+live build. The replacement guard (the per-owner one) also had **two
+blockers** in review — the refusal depended on the slot scan order, and a
+double claim leaked a slot — and the shipped 8-thread test was **flaky** (49
+failures in 3000 runs).
+
+**Those rows are closed.** The fix — the two-pass `try_enter`
+(`compare_exchange_strong`; 3000 rounds with 0 failures), no per-frame module
+lookup, `docs/re/thirdperson.md` — **merged** (`8f215c2`) and was
+**re-reviewed** (`SHIP WITH FIXES`: the two-pass `try_enter` really does
+break a same-thread recursion whatever the order of the slots, a thread
+really does hold at most one slot, and the shipped 8-thread case is **0
+failures in 3000 rounds**), so §9's rule is satisfied and the rows were
+**deleted**. Their content is not lost: it is in `docs/re/thirdperson.md`
+(§1 the symptom, §2 the faulting instruction, §4 the address, §6 the guard
+that replaces it) and in the review reports.
+
+**What is still owed is the live run.** The **fixed** camera has never run
+against a real game, so the operator's first camera run is the first
+observation of the new guard — `docs/operator-live-check.md` §3, and the RE
+document's own list in `docs/re/thirdperson.md` §9.
 
 ---
 
@@ -58,23 +83,33 @@ hook fires; the offsets refresh offline reproduces the dump exactly.
 | **A3** | major | `docs/re/animfix.md` §10.1 stated the **opposite** of the code in three sentences. The file is append-only: the fix appends a dated §11 that corrects it. | `docs/re/animfix.md` | **`feat/t20b-animfix-estimator`** — §11 corrects §10.1 ✓, but §11 itself carries **two new false sentences** of the same class ("it is never an inflated one", "the 245 ms old capture is gone") — measured false by the re-review. Not merged with the branch |
 | **A4** | minor | The duty cycle was computed from counters with **mismatched windows** (the denominator counted every tick since the payload started) → the scenario reported 0.0 % for a feature that was working perfectly. | `scripts/scenario/scenarios/animfix.py` | **merged** (`14a64e1`) |
 | **A5** | minor | The install path **logged a line on every tick** when the calibration dump was stale (~500 MB/day). | `payload/control/src/input.cpp` | **merged** (`14a64e1`) |
-| **A6** | minor | The scenario's fallback to an older payload's counter was **silent** (two different denominators, no marker). | `animfix.py` | **`feat/t20b-animfix-estimator`** (in review) |
-| **A7** | minor | The refusal counters mixed per-tick and per-slot units; the status's comment asserted a unit the code did not keep. | `input.cpp`, `service.cpp` | **`feat/t20b-animfix-estimator`** (in review) |
-| **A8** | nit | The reported snapshot interval was `0` for a server faster than the floor — ambiguous with "not observed yet". | `animfix.hpp` | **`feat/t20b-animfix-estimator`** (in review) |
-| **A9** | nit | One of the three new burst tests was **green against the pre-fix code** (it only exercised the initial fill). | `test_control_animfix.cpp` | **`feat/t20b-animfix-estimator`** (in review) |
+| **A6** | minor | The scenario's fallback to an older payload's counter was **silent** (two different denominators, no marker). | `animfix.py` | **not fixed** — deferred (the branch is **parked**: its re-review returned **DO NOT SHIP** — §10) |
+| **A7** | minor | The refusal counters mixed per-tick and per-slot units; the status's comment asserted a unit the code did not keep. | `input.cpp`, `service.cpp` | **not fixed** — deferred (the branch is **parked**: its re-review returned **DO NOT SHIP** — §10) |
+| **A8** | nit | The reported snapshot interval was `0` for a server faster than the floor — ambiguous with "not observed yet". | `animfix.hpp` | **not fixed** — deferred (the branch is **parked**: its re-review returned **DO NOT SHIP** — §10) |
+| **A9** | nit | One of the three new burst tests was **green against the pre-fix code** (it only exercised the initial fill). | `test_control_animfix.cpp` | **not fixed** — deferred (the branch is **parked**: its re-review returned **DO NOT SHIP** — §10) |
 
 ---
 
-## 4. The prediction's copy — the defect was latent, and the fix is in review
+## 4. The prediction's copy — the fix is merged, and the checks around it are not
 
 | # | severity | finding | where | fix |
 |---|---|---|---|---|
-| **P1** | minor | The prediction's copy buffer was a `thread_local` — on a manually mapped image that can never get a block (the TLS index is 154). **The defect was latent, not a live outage**: `Input::simulate_landing` has **no call site** in the tree, and `predict_` defaults to false. The buffer is now the caller's stack local. | `payload/control/src/input.cpp` | **`feat/t30-prediction-tls`** (in review) |
 | **P2** | major | The source check that guards "no `thread_local` in the control module" has **three reproducible false negatives**: a C++ **digit separator** (`1'000`) makes the stripper discard the rest of the file, `__declspec(thread)` is not the word it looks for, and a **raw string** containing a `"` leaves it inside a string. | `payload/control/tests/test_control_prediction.cpp` | **not fixed** — deferred |
 | **P3** | major | The property "a failed read leaves the engine's object alone" is asserted on a **model of the caller** written inside the test, not on the caller: a change in `input.cpp` that restores unconditionally would write 4064 zero bytes over the engine's `CCSPlayer_MovementServices` and the test would stay green. | `test_control_prediction.cpp` | **not fixed** — deferred |
 | **P4** | minor | The restore writer is a raw `memcpy` although the payload has a fault-safe `cs2::game::write_bytes`; and `writable()` proves **readability**, not writability — the comment says otherwise. | `input.cpp` | **not fixed** — deferred |
 | **P5** | nit | The check's scope is `payload/control` while the document states the rule as "no `thread_local` in the payload" (one module out of seven). | the test, `docs/re/prediction.md` | **not fixed** — deferred |
 | **P6** | nit | `predict_snapshot_failed_` latches forever, so only the first failure in the payload's lifetime is ever logged. | `input.cpp` | **not fixed** — deferred |
+
+**The row that was fixed here is closed.** The prediction's copy buffer was a
+`thread_local` — on a manually mapped image that can never get a block (the
+TLS index is 154). **The defect was latent, not a live outage**:
+`Input::simulate_landing` has **no call site** in the tree, and `predict_`
+defaults to false. The buffer is now the caller's stack local
+(`input.cpp:1293`), and the fix **merged** (`269a093`) and was
+**re-reviewed** (`SHIP WITH FIXES`: the premise correction holds — the
+`thread_local` was a latent trap, not a live outage), so §9's rule is
+satisfied and the row was **deleted**. Its record is in
+`docs/re/prediction.md` and in §11.3's table.
 
 ---
 
@@ -83,20 +118,24 @@ hook fires; the offsets refresh offline reproduces the dump exactly.
 | # | severity | finding | where | fix |
 |---|---|---|---|---|
 | **H1** | blocker (historical) | The draw hook's target came from an RTTI **lambda** type; a lambda's `operator()` is static, so the nine-argument detour shifted the whole argument list and the game crashed with `0xc0000005`. The real target is `scenesystem.dll + 0x580A0` — a nine-argument member function whose signature is **exactly** the payload's existing typedef (the material at index 3). | `payload/features/src/chams.cpp` | **merged** (the signature, the pure decision function, the prologue verification) |
-| **H2** | major | The re-entrancy guard was **process-wide** and its early return **drops the draw**. The scene system renders the draw list on the **tier0 thread pool** (`g_pThreadPool`, `Thread_RenderSceneDrawList`, `"rendering in %i jobs"`, `sc_disableThreading`), so two jobs can be inside the detour at once. | `chams.cpp` | **fixed** by the per-owner guard (the branch's fix round) |
-| **H2a** | **major** | **The per-owner guard exposes a desc-cache race.** The guard lets two jobs into the draw path *by design*, but the desc cache is published with three separate atomics (the desc last) — a protocol that is safe for **one** writer and not for two. Two descs that hash to the same slot (`(desc >> 4) & 63` — routine with hundreds of models) can leave a reader seeing **desc A with entity B**, so the chams are decided on the **wrong player** (the CT's model chamsed, the T not). The reviewer's probe of the exact protocol reproduced **965–3048** such mismatches per run. `desc_cache_stamp_` is a second, simpler race (a plain `std::uint64_t`). The branch's own comments now contradict each other (`chams.cpp:202-210` says two threads may be inside; `chams.hpp:256` says "the render thread owns the cache"). | `payload/features/include/cs2/features/chams.hpp` (the `DescEntry`), `payload/features/src/chams.cpp` (the publish protocol) | **fixed on `feat/t33-chams-race`** — the cache is a **per-slot seqlock** with the generation inside the entry (`chams.hpp`'s `DescCache`), and the probe is `payload/features/tests/test_chams_desc_cache.cpp` (four threads, two descs in one slot: **zero** mismatches; the pre-fix protocol is reproduced in the test as the control and reports hundreds). The writer's claim is ordered before the entry's writes by a release fence (`a4493ba`), the reader's give-up path is measured (`c239bb2`). **Not merged** — see the note below the table |
-| **H3** | minor | After a refusal the status stuck at "installing" forever and the refusal was never re-reported (`install_failed_` was never cleared). | `chams.cpp` | **fixed on `feat/t33-chams-race`** — the switch-off clears the latch (`chams.cpp`'s `configure()`), and the test now pins **the value that is stored** — the switch's own answer — not merely that the rule is mentioned nearby (`fc5c8ba`); the neutered call now fails the suite |
-| **H4** | minor | `status_line()` allocated a `std::string` **on the game's render thread, every frame**. | `chams.cpp` | **fixed** by the fix round (`snprintf` into the caller's buffer) |
-| **H5** | minor | Two new public accessors were dead code; the module-identity check skipped an empty module string; `describe(installed)` returned `"on"`; the counters were not reset on toggle. | `chams.cpp` | **fixed** by the fix round |
-| **H6** | minor | **Nothing pins that the guard is held *across* the trampoline call** — moving the scope after the original leaves the suite green, and that is the guard's entire purpose (the recursion it breaks happens *inside* the call to the original). | the test | **fixed on `feat/t33-chams-race`** — `test_chams_draw_hook.cpp` fails when the scope moves after the call (the branch's own test, `440fe4b`) |
-| **H7** | minor | The shared guard's **fail-open** rationale is the camera's ("refusing would drop a camera update"); for the chams the arithmetic is the other way round: a refusal drops **one primitive**, while failing open lets the recursion run until the stack overflows (`0xc00000fd`) and takes the renderer with it. | `recursion_guard.hpp` | **fixed on `feat/t33-chams-race`** — the policy is **per instance** (`RecursionGuard::Policy`): the chams' guard fails closed, the camera's keeps failing open and `thirdperson.hpp` is untouched. The **pool's size** is per instance too: the draw path's pool holds 64 concurrent render jobs, so the tenth job's draw is not refused (`3ad442e`). The refusals are counted **by cause** (`rec=`, `pool=`, `tdn=`, `88eb291`) |
-| **H8** | nit | `docs/re/chams.md` names `test_chams_guard.cpp`; the file is `test_chams_draw_hook.cpp`. The shared header cites `docs/re/thirdperson.md`, which arrives with T27. | the docs | **fixed on `feat/t33-chams-race`** — `docs/re/chams.md` names the file that exists, and the shared header's citation resolves |
 
-The rows marked **fixed on `feat/t33-chams-race`** are fixed **on that branch**, and
-the branch is **not merged**: this file's rule (§9) is that a row is deleted
-only when the fix is merged **and re-reviewed**. So they are annotated here
-and the deletion is left to the orchestrator after the merge. The branch's
-own commits are listed in `docs/re/chams.md` §10.
+The rows that were fixed on `feat/t26-chams-draw-hook` and on
+`feat/t33-chams-race` are **closed**: both branches **merged** and were
+**re-reviewed**, so §9's rule is satisfied and the rows were **deleted**.
+
+* **T26** (`be413b3`, re-reviewed — `SHIP WITH FIXES`: the guard is the
+  shared, **per-owner** one, the refusal latch is cleared by the switch-off,
+  the status line no longer allocates on the render thread, and the four
+  accessors are used) closed **H2**, **H4** and **H5**.
+* **T33** (`1c80086`, re-reviewed — `SHIP WITH FIXES`, no blockers, no
+  majors) closed **H2a**, **H3**, **H6**, **H7** and **H8**.
+
+Their content is not lost: it is in `docs/re/chams.md` **§9** (the guard, the
+latch, the status line, the module identity) and **§10** (the desc cache,
+the fail-closed policy, the trampoline's lifetime), and in the review
+reports. **H5's fourth clause** — the counters are not reset on toggle — is
+now the **documented design** (`docs/re/chams.md` §10.5, and §11.1's item 3),
+not a defect. What T33 left open is in **§14**.
 
 ---
 
@@ -173,7 +212,10 @@ re-review falsified must be corrected.
 merged tree still carries the camera detour's `thread_local`; the camera's
 hook is the **live** crash. T27's fix round exists (two-pass guard, 3000
 rounds with 0 failures) and is in review; until it lands, the camera must
-not be switched on.
+not be switched on. **The condition is met:** T27 **merged** (`8f215c2`) and
+was **re-reviewed** (`SHIP WITH FIXES`), so the camera may be switched on
+again — but the **fixed** camera has still never run against a real game
+(**§2**), so its first run is the operator's.
 
 **2026-10-21 — the bot match (T31) was merged without an adversarial
 review**, because the operator stopped the agent budget to move on to new
@@ -195,19 +237,23 @@ section is the plan, not the work.
 
 ### 11.1 Fully fix the chams
 
-> **Status (2026-10-21):** the whole recipe below is implemented on
-> `feat/t33-chams-race`, which is **not merged**: the desc cache is a
-> per-slot seqlock with the generation inside the entry (**H2a**), the
-> latch's wiring is pinned — and the *value* it stores with it (**H3**), the
-> guard's scope order is pinned (**H6**), the fail-closed policy and the
-> per-instance pool are in (**H7**), and the doc's file names are right
-> (**H8**). The rows in §5 stay until the merge and the re-review; see
-> `docs/re/chams.md` §10.
+> **Status (2026-10-22):** the whole recipe below is **merged**
+> (`1c80086`) and **re-reviewed** (`SHIP WITH FIXES` — no blockers, no
+> majors). The desc cache is a per-slot seqlock with the generation inside
+> the entry (**H2a**), the latch's wiring is pinned — and the *value* it
+> stores with it (**H3**), the guard's scope order is pinned (**H6**), the
+> fail-closed policy and the per-instance pool are in (**H7**), and the doc's
+> file names are right (**H8**). The recipe's **premise** — the per-owner
+> guard — came with T26 (`be413b3`, re-reviewed), and with it **H2**,
+> **H4** and **H5** are closed. The rows are **closed** (§5) and this recipe
+> is kept as the record of what was done; the branch's own commits are
+> listed in `docs/re/chams.md` §10, and what it left open is in **§14**.
 
 The feature is in place (the target is resolved through a dumper signature and
-verified against the prologue ✓) and the guard is per-owner ✓. What is left
-is the **race the per-owner guard exposed** (**H2a**) and the test gaps around
-it (**H3**, **H6**, **H7**, **H8**).
+verified against the prologue ✓) and the guard is per-owner ✓. What was left
+— the **race the per-owner guard exposed** (**H2a**) and the test gaps around
+it (**H3**, **H6**, **H7**, **H8**) — is **done**: the recipe below is what
+it was, and it is kept as the record of how it was done.
 
 The recipe the review measured and the fix round's own review confirmed:
 
@@ -325,7 +371,6 @@ bot match in it.
 | **M3** | minor | **The Monte-Carlo objective scores the hitbox geometry only.** The repo is Tier-2: the world is projected into the chart, not traced, so whether the shot is *visible* (or penetrates a wall) is still the existing machinery's job — the `only_visible` gate and the `penetrated` flag. | `payload/aim/src/solver.cpp` | **by design** (`docs/ragebot.md` §13.7) |
 | **M4** | minor | **The `min_hitchance` and `min_damage` gates change meaning under the new objective, and not in the same direction.** The same `min_hitchance` passes **more** shots (the old Gaussian mass's σ is √6 too wide — it reports **0.221** where the truth is **0.777**), and the same `min_damage` blocks **more** shots (the Monte-Carlo's value is the **expected** damage: a 50 % hit chance on 100 damage reports **50**, not 100). A ragebot that fires under `hitchance` and does not fire under `monte_carlo` with the same thresholds is the semantics change, not a defect. | the gates (`payload/control/src/service.cpp`) | **by design** (`docs/ragebot.md` §14.2) |
 | **M5** | minor | **The Monte-Carlo objective and the backtracking pass do not fit the frame budget together.** One Monte-Carlo solve is ~4.3 ms at a live-sized hitbox set, and the backtracking pass is a **full solve per pose**, so the two together exceed the 12 ms guard. | the backtracking pass | **not fixed — deferred** (the operator turns the backtracking off while live-testing; the sample count of **64** was chosen for the single-solve budget) |
-| **M6** | nit | **The harness's `AimObjective` type does not know the new name.** `scripts/scenario/protocol.py`'s `Literal["damage", "hitchance", "expected", "pellets"]` becomes the MCP `cs2_rage` tool's JSON schema, so the tool refuses `"monte_carlo"` before the request is sent. The scenario library's `game.rage(objective="monte_carlo")` works (the annotation is not enforced at run time). | `scripts/scenario/protocol.py` | **not fixed — deferred** (one line: add the name to the literal) |
 | **M7** | nit | **The `√6` σ correction is still not applied.** It is blocked on the `sqrt(r)` RE question and on the inaccuracy's units. It does not affect the Monte-Carlo objective (the kernel is sampled, not blurred), but it is why the *old* objective's numbers are not comparable with the new one's. | the field's blur | **not fixed — deferred** (see §11.2) |
 
 **What is verified:** the host tests — `aim-solver` (the objective, its
@@ -354,7 +399,7 @@ names, the values, the seed policy, the weapon's pattern) and
 | **M2** | major | **The seed-fallback disclosure had no test at all.** Inverting `seed_source_is_fallback` and replacing `seed_source_note`'s body with "the numbers are exact" left the suite green, so the operator could be told that a stand-in number is the engine's own seed. | `payload/control/include/cs2/control/rage_objective.hpp` | **fixed** — the test pins both flags, both notes (by the word the operator has to read) and that the two policies carry different notes |
 | **M3** | major | **The `aim` command's Monte-Carlo path could never report a target or a kill.** The health list carried the entity index while the hitboxes kept `Hitbox::target`'s default -1, so the core's can-kill lookup never matched: `mc_target` was always -1 and `mc_can_kill` always false. | `payload/aim/src/reader.cpp`, `payload/control/src/service.cpp` | **fixed** — the reader stamps the hitboxes with the index of the target it chose, and the health entry is built from that same index by a pure rule the host test pins |
 | **M4** | major | **The `aim` command's Monte-Carlo path built a degenerate kernel whenever the caller stated any weapon argument.** The weapon was read from the caller's profile alone, so the spread and the inaccuracy stayed 0 and the type stayed unknown: every sample landed on the aim (a "measured probability" of 1.0) and an unknown type counts as "modelled", so a shotgun would have been scored with the standard pattern. | `payload/control/src/service.cpp` | **fixed** — the weapon is always read from the game and the caller's damage model is overlaid on top; the `pellets` branch's spread hole is closed with it |
-| **N1** | minor | **The MCP `cs2_aim`/`cs2_rage` tools refused `"monte_carlo"`.** The `Literal` becomes the tools' advertised schema and the server validates against it before the request is sent. | `scripts/scenario/protocol.py` | **fixed** — the literal carries the name, the test reads the schema from the tools themselves and checks that the validator accepts it. **The running MCP server has to be restarted** to advertise it |
+| **N1** | minor | **The MCP `cs2_aim`/`cs2_rage` tools refused `"monte_carlo"`.** The `Literal` becomes the tools' advertised schema and the server validates against it before the request is sent. | `scripts/scenario/protocol.py` | **fixed** — the literal carries the name, the test reads the schema from the tools themselves and checks that the validator accepts it. **Merged** (`5aa748d`). **The running MCP server has to be restarted** to advertise it |
 | **N2** | minor | **The Monte-Carlo's live state was published as seven independent relaxed atomics**, so a reader could mix two ticks — and the inverse **hid the refusal entirely**. | `payload/control/src/service.cpp`, `service.hpp` | **fixed** — the verdict is published as **one value** (a mutex), so a reader never sees a half-published verdict |
 | **N3** | minor | **The Monte-Carlo's state was never cleared on the early returns**, so the status could show a stale verdict under another objective's name. | `payload/control/src/service.cpp` | **fixed** — the verdict is cleared at the top of the tick, so every early return leaves nothing stale |
 | **N4** | minor | **The hitbox filter drops malformed hitboxes silently**, so the measured probability is a silent lower bound. | `payload/aim/src/solver.cpp` | **fixed** — the count travels with the verdict (`MonteCarloVerdict::filtered_hitboxes`) and the status carries it as `mc_filtered`, so a dropped hitbox is visible |
@@ -383,3 +428,36 @@ plus the scenario suite (the MCP tools' advertised schema).
 
 **What is not:** the live run. The operator's steps are in
 `docs/operator-live-check.md` §6.
+
+---
+
+## 14. The chams' residue — what the merged branch left open (2026-10-22)
+
+> Added with task T36. The chams' branch (T33) **merged** (`1c80086`) and was
+> **re-reviewed**, so the rows it closed are **gone** from §5. These are the
+> **residue** its own fix round reported and did **not** fix: known defects
+> and one deliberate trade, recorded here so that nobody has to rediscover
+> them.
+>
+> **The live run is still owed.** The chams' detour has **never run against
+> the real draw** — the live run needs a GPU and an interactive desktop — so
+> two of the numbers below are unmeasured and one is unobserved: the tier0
+> render-job count is unknown, and the fail-closed refusal's real-world
+> frequency is unknown. The operator's steps are in
+> `docs/operator-live-check.md` §3.
+
+| # | severity | finding | where | fix |
+|---|---|---|---|---|
+| **H9** | minor | **The other `g_active`s are plain pointers.** The chams' own is an `std::atomic<Chams*>` — published with a release store and read with an acquire load — but **four** others still hold a plain pointer with the shape the chams' had: the camera's (`payload/features/src/thirdperson.cpp:18`), the present hook's (`payload/features/src/game_present_hook.cpp:28`), the input's (`payload/control/src/input.cpp:34`) and the event log's (`payload/control/src/events.cpp:74`). Each is written by the payload's **own** thread (the install, the uninstall) and read by a **game** thread (the camera thread, the present thread, the create-move and codec threads, the game's event thread). A pointer store is atomic on x86-64, so the value is never torn — but it is **not ordered** against the object's construction and its destruction, so a reader can see a non-null pointer to an object that is not yet built, or a stale pointer to one that is already gone. | the four modules | **not fixed — deferred** (the camera's behaviour must not change, so this is not a chams task; the fix is the one the chams got — an `std::atomic<T*>` with a release store and an acquire load) |
+| **H10** | nit | **The trampoline's pages are never unmapped.** `InlineHook::uninstall()` **retires** the trampoline — the pointer is published as `nullptr` and dropped — but does not release the pages: they stay mapped and executable until the process exits. This is a **deliberate trade**, not an oversight: it buys an unconditional safety property ("no thread can execute freed trampoline memory") that holds even when the detour is inside the hook and the hook is destroyed under it — which the engine can never rule out, because the detour is the **caller's** function and the engine never sees it enter or leave. The cost is a bounded leak: **one page per uninstall** — the chams retire one per switch-off (`chams.cpp:320`) and the camera one per switch-off (`thirdperson.cpp:188`) — reclaimed by the operating system when the process exits. The **animfix leaks none**: its two hooks are installed once (`input.cpp:1998` and `:2012`, on the game's first CreateMove) and are **never uninstalled**, so no trampoline of its own is ever retired. The present hook installs once (`payload_main.cpp:676`) and is uninstalled only by its destructor, so it costs **at most** one page, at the process's end. | `payload/hooks/src/inline.cpp` | **by design** (`docs/re/chams.md` §10.6 — the property is proved by `payload/hooks/tests/test_inline.cpp`) |
+| **H11** | minor | **The scene system's render-job count is unmeasured.** The draw path's guard pool holds **64** concurrent owners, and 64 is **headroom, not a measurement**: the tier0 thread pool has about as many threads as the machine has hardware threads, so 64 covers a machine with up to 64 hardware threads. Nothing in the tree has ever measured how many render jobs actually overlap in one frame, because the detour has still never run against the real draw. On a machine with more than 64 hardware threads the pool can be exhausted again — and a refusal on the draw path **drops the primitive**, so the models are hole-ridden, every frame. The drops are **counted** (`pool=`), which is the mitigation: the operator sees it. | `payload/features/include/cs2/features/recursion_guard.hpp` (`DRAW_PATH_SLOT_COUNT`), `docs/re/chams.md` §10.4.1 | **not fixed — deferred** (it needs a live run) |
+
+**What is verified:** the host tests — `features-chams-desc-cache` (the probe:
+four threads, two descs in one slot, **zero** mismatches; the generation bump
+under a concurrent publisher; the reader's give-up path),
+`features-chams-draw-hook` (the latch's wiring, the guard's scope order, the
+fail-closed policy, the per-instance pool, the refusals counted by cause, the
+status line's 192-byte bound) and `hooks-inline` (the trampoline's lifetime).
+
+**What is not:** the live run. Nothing in this section has been observed in
+the game.

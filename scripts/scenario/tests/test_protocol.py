@@ -13,9 +13,10 @@ they are tested here with synthetic answers:
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 import unittest
-from typing import Any, get_args, get_type_hints
+from typing import Any, NotRequired, get_args, get_origin, get_type_hints
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
@@ -34,6 +35,13 @@ from scenario.protocol import (  # noqa: E402
     validate_snapshot,
 )
 from scenario.session import Game  # noqa: E402
+
+#: The repository's root — the payload's own source lives under it.
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+#: The payload's control service: the source of the answers the client's
+#: types describe (``Service::do_aim`` and ``Service::do_rage``).
+SERVICE = REPO_ROOT / "payload" / "control" / "src" / "service.cpp"
 
 
 def player(**overrides: Any) -> dict[str, Any]:
@@ -393,6 +401,207 @@ class TestPredicateGrammar(unittest.TestCase):
         hints = get_type_hints(WaitExpr)
         self.assertIn("WaitExpr", str(hints["all"]))
         self.assertIs(hints["not"], WaitExpr)
+
+
+# --- the payload's published keys -------------------------------------------
+def _function_body(text: str, signature: str) -> str:
+    """The body of a C++ function, found by counting the braces."""
+    start = text.index(signature)
+    brace = text.index("{", start)
+    depth = 0
+    for index in range(brace, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace:index + 1]
+    raise AssertionError(f"the body of {signature!r} is never closed")
+
+
+def _block_after(text: str, marker: str, start: int = 0) -> str:
+    """The ``{ ... }`` block that follows a marker, found by brace counting.
+
+    ``start`` is where the search begins, so a marker that occurs more than
+    once can be taken one at a time.
+    """
+    found = text.index(marker, start)
+    brace = text.index("{", found + len(marker))
+    depth = 0
+    for index in range(brace, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace:index + 1]
+    raise AssertionError(f"the block after {marker!r} is never closed")
+
+
+def _strip_comments(source: str) -> str:
+    """The source with its **comments removed**.
+
+    A source check has to look at the code, not at the prose around it.  A
+    commented-out ``payload.set(...)`` is **not** a published key, and a
+    comment that quotes one is not either — so a check that reads the raw
+    source counts a key the payload does not send (the false pass) and fails
+    for a key that was never there (the spurious failure).  The tree's own C++
+    checks strip the comments first for the same reason
+    (``payload/control/tests/test_control_rage_objective.cpp``).
+
+    The **string literals are kept** — they carry the keys the payload
+    publishes — but a ``//`` inside one is not a comment.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(source)
+    while index < length:
+        char = source[index]
+        following = source[index + 1] if index + 1 < length else ""
+        if char == "/" and following == "/":
+            while index < length and source[index] != "\n":
+                index += 1
+            continue
+        if char == "/" and following == "*":
+            index += 2
+            while index < length and not source.startswith("*/", index):
+                if source[index] == "\n":
+                    out.append("\n")
+                index += 1
+            index += 2
+            continue
+        if char in "\"'":
+            quote = char
+            out.append(char)
+            index += 1
+            while index < length:
+                current = source[index]
+                out.append(current)
+                index += 1
+                if current == "\\" and index < length:
+                    out.append(source[index])
+                    index += 1
+                elif current == quote:
+                    break
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _published(body: str, variable: str) -> set[str]:
+    """The keys a JSON object is given, by the ``set("name", ...)`` calls.
+
+    The payload writes its answers with ``Json::set`` — ``payload.set("key",
+    ...)`` for the answer itself, ``perf.set(...)`` for the instrumentation
+    block inside it — so the keys it publishes are **in the source**.
+
+    The **comments are stripped first**: a commented-out ``set(...)`` is not a
+    published key, and a comment that quotes one is not either.
+    """
+    code = _strip_comments(body)
+    pattern = re.compile(rf'(?<![A-Za-z0-9_]){variable}\.set\(\s*"([^"]+)"')
+    return {match.group(1) for match in pattern.finditer(code)}
+
+
+def _optional_keys(shape: type) -> set[str]:
+    """The keys a ``TypedDict`` declares optional (``NotRequired``).
+
+    Under ``from __future__ import annotations`` the class attribute
+    ``__required_keys__`` still claims an optional key, so the **resolved**
+    annotations are consulted — the same rule the module's own validator
+    follows (``protocol._required_keys``).
+    """
+    hints = get_type_hints(shape, include_extras=True)
+    return {key for key, hint in hints.items() if get_origin(hint) is NotRequired}
+
+
+@unittest.skipUnless(SERVICE.is_file(), "the payload's source is not in this tree")
+class TestThePublishedKeys(unittest.TestCase):
+    """The types must describe the answers the payload actually sends.
+
+    A ``TypedDict`` that promises a key the payload does not send is a lie,
+    and the type gate cannot catch it: the reader would look for a key that
+    is not there.  A ``TypedDict`` that is missing a key the payload *does*
+    send is the mirror image — the reader would not know the key exists.
+
+    So the two answers that carry the Monte-Carlo objective are read from the
+    payload's **own source** and compared with the client's types, key by
+    key: a key added on one side and not the other fails this suite.
+
+    The source is read with its **comments stripped**, so a key that is
+    **commented out** is not published: disabling a key that way fails this
+    suite exactly like deleting it would.
+    """
+
+    #: The two answer bodies, read once for the whole class.
+    aim: str
+    rage: str
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # The comments are stripped **before** the bodies are read: a comment
+        # with a brace or an ``if (`` in it must not move a body's boundary
+        # nor invent a condition the answer does not have.
+        text = _strip_comments(SERVICE.read_text(encoding="utf-8"))
+        cls.aim = _function_body(text, "void Service::do_aim(")
+        cls.rage = _function_body(text, "void Service::do_rage(")
+
+    def test_the_rage_answer_carries_exactly_the_payloads_keys(self) -> None:
+        """``RageResult`` is the ``rage`` command's answer, key for key."""
+        published = _published(self.rage, "payload")
+        self.assertEqual(set(protocol.RageResult.__annotations__), published)
+
+    def test_the_instrumentation_block_carries_exactly_the_payloads_keys(self) -> None:
+        """The ``perf`` sub-object is its own shape."""
+        published = _published(self.rage, "perf")
+        self.assertEqual(set(protocol.RagePerfDict.__annotations__), published)
+
+    def test_the_aim_answer_carries_exactly_the_payloads_keys(self) -> None:
+        """``AimResult`` is the ``aim`` command's answer, key for key."""
+        published = _published(self.aim, "payload")
+        self.assertEqual(set(protocol.AimResult.__annotations__), published)
+
+    def test_the_keys_the_payload_may_omit_are_optional(self) -> None:
+        """The Monte-Carlo's numbers are sent only when it produced a verdict.
+
+        The payload publishes them inside
+        ``if (result.monte_carlo.has_value())`` — under the other four
+        objectives, and when the solver refused, they are **absent**.  So
+        they are the optional keys of the type, and the rest are the
+        required ones: a type that promised a key the payload does not send
+        would be a lie the type gate cannot catch.
+
+        ``mc_samples`` is published **both** inside the block and outside it
+        (the block overwrites it with the verdict's own count), so it is
+        always there — and it stays required.
+        """
+        conditional_block = _block_after(
+            self.aim, "if (result.monte_carlo.has_value())")
+        conditional = _published(conditional_block, "payload")
+        # The keys published **outside** the block — ``mc_samples`` is in both
+        # (the block overwrites it with the verdict's own count), so the
+        # block is removed before the rest is read.
+        always = _published(self.aim.replace(conditional_block, "", 1), "payload")
+        optional = _optional_keys(protocol.AimResult)
+        self.assertEqual(optional, conditional - always)
+        self.assertEqual(set(protocol.AimResult.__annotations__) - optional, always)
+
+    def test_the_rage_answer_does_not_depend_on_the_state(self) -> None:
+        """Every key of the ``rage`` answer is published on **every** call.
+
+        The block that publishes the Monte-Carlo's state is a bare block, not
+        a condition: the verdict is always there (empty when there was none),
+        so the answer's **shape** does not depend on the objective, on the
+        tick or on the weapon.  A key that only appeared under a condition
+        would be a key a reader could not count on — and the type
+        (``total=False``) would not say so.
+        """
+        conditional: set[str] = set()
+        for match in re.finditer(r"\bif\s*\(", self.rage):
+            block = _block_after(self.rage, match.group(0), match.start())
+            conditional |= _published(block, "payload")
+        self.assertEqual(conditional, set())
 
 
 if __name__ == "__main__":
