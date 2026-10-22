@@ -285,3 +285,34 @@ game.rage(on=True, force=True, objective="monte_carlo")
 > refuses `"monte_carlo"` before the request is sent. Until that literal is
 > widened, use the scenario library's `game.rage(...)` (which passes the name
 > through) or the raw control channel.
+
+### 6.9 After the review round (2026-10-22)
+
+**§6.8's warning is closed.** The harness's `AimObjective` type now carries
+`"monte_carlo"`, so the MCP `cs2_aim` and `cs2_rage` tools accept it:
+
+```json
+{"name": "cs2_rage", "arguments": {"objective": "monte_carlo"}}
+```
+
+> **The running MCP server still advertises the old schema.** It imported
+> `protocol.py` at start-up, so the two tools refuse `"monte_carlo"` until the
+> server is restarted by hand. Until then the feature is live-testable through
+> the scenario library (`game.rage(objective="monte_carlo")`) or through
+> `cs2_run_scenario`, whose `args` are free-form:
+>
+> ```json
+> {"name": "cs2_run_scenario", "arguments": {"name": "rage", "args": {"objective": "monte_carlo"}}}
+> ```
+
+**What to look for in the HUD.** The one-line status carries the objective's
+name and, under the Monte-Carlo objective, a marker: `mc83%` is the measured
+probability, and `mc-refused` says the solver refused — the aim then came from
+the `damage` objective, and §2.4 says a fallback must never be silent.
+
+**The status's new keys.** `mc_can_kill`, `mc_hitgroup` and `mc_hits` are in
+the `rage` status now; `objective` names the **effective** objective (the
+per-weapon profile's, when there is one) and `objective_global` the setting;
+`mc_samples_note` says what the sample count in force means; and
+`backtrack_over_budget` says whether the last tick skipped the backtracking
+because the frame had already blown the 12 ms guard.

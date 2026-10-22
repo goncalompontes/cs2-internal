@@ -1168,3 +1168,52 @@ And the two the live path adds:
 | `payload/control/src/service.cpp` | the live path: the objective switch, the seed context, the health, the status |
 | `payload/control/include/cs2/control/rage_config.hpp` | the profile's `objective` byte and the line codec |
 | `payload/control/tests/test_control_rage_config.cpp` | the profile's round trip (`control-rage-config`) |
+
+### 14.9 The review round (2026-10-22)
+
+The adversarial review of T35 found four majors and a dozen minors. The fixes
+that change what the operator sees are here; the rest are in the ledger
+(`docs/known-issues.md` §13).
+
+**The status names the *effective* objective.** With a per-weapon profile the
+solve runs the **profile's** objective, not the global one, so `objective` is
+the effective one and `objective_global` is the setting; `objective_value` is
+the effective objective's byte.
+
+**The status carries the verdict's whole shape.** `mc_can_kill`, `mc_hitgroup`
+and `mc_hits` are there now (they were only in the `aim` command's payload),
+and the verdict is published as **one value** — a reader can never see a
+half-published verdict, so a refusal can no longer be hidden by a torn read.
+
+**The `aim` command's payload carries the seed's disclosure**
+(`mc_seed_fallback`, `mc_seed_note`) and the sample count's note.
+
+**The HUD line carries the Monte-Carlo's marker.** `obj monte_carlo mc83%` is
+the measured probability; `mc-refused` says the solver refused and the aim
+came from the `damage` objective (§2.4: a fallback must never be silent, and
+the HUD is where the operator actually looks). The line's tail no longer
+carries the backtracking record and the occluder count — both are in the
+`rage` command's JSON status — so the line still fits its 128-byte buffer.
+
+**The sample count behaves the same way in both entry points.** A count
+outside 1..256 is **ignored** (the count in force is unchanged) and
+`mc_samples_note` says so; a count above 64 is honoured, and the note says it
+does not fit the tick.
+
+**The backtracking budget is visible.** `backtrack_over_budget` is true when
+the last tick skipped the backtracking because the frame had already blown
+the 12 ms guard — otherwise the operator sees the backtrack counter stop
+incrementing with no explanation.
+
+**The `aim` command's Monte-Carlo kernel is never degenerate.** The weapon's
+spread, its inaccuracy and its type always come from the game (the caller's
+profile sets only the damage model), so a probe with `damage=36` measures a
+real weapon's spread instead of a perfect one. The weapon type falls back to
+the snapshot's own read when the VData could not be read, so a shotgun is
+refused rather than scored with the standard pattern.
+
+**The health list and the hitboxes speak about the same target.** The reader
+stamps the hitboxes with the index of the target it chose, and the health
+entry is built from that same index, so the Monte-Carlo's can-kill key works
+in the `aim` path too (it was dead there: `mc_target` was always -1 and
+`mc_can_kill` always false).
