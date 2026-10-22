@@ -118,6 +118,25 @@ ROTATE_IMMEDIATE = re.compile(
 #: register this pattern matches.
 ROTATE_BY_ONE = re.compile(r"\b(?P<op>rolq|rorq)\s+%r[a-z0-9]+\b")
 
+#: The **truncated** form of the rotation: a shift to the right.
+#:
+#: The backend drops the high term of the rotation when it only reaches the
+#: high bits of the decoded index -- and the high three bits of the index do
+#: not reach the address of the table entry (the address is `base + index * 8`
+#: in 64 bits, and the index's bits 61 to 63 are lost in the multiplication).
+#: The drop is therefore harmless, but the image does **not** hold a rotate
+#: any more: it holds a shift to the right by 64 minus the rotation.
+#:
+#: The three rotations that are truncated are 61, 62 and 63 (the only ones
+#: whose high term reaches nothing but the high bits of the index).
+SHIFT_RIGHT_IMMEDIATE = re.compile(
+    r"\b(?P<op>shrq)\s+\$(?:0x(?P<hex>[0-9a-f]+)|(?P<dec>[0-9]+))"
+)
+
+#: The truncated form with no immediate: `shrq %rax` is a shift by one, and
+#: it is the truncated form of the rotation of 63.
+SHIFT_RIGHT_BY_ONE = re.compile(r"\b(?P<op>shrq)\s+%r[a-z0-9]+\b")
+
 #: An instruction of the disassembly: `18011351a:\tcallq\t*(%rsi,%rax,8)`.
 INSTRUCTION = re.compile(r"^\s*([0-9a-f]+):\s+(?P<text>.*)$")
 
@@ -129,19 +148,12 @@ INSTRUCTION = re.compile(r"^\s*([0-9a-f]+):\s+(?P<text>.*)$")
 #: belongs to something else.
 REFERENCE_WINDOW = 24
 
-#: How many rotations the window keeps.
-#:
-#: The rotation of the decode is the **last** one before the call: nothing
-#: between it and the call rotates anything. The ones before it belong to
-#: the code the pass did not touch.
-ROTATION_WINDOW = 32
-
 
 def rotation_of(text: str) -> int | None:
     """The rotation an instruction performs to the left, or None.
 
     The rotation of the mixer is a rotation to the **left** by R, with R in
-    [1, 63], and the X86 backend spells it in three ways:
+    [1, 63], and the X86 backend spells it in **six** ways:
 
     | instruction | the rotation |
     |---|---|
@@ -149,13 +161,21 @@ def rotation_of(text: str) -> int | None:
     | `rolq %rax` | 1 |
     | `rorq %rax` | 63 |
     | `rorq $0x2, %rax` | 62 |
+    | `shrq $0x2, %rax` | 62 |
+    | `shrq %rax` | 63 |
 
-    The last two are the ones a reader that only knows `rolq $imm8` cannot
-    see: the backend folds a rotation by one into the `D1` form, which has
-    **no immediate at all**, and a rotation of 63 is a rotation to the right
-    by one. Two of the sixty-three legal rotations of the mixer therefore
-    produce a dispatch that such a reader cannot read, and a build with one
-    of them fails its own check.
+    The first four are the rotation itself. The last two are its
+    **truncated** form: the backend drops the high term of the rotation when
+    that term reaches nothing but the high bits of the decoded index, and the
+    high three bits of the index do not reach the address of the table entry
+    (the address is `base + index * 8` in 64 bits, and the index's bits 61 to
+    63 are lost in the multiplication). The drop is harmless, and the image
+    holds a shift to the right by 64 minus the rotation instead of a rotate.
+
+    The last two are also the spellings a reader that knows only `rolq $imm8`
+    cannot see -- and a reader that knows only `rolq $imm8` misses the
+    rotations of 1, 61, 62 and 63, which is four of the sixty-three legal
+    rotations of the mixer.
 
     A rotation that is not in [1, 63] is not a rotation of the mixer (a
     rotation of 0 is a no-op and a rotation of 64 is not a rotation), and
@@ -169,9 +189,19 @@ def rotation_of(text: str) -> int | None:
             amount = 64 - amount
     else:
         by_one = ROTATE_BY_ONE.search(text)
-        if by_one is None:
-            return None
-        amount = 1 if by_one.group("op") == "rolq" else 63
+        if by_one is not None:
+            amount = 1 if by_one.group("op") == "rolq" else 63
+        else:
+            truncated = SHIFT_RIGHT_IMMEDIATE.search(text)
+            if truncated is not None:
+                digits = truncated.group("hex")
+                amount = 64 - (int(digits, 16) if digits is not None
+                               else int(truncated.group("dec")))
+            else:
+                by_one = SHIFT_RIGHT_BY_ONE.search(text)
+                if by_one is None:
+                    return None
+                amount = 63
     if amount < 1 or amount > 63:
         return None
     return amount
@@ -244,13 +274,17 @@ def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = Non
     they are per build: the caller passes the values the coverage names.
 
     The **rotation** of the mixer is the one value of the mixer that is in
-    the instruction stream, and it is the last rotation before the call: the
-    decode rotates its result and nothing after it rotates anything.
+    the instruction stream. It is the rotation of the **decode**, and the
+    decode is recognised by the constants of the mixer it reads: the rotation
+    is the first rotation *after* the last read of a constant of the mixer.
+    The rule matters, because the truncated form of the rotation (a shift to
+    the right) is a common instruction, and the last rotation in the window
+    would be an unrelated one.
     """
     sites: list[DispatchSite] = []
     tables: dict[str, int] = {}
     window: list[int] = []
-    rotations: list[int] = []
+    rotation: int | None = None
     pending: tuple[str, str] | None = None
 
     for line in asm.splitlines():
@@ -265,9 +299,10 @@ def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = Non
         register = destination[1:] if destination.startswith("%r") else ""
 
         rotate = rotation_of(text)
-        if rotate is not None:
-            rotations.append(rotate)
-            rotations = rotations[-ROTATION_WINDOW:]
+        if rotate is not None and rotation is None:
+            # The first rotation after the last read of a constant of the
+            # mixer: this is the rotation of the decode.
+            rotation = rotate
 
         rip = RIP_MEMORY.search(line)
         if rip is not None:
@@ -275,6 +310,10 @@ def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = Non
             reference = int(rip.group("address"), 16) - image_base
             window.append(reference)
             window = window[-REFERENCE_WINDOW:]
+            if reads_a_mixer_constant(image, [reference], mixer_values or set()):
+                # A new decode starts here: the rotation that follows is
+                # this decode's, and not the one of the code before it.
+                rotation = None
             if rip.group("op") == "leaq" and register:
                 # A `leaq` puts the *address* of the global into the
                 # register: that is the table of the dispatch.
@@ -288,18 +327,18 @@ def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = Non
         if call is not None:
             base = call.group("base")
             sites.append(DispatchSite(int(matched.group(1), 16), tables.get(base), list(window),
-                                      rotations[-1] if rotations else None))
+                                      rotation))
             window = []
-            rotations = []
+            rotation = None
             pending = None
         elif jump is not None and reads_a_mixer_constant(image, window, mixer_values or set()):
             # A tail call: the backend jumped to the callee instead of
             # calling it. The decode is right before it.
             base = jump.group("base")
             sites.append(DispatchSite(int(matched.group(1), 16), tables.get(base), list(window),
-                                      rotations[-1] if rotations else None))
+                                      rotation))
             window = []
-            rotations = []
+            rotation = None
             pending = None
         elif loaded is not None:
             # The other lowering: the target is loaded into a register and the
@@ -308,9 +347,9 @@ def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = Non
         elif indirect is not None and pending is not None and indirect.group("target") == pending[1]:
             base = pending[0]
             sites.append(DispatchSite(int(matched.group(1), 16), tables.get(base), list(window),
-                                      rotations[-1] if rotations else None))
+                                      rotation))
             window = []
-            rotations = []
+            rotation = None
             pending = None
 
         # Any other write to the register invalidates the table it held.

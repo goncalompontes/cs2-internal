@@ -8,24 +8,28 @@ the `.text` of two builds with two seeds differ, and the payload check has to
 read it out of the image to prove that the image uses the rotation the pass
 encrypted with.
 
-The X86 backend spells the rotation in **three** ways, and a reader that
-knows only one of them cannot see two of the sixty-three legal rotations:
+The X86 backend spells the rotation in **six** ways, and a reader that knows
+only one of them cannot see four of the sixty-three legal rotations:
 
 | the rotation | the instruction | the encoding |
 |---|---|---|
 | 31 | `rolq $0x1f, %rax` | `48 c1 c0 1f` |
 | 1 | `rolq %rax` | `48 d1 c0` |
 | 63 | `rorq %rax` | `48 d1 c8` |
+| 62 | `rorq $0x2, %rax` | `48 c1 c8 02` |
+| 62 | `shrq $0x2, %rax` | `48 c1 e8 02` |
+| 63 | `shrq %rax` | `48 d1 e8` |
 
-The second and the third are the ones the backend folds: a rotation by one
-has no immediate at all, and a rotation by 63 is a rotation to the right by
-one. A build whose module has one of the two rotations therefore produces a
-dispatch that a reader of `rolq $imm8` cannot read, and **the build fails
-its own check** -- and the seed `0x2222222222222222` of the specification's
-acceptance procedure is one of them.
+The last two are the **truncated** form: the backend drops the high term of
+the rotation when it reaches nothing but the high bits of the decoded index,
+and the high three bits of the index do not reach the address of the table
+entry. The drop is harmless, but the image holds a shift and not a rotate --
+and a build whose module has one of those rotations fails its own check if
+the reader cannot see it. The seed `0x2222222222222222` of the
+specification's acceptance procedure is one of them.
 
 The test drives the reader of the disassembly and the check that uses it, so
-that a reader that rots (one that only knows `rolq $imm8` again) fails the
+that a reader that rots (one that knows only `rolq $imm8` again) fails the
 suite instead of failing the build of a good seed.
 
 Usage: rotation_test.py
@@ -81,18 +85,20 @@ KEY_PARTS = (0x1111111111111111, 0x2222222222222222, 0x3333333333333333)
 TABLE_RVA = RDATA_RVA + 0x100
 
 
-def the_disassembly(rotation: str) -> str:
+def the_disassembly(rotation: str, before: str = "") -> str:
     """A disassembly with one dispatch and the given rotation in front of it.
 
     The rotation is the text of the instruction, so that the test can spell
-    it the way the backend does: `rolq %rax` for a rotation by one and
-    `rorq %rax` for a rotation by 63.
+    it the way the backend does: `rolq %rax` for a rotation by one,
+    `rorq %rax` for a rotation by 63, and `shrq %rax` for the truncated form
+    of a rotation by 63.
     """
     def at(offset: int, rva: int) -> str:
         """One instruction: its address and the global it reads."""
         return f"   {offset:x}:\tmovq\t0x{rva:x}(%rip),%rax        # 0x{IMAGE_BASE + rva:x}"
 
     return "\n".join([
+        before,
         f"   113500:\tleaq\t0x{TABLE_RVA:x}(%rip),%rsi        # 0x{IMAGE_BASE + TABLE_RVA:x}",
         at(113507, RDATA_RVA + 0x00),
         at(113514, RDATA_RVA + 0x08),
@@ -137,15 +143,18 @@ def the_coverage(root: Path, rotate: int) -> Coverage:
 
 
 def check_the_reader() -> None:
-    """The reader sees the rotation in all three spellings of the backend."""
+    """The reader sees the rotation in all six spellings of the backend."""
     cases = (
         ("rolq $0x1f, %rax", 31),
         ("rolq $0x2, %rax", 2),
-        ("rolq $0x3e, %rax", 62),
+        ("rolq $0x3c, %rax", 60),
         ("rolq %rax", 1),
         ("rorq %rax", 63),
         ("rorq $0x2, %rax", 62),
         ("rorq $0x1, %rax", 63),
+        ("shrq $0x2, %rax", 62),
+        ("shrq $0x3, %rax", 61),
+        ("shrq %rax", 63),
     )
     for text, expected in cases:
         found = rotation_of(text)
@@ -154,7 +163,8 @@ def check_the_reader() -> None:
 
     # A rotation by a variable count is not a rotation of the mixer, and a
     # rotation of 0 or 64 is not a rotation at all.
-    for text in ("rolq %cl, %rax", "rorq %cl, %rax", "rolq $0x0, %rax", "rorq $0x0, %rax"):
+    for text in ("rolq %cl, %rax", "rorq %cl, %rax", "rolq $0x0, %rax", "rorq $0x0, %rax",
+                 "shlq $0x2, %rax"):
         check(rotation_of(text) is None,
               f"the reader read a rotation out of '{text}': it is not one of the mixer's")
 
@@ -165,8 +175,10 @@ def check_the_reader() -> None:
 def check_the_dispatch(root: Path) -> None:
     """The dispatch of the image carries the rotation of its module."""
     image = the_image()
-    for text, expected in (("rolq $0x1f, %rax", 31), ("rolq %rax", 1), ("rorq %rax", 63)):
-        sites = find_dispatch_sites(the_disassembly(text), image.image_base, image)
+    for text, expected in (("rolq $0x1f, %rax", 31), ("rolq %rax", 1), ("rorq %rax", 63),
+                           ("shrq %rax", 63), ("shrq $0x2, %rax", 62)):
+        sites = find_dispatch_sites(the_disassembly(text), image.image_base, image,
+                                    {MULTIPLIER, XOR_CONSTANT})
         check(len(sites) == 1, f"the reader found {len(sites)} dispatches, not 1")
         site = sites[0]
         check(site.rotation == expected,
@@ -191,9 +203,20 @@ def check_the_dispatch(root: Path) -> None:
                 f"encrypted with {(expected % 63) + 1}"
             )
 
+    # An unrelated shift in front of the decode is not the rotation: the
+    # rotation is the first one *after* the last read of a constant of the
+    # mixer.
+    unrelated = "   1134f0:\tshrq\t%rcx\n"
+    sites = find_dispatch_sites(the_disassembly("rolq $0x1f, %rax", unrelated),
+                                image.image_base, image, {MULTIPLIER, XOR_CONSTANT})
+    check(len(sites) == 1, f"the reader found {len(sites)} dispatches, not 1")
+    check(sites[0].rotation == 31,
+          f"the dispatch carries the rotation {sites[0].rotation}, not 31")
+
     # A dispatch with no rotation in front of it is a failure: the image
     # does not hold the rotation of the mixer at all.
-    sites = find_dispatch_sites(the_disassembly("movq %rax, %rcx"), image.image_base, image)
+    sites = find_dispatch_sites(the_disassembly("movq %rax, %rcx"), image.image_base, image,
+                                {MULTIPLIER, XOR_CONSTANT})
     check(len(sites) == 1, f"the reader found {len(sites)} dispatches, not 1")
     coverage = the_coverage(root, 31)
     try:

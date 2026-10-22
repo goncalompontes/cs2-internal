@@ -737,12 +737,15 @@ The three values are not treated alike, and the difference is deliberate:
 |---|---|---|
 | the multiplier | a global, read with a **volatile** load | a 64-bit immediate in the instruction stream can be mis-materialised (§10.2) |
 | the xor constant | a global, read with a **volatile** load | the same |
-| the **rotation** | the instruction stream (`rolq $imm8`) | it is the one value that has to be in the code, and it is what makes the `.text` of two builds differ |
+| the **rotation** | the instruction stream (a rotate or a shift, §12) | it is the one value that has to be in the code, and it is what makes the `.text` of two builds differ |
 
 The rotation is in **[1, 63]**: a rotation of 0 would make the `lshr` by 64
 of the decode undefined behaviour, and a rotation of 64 is not a rotation.
 The decode emits `shl` by the rotation and `lshr` by 64 minus the rotation,
-and the backend folds the pair into a single `rolq $imm8`.
+and the backend folds the pair into a single instruction — in **six**
+different ways (§12). A reader of the image that knows only `rolq $imm8`
+cannot see four of the sixty-three legal rotations, and the build of such a
+seed fails its own check.
 
 **What it does not buy.** It hides nothing: the analyst reads the rotation
 out of the instruction stream in one instruction, and the mixer out of the
@@ -1037,17 +1040,18 @@ python tools/protect/check_payload.py --protected build-payload-protect/payload.
   **per build**, so the check reads them from the coverage — the coverage is
   the contract ("the value the pass encrypted with");
 * the **rotation** of the mixer in the image's instruction stream is the one
-  of **its own module**: the check reads the rotate in front of every
-  dispatch and compares it with the `rotate=` of the coverage of the module
-  the dispatch belongs to (the modules of one build have different mixers,
-  so "one of the rotations of the build" would be a one-in-four test). The
-  rotation is the only per-build value of the protection that is in the
-  code, and it is in [1, 63]. The X86 backend spells it in **three** ways
-  -- `rolq $imm8` for a rotation of 2 to 62, and `rolq %rax` (a rotation of
-  1) and `rorq %rax` (a rotation of 63), which have **no immediate at all**
-  -- and the check has to read all three: a reader that knows only
-  `rolq $imm8` cannot see two of the sixty-three legal rotations, and the
-  build of such a seed fails its own check;
+  of **its own module**: the check reads the rotate (or the shift the
+  backend spelled it as, §12) in front of every dispatch and compares it
+  with the `rotate=` of the coverage of the module the dispatch belongs to
+  (the modules of one build have different mixers, so "one of the rotations
+  of the build" would be a one-in-four test). The rotation is the only
+  per-build value of the protection that is in the code, and it is in
+  [1, 63]. The backend spells it in **six** ways, and the check has to read
+  all of them: a reader that knows only `rolq $imm8` cannot see the
+  rotations of 1, 61, 62 and 63, and the build of such a seed fails its own
+  check. The rotation the check reads is the first one **after** the last
+  read of a constant of the mixer — that is the decode's rotation, and not
+  an unrelated shift of the code around it;
 * the **layout** of every module with more than one definition moved: the
   coverage names how many functions the pass permuted, and a module that
   moved none is a module the pass did not permute;
@@ -1277,9 +1281,39 @@ changes the callers as well.
 | The SDK's `llvm::json::parse` keeps the **first** of two equal keys, Python's `json` keeps the **last** | a duplicated key is an error on both sides |
 | The X86 backend of the SDK's LLVM 22.1.8 **mis-materialises a 64-bit immediate** in the shape the transform emits (`xor i64 %mul, C` becomes `movabsq $C'`, one bit lost) | the constants of the mixer live in globals, and the payload check asserts that the image holds them (§10.2, §11) |
 | The backend turns the **last call of a function into a tail jump** (`jmpq *(%rX,%rY,8)`) | a dispatch is not always a `callq`: the check counts the tail jump as well, and tells it apart from a switch table jump by the decode in front of it (§11) |
-| The backend folds the `shl`/`lshr` pair of the mixer into a single **`rolq $imm8`** | the rotation is the one per-build value of the mixer that is in the instruction stream, and the check reads it out of the disassembly (§11) |
+| The backend folds the `shl`/`lshr` pair of the mixer into a single rotate — and it spells the rotation in **six** ways | the rotation is the one per-build value of the mixer that is in the instruction stream, and the check has to read **all six** of them, or the build of a legal seed fails its own check (§11, §12) |
+| The **six** spellings of the rotation, measured over all sixty-three legal rotations | the rotation of 1 is `rolq %rax` (`48 d1 c0`), the rotations of 2 to 60 are `rolq $imm8` (`48 c1 c0 ib`), and the rotations of 61, 62 and 63 are `shrq $3`, `shrq $2` and `shrq %rax` — a shift to the right, not a rotate | see the note below |
 | The **object writer** emits the functions in the **module's function list** order, and the **linker** keeps the order of an object's sections | a pass that reorders the module's function list moves the code in the image (§16) |
 | **Renaming** the symbols per build moves **nothing**: the layout follows the definition order, not the name | the layout is changed by *reordering* the function list, not by renaming it (§16) |
+
+### The six spellings of the rotation
+
+The rotation of the mixer is the only value of the mixer that is in the
+instruction stream, and the X86 backend spells it in six ways. The table is
+**measured**: every one of the sixty-three legal rotations was put through
+the pass, the IR was compiled, and the instruction was read back.
+
+| the rotation | the instruction | the encoding | the size |
+|---|---|---|---|
+| 1 | `rolq %rax` | `48 d1 c0` | three bytes |
+| 2 to 60 | `rolq $imm8, %rax` | `48 c1 c0 ib` | four bytes |
+| 61 | `shrq $0x3, %rax` | `48 c1 e8 03` | four bytes |
+| 62 | `shrq $0x2, %rax` | `48 c1 e8 02` | four bytes |
+| 63 | `shrq %rax` | `48 d1 e8` | three bytes |
+
+The last three are **not** a rotate: they are a shift to the right, and the
+backend produced them by dropping the high term of the rotation. The drop is
+**harmless**, and the reason is the address computation: the decoded index
+reaches the table as `base + index * 8` in 64 bits, and the index's bits 61
+to 63 are lost in the multiplication — so the high term of the rotation,
+which reaches nothing but those bits, does not change the address the
+dispatch calls. The image is right; it is the *reader* that has to know
+that a shift to the right by 64 minus the rotation is the rotation.
+
+**The size matters**: the three-byte spellings and the four-byte ones make
+the code after the rotation shift, and the difference between two builds
+whose rotations are spelled differently is an order of magnitude larger than
+the difference between two builds whose rotations are not (§16).
 
 ## 13. Known limits of the build wiring
 
@@ -1331,6 +1365,21 @@ changes the callers as well.
   the **same length**: a path of a different length shifts the layout of
   the image, and the `.text` section is then genuinely different. The tool
   says so instead of pretending the two images are comparable.
+* **The shipped `policy.example.json` does not build a protected payload of
+  the current tree.** Its `cross_module` list names thirteen symbols, and
+  six of them (`cs2::aim::OccluderCell::lower_bound_distance`,
+  `cs2::aim::penetration_damage_at_target`, `cs2::aim::polygon_centroid`,
+  `cs2::aim::polygon_contains`, `cs2::aim::subtract_convex` and
+  `cs2::aim::yaw_scale`) are called by functions the example's `protect`
+  list does **not** select: an entry that named no declaration is a build
+  failure (§11), because an entry that protects nothing is a failure the
+  project exists to avoid. The operator's `policy.local.json` has the six
+  `protect` entries the example's `cross_module` list was written for, but
+  no `cross_module` list at all, and it fails the other way: the
+  cross-TU callees a protected function calls directly are the payload's
+  own code, and that is a failure too (§11). A policy that builds needs
+  **both**: the six `protect` entries and the `cross_module` list. The
+  measurement of §16 uses such a policy.
 
 ## 14. The front end of the virtualizer
 
@@ -2327,21 +2376,40 @@ python tools/protect/compare_builds.py --section .text \
     build-payload-t24a/payload.dll build-payload-t24b/payload.dll
 ```
 
-The floor of the criterion is 0.5 % of the section (8,535 bytes of
-1,707,008): a floor below it would be satisfied by the 37 bytes of the
+The floor of the criterion is 0.5 % of the section (8,538 bytes of
+1,707,520): a floor below it would be satisfied by the 51 bytes of the
 rotation alone, which is not what the task is for.
 
 **What was measured** (the payload of this tree, 2026-10-22, two builds
 with the seeds `0x1111111111111111` and `0x2222222222222222`, the policy of
-`tools/protect/policy.example.json`):
+the six `protect` entries of the operator's `policy.local.json` plus the
+`cross_module` list of `tools/protect/policy.example.json` — the example
+alone does not build, see §13):
 
 | what | measured |
 |---|---|
-| the `.text` of the two builds | **1,426,316 bytes differ — 83.53 % of the section** (the floor is 0.5 %) |
-| the modules the pass permuted | 75, with 3,145 definitions in all |
-| the definitions that moved | 3,078 (97.9 %); **no module with more than one definition moved none** |
-| the mixer's contribution alone (the permutation disabled) | **37 bytes of `.text`** (the rotation's immediate, one per dispatch site) and 504 bytes of `.rdata` — 541 bytes of the image |
+| the `.text` of the two builds | **1,425,969 bytes differ — 83.51 % of the section** (the floor is 0.5 %) |
+| the modules the pass permuted | 75, with 3,147 definitions in all |
+| the definitions that moved | 3,079 (97.9 %); **no module with more than one definition moved none** |
+| the encrypted dispatches | **51**, and the pass reports 51 rewrites |
+| the mixer's contribution alone (the layout permutation neutralised) | **51 bytes of `.text`** (the rotation's immediate, one per dispatch site) and 649 bytes of `.rdata` — 700 bytes of the image |
+| the same, with a module whose rotation the backend spells differently | **522,771 bytes of `.text`** (30.62 % of the section) and 2,557 bytes of `.rdata` |
+| the code the plugin does **not** compile | the imgui's code moved by **17,280 bytes**; **844 of the 3,351 unwind entries (25.19 %)** kept their address; the 16.49 % of the `.text` that stays byte-identical is scattered over **42,901 runs**, the longest of them 11,689 bytes |
 | two builds with the **same** seed | **0 bytes** differ apart from the linker's per-link stamps |
+
+**The mixer's contribution depends on the rotation, and the number above is
+a measurement, not a property.** The backend spells the rotation in six ways
+(§12), and the spellings have **different sizes**: a rotation of 2 to 60 is
+a four-byte `rolq $imm8`, and the rotations of 1, 61, 62 and 63 are
+three-byte instructions. When the two builds spell it differently, the code
+after it shifts, and the difference is an order of magnitude larger: the
+second row is measured with the seeds `0x300000000000001a` (the rotations 1,
+33, 39 and 41) and `0x3000000000000003` (the rotations 4, 35, 40 and 63),
+and the first row with the seeds `0x1111111111111111` and
+`0x2222222222222222` (the rotations 25, 30, 47, 54 and 11, 11, 27, 50 —
+none of them one of the four). **Four of the sixty-three legal rotations**
+are spelled differently, so about one protected build in eight is the
+second case and not the first.
 
 The last row is the rule of §4: the seed still fully determines the image,
 and two releases must not share a seed.
