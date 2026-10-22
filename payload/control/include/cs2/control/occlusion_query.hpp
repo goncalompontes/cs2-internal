@@ -64,12 +64,12 @@ struct OcclusionHull {
 struct OcclusionQueryStats {
   bool complete = false;  // false if query, geometry, or penetration-surface data is incomplete
   std::uint32_t incomplete_reasons = 0;  // bitset of OcclusionQueryIssue
-  bool ok = false;       // the engine query returned (no fault)
-  bool faulted = false;  // a guarded fault was recovered
-  int records = 0;       // overlap records the query returned
-  int bodies = 0;        // records whose +0x58 resolved to a CPhysicsBody
-  int shapes = 0;        // collision shapes visited
-  int hulls = 0;         // convex hulls parsed
+  bool ok = false;                       // the engine query returned (no fault)
+  bool faulted = false;                  // a guarded fault was recovered
+  int records = 0;                       // overlap records the query returned
+  int bodies = 0;                        // records whose +0x58 resolved to a CPhysicsBody
+  int shapes = 0;                        // collision shapes visited
+  int hulls = 0;                         // convex hulls parsed
   int type_counts[8] =
       {};  // histogram of shape types seen (0 sphere, 1 capsule, 2 hull, 3 mesh, 4 compound)
   // Read-only diagnostics (filled even when the call is not invoked).
@@ -523,6 +523,36 @@ struct TraceProbeRun {
         .start = eye, .direction = direction, .end = eye + direction * depth, .depth = depth});
   }
   return rays;
+}
+
+// The pyramid's target box for the probe's rays: the far ends' AABB, **padded**.
+//
+// The pad matters: a box that is a single point (one ray, no fan) is a degenerate
+// hull — the eye→box pyramid has no face planes, and `AabbBvh::query_pyramid`
+// keeps **nothing** at all, so the probe's own answer would come back empty. The
+// pad is small, so the pyramid stays a thin cone around the ray.
+[[nodiscard]] inline auto trace_target_box(const std::vector<TraceRay>& rays, float pad) noexcept
+    -> cs2::aim::Aabb {
+  cs2::aim::Aabb box{};
+  if (rays.empty()) {
+    box.min = cs2::aim::Vec3{.x = -pad, .y = -pad, .z = -pad};
+    box.max = cs2::aim::Vec3{.x = pad, .y = pad, .z = pad};
+    return box;
+  }
+  cs2::aim::Vec3 lo = rays.front().end;
+  cs2::aim::Vec3 hi = lo;
+  for (const TraceRay& ray : rays) {
+    lo.x = std::min(lo.x, ray.end.x);
+    lo.y = std::min(lo.y, ray.end.y);
+    lo.z = std::min(lo.z, ray.end.z);
+    hi.x = std::max(hi.x, ray.end.x);
+    hi.y = std::max(hi.y, ray.end.y);
+    hi.z = std::max(hi.z, ray.end.z);
+  }
+  const cs2::aim::Vec3 margin{.x = pad, .y = pad, .z = pad};
+  box.min = lo - margin;
+  box.max = hi + margin;
+  return box;
 }
 
 // The occluder cell for an enumerated solid — the **same** projection the solver's

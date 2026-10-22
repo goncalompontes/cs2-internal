@@ -173,6 +173,31 @@ void test_fan_order() {
   expect(inside, "every fan ray is a unit direction inside the spread");
   expect(distinct, "no two fan rays are the same");
 
+  // The **documented order**: ray `i` (i >= 1) is at the radius
+  // `spread * sqrt(i / count)` and the angle `i * 137.5077°` around the view ray.
+  // The order is part of the answer's contract (two runs compare), so it is
+  // spelled out here rather than left to the implementation.
+  constexpr float k_golden_angle_degrees = 137.50776405003785F;
+  bool spiral = true;
+  for (std::size_t i = 1; i < rays.size(); ++i) {
+    const float t = static_cast<float>(i) / static_cast<float>(count);
+    const float radius = spread * k_deg_to_rad * std::sqrt(t);
+    const float theta = static_cast<float>(i) * k_golden_angle_degrees * k_deg_to_rad;
+    const std::optional<cs2::aim::Vec2> point = basis.project(rays[i].direction);
+    if (!point.has_value()) {
+      spiral = false;
+      break;
+    }
+    const float du = point->x - centre.x;
+    const float dv = point->y - centre.y;
+    if (!near(du, radius * std::cos(theta), 1.0e-3F) ||
+        !near(dv, radius * std::sin(theta), 1.0e-3F)) {
+      spiral = false;
+      break;
+    }
+  }
+  expect(spiral, "the fan's ray i is at the documented spiral point");
+
   // A fan of one ray is the view ray, whatever the spread.
   const auto single = cs2::control::build_trace_fan(eye, basis, yaw, pitch, spread, 1, 1000.0F);
   expect(single.size() == 1U && near(single.front().direction, rays.front().direction),
@@ -182,9 +207,15 @@ void test_fan_order() {
 // --- 3. the interval record reader --------------------------------------------
 void test_interval_reader() {
   std::uint8_t record[cs2::control::TRACE_INTERVAL_SIZE] = {};
+  // The **literal** offsets: the record's layout is a property of the engine, not
+  // of the constants, so the test places the values at `+0x0C` and `+0x32` and
+  // reads them back. (A test that used the constants would pass with a wrong
+  // constant — the reader would simply agree with itself.)
+  constexpr std::size_t k_fraction_offset = 0x0C;
+  constexpr std::size_t k_enter_exit_offset = 0x32;
   const float fraction = 0.25F;
-  std::memcpy(record + cs2::control::TRACE_INTERVAL_FRACTION, &fraction, sizeof(float));
-  record[cs2::control::TRACE_INTERVAL_ENTER_EXIT] = 1U;
+  std::memcpy(record + k_fraction_offset, &fraction, sizeof(float));
+  record[k_enter_exit_offset] = 1U;
   record[0] = 0xABU;  // a byte outside the pinned fields: the raw copy must keep it
 
   const cs2::control::TraceInterval interval = cs2::control::read_trace_interval(record, 800.0F);
@@ -196,7 +227,7 @@ void test_interval_reader() {
          "the whole record is copied");
 
   // A "leave" record reads the other byte value.
-  record[cs2::control::TRACE_INTERVAL_ENTER_EXIT] = 0U;
+  record[k_enter_exit_offset] = 0U;
   const cs2::control::TraceInterval leave = cs2::control::read_trace_interval(record, 800.0F);
   expect(leave.enter_exit == 0U, "a leave record reads zero at +0x32");
 
@@ -329,6 +360,10 @@ void test_difference() {
 
 // --- 5. the bounds --------------------------------------------------------------
 void test_bounds() {
+  // The **documented** maxima (the command's error message and the docs quote
+  // them): 8 rays in a fan, 64 published intervals per ray.
+  expect(cs2::control::TRACE_MAX_RAYS == 8, "the probe's maximum number of rays is 8");
+  expect(cs2::control::TRACE_MAX_INTERVALS == 64, "the probe's published interval maximum is 64");
   expect(cs2::control::trace_fan_size_ok(1), "one ray is in range");
   expect(cs2::control::trace_fan_size_ok(cs2::control::TRACE_MAX_RAYS),
          "the maximum number of rays is in range");
@@ -360,7 +395,36 @@ void test_bounds() {
          "the results buffer is at least as large as the published maximum");
 }
 
-// --- 6. the service's wiring ----------------------------------------------------
+// --- 6. the enumeration's target box ------------------------------------------
+void test_target_box() {
+  const cs2::aim::Basis basis = cs2::aim::Basis::world();
+  const cs2::aim::Vec3 eye{0.0F, 0.0F, 0.0F};
+  constexpr float k_pad = 8.0F;
+
+  // One ray: the far end is a **point**, and an unpadded box would be a degenerate
+  // hull — the eye→box pyramid would have no face planes, and the pyramid query
+  // keeps nothing at all, so the probe's own answer would come back empty.
+  const auto one = cs2::control::build_trace_fan(eye, basis, 0.0F, 0.0F, 0.0F, 1, 1000.0F);
+  const cs2::aim::Aabb single = cs2::control::trace_target_box(one, k_pad);
+  expect(single.max.x > single.min.x && single.max.y > single.min.y && single.max.z > single.min.z,
+         "a single ray's target box has volume (the pyramid is not degenerate)");
+  expect(near(single.min.x, one.front().end.x - k_pad) &&
+             near(single.max.x, one.front().end.x + k_pad),
+         "the target box is the far end, padded");
+
+  // A fan: the box covers every far end.
+  const auto fan = cs2::control::build_trace_fan(eye, basis, 30.0F, 0.0F, 5.0F, 5, 1000.0F);
+  const cs2::aim::Aabb spread = cs2::control::trace_target_box(fan, k_pad);
+  bool covers = true;
+  for (const cs2::control::TraceRay& ray : fan) {
+    covers = covers && ray.end.x >= spread.min.x && ray.end.x <= spread.max.x &&
+             ray.end.y >= spread.min.y && ray.end.y <= spread.max.y && ray.end.z >= spread.min.z &&
+             ray.end.z <= spread.max.z;
+  }
+  expect(covers, "the fan's target box covers every far end");
+}
+
+// --- 7. the service's wiring ----------------------------------------------------
 void test_service_uses_the_rules(const char* root) {
   const std::filesystem::path service_path =
       std::filesystem::path(root) / "payload" / "control" / "src" / "service.cpp";
@@ -407,6 +471,7 @@ auto main(int argc, char** argv) -> int {
   test_interval_reader();
   test_difference();
   test_bounds();
+  test_target_box();
   if (argc >= 2) {
     test_service_uses_the_rules(argv[1]);
   }

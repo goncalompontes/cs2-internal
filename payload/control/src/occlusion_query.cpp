@@ -211,7 +211,7 @@ constexpr std::uintptr_t k_body_shapes_ptr = 0x68;
 constexpr std::uintptr_t k_body_transform_slot = 0x1B0;
 // The world body holds one shape per map brush (~10k on de_dust2).
 constexpr int k_max_body_shapes = 32768;
-constexpr int k_max_bodies = 256;        // unique overlap bodies walked per query
+constexpr int k_max_bodies = 256;  // unique overlap bodies walked per query
 constexpr int k_max_query_targets = 64;
 constexpr int k_max_query_exclude = 64;
 constexpr int k_large_body_shapes = 64;  // above this = a static world body (cached)
@@ -1115,8 +1115,7 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
         for (const int index : target_hits) {
           hits.push_back(index);
           const int previous = owner[static_cast<std::size_t>(index)];
-          owner[static_cast<std::size_t>(index)] =
-              previous == -1 ? t : (previous == t ? t : -2);
+          owner[static_cast<std::size_t>(index)] = previous == -1 ? t : (previous == t ? t : -2);
         }
       }
       // The per-target queries overlap, so deduplicate before projecting.
@@ -1609,8 +1608,6 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
   // The volume the fan covers: the eye and the rays' far ends.
   Vec3 lo = eye;
   Vec3 hi = eye;
-  Vec3 far_lo = rays.front().end;
-  Vec3 far_hi = far_lo;
   for (const TraceRay& ray : rays) {
     lo.x = std::min(lo.x, ray.end.x);
     lo.y = std::min(lo.y, ray.end.y);
@@ -1618,19 +1615,18 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
     hi.x = std::max(hi.x, ray.end.x);
     hi.y = std::max(hi.y, ray.end.y);
     hi.z = std::max(hi.z, ray.end.z);
-    far_lo.x = std::min(far_lo.x, ray.end.x);
-    far_lo.y = std::min(far_lo.y, ray.end.y);
-    far_lo.z = std::min(far_lo.z, ray.end.z);
-    far_hi.x = std::max(far_hi.x, ray.end.x);
-    far_hi.y = std::max(far_hi.y, ray.end.y);
-    far_hi.z = std::max(far_hi.z, ray.end.z);
   }
 
   // **Our answer** comes from the solver's own enumeration: the eye→the ray's end
   // pyramid is the conservative superset the solver uses for a target at that end
   // (`AabbBvh::query_pyramid`), and `OccluderCell::ray_span` then decides which of
   // those solids the ray actually enters.
-  const cs2::aim::Aabb target{.min = far_lo, .max = far_hi};
+  //
+  // The pyramid's target box is padded: a box that is a single point (one ray, no
+  // fan) is a degenerate hull — the pyramid has no face planes, and the query
+  // would then keep nothing at all (`AabbBvh::query_pyramid` returns early).
+  constexpr float k_target_pad = 8.0F;
+  const cs2::aim::Aabb target = trace_target_box(rays, k_target_pad);
   OcclusionQueryResult occluders = query_world_occluders(eye, lo, hi, true, nullptr, 0, &target, 1);
   run.occluders = static_cast<int>(occluders.hulls.size());
 
@@ -1638,10 +1634,13 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
   // probe's answer is the solver's answer.
   std::vector<cs2::aim::OccluderCell> cells;
   std::vector<int> clusters;
+  std::vector<int> hulls;
   cells.reserve(occluders.hulls.size());
   clusters.reserve(occluders.hulls.size());
+  hulls.reserve(occluders.hulls.size());
   int cluster = -1;
-  for (const OcclusionHull& hull : occluders.hulls) {
+  for (std::size_t index = 0; index < occluders.hulls.size(); ++index) {
+    const OcclusionHull& hull = occluders.hulls[index];
     if (hull.kind == cs2::aim::SolidKind::mesh) {
       ++cluster;
     }
@@ -1651,6 +1650,8 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
     }
     cells.push_back(*cell);
     clusters.push_back(hull.kind == cs2::aim::SolidKind::mesh ? cluster : -1);
+    // The solid's index in the enumerated set — the identifier the answer carries.
+    hulls.push_back(static_cast<int>(index));
   }
 
   for (const TraceRay& ray : rays) {
@@ -1665,7 +1666,7 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
       result.ours.push_back(TraceOccluderHit{.entry = span->entry,
                                              .exit = span->exit,
                                              .kind = cells[i].kind,
-                                             .index = static_cast<int>(i),
+                                             .index = hulls[i],
                                              .cluster = clusters[i]});
     }
     run.occluder_hits += static_cast<int>(result.ours.size());
