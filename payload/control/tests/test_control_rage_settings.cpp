@@ -199,6 +199,24 @@ auto function_body(const std::string& source, const std::string& marker) -> std:
   return source.substr(start, end - start);
 }
 
+// Whether the code does something **only on the menu's write**.
+//
+// The check is anchored on the **branch**, not on the statement: a store that
+// sits outside the menu's branch (or in a branch that never runs) would
+// satisfy a search for the statement alone.
+auto stored_on_the_menus_write(const std::string& code, const std::string& statement) -> bool {
+  const std::size_t at = code.find(statement);
+  if (at == std::string::npos) {
+    return false;
+  }
+  // The branch is a line or two above the statement; the window is wide
+  // enough for the formatting and narrow enough not to reach the function's
+  // signature.
+  constexpr std::size_t k_window = 200;
+  const std::size_t start = at > k_window ? at - k_window : 0;
+  return code.substr(start, at - start).find("RageSource::menu") != std::string::npos;
+}
+
 // The wire's rage field names: the identifiers in the `Settings` struct that
 // start with "rage".
 //
@@ -582,8 +600,10 @@ void test_the_service_applies_only_the_masked_fields(const std::string& root) {
   expect(code.find("note_rage_owner(") != std::string::npos,
          "the service records the owner of the fields it wrote");
   // The menu's **displayed** objective is recorded, so the status can say what
-  // the menu's tab shows.
-  expect(code.find("rage_menu_objective_") != std::string::npos,
+  // the menu's tab shows — and it is recorded on the **menu's** write only
+  // (the control channel's write carries the service's own value, which is
+  // not what the tab shows).
+  expect(stored_on_the_menus_write(code, "rage_menu_objective_.store("),
          "the service records the objective the menu's tab is showing");
   // The status publishes the owner.
   const std::string status = function_body(source, "void Service::do_rage(");
