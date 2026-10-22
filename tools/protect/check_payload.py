@@ -741,7 +741,7 @@ def check_direct_callees(coverage: list[Coverage], symbols: set[str]) -> tuple[i
 
     if failures:
         names = ", ".join(f"{symbol} ({reason})" for symbol, reason in failures)
-        advice = " ".join(advice_for(reason) for _symbol, reason in failures)
+        advice = " ".join(dict.fromkeys(advice_for(reason) for _symbol, reason in failures))
         raise Failure(
             f"{len(failures)} cross-TU callees that a protected function calls directly are "
             f"the payload's own code: {names}. {advice}"
