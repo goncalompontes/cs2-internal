@@ -1332,7 +1332,7 @@ recomputed from its **contributors** for every command
 
 | contributor | what it is | survives the ragebot's withdrawal |
 |---|---|---|
-| the **player** | the engine's own mask, read **before** the payload's write | **yes** |
+| the **player** | the engine's own mask, read **before** the payload's write — and what the payload **knows** about it (see below: it can be **unknown**) | **yes** |
 | the **control channel** | an explicit `press("attack")` | **yes** |
 | the **triggerbot** | its own hold (a feature bit) | **yes** |
 | the **ragebot** | the fire path's decision for this command | **no** — this is the one that is withdrawn |
@@ -1340,6 +1340,47 @@ recomputed from its **contributors** for every command
 The features' **other** bits are still only ever set, never cleared. Only the
 attack bit is replaced, and only because the ragebot's contribution to it has
 to be replaceable.
+
+#### An **unknown** reading never removes the bit
+
+The player's own press is the one contributor the payload has to **read**, and
+the reading is not always a fact: the engine **reuses** the command objects
+and the payload writes to two commands per tick, so a command can carry the
+payload's own press as well — and then the player's press and the payload's
+press cannot be told apart.
+
+So the reading is **three-valued** (`PlayerPress`): `held`, `released`, and
+**`unknown`**. And the invariant is:
+
+> An **unknown** reading never **removes** the attack bit. The bit is cleared
+> only on the strength of a reading that is **known** to be the player's own
+> state.
+
+An unknown reading leaves the command's own attack bit **as it is** — the
+payload never takes away a bit it cannot prove it set — and the other
+contributors (the control channel, the triggerbot, the fire path) still
+apply. The cost is that the **release** can be a tick late on a command the
+payload cannot read; the benefit is that the player's own press is never
+swallowed. *When in doubt, do not fire* applies to the **player's** press
+symmetrically.
+
+**A clear bit is a fact.** The payload never clears the engine's own attack
+bit (that is the invariant above), so a command whose attack bit is **clear**
+says the player is not pressing — on a copy as well as on the command the
+engine has just built. Only a **set** bit can be ambiguous.
+
+#### The control channel's own **release**
+
+The operator's `release("attack")` removes **the control channel's own**
+contribution — and only that one. The **player's** own press and the
+**features'** bits are only ever set, never cleared (the repo's rule), so the
+triggerbot's hold and the ragebot's press survive it. (Before this rule the
+release cancelled them as well, which changed the **triggerbot** — a feature
+this task does not own — and left the operator with a silently silenced
+weapon: the refusal still read `ok`, because the fire path's *decision* was
+still "press". The default backend is `console`, where the control's masks
+never reach the command at all, so the blast radius was the `usercmd` backend
+only.)
 
 #### The engine's own press is read **per command**
 
@@ -1350,12 +1391,23 @@ command the payload wrote last tick still carries the payload's own press.
 Reading the mask naively would therefore read the **payload's own press back
 as the player's**, and the withdrawal would never clear the bit.
 
-The payload caches the engine's own attack bit **per command number**
-(`CUserCmd::nSequenceNumber`, `FireCommandCache`): a command the payload has
-**not** written its own press to yet carries the engine's own mask — that is a
-**clean** reading — and the engine builds a **new** command every tick, so the
-reading is clean and fresh every tick. The slot-25 copy of the command reuses
-the tick's reading.
+The payload caches what it knows about the engine's own attack bit **per
+command number** (`CUserCmd::nSequenceNumber`, `FireCommandCache`):
+
+| the command | the reading |
+|---|---|
+| the engine has **just built** it (the slot-5 command) | the mask is the engine's own — a **clean** reading: `held` when the attack bit is set, `released` when it is clear |
+| a command the payload has **not** put its own press on | the same: a clean reading, refreshed |
+| a command the payload **has** pressed | **not** clean: the reading is the one taken before the payload's write |
+| the **copy** of a command the cache has not seen | **unknown** when the attack bit is set (the copy may carry the payload's own press), `released` when it is clear |
+
+The cache never answers with a **stale** value: a command's reading is either
+clean, or the one taken before the payload wrote to it. (The earlier version
+answered a copy it did not know with the last **clean** reading it had — a
+value from an earlier tick — and the payload's replacement of the attack bit
+took that stale answer for the player's own state: the player's own press was
+**deleted** from the command, from the PB's held word and from the movement
+services' word. The status line's `player?` is what that case looks like now.)
 
 **What happens when the player holds attack.** Then the engine's own mask
 carries the attack bit on every command, so the engine sees **one continuous
@@ -1418,6 +1470,7 @@ rage: AIM tgt 12 box 1 obj hitchance s12 p13 e12 semi ok
 | `semi` / `auto` / `unknown` | the weapon's fire mode as the payload reads it |
 | `ok` / `no-solve` / `fire-off` / `clip-unknown` / `no-ammo` / `reloading` / `deploying` / `edge` / `interval` / `rate-unknown` | the gate's verdict: `ok` when the shot can be taken, the blocking condition's name when it cannot |
 | `player` | the **player** is holding the trigger — the engine sees one continuous press, so the edge is the player's to make |
+| `player?` | the payload **cannot tell** whether the player is holding the trigger (its own press may be on the command it is reading) — the bit is left alone in that case, never removed |
 
 **The line fits the HUD's buffer.** The HUD's rage line has a **192-byte**
 buffer (`payload/features/src/overlay.cpp`), and the line must fit it in the
@@ -1426,11 +1479,18 @@ the aim **writes** and the **backtracks**: they are diagnostics, and they are
 in the `rage` command's JSON (`writes`, `backtracks`) instead. The `fire`
 toggle is not on the line either: the refusal says `fire-off` when the fire
 path is disabled, which is the same fact and costs less. The host test drives
-every field to its longest and measures the line (**185** characters).
+every field to its longest and measures the line (**186** characters, with
+`player?` and `rate-unknown` as the longest ones).
 
 The JSON carries the same facts under `shots`, `presses`, `edges`,
-`fire_mode`, `fire_refusal` and `player_attack`, plus `writes` and
-`backtracks`.
+`fire_mode`, `fire_refusal`, `player_attack` and `player_press`, plus
+`writes` and `backtracks`.
+
+**`player_attack` and `player_press`.** `player_attack` is the **bool**: the
+player is *known* to be holding the trigger. `player_press` is the same fact
+with all three states: `"held"`, `"released"` or `"unknown"` (the payload
+cannot tell the player's own press from its own — and an unknown reading
+never removes the attack bit, so the player's press is safe either way).
 
 **`shots` changed meaning.** The counter that used to answer `shots` counted
 the **commands** the attack was asserted on — the ragebot's *attempts*, not
@@ -1457,19 +1517,30 @@ the **whole wiring**, not a neighbour of it:
 | what | the test |
 |---|---|
 | the **decision** — the edge, the gate, the fire mode, the refusals | `decide_fire` is a pure function (`cs2/control/strafe_geometry.hpp`), and the test drives it |
-| the **write** — the command's mask, the PB's button words and the movement services' word | `compose_fire_write` is a pure function, and the payload calls **it** |
+| the **write** — the command's mask, the PB's button words and the movement services' word | `apply_fire_write` is the payload's own write, and the test drives it against plain memory and reads the **bytes** back |
 | the **edge on the command** | the test drives the payload's own per-tick loop: press → withdraw → press, and asserts that the command's attack bit goes **1 → 0 → 1** |
 | the **player's press survives** | the same loop, with the player holding the trigger: the withdrawal must leave the bit set |
+| the **unknown reading** | the cache's three-valued reading, and the invariant: an unknown reading leaves the command's attack bit **as it is** — the review's own probe (the **copy first**, the player pressing) must show `attack=1` |
 | the **command cache** | `FireCommandCache` is a pure class, and the test drives it |
 | the **shot counter** | `is_engine_shot` is a pure function: a reload and a failed read are not shots |
 | the **status line** | `format_rage_status` is a pure function, and the test drives every field to its longest |
-| the **wiring** | the test reads the payload's own source (`input.cpp`) and asserts that the composition is the pure function's, that the ragebot's press is the **service's decision**, and that the player's own press is the engine's own bit |
+| the **wiring** | the test reads the payload's own source (`input.cpp`), **anchored** to `Input::apply_command`, and asserts that the write is the pure function's, that all three channels are **passed**, that the ragebot's press is the **service's decision**, and that the player's own press is what the cache knows |
 
-The last one is what catches the two breaks the review named: a ragebot that
-holds `IN_ATTACK` down on every command (the original defect) and a
-withdrawal that takes the player's own press away (the rule the repo states)
-are both one line away from the pure functions, and the pure functions'
-tests cannot see a line that is not called.
+The last one is what catches the breaks the reviews named: a ragebot that
+holds `IN_ATTACK` down on every command (the original defect), a withdrawal
+that takes the player's own press away (the rule the repo states), a write
+that is computed and then **ignored**, and a channel that is **dropped** are
+all one line away from the pure functions, and the pure functions' tests
+cannot see a line that is not called. The check is **anchored**: the
+statements have to be inside `Input::apply_command` itself, so a neighbouring
+occurrence elsewhere in the file cannot satisfy it, and they have to be
+**present** — a channel that is not written fails the check.
+
+The **behavioural** test is the other half: the payload's write is one call
+(`apply_fire_write`), the test drives that call with the three channels as
+plain memory, and asserts what each of them carries. A call site that
+composes the mask and then ignores it cannot exist, because the composition
+**is** the write.
 
 **They cannot prove that the engine *honours* the edge.** Whether a
 semi-automatic weapon really needs a release→re-press, and whether the engine
@@ -1509,7 +1580,12 @@ write" and the movement services' word was only ever *set*.
 - **The engine's own press is read per command.** A command the payload has
   already put its own press on is not a clean reading, so the cached value is
   used for it. The engine builds a new command every tick, so the reading is
-  refreshed every tick.
+  refreshed every tick. The **copy** of a command the cache has not seen is
+  the exception: its reading is **unknown** when the attack bit is set (the
+  copy may carry the payload's own press), and an unknown reading leaves the
+  bit **as it is** — so the player's own press is never removed, and the
+  release can be a tick late on that command. Which of the two slots runs
+  first is not observed at runtime, so the payload does not depend on it.
 - **Whether the engine honours the edge is engine behaviour** — the host
   tests prove the payload *emits* it, the operator's live run proves the
   engine *reads* it.

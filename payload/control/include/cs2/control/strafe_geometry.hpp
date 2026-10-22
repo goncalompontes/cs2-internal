@@ -1019,8 +1019,8 @@ struct AttackContributors {
 /// reading that is **known** to be the player's own state; an unknown reading
 /// leaves the command's own bit **as it is** (the payload never takes away a
 /// bit it cannot prove it set).
-[[nodiscard]] inline constexpr auto compose_attack_bit(std::uint64_t current_attack,
-                                                       const AttackContributors& contributors) noexcept
+[[nodiscard]] inline constexpr auto compose_attack_bit(
+    std::uint64_t current_attack, const AttackContributors& contributors) noexcept
     -> std::uint64_t {
   const bool player = contributors.player == PlayerPress::held ||
                       (contributors.player == PlayerPress::unknown && current_attack != 0);
@@ -1057,8 +1057,7 @@ struct AttackContributors {
   const bool control_reaches = button_reaches_command(ButtonPath::control_command, usercmd_backend);
   const AttackContributors effective{
       .player = contributors.player,
-      .control = contributors.control && control_reaches &&
-                 (control_clear & button::k_attack) == 0,
+      .control = contributors.control && control_reaches && (control_clear & button::k_attack) == 0,
       .trigger = contributors.trigger,
       .rage = contributors.rage,
   };

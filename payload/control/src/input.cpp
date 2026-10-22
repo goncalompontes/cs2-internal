@@ -2731,9 +2731,9 @@ void Input::apply_command(void* cmd, bool fresh) noexcept {
   const cs2::control::FireWritePorts ports{
       .mask = buttons,
       .pb = pb_words,
-      .pb_has_bits = pb_words != nullptr
-                         ? reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset)
-                         : nullptr,
+      .pb_has_bits = pb_words != nullptr ? reinterpret_cast<std::uint32_t*>(
+                                               buttons_pb + k_buttonstate_has_bits_offset)
+                                         : nullptr,
       .engine = engine_button_state(),
   };
   const cs2::control::FireWrite write =

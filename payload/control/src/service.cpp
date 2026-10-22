@@ -3496,8 +3496,8 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   // payload cannot tell the player's own press from its own on a command it
   // has already written to — and an unknown reading never removes the attack
   // bit, `docs/ragebot.md` §"the fire path").
-  payload.set("player_press", Json::string(std::string(player_press_name(
-                                       input_.rage_player_press()))));
+  payload.set("player_press",
+              Json::string(std::string(player_press_name(input_.rage_player_press()))));
   payload.set("occluders", Json::number(static_cast<double>(rage_occluders_.load())));
   payload.set("occlusion_query_complete",
               Json::boolean(rage_occlusion_query_complete_.load(std::memory_order_relaxed)));

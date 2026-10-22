@@ -1103,7 +1103,8 @@ auto repository_root(const char* argv0) -> std::filesystem::path {
     if (!file.good()) {
       return {};
     }
-    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    const std::string text((std::istreambuf_iterator<char>(file)),
+                           std::istreambuf_iterator<char>());
     const std::string key = "\"source\": \"";
     const std::size_t start = text.find(key);
     if (start == std::string::npos) {
