@@ -362,6 +362,13 @@ def the_seed(policy_path: str) -> int:
     plugin's own errors: a policy the plugin rejects is the plugin's error to
     report, and the probe must not hide it behind a seed error. That is why
     the two failures have two exit codes.
+
+    The policy is only read when the seed has to come from it: the gate is
+    about the seed, and a malformed policy is the **plugin's** error, which
+    the plugin reports when it reads the file at compile time. The one case
+    the probe has to get right is the one where the policy is malformed
+    **and** there is no seed: the probe reads the policy then, and reports
+    the malformed policy instead of a missing seed.
     """
     seed = os.environ.get("CS2_PROTECT_SEED", "").strip()
     if seed:
