@@ -17,6 +17,13 @@ parameter, the pass routes it through a thunk, and the hidden pointer has to
 reach the callee unchanged. A mistake there is a **wrong value**, not a
 crash.
 
+The fixture has two selected functions: the ordinary one, and the one whose
+call to a struct-returning callee is **inside a catch handler**. A catch
+handler is a funclet in the MSVC EH model, and the calls in it carry a
+"funclet" operand bundle: the replacement call the pass emits has to keep
+that bundle, or the backend drops the body of the funclet and the image
+traps.
+
 The build needs the MSVC toolchain (the static CRT of the fixture), so the
 driver sets up vcvars64 the way scripts/build-protect-plugin.py does.
 
@@ -134,8 +141,8 @@ def compile_fixture(
         "/std:c++latest",
         "/O2",
         # The payload is built with /EHsc, and so is the fixture: the
-        # selected function has an EH edge, and the pass must skip the
-        # `invoke` and leave the plain calls alone.
+        # selected functions have EH edges, and the pass has to route the
+        # cross-TU ones and leave the same-module ones alone.
         "/EHsc",
         "/GR-",
         "/MT",
@@ -154,17 +161,27 @@ def compile_fixture(
     return run(command, environment, vcvars)
 
 
-def probe(dll: Path, seed: int) -> int:
-    """Loads the DLL and calls its exported probe.
+def probe(dll: Path, seed: int, name: str = "cs2_fixture_probe") -> int:
+    """Loads the DLL and calls one of its exported probes.
 
     The loader calls `DllMain`, so the fixture is loaded the way the payload
     is loaded: the probe is reached through the loader's own path.
+
+    A probe that **traps** -- the image the pass produced is broken -- is a
+    failure of the test, not the end of it: the exception is caught and
+    reported with the name of the probe.
     """
     library = ctypes.WinDLL(str(dll))
-    function = library.cs2_fixture_probe
+    function = getattr(library, name)
     function.restype = ctypes.c_ulonglong
     function.argtypes = [ctypes.c_int]
-    return int(function(seed))
+    try:
+        return int(function(seed))
+    except OSError as error:
+        raise Failure(
+            f"the probe '{name}' of '{dll.name}' trapped: {error}. The image the pass "
+            "produced is broken."
+        ) from error
 
 
 def check_constants(binary: Path, mixers: list[Mixer]) -> None:
@@ -286,9 +303,11 @@ def check_result(args: argparse.Namespace) -> None:
         if "rewritten=" in line:
             for part in line.split():
                 if part.startswith("rewritten="):
-                    rewritten = max(rewritten, int(part.split("=", 1)[1]))
+                    # The report has one line per selected function, so the
+                    # counts of the whole build are their **sum**.
+                    rewritten += int(part.split("=", 1)[1])
                 elif part.startswith("cross_module="):
-                    cross = max(cross, int(part.split("=", 1)[1]))
+                    cross += int(part.split("=", 1)[1])
     check(rewritten > 0, "the pass rewrote no call at all")
     check(
         cross > 0,
@@ -339,21 +358,32 @@ def check_result(args: argparse.Namespace) -> None:
     check(
         protected_dispatches == plain_dispatches + rewritten,
         f"the protected binary has {protected_dispatches} dispatches and the unprotected one "
-        f"{plain_dispatches}, but the pass reported {rewritten} rewrites: the compiler folded "
-        "the dispatch away",
+        f"{plain_dispatches}, but the pass reported {rewritten} rewrites: a dispatch is missing. "
+        "The compiler folded one away, or the backend dropped the code around it -- a call in a "
+        "catch handler whose 'funclet' bundle was dropped is one way to lose one.",
     )
 
     # The two runs have to agree: the value the probe returns carries the
     # result **and** the counter, so a call that reached the wrong function
     # changes it.
+    #
+    # The two probes are the two selected functions: the ordinary one, and
+    # the one whose call to a struct-returning callee is **inside a catch
+    # handler** (a funclet: the call carries a "funclet" operand bundle,
+    # and the replacement call has to keep it).
     for seed in (5, 0, -3):
-        first = probe(plain, seed)
-        second = probe(protected, seed)
-        check(
-            first == second,
-            f"the two builds disagree on the seed {seed}: {first} and {second}",
-        )
+        for name in ("cs2_fixture_probe", "cs2_fixture_functlet_probe"):
+            first = probe(plain, seed, name)
+            second = probe(protected, seed, name)
+            check(
+                first == second,
+                f"the two builds disagree on the seed {seed} of '{name}': {first} and {second}",
+            )
     check(probe(plain, 5) != 0, "the fixture returned nothing: the test would be vacuous")
+    check(
+        probe(plain, 5, "cs2_fixture_functlet_probe") != 0,
+        "the funclet fixture returned nothing: the test would be vacuous",
+    )
 
 
 if __name__ == "__main__":
