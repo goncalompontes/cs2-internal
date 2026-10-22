@@ -977,9 +977,10 @@ void test_transform_cross_module() {
       }
     }
   }
-  const std::uint64_t key = mix64(constant_value(*module, "cs2.protect.key0") ^
-                                  constant_value(*module, "cs2.protect.key1") ^
-                                  constant_value(*module, "cs2.protect.key2"));
+  const cs2::protect::Mixer mixer = mixer_of(config, *module);
+  const std::uint64_t key = mixer.mix64(constant_value(*module, "cs2.protect.key0") ^
+                                         constant_value(*module, "cs2.protect.key1") ^
+                                         constant_value(*module, "cs2.protect.key2"));
   check((cipher ^ key) == 0, "the decode does not yield the index of the declaration");
 
   // The state of the entry: it named a declaration and every call to it was

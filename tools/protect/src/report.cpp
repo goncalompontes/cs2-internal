@@ -702,7 +702,7 @@ auto write_coverage(const Config& config, const llvm::Module& module,
 auto write_coverage(const Config& config, const llvm::Module& module, const SelectionResult& result)
     -> std::optional<std::string> {
   return write_coverage(config, module, coverage_entries(result), {}, CoverageProtect{}, {}, {}, {},
-                        CrossModuleState{});
+                        CoverageLayout{}, CrossModuleState{});
 }
 
 }  // namespace cs2::protect

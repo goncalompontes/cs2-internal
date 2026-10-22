@@ -437,8 +437,9 @@ def check_the_table_lookup(root: Path) -> None:
     entry = Coverage(coverage / "0x1.cov")
     check(entry.intact, "the coverage of the table test is not intact")
 
-    # The key the call site mixes: the xor of the three parts of the key.
-    mixed = mix64(0x1 ^ 0x2 ^ 0x3)
+    # The key the call site mixes: the xor of the three parts of the key,
+    # through the mixer the coverage names.
+    mixed = mix64(0x1 ^ 0x2 ^ 0x3, entry.mixer())
 
     def code(offset: int) -> int:
         """A code address of the `.text` section."""
