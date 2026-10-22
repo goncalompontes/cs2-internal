@@ -438,15 +438,70 @@ def _block_after(text: str, marker: str, start: int = 0) -> str:
     raise AssertionError(f"the block after {marker!r} is never closed")
 
 
+def _strip_comments(source: str) -> str:
+    """The source with its **comments removed**.
+
+    A source check has to look at the code, not at the prose around it.  A
+    commented-out ``payload.set(...)`` is **not** a published key, and a
+    comment that quotes one is not either — so a check that reads the raw
+    source counts a key the payload does not send (the false pass) and fails
+    for a key that was never there (the spurious failure).  The tree's own C++
+    checks strip the comments first for the same reason
+    (``payload/control/tests/test_control_rage_objective.cpp``).
+
+    The **string literals are kept** — they carry the keys the payload
+    publishes — but a ``//`` inside one is not a comment.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(source)
+    while index < length:
+        char = source[index]
+        following = source[index + 1] if index + 1 < length else ""
+        if char == "/" and following == "/":
+            while index < length and source[index] != "\n":
+                index += 1
+            continue
+        if char == "/" and following == "*":
+            index += 2
+            while index < length and not source.startswith("*/", index):
+                if source[index] == "\n":
+                    out.append("\n")
+                index += 1
+            index += 2
+            continue
+        if char in "\"'":
+            quote = char
+            out.append(char)
+            index += 1
+            while index < length:
+                current = source[index]
+                out.append(current)
+                index += 1
+                if current == "\\" and index < length:
+                    out.append(source[index])
+                    index += 1
+                elif current == quote:
+                    break
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
 def _published(body: str, variable: str) -> set[str]:
     """The keys a JSON object is given, by the ``set("name", ...)`` calls.
 
     The payload writes its answers with ``Json::set`` — ``payload.set("key",
     ...)`` for the answer itself, ``perf.set(...)`` for the instrumentation
     block inside it — so the keys it publishes are **in the source**.
+
+    The **comments are stripped first**: a commented-out ``set(...)`` is not a
+    published key, and a comment that quotes one is not either.
     """
+    code = _strip_comments(body)
     pattern = re.compile(rf'(?<![A-Za-z0-9_]){variable}\.set\(\s*"([^"]+)"')
-    return {match.group(1) for match in pattern.finditer(body)}
+    return {match.group(1) for match in pattern.finditer(code)}
 
 
 def _optional_keys(shape: type) -> set[str]:
@@ -473,6 +528,10 @@ class TestThePublishedKeys(unittest.TestCase):
     So the two answers that carry the Monte-Carlo objective are read from the
     payload's **own source** and compared with the client's types, key by
     key: a key added on one side and not the other fails this suite.
+
+    The source is read with its **comments stripped**, so a key that is
+    **commented out** is not published: disabling a key that way fails this
+    suite exactly like deleting it would.
     """
 
     #: The two answer bodies, read once for the whole class.
@@ -481,7 +540,10 @@ class TestThePublishedKeys(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        text = SERVICE.read_text(encoding="utf-8")
+        # The comments are stripped **before** the bodies are read: a comment
+        # with a brace or an ``if (`` in it must not move a body's boundary
+        # nor invent a condition the answer does not have.
+        text = _strip_comments(SERVICE.read_text(encoding="utf-8"))
         cls.aim = _function_body(text, "void Service::do_aim(")
         cls.rage = _function_body(text, "void Service::do_rage(")
 
