@@ -471,17 +471,20 @@ the game.
 
 | # | severity | finding | where | fix |
 |---|---|---|---|---|
-| **H12** | major | **The desc cache's acceptance test was flaky — it failed one run in four on a fast machine, and it had nothing to do with the cache.** `features-chams-desc-cache` asserted four *counts* — "the generation really advanced", "the probe still read the cache" (twice) and "the reader gave up at least once" — and every one of them was a statement about the **scheduler**, not about the cache. The **shipped cache reported zero mismatches in every run**, including the two that failed: run 1 printed `0 hits` with 160 000 give-ups, run 2 printed `0 advances`. The control (the old three-atomic protocol) reported between **0 and 23 257** mismatches across runs and was **printed, not asserted**, so it proved nothing. A flaky test in the merged tree fails CI and trains everyone to ignore red, and it made T33's "the probe bites" indistinguishable from "the test is noisy". | `payload/features/tests/test_chams_desc_cache.cpp` | **fixed, not merged** — branch `feat/t41-flaky-desc-cache-test` (`9eaeb74`, `ed752ec`): every check is now an **invariant** or an **arranged** fact (the test drives the contention until the path it wants to cover has been taken, and the bumps are the main thread's own), and the **control is asserted** on an interleaving that is put together by hand, so it fails on every run. The shipped cache is **unchanged**. |
+| **H12** | major | **The desc cache's acceptance test was flaky — it failed one run in four on a fast machine, and it had nothing to do with the cache.** `features-chams-desc-cache` asserted four *counts* — "the generation really advanced", "the probe still read the cache" (twice) and "the reader gave up at least once" — and every one of them was a statement about the **scheduler**, not about the cache. The **shipped cache reported zero mismatches in every run**, including the two that failed: run 1 printed `0 hits` with 160 000 give-ups, run 2 printed `0 advances`. The control (the old three-atomic protocol) reported between **0 and 23 257** mismatches across runs and was **printed, not asserted**, so it proved nothing. A flaky test in the merged tree fails CI and trains everyone to ignore red, and it made T33's "the probe bites" indistinguishable from "the test is noisy". | `payload/features/tests/test_chams_desc_cache.cpp` | **fixed, not merged** — branch `feat/t41-flaky-desc-cache-test` (`9eaeb74`, `ed752ec`, `d1bfe58`): every check is now an **invariant** or an **arranged** fact (the test drives the contention until the path it wants to cover has been taken, and the bumps are the main thread's own), and the **control is asserted** on an interleaving that is put together by hand, so it fails on every run. The shipped cache is **unchanged**. |
 
 **What is verified:** the host test `features-chams-desc-cache` — **twenty
 runs in a row with zero failures**, and the **old protocol** put back into the
 shipped cache (`payload/features/include/cs2/features/chams.hpp`, the class's
-interface unchanged) — **twenty runs, every one of them failing**, on four
-checks: the two "never pairs two writes" invariants, "the cache refused a
-second writer in the slot" and "the reader gave up at least once under the
-contention". The contention is unchanged: four threads, two descs in one
-slot, a generation bump under a concurrent publisher, and eight writers
-hammering one slot.
+interface unchanged) — **twenty runs, every one of them failing**. Two
+variants were used: the old protocol **with** the generation check (the
+harder case — the failure is then attributable to the concurrency defect
+alone: four checks fail, two of them the "never pairs two writes"
+invariants) and the **literal** three-atomic protocol of the pre-T33 cache,
+without the generation check (six checks fail, the two generation ones among
+them). The contention is unchanged: four threads, two descs in one slot, a
+generation bump under a concurrent publisher, and eight writers hammering
+one slot.
 
 **What is not:** the live run. Nothing here has been observed in the game —
 the probe is a host test, and the cache it drives is the shipped one.
