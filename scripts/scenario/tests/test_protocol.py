@@ -419,10 +419,14 @@ def _function_body(text: str, signature: str) -> str:
     raise AssertionError(f"the body of {signature!r} is never closed")
 
 
-def _block_after(text: str, marker: str) -> str:
-    """The ``{ ... }`` block that follows a marker, found by brace counting."""
-    start = text.index(marker) + len(marker)
-    brace = text.index("{", start)
+def _block_after(text: str, marker: str, start: int = 0) -> str:
+    """The ``{ ... }`` block that follows a marker, found by brace counting.
+
+    ``start`` is where the search begins, so a marker that occurs more than
+    once can be taken one at a time.
+    """
+    found = text.index(marker, start)
+    brace = text.index("{", found + len(marker))
     depth = 0
     for index in range(brace, len(text)):
         if text[index] == "{":
@@ -521,16 +525,21 @@ class TestThePublishedKeys(unittest.TestCase):
         self.assertEqual(optional, conditional - always)
         self.assertEqual(set(protocol.AimResult.__annotations__) - optional, always)
 
-    def test_the_rage_answer_may_omit_nothing(self) -> None:
-        """The ``rage`` command publishes every key it declares, always.
+    def test_the_rage_answer_does_not_depend_on_the_state(self) -> None:
+        """Every key of the ``rage`` answer is published on **every** call.
 
-        ``RageResult`` is ``total=False`` (the block grows), so the keys are
-        optional by construction — but the payload sends **all** of them on
-        every call, and a key the payload stopped sending would be a silent
-        loss the type would not report.
+        The block that publishes the Monte-Carlo's state is a bare block, not
+        a condition: the verdict is always there (empty when there was none),
+        so the answer's **shape** does not depend on the objective, on the
+        tick or on the weapon.  A key that only appeared under a condition
+        would be a key a reader could not count on — and the type
+        (``total=False``) would not say so.
         """
-        published = _published(self.rage, "payload")
-        self.assertEqual(set(protocol.RageResult.__annotations__) - published, set())
+        conditional: set[str] = set()
+        for match in re.finditer(r"\bif\s*\(", self.rage):
+            block = _block_after(self.rage, match.group(0), match.start())
+            conditional |= _published(block, "payload")
+        self.assertEqual(conditional, set())
 
 
 if __name__ == "__main__":
