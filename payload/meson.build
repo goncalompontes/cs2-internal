@@ -144,11 +144,19 @@ if protect_enabled
   # The plugin refuses to run without a seed as well
   # (tools/protect/src/config.cpp): the wiring catches it here, where the
   # message can name both sources.
-  protect_seed_probe = run_command(
-    find_program('python'), protect_tool / 'seed_probe.py', check : false)
-  if protect_seed_probe.returncode() != 0
+  #
+  # The rule is the **plugin's**, and the probe that applies it is the
+  # policy checker's (`--seed`): there is one reader of the policy, and the
+  # configure step fails with the plugin's own message -- a malformed
+  # policy is the plugin's error to report, and it is not hidden behind a
+  # seed error.
+  protect_seed_probe = run_command(protect_check, '--seed', check : false)
+  if protect_seed_probe.returncode() == 1
     error('-Dprotect=true needs a build seed: set CS2_PROTECT_SEED=<64-bit hexadecimal> or ' +
-          'put a "seed" in the policy file. ' + protect_seed_probe.stderr().strip())
+          'put a "seed" in the policy file')
+  elif protect_seed_probe.returncode() != 0
+    error('-Dprotect=true: the seed or the policy is invalid: ' +
+          protect_seed_probe.stderr().strip())
   endif
   protect_policy_digest = fs.hash(files(protect_policy), 'sha256')
   protect_policy_args = [

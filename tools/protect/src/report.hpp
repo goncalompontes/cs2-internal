@@ -83,6 +83,13 @@ struct CoverageProtect {
 /// The section is **new**: a coverage file of an older build has none, and a
 /// reader that does not know it still reads the file.
 struct CoverageLayout {
+  /// Whether the permutation ran at all.
+  ///
+  /// The line is written whenever the permutation ran, and a module with no
+  /// definition has one too: a reader has to be able to tell "the module has
+  /// no definition" from "the build did not permute anything". The selection
+  /// phase writes the coverage before the permutation, and it has no line.
+  bool permuted{false};
   /// The number of the definitions of the module.
   std::size_t functions{0};
   /// The number of the definitions that moved.
@@ -219,15 +226,12 @@ void write_string_report(const llvm::Module& module, const StringResult& result,
 /// and the cross-TU callees that stayed direct). A coverage file of an older
 /// build has none, and a reader that does not know them still reads the
 /// file.
-[[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,
-                                  const std::vector<CoverageEntry>& entries,
-                                  const std::vector<CoverageFunction>& functions,
-                                  const CoverageProtect& protect,
-                                  std::span<const CoverageVm> vm = {},
-                                  const std::vector<CoverageString>& strings = {},
-                                  std::string_view strings_salt = {},
-                                  const CoverageLayout& layout = {},
-                                  const CrossModuleState& cross = {}) -> std::optional<std::string>;
+[[nodiscard]] auto write_coverage(
+    const Config& config, const llvm::Module& module, const std::vector<CoverageEntry>& entries,
+    const std::vector<CoverageFunction>& functions, const CoverageProtect& protect,
+    std::span<const CoverageVm> vm = {}, const std::vector<CoverageString>& strings = {},
+    std::string_view strings_salt = {}, const CoverageLayout& layout = {},
+    const CrossModuleState& cross = {}) -> std::optional<std::string>;
 
 /// Writes the machine-readable coverage of one module from a selection.
 [[nodiscard]] auto write_coverage(const Config& config, const llvm::Module& module,

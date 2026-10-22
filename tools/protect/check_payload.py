@@ -230,8 +230,7 @@ def check_unwind_table(image: PeImage) -> int:
     return entries
 
 
-def check_constants(image: PeImage, sites: list[DispatchSite],
-                    mixers: list[Mixer]) -> None:
+def check_constants(image: PeImage, mixers: list[Mixer]) -> None:
     """The constants of the mixer have to be in the read-only data.
 
     The call site reads them from the globals of the image, so the value the
@@ -261,20 +260,30 @@ def check_constants(image: PeImage, sites: list[DispatchSite],
             )
 
 
-def check_rotations(sites: list[DispatchSite], mixers: list[Mixer]) -> None:
-    """The rotation of the mixer in the image has to be the one the coverage names.
+def check_rotations(image: PeImage, sites: list[DispatchSite],
+                    coverage: list[Coverage]) -> None:
+    """The rotation of every dispatch has to be the one of **its own module**.
 
     The multiplier and the xor constant live in the data of the image, but the
     **rotation** is the one value of the mixer that is in the instruction
-    stream (`rolq $imm8`). It is what makes the `.text` of two builds with
-    two seeds differ, and the check has to prove that the image's
-    instruction stream uses the rotation the pass encrypted with.
+    stream (`rolq $imm8`, or the `D1` form the backend folds a rotation by
+    one into). It is what makes the `.text` of two builds with two seeds
+    differ, and the check has to prove that the image's instruction stream
+    uses the rotation the pass encrypted with.
+
+    The modules of one build have **different** mixers, so the rotation of a
+    dispatch has to be the one of the module the dispatch belongs to -- and
+    not one of the rotations of the build: with four modules that would be a
+    one-in-four test. The module is found the way the decode finds it, by the
+    constants the dispatch reads.
     """
-    for mixer in mixers:
-        if mixer.rotate < 1 or mixer.rotate > 63:
+    for entry in coverage:
+        rotate = entry.mix_rotate
+        if rotate < 1 or rotate > 63:
             raise Failure(
-                f"the coverage names the rotation {mixer.rotate}, and it is not in [1, 63]: a "
-                "rotation of 0 makes the `lshr` by 64 of the decode undefined behaviour"
+                f"the coverage '{entry.path.name}' names the rotation {rotate}, and it is not in "
+                "[1, 63]: a rotation of 0 makes the `lshr` by 64 of the decode undefined "
+                "behaviour"
             )
     for site in sites:
         if site.rotation is None:
@@ -287,16 +296,17 @@ def check_rotations(sites: list[DispatchSite], mixers: list[Mixer]) -> None:
                 f"the dispatch at 0x{site.address:x} rotates by {site.rotation}, and it is not "
                 "in [1, 63]"
             )
-    # The rotation of every dispatch has to be the one of its module. The
-    # modules of one build have different mixers, so the check accepts any
-    # of the rotations the coverage names -- and nothing else.
-    known = {mixer.rotate for mixer in mixers}
-    for site in sites:
+        found = entry_of_site(image, site, coverage)
+        if found is None:
+            raise Failure(
+                f"the dispatch at 0x{site.address:x} has no coverage: the image and the coverage "
+                "do not belong to the same build"
+            )
         check(
-            site.rotation in known,
-            f"the dispatch at 0x{site.address:x} rotates by {site.rotation}, and the coverage "
-            f"names {sorted(known)}: the image does not use the rotation the pass encrypted "
-            "with",
+            site.rotation == found.mix_rotate,
+            f"the dispatch at 0x{site.address:x} rotates by {site.rotation}, and the module it "
+            f"belongs to ('{found.path.name}') encrypted with {found.mix_rotate}: the image does "
+            "not use the rotation the pass encrypted with",
         )
 
 
@@ -309,6 +319,10 @@ def check_layout(coverage: list[Coverage]) -> None:
     the pass is the evidence the check reads.
     """
     for entry in coverage:
+        if not entry.layout_present:
+            # A coverage of an older build: it has no layout line, and the
+            # check cannot say anything about the layout.
+            continue
         if entry.layout_functions < 2:
             continue
         check(
@@ -1315,8 +1329,8 @@ def main(argv: list[str]) -> int:
                   "dispatches")
 
         if mixers:
-            check_constants(protected, protected_sites, mixers)
-            check_rotations(protected_sites, mixers)
+            check_constants(protected, mixers)
+            check_rotations(protected, protected_sites, files)
 
         if files:
             expected = reported_rewrites(files)

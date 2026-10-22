@@ -95,13 +95,28 @@ INDIRECT_CALL = re.compile(r"\bcallq\s+\*%(?P<target>r[a-z0-9]+)")
 #: A jump through a table: `jmpq *(%rsi,%rax,8)`.
 DISPATCH_JUMP = re.compile(r"\bjmpq\s+\*\(%(?P<base>r[a-z0-9]+),%r[a-z0-9]+,8\)")
 
-#: The rotation of the mixer: `rolq $0x1f, %rax`.
+#: A rotation of the mixer with an immediate: `rolq $0x1f, %rax`.
 #:
 #: The rotation is the one value of the mixer that is in the instruction
 #: stream: the multiplier and the xor constant live in the data of the image
 #: (the backend mis-materialises a 64-bit immediate), but the rotation is an
 #: immediate, and it is what makes the `.text` of two builds differ.
-ROTATE = re.compile(r"\brolq\s+\$(?:0x(?P<hex>[0-9a-f]+)|(?P<dec>[0-9]+))")
+ROTATE_IMMEDIATE = re.compile(
+    r"\b(?P<op>rolq|rorq)\s+\$(?:0x(?P<hex>[0-9a-f]+)|(?P<dec>[0-9]+))"
+)
+
+#: A rotation of the mixer **without** an immediate: `rolq %rax`, `rorq %rax`.
+#:
+#: The X86 backend folds a rotation by one into the `D1` form, which has no
+#: immediate at all: `D1 /0` is a rotation to the **left** by one and `D1 /1`
+#: is a rotation to the **right** by one. The mixer's rotation is a rotation
+#: to the left, so `rolq %rax` is a rotation by 1 and `rorq %rax` is a
+#: rotation by 63.
+#:
+#: A rotation by a *variable* count (`rolq %cl, %rax`) is not a rotation of
+#: the mixer: the mixer always rotates by a constant, and `%cl` is not a
+#: register this pattern matches.
+ROTATE_BY_ONE = re.compile(r"\b(?P<op>rolq|rorq)\s+%r[a-z0-9]+\b")
 
 #: An instruction of the disassembly: `18011351a:\tcallq\t*(%rsi,%rax,8)`.
 INSTRUCTION = re.compile(r"^\s*([0-9a-f]+):\s+(?P<text>.*)$")
@@ -120,6 +135,46 @@ REFERENCE_WINDOW = 24
 #: between it and the call rotates anything. The ones before it belong to
 #: the code the pass did not touch.
 ROTATION_WINDOW = 32
+
+
+def rotation_of(text: str) -> int | None:
+    """The rotation an instruction performs to the left, or None.
+
+    The rotation of the mixer is a rotation to the **left** by R, with R in
+    [1, 63], and the X86 backend spells it in three ways:
+
+    | instruction | the rotation |
+    |---|---|
+    | `rolq $0x1f, %rax` | 31 |
+    | `rolq %rax` | 1 |
+    | `rorq %rax` | 63 |
+    | `rorq $0x2, %rax` | 62 |
+
+    The last two are the ones a reader that only knows `rolq $imm8` cannot
+    see: the backend folds a rotation by one into the `D1` form, which has
+    **no immediate at all**, and a rotation of 63 is a rotation to the right
+    by one. Two of the sixty-three legal rotations of the mixer therefore
+    produce a dispatch that such a reader cannot read, and a build with one
+    of them fails its own check.
+
+    A rotation that is not in [1, 63] is not a rotation of the mixer (a
+    rotation of 0 is a no-op and a rotation of 64 is not a rotation), and
+    neither is a rotation by a variable count.
+    """
+    immediate = ROTATE_IMMEDIATE.search(text)
+    if immediate is not None:
+        digits = immediate.group("hex")
+        amount = int(digits, 16) if digits is not None else int(immediate.group("dec"))
+        if immediate.group("op") == "rorq":
+            amount = 64 - amount
+    else:
+        by_one = ROTATE_BY_ONE.search(text)
+        if by_one is None:
+            return None
+        amount = 1 if by_one.group("op") == "rolq" else 63
+    if amount < 1 or amount > 63:
+        return None
+    return amount
 
 
 class DispatchSite:
@@ -209,12 +264,9 @@ def find_dispatch_sites(asm: str, image_base: int, image: "PeImage | None" = Non
         destination = operands[-1]
         register = destination[1:] if destination.startswith("%r") else ""
 
-        rotate = ROTATE.search(line)
+        rotate = rotation_of(text)
         if rotate is not None:
-            if rotate.group("hex") is not None:
-                rotations.append(int(rotate.group("hex"), 16))
-            else:
-                rotations.append(int(rotate.group("dec")))
+            rotations.append(rotate)
             rotations = rotations[-ROTATION_WINDOW:]
 
         rip = RIP_MEMORY.search(line)
@@ -460,6 +512,7 @@ class Coverage:
         #: The layout of the module: the number of the definitions and the
         #: number of them that moved. The section is new: a coverage file of
         #: an older build has none.
+        self.layout_present = False
         self.layout_functions = 0
         self.layout_moved = 0
         self.layout_seed = 0
@@ -630,8 +683,12 @@ class Coverage:
         """The `layout` line: the permutation of the function list.
 
         The line is new: a coverage file of an older build has none, and the
-        reader still reads that file.
+        reader still reads that file. The line is written for every module
+        the plugin permuted -- a module with no definition has one too -- so
+        that "the module has no definition" and "the build did not permute
+        anything" are two different things.
         """
+        self.layout_present = True
         for part in value.split():
             name, _, number = part.partition("=")
             if name == "functions":

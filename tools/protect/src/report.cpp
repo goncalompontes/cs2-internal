@@ -507,8 +507,7 @@ auto write_coverage(const Config& config, const llvm::Module& module,
                     const std::vector<CoverageFunction>& functions, const CoverageProtect& protect,
                     std::span<const CoverageVm> vm, const std::vector<CoverageString>& strings,
                     std::string_view strings_salt, const CoverageLayout& layout,
-                    const CrossModuleState& cross)
-    -> std::optional<std::string> {
+                    const CrossModuleState& cross) -> std::optional<std::string> {
   if (!config.policy) {
     return std::nullopt;
   }
@@ -562,9 +561,12 @@ auto write_coverage(const Config& config, const llvm::Module& module,
     text += "\n";
   }
   // The layout: the permutation of the module's function list. The line is
-  // new: a coverage file of an older build has none, and a reader that does
-  // not know it still reads the file.
-  if (layout.functions > 0) {
+  // written whenever the permutation ran -- a module with no definition has
+  // one too, so that a reader can tell "the module has no definition" from
+  // "the build did not permute anything". The line is new: a coverage file
+  // of an older build has none, and a reader that does not know it still
+  // reads the file.
+  if (layout.permuted) {
     text += "layout functions=" + std::to_string(layout.functions);
     text += " moved=" + std::to_string(layout.moved);
     text += " seed=" + hex_seed(layout.seed);

@@ -274,6 +274,7 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     protect.mix_rotate = result.mix_rotate;
     protect.key_parts.assign(result.key_parts.begin(), result.key_parts.end());
     cs2::protect::CoverageLayout covered_layout;
+    covered_layout.permuted = true;
     covered_layout.functions = layout.functions;
     covered_layout.moved = layout.moved;
     covered_layout.seed = layout.seed;
