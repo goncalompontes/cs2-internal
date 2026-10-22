@@ -141,6 +141,8 @@ def trace_probe_answer() -> TraceProbeResult:
             "occluder_cap": 256,
             "occluders_truncated": False,
             "world_cached": True,
+            "refused": False,
+            "refusal_reason": "",
             "target_pad": 8.0,
         },
         "ran": True,
@@ -260,6 +262,28 @@ class TestTraceProbeTypes(unittest.TestCase):
         self.assertIn("engine_answer_usable", ray["difference"])
         self.assertFalse(ray["engine"]["answer_missing"])
         self.assertTrue(ray["difference"]["engine_answer_usable"])
+
+    def test_the_cold_cache_refusal_is_part_of_the_contract(self) -> None:
+        """The probe refuses to answer while the world's cache is cold.
+
+        A refusal is **not** a fault: the probe does not ask the engine
+        anything when our own answer would be empty anyway, so the answer has to
+        say *why* it is missing — otherwise the operator cannot tell "the probe
+        refused" from "the engine call faulted".
+        """
+        answer = trace_probe_answer()
+        engine = answer["engine"]
+        self.assertIn("refused", engine)
+        self.assertIn("refusal_reason", engine)
+        self.assertFalse(engine["refused"])
+        self.assertEqual(engine["refusal_reason"], "")
+        # The payload names the cold cache as the reason, and publishes both
+        # keys.
+        header = PAYLOAD_QUERY_HEADER.read_text(encoding="utf-8")
+        self.assertIn("world_cache_cold", header)
+        source = payload_service_source()
+        self.assertIn('"refused"', source)
+        self.assertIn('"refusal_reason"', source)
 
 
 if __name__ == "__main__":

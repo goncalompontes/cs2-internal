@@ -389,6 +389,43 @@ enum class TraceAbi : std::uint8_t {
   return count >= 1 && count <= TRACE_MAX_RAYS;
 }
 
+// Why the probe **refuses** to answer.
+//
+// The probe's "our answer" is the solver's own `ray_span` over the world's
+// occluders, and the world's static body is parsed **once** and cached. When that
+// cache is cold:
+//
+//   * parsing ~10k brush shapes **inside the game's CreateMove hook** is the one
+//     thing that could stall the game (the probe runs on the game's main thread,
+//     in its input path), and
+//   * our own answer would be **empty** anyway — the comparison the probe exists
+//     to make would be meaningless.
+//
+// So the probe refuses: it publishes the refusal and an empty answer, and the
+// operator warms the cache first (the heatmap, or the ragebot's own enumeration
+// — either populates the same cache).
+enum class TraceRefusal : std::uint8_t {
+  none,              // the probe answered
+  world_cache_cold,  // the world's static body is not parsed yet
+};
+
+// The refusal the probe owes the operator, given whether the world's cache was
+// warm when it ran. The rule is **pure** so it can be pinned by a host test.
+[[nodiscard]] inline auto trace_refusal(bool world_cached) noexcept -> TraceRefusal {
+  return world_cached ? TraceRefusal::none : TraceRefusal::world_cache_cold;
+}
+
+// The refusal's name, as the answer publishes it (empty when there is none).
+[[nodiscard]] inline auto to_string(TraceRefusal refusal) noexcept -> const char* {
+  switch (refusal) {
+    case TraceRefusal::none:
+      return "";
+    case TraceRefusal::world_cache_cold:
+      return "world_cache_cold";
+  }
+  return "";
+}
+
 // The interval budget: how many of the engine's intervals the probe publishes, and
 // whether the engine returned more than the probe publishes (it refuses to publish
 // them all and says so).
@@ -441,9 +478,12 @@ struct TraceProbeRun {
   int occluder_cap = TRACE_MAX_OCCLUDERS;
   bool occluders_truncated = false;
   // Whether the static world body was already parsed when the probe ran. When it
-  // was not, this run paid the world's parse (10k brush shapes) inside the input
-  // hook — the probe's one expensive case, and it happens **once** per session.
+  // was not, the probe **refuses** to answer (`refusal`): paying the world's parse
+  // (10k brush shapes) inside the input hook could stall the game, and our own
+  // answer would be empty anyway.
   bool world_cached = false;
+  // The probe's refusal, when it refused: `none` when it answered.
+  TraceRefusal refusal = TraceRefusal::none;
   std::vector<TraceRayResult> rays;
 };
 
@@ -607,6 +647,21 @@ struct TraceProbeRun {
     diff.verdict = TraceVerdict::agrees;
   }
   return diff;
+}
+
+// The answer a **refused** ray publishes.
+//
+// The probe refuses (see `trace_refusal`) when our own answer would be empty
+// anyway, so the ray carries **no** engine intervals and **no** occluders of ours:
+// both lists are empty, and the difference is `unknown` — never "agrees" over two
+// empty lists. The rule is pure so a host test can pin what a refusal publishes.
+[[nodiscard]] inline auto trace_refused_ray(const TraceRay& ray) -> TraceRayResult {
+  TraceRayResult result;
+  result.ray = ray;
+  // The engine was never asked, so its answer is missing.
+  result.engine_answer_missing = true;
+  result.diff = diff_trace(result.intervals, result.ours, TRACE_MATCH_TOLERANCE, false);
+  return result;
 }
 
 // The probe's fan: `count` rays around the view ray, in a **documented, deterministic**

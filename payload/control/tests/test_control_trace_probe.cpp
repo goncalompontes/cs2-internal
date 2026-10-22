@@ -616,6 +616,45 @@ void test_target_box() {
   expect(covers, "the fan's target box covers every far end");
 }
 
+// --- 9. the cold-cache refusal -------------------------------------------------
+//
+// The probe **refuses** to answer while the world's static body is not parsed:
+// paying the world's parse (10k brush shapes) inside the game's CreateMove hook is
+// the one thing that could stall the game, and our own answer would be empty
+// anyway — so the comparison the probe exists to make would be meaningless.
+//
+// The rule is pure, so it is pinned here; the refusal itself is checked against
+// the source below (the probe needs the game).
+void test_the_cold_cache_refusal() {
+  expect(cs2::control::trace_refusal(true) == cs2::control::TraceRefusal::none,
+         "a warm world's cache is no reason to refuse");
+  expect(cs2::control::trace_refusal(false) == cs2::control::TraceRefusal::world_cache_cold,
+         "a cold world's cache is a refusal");
+  expect(std::string(cs2::control::to_string(cs2::control::TraceRefusal::world_cache_cold)) ==
+             "world_cache_cold",
+         "the refusal names the cold cache");
+  expect(std::string(cs2::control::to_string(cs2::control::TraceRefusal::none)).empty(),
+         "no refusal has no reason");
+
+  // **What a refusal publishes.** Both sides are empty and the difference is
+  // `unknown`: the probe must never report "agrees" over two empty lists, and it
+  // must say the engine's answer is missing rather than quietly publishing an
+  // empty one.
+  cs2::control::TraceRay ray{};
+  ray.start = cs2::aim::Vec3{.x = 1.0F, .y = 2.0F, .z = 3.0F};
+  ray.direction = cs2::aim::Vec3{.x = 1.0F, .y = 0.0F, .z = 0.0F};
+  const cs2::control::TraceRayResult refused = cs2::control::trace_refused_ray(ray);
+  expect(refused.engine_answer_missing, "a refused ray's engine answer is missing");
+  expect(refused.intervals.empty(), "a refused ray publishes no engine intervals");
+  expect(refused.ours.empty(), "a refused ray publishes no occluders of ours");
+  expect(refused.diff.verdict == cs2::control::TraceVerdict::unknown,
+         "a refused ray's difference is 'unknown'");
+  expect(!refused.diff.engine_answer_usable, "a refused ray's difference is not usable");
+  expect(refused.diff.engine_only.empty() && refused.diff.ours_only.empty(),
+         "a refused ray has no difference to report");
+  expect(refused.ray.direction.x == 1.0F, "a refused ray still carries its ray");
+}
+
 // --- 8. the service's wiring ----------------------------------------------------
 //
 // The service is not reachable from a host test (it needs the game), so the wiring
@@ -676,7 +715,26 @@ void test_service_uses_the_rules(const char* root) {
   expect(probe.find("set_occlusion_exclude_pawns(") != std::string::npos,
          "the probe excludes the players itself");
   expect(probe.find("occlusion_world_cache_ready()") != std::string::npos,
-         "the probe does not parse the world body inside the input hook");
+         "the probe reads whether the world's cache is cold");
+
+  // The **refusal**: the probe must decide to refuse **before** it enumerates, so
+  // it never pays the world's parse inside the input hook. The order is the whole
+  // point, so it is checked as an order.
+  const std::size_t refusal_at = flat_probe.find("trace_refusal(");
+  const std::size_t enumeration_at = flat_probe.find("query_world_occluders(");
+  expect(refusal_at != std::string::npos, "the probe asks whether it must refuse");
+  expect(enumeration_at != std::string::npos, "the probe enumerates the world's occluders");
+  expect(refusal_at != std::string::npos && enumeration_at != std::string::npos &&
+             refusal_at < enumeration_at,
+         "the refusal comes **before** the enumeration: the probe does not parse the world body");
+  const std::string refusal_region =
+      (refusal_at != std::string::npos && enumeration_at != std::string::npos)
+          ? flat_probe.substr(refusal_at, enumeration_at - refusal_at)
+          : std::string{};
+  expect(refusal_region.find("run.refusal = refusal") != std::string::npos,
+         "the refusal is published");
+  expect(refusal_region.find("trace_refused_ray(") != std::string::npos,
+         "the refusal publishes the refused ray's answer");
 
   // The guarded call: the engine call is behind the tree's **one** guard. The probe
   // used to carry its own copy of it; `cs2::diag` owns the tree's only recovery
@@ -698,6 +756,10 @@ void test_service_uses_the_rules(const char* root) {
          "the answer says whether the difference could be computed");
   expect(publication.find("trace_probe_armed_") != std::string::npos,
          "the command arms the request for the game thread");
+  expect(publication.find("\"refused\"") != std::string::npos,
+         "the answer says that the probe refused");
+  expect(publication.find("\"refusal_reason\"") != std::string::npos,
+         "the answer says why the probe refused");
 
   // The engine call runs in the **game thread's sink** — the CreateMove hook — and
   // not in the control thread (an engine call that reaches tier0's allocator faults
@@ -718,6 +780,7 @@ auto main(int argc, char** argv) -> int {
   test_difference();
   test_bounds();
   test_target_box();
+  test_the_cold_cache_refusal();
   if (argc >= 2) {
     test_service_uses_the_rules(argv[1]);
   }

@@ -1154,9 +1154,17 @@ class TraceProbeEngineDict(TypedDict):
     #: then incomplete).
     occluders_truncated: bool
     #: Whether the static world body was already parsed when the probe ran. When
-    #: it was not, this run paid the world's parse (10k brush shapes) inside the
-    #: input hook — it happens once per session.
+    #: it was not, the probe **refused** to answer (see ``refused``): it does not
+    #: pay the world's parse (10k brush shapes) inside the input hook.
     world_cached: bool
+    #: Whether the probe **refused** to answer. A refusal is not a fault: the
+    #: probe did not ask the engine anything, so every ray's
+    #: ``engine.answer_missing`` is true and the verdict is ``"unknown"``.
+    refused: bool
+    #: Why the probe refused, or ``""``: ``"world_cache_cold"`` means the
+    #: world's static body was not parsed yet — warm the cache (the heatmap, or
+    #: the ragebot's own enumeration) and run the probe again.
+    refusal_reason: str
     #: The pad the probe's target box gets, in world units. It decides which
     #: solids the enumeration keeps.
     target_pad: float

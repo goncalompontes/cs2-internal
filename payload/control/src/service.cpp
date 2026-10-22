@@ -1960,9 +1960,13 @@ void Service::on_game_thread() noexcept {
   //
   // The probe's work is bounded (8 rays, a fixed interval buffer, a capped number
   // of projections — `occlusion_query.hpp`) and it runs **once per command**, not
-  // per tick. It does not parse the world body: the probe refuses to answer while
-  // the world's cache is cold (`occlusion_world_cache_ready`), because parsing 10k
-  // brush shapes inside the input hook is the one thing that could stall the game.
+  // per tick. It does not parse the world body: the probe **refuses** to answer
+  // while the world's cache is cold (`occlusion_world_cache_ready`), because
+  // parsing 10k brush shapes inside the input hook is the one thing that could
+  // stall the game — and because our own answer would be empty anyway. The
+  // refusal is published (`engine.refused` / `engine.refusal_reason`), so the
+  // operator can warm the cache (the heatmap, or the ragebot's own enumeration)
+  // and run it again.
   if (trace_probe_armed_.exchange(false, std::memory_order_acq_rel)) {
     std::vector<TraceRay> rays;
     TraceAbi abi = TraceAbi::correct;
@@ -4646,13 +4650,17 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   engine.set("occluders", Json::integer(run.occluders));
   engine.set("occluder_hits", Json::integer(run.occluder_hits));
   // The probe's own bounds: how many solids it projects at most, whether the set was
-  // truncated, and whether the static world body was already parsed (when it was
-  // not, this run paid the world's parse — 10k brush shapes — inside the input
-  // hook; it happens once per session). The target box's pad decides which solids
-  // the enumeration keeps, so it is published too.
+  // truncated, and whether the static world body was already parsed. When it was
+  // not, the probe **refused** to answer (it does not pay the world's parse — 10k
+  // brush shapes — inside the input hook), and it says so. The target box's pad
+  // decides which solids the enumeration keeps, so it is published too.
   engine.set("occluder_cap", Json::integer(run.occluder_cap));
   engine.set("occluders_truncated", Json::boolean(run.occluders_truncated));
   engine.set("world_cached", Json::boolean(run.world_cached));
+  // The refusal: `world_cache_cold` when the world's static body was not parsed
+  // yet (warm the cache and run the probe again), empty when there was none.
+  engine.set("refused", Json::boolean(run.refusal != TraceRefusal::none));
+  engine.set("refusal_reason", Json::string(to_string(run.refusal)));
   engine.set("target_pad", Json::number(static_cast<double>(TRACE_TARGET_PAD)));
   payload.set("engine", std::move(engine));
   payload.set("ran", Json::boolean(done));

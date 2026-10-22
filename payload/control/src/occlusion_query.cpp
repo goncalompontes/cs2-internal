@@ -1652,9 +1652,27 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
   // The static world body is parsed **once** and cached. The probe's own
   // enumeration reuses that cache, so the probe's marginal cost is one query — but
   // the **first** enumeration in a session pays the parse (10k brush shapes), and
-  // the probe runs inside the input hook. The answer says whether this run paid it
-  // (`world_cached`), so the operator can tell a slow first run from the rest.
+  // the probe runs inside the input hook.
+  //
+  // **So the probe refuses while the cache is cold.** Two reasons, and both are
+  // about the game rather than about the probe: parsing 10k brush shapes inside the
+  // CreateMove hook is the one thing that could stall the game, and our own answer
+  // would be **empty** anyway (the solver's `ray_span` has no world's occluders to
+  // work with), so the comparison the probe exists to make would be meaningless.
+  // The refusal publishes the reason and empty lists for both sides; the operator
+  // warms the cache first (the heatmap, or the ragebot's own enumeration — both
+  // populate the same cache).
   run.world_cached = occlusion_world_cache_ready();
+  const TraceRefusal refusal = trace_refusal(run.world_cached);
+  if (refusal != TraceRefusal::none) {
+    run.refusal = refusal;
+    for (const TraceRay& ray : rays) {
+      // The refusal's answer: no engine intervals, no occluders of ours, and the
+      // difference `unknown` — never "agrees" over two empty lists.
+      run.rays.push_back(trace_refused_ray(ray));
+    }
+    return run;
+  }
   // The players are targets, not occluders: the probe excludes them **itself**, so
   // the answer never depends on the solver having run first in the tick.
   set_occlusion_exclude_pawns(exclude.entities, exclude.entity_count);

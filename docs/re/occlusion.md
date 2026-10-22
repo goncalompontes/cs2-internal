@@ -453,8 +453,19 @@ The raw wire form (one NDJSON line on the pipe):
 
 **Run the heatmap once first** (`{"cmd": "heatmap"}`), so the static world body is
 already parsed: the probe's own enumeration then reuses that cache and the probe
-does not pay the world's parse inside the input hook. The answer says which
-happened (`engine.world_cached`).
+does not pay the world's parse inside the input hook.
+
+**The probe REFUSES while the cache is cold.** It does not parse the world body
+itself: parsing ~10k brush shapes inside the game's CreateMove hook is the one
+thing that could stall the game, and our own answer would be **empty** anyway
+(the solver's `ray_span` has no world's occluders to work with), so the
+comparison the probe exists to make would be meaningless. A refused probe
+publishes `engine.refused == true` and `engine.refusal_reason ==
+"world_cache_cold"`, every ray's `engine.answer_missing == true`, the verdict
+`unknown`, and **empty** lists on both sides — and it does **not** run the
+enumeration at all. Warm the cache (the heatmap, or the ragebot's own
+enumeration — both populate the same cache) and run it again. The answer says
+which happened (`engine.world_cached`).
 
 **The proof that the probe can fail** — the deliberately wrong calls (they must
 give a visibly wrong answer or a caught fault, never a crash):
@@ -473,7 +484,8 @@ whether the answer means anything:
    `engine.answer_missing == false` and `difference.engine_answer_usable == true`.
    If either is false, the verdict is `unknown` and **nothing can be concluded** —
    the instrument is broken (not the game). The same goes for
-   `engine.faulted == true`.
+   `engine.faulted == true`. **And `engine.refused` must be false**: a refused probe
+   measured nothing at all.
 2. **A verdict of `agrees` with an empty engine list must be impossible** — and it
    is: the difference is computed over the engine's intervals, and when they were
    dropped the verdict is `unknown`. If a live run ever shows `agrees` with
@@ -502,6 +514,7 @@ still open. The measurement settles it, and this is how to read the result:
 
 | the probe says | the world geometry is lost at |
 |---|---|
+| `engine.refused` is true | **nothing was measured** — the probe refused while the world's cache was cold (`engine.refusal_reason == "world_cache_cold"`). Warm the cache (the heatmap, or the ragebot's own enumeration) and run it again. This is **not** a geometry loss. |
 | `engine.answer_missing` is true (or the verdict is `unknown`) | **the instrument is broken** — the engine's answer was dropped (the call faulted, or the container did not hold the buffer the probe handed it). **Nothing can be concluded**; re-run. A `faulted: true` means the instrument, not the game. |
 | `engine.faulted` is true | the engine call faulted (the guard caught it) — the instrument is broken, not the game |
 | the engine's intervals are empty **and** ours is empty | the ray misses everything — **not** a geometry loss (aim elsewhere) |
@@ -528,7 +541,9 @@ without re-running the game.
 | `engine.rays_ok` / `engine.rays_faulted` | how many rays the engine answered, and how many faulted |
 | `engine.filter_mask` / `filter_group` / `filter_flags` | the filter **actually** passed (in the `static_filter` mode: the engine's static one, not the bullet's) |
 | `engine.occluder_cap` / `occluders_truncated` | how many of our solids the probe projects at most, and whether the enumeration produced more |
-| `engine.world_cached` | whether the static world body was already parsed. **`false` means this run paid the world's parse** (10k brush shapes) inside the input hook — it happens **once** per session, so run the heatmap once first and the probe is cheap |
+| `engine.world_cached` | whether the static world body was already parsed. **`false` means the probe REFUSED** (see `engine.refused`) — it does not pay the world's parse (10k brush shapes) inside the input hook |
+| `engine.refused` | whether the probe **refused** to answer. A refusal is not a fault: the engine was never asked, so every ray's `engine.answer_missing` is true and the verdict is `unknown` |
+| `engine.refusal_reason` | why the probe refused, or `""`: `"world_cache_cold"` means the world's static body was not parsed yet — warm the cache (the heatmap, or the ragebot's own enumeration) and run the probe again |
 | `engine.target_pad` | the pad the probe's target box gets, in world units. It is **not** cosmetic: the pad decides the pyramid's face planes, i.e. **which solids the enumeration keeps** — it is part of what "our answer" contains |
 | `game_thread` (top level) | `answered` / `busy` (the game thread is running but did not answer in time) / `stalled` (it is not running at all — the CreateMove hook is not installed) |
 | `depth` | the ray's length: the weapon's own `m_flRange`, or **8192 units** (the engine's maximum trace length) when the weapon's range cannot be read |
@@ -540,9 +555,10 @@ without re-running the game.
   engine is given the **external-buffer** bit, so it never allocates;
 * the projections are capped at **256** solids;
 * the enumeration runs **once per command**, never per tick;
-* the **worst case** is the world's first parse (10k brush shapes), which happens
-  **once per session** and is reported as `engine.world_cached == false`. Run the
-  heatmap once before the probe and the probe's answer is cheap.
+* the probe **refuses** while the world's cache is cold, so it never pays the
+  world's parse (10k brush shapes) inside the input hook — the answer says so
+  (`engine.refused` / `engine.refusal_reason`). Run the heatmap once (or let
+  the ragebot's own enumeration run) and the probe's answer is cheap.
 
 ### Process notes (recorded here, because they were recorded nowhere)
 
