@@ -20,6 +20,7 @@
 #include "cs2/control/snapshot_json.hpp"
 #include "cs2/diag/watchdog.hpp"
 #include "cs2/game/log.hpp"
+#include "cs2/game/memory.hpp"
 #include "cs2/game/snapshot.hpp"
 #include "cs2/tls/bootstrap.hpp"
 
@@ -71,6 +72,16 @@ constexpr std::uint64_t k_sound_max_age_ms = 1000;
 // the ragebot's, measured at ~1 ms (and worse at dense spots), so it runs a
 // few times a second — never per frame.
 constexpr std::uint64_t k_visibility_interval_ms = 250;
+
+// The trace probe (`docs/re/bullet-trace.md`): the ray's length when the caller
+// gives none and the weapon's range cannot be read (the engine's own trace
+// length is the weapon's `m_flRange`), and how long the control thread waits
+// for the game thread's answer.
+constexpr float k_trace_probe_default_depth = 8192.0F;
+constexpr std::uint64_t k_trace_probe_timeout_ms = 5000;
+// `CCSWeaponBaseVData::m_flRange` (`docs/re/bullet-trace.md` — the shot's trace
+// length).
+constexpr std::uintptr_t k_vdata_range = 0x830;
 
 // Microsecond wall clock for the ragebot instrumentation (`docs/ragebot-perf.md`).
 auto now_us() noexcept -> std::uint64_t {
@@ -318,6 +329,8 @@ auto Service::handle(const std::string& line, std::string& response) noexcept ->
     do_trigger(arguments, out);
   } else if (command == "heatmap") {
     do_heatmap(arguments, out);
+  } else if (command == "trace_probe") {
+    do_trace_probe(arguments, out);
   } else if (command == "predict") {
     do_predict(arguments, out);
   } else if (command == "settings") {
@@ -1781,6 +1794,22 @@ void Service::on_game_thread() noexcept {
     const std::scoped_lock lock(occlusion_mutex_);
     occlusion_hulls_ = std::move(query.hulls);
     occlusion_stats_ = query.stats;
+  }
+
+  // The trace probe: the engine's own answer for a ray. The call runs **here**
+  // (a game thread): an engine call that reaches tier0's allocator faults on the
+  // payload's own thread (`docs/handoff.md`). The control thread armed the
+  // request and waits for the answer.
+  if (trace_probe_armed_.exchange(false, std::memory_order_acq_rel)) {
+    std::vector<TraceRay> rays;
+    {
+      const std::scoped_lock lock(trace_probe_mutex_);
+      rays = trace_probe_rays_;
+    }
+    TraceProbeRun probe = probe_trace(rays, true);
+    const std::scoped_lock lock(trace_probe_mutex_);
+    trace_probe_run_ = std::move(probe);
+    trace_probe_done_ = true;
   }
 
   // The ESP's visibility: the per-player states, derived from the solids the
@@ -3922,6 +3951,255 @@ void Service::do_heatmap(const Json& args, Json& out) noexcept {
   }
   payload.set("cell_count", Json::integer(static_cast<std::int64_t>(map.cells.size())));
   payload.set("cells", std::move(cells));
+  set_ok(out, std::move(payload));
+}
+
+// The trace probe (`docs/re/bullet-trace.md`): the engine's own answer for a ray,
+// our occluder set's answer for the same ray, and the difference.
+//
+// The engine call (`TraceLineIntervals`) runs on the **game thread**: the control
+// thread arms the request here and the CreateMove hook's sink runs it, because an
+// engine call that reaches tier0's allocator faults on the payload's own thread
+// (`docs/handoff.md`).
+void Service::do_trace_probe(const Json& args, Json& out) noexcept {
+  refresh_reader(true);
+  if (!reader_.has_value()) {
+    set_error(out, "trace_probe unavailable: client.dll / entity system not ready");
+    return;
+  }
+  game::Snapshot snapshot = reader_->snapshot();
+  refresh_reader(snapshot.valid);
+  if (!snapshot.valid || !snapshot.local.has_value()) {
+    set_error(out, "trace_probe unavailable: no local player");
+    return;
+  }
+  const game::PlayerSnapshot& local = *snapshot.local;
+
+  const auto number = [&](const char* key, float fallback) -> float {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
+                                                  : fallback;
+  };
+  const auto integer = [&](const char* key, int fallback) -> int {
+    const Json* value = args.find(key);
+    return value != nullptr && value->is_number() ? static_cast<int>(value->as_number()) : fallback;
+  };
+
+  // Which rays to probe: the current view ray is the only source today.
+  if (const Json* value = args.find("rays");
+      value != nullptr && value->is_string() && value->as_string() != "view") {
+    set_error(out, "trace_probe: unknown rays source '" + std::string(value->as_string()) +
+                       "' (only 'view' is available)");
+    return;
+  }
+
+  // The ray's origin: the local player's eye unless the caller gave one.
+  game::Vec3 eye = local.eye_origin;
+  if (const Json* value = args.find("eye");
+      value != nullptr && value->is_array() && value->items().size() == 3) {
+    const std::vector<Json>& items = value->items();
+    eye = game::Vec3{.x = static_cast<float>(items[0].as_number()),
+                     .y = static_cast<float>(items[1].as_number()),
+                     .z = static_cast<float>(items[2].as_number())};
+  }
+
+  // The view direction, in degrees (the Source convention: the pitch is positive
+  // downwards). The default is the local player's own eye angles.
+  float yaw = local.eye_angles.yaw;
+  float pitch = local.eye_angles.pitch;
+  if (const Json* value = args.find("yaw"); value != nullptr && value->is_number()) {
+    yaw = static_cast<float>(value->as_number());
+  }
+  if (const Json* value = args.find("pitch"); value != nullptr && value->is_number()) {
+    pitch = static_cast<float>(value->as_number());
+  }
+  const float spread = number("spread", 0.0F);
+  const int count = integer("count", 1);
+  if (!trace_fan_size_ok(count)) {
+    set_error(out,
+              "trace_probe: count must be between 1 and " + std::to_string(TRACE_MAX_RAYS));
+    return;
+  }
+  if (spread < 0.0F || spread > 45.0F) {
+    set_error(out, "trace_probe: spread must be between 0 and 45 degrees");
+    return;
+  }
+  // The ray's length: the engine's own trace length (the weapon's `m_flRange`,
+  // `docs/re/bullet-trace.md`) unless the caller gave one.
+  float depth = number("depth", 0.0F);
+  if (depth <= 0.0F) {
+    depth = k_trace_probe_default_depth;
+    float range = 0.0F;
+    if (local.weapon_vdata != 0 &&
+        cs2::game::read(local.weapon_vdata + k_vdata_range, range) && range > 0.0F) {
+      depth = range;
+    }
+  }
+
+  // The fan: ray 0 is the view ray itself, the rest are the golden-angle spiral
+  // around it (a documented, deterministic order — two runs compare).
+  const aim::Basis basis = aim::Basis::world();
+  const std::vector<TraceRay> rays =
+      build_trace_fan(eye, basis, yaw, pitch, spread, count, depth);
+
+  // Arm the request; the game thread runs the engine call and publishes the answer.
+  {
+    const std::scoped_lock lock(trace_probe_mutex_);
+    trace_probe_rays_ = rays;
+    trace_probe_done_ = false;
+    trace_probe_run_ = TraceProbeRun{};
+  }
+  trace_probe_armed_.store(true, std::memory_order_release);
+  input_.refresh();  // install the CreateMove hook (the game-thread query site)
+
+  const std::uint64_t deadline = now_ms() + k_trace_probe_timeout_ms;
+  bool done = false;
+  while (!done && now_ms() < deadline) {
+    {
+      const std::scoped_lock lock(trace_probe_mutex_);
+      done = trace_probe_done_;
+    }
+    if (!done) {
+      Sleep(2);
+    }
+  }
+
+  TraceProbeRun run;
+  {
+    const std::scoped_lock lock(trace_probe_mutex_);
+    run = trace_probe_run_;
+  }
+
+  const auto vec3_json = [](const game::Vec3& v) -> Json {
+    Json item = Json::object();
+    item.set("x", Json::number(static_cast<double>(v.x)));
+    item.set("y", Json::number(static_cast<double>(v.y)));
+    item.set("z", Json::number(static_cast<double>(v.z)));
+    return item;
+  };
+  const auto hex = [](std::uintptr_t value) -> std::string {
+    char buffer[24];
+    std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(value));
+    return std::string(buffer);
+  };
+  const auto hex_bytes = [](const std::uint8_t* bytes, std::size_t count) -> std::string {
+    constexpr char k_digits[] = "0123456789abcdef";
+    std::string text;
+    text.resize(count * 2);
+    for (std::size_t i = 0; i < count; ++i) {
+      text[i * 2] = k_digits[(bytes[i] >> 4U) & 0x0FU];
+      text[(i * 2) + 1] = k_digits[bytes[i] & 0x0FU];
+    }
+    return text;
+  };
+
+  Json payload = Json::object();
+  payload.set("eye", vec3_json(eye));
+  payload.set("yaw", Json::number(static_cast<double>(yaw)));
+  payload.set("pitch", Json::number(static_cast<double>(pitch)));
+  payload.set("spread", Json::number(static_cast<double>(spread)));
+  payload.set("count", Json::integer(count));
+  payload.set("depth", Json::number(static_cast<double>(depth)));
+  payload.set("max_rays", Json::integer(TRACE_MAX_RAYS));
+  payload.set("max_intervals", Json::integer(TRACE_MAX_INTERVALS));
+  // The probe's own health: whether the engine call succeeded, and loudly whether it
+  // faulted (the guard caught it — a probe that faults is a *result*, not a crash).
+  Json engine = Json::object();
+  engine.set("ok", Json::boolean(run.ok));
+  engine.set("faulted", Json::boolean(run.faulted));
+  engine.set("iface", Json::string(hex(run.iface)));
+  engine.set("filter", Json::string(hex(run.filter)));
+  engine.set("filter_mask", Json::integer(run.filter_mask));
+  engine.set("filter_group", Json::integer(run.filter_group));
+  engine.set("filter_flags", Json::integer(run.filter_flags));
+  engine.set("occluders", Json::integer(run.occluders));
+  engine.set("occluder_hits", Json::integer(run.occluder_hits));
+  payload.set("engine", std::move(engine));
+  payload.set("ran", Json::boolean(done));
+  payload.set("timeout", Json::boolean(!done));
+
+  Json rays_json = Json::array();
+  for (const TraceRayResult& ray : run.rays) {
+    Json item = Json::object();
+    item.set("start", vec3_json(ray.ray.start));
+    item.set("direction", vec3_json(ray.ray.direction));
+    item.set("end", vec3_json(ray.ray.end));
+    item.set("depth", Json::number(static_cast<double>(ray.ray.depth)));
+
+    // A. The engine's answer: the intervals, their distance and their raw bytes.
+    Json engine_json = Json::object();
+    engine_json.set("ok", Json::boolean(ray.engine_ok));
+    engine_json.set("faulted", Json::boolean(ray.engine_faulted));
+    engine_json.set("interval_count", Json::integer(ray.interval_count));
+    engine_json.set("intervals_overflow", Json::boolean(ray.intervals_overflow));
+    Json intervals = Json::array();
+    for (const TraceInterval& interval : ray.intervals) {
+      Json record = Json::object();
+      record.set("fraction", Json::number(static_cast<double>(interval.fraction)));
+      record.set("distance", Json::number(static_cast<double>(interval.distance)));
+      record.set("enter_exit", Json::integer(interval.enter_exit));
+      // The record's surface is **unmapped** (only two of its fields are pinned) —
+      // the raw bytes are published so a later RE pass can map the rest from the
+      // probe's own output.
+      record.set("surface", Json::string("unmapped"));
+      record.set("raw", Json::string(hex_bytes(interval.raw, TRACE_INTERVAL_SIZE)));
+      intervals.push_back(std::move(record));
+    }
+    engine_json.set("intervals", std::move(intervals));
+    item.set("engine", std::move(engine_json));
+
+    // B. Our answer: the occluders the ray enters, with their kind.
+    Json ours = Json::array();
+    for (const TraceOccluderHit& hit : ray.ours) {
+      Json record = Json::object();
+      record.set("index", Json::integer(hit.index));
+      record.set("kind", Json::string(solid_kind_name(hit.kind)));
+      record.set("cluster", Json::integer(hit.cluster));
+      record.set("entry", Json::number(static_cast<double>(hit.entry)));
+      record.set("exit", Json::number(static_cast<double>(hit.exit)));
+      ours.push_back(std::move(record));
+    }
+    item.set("ours", std::move(ours));
+
+    // C. The difference: what the engine found that our set has nothing for, and
+    // what our set has that the engine did not report.
+    Json difference = Json::object();
+    difference.set("verdict", Json::string(to_string(ray.diff.verdict)));
+    Json engine_only = Json::array();
+    for (const TraceSpan& span : ray.diff.engine_only) {
+      Json record = Json::object();
+      record.set("entry", Json::number(static_cast<double>(span.entry)));
+      record.set("exit", Json::number(static_cast<double>(span.exit)));
+      record.set("enter_record",
+                 Json::integer(span.enter_record >= 0 &&
+                                       static_cast<std::size_t>(span.enter_record) <
+                                           ray.intervals.size()
+                                   ? span.enter_record
+                                   : -1));
+      record.set("exit_record",
+                 Json::integer(span.exit_record >= 0 &&
+                                       static_cast<std::size_t>(span.exit_record) <
+                                           ray.intervals.size()
+                                   ? span.exit_record
+                                   : -1));
+      engine_only.push_back(std::move(record));
+    }
+    difference.set("engine_only", std::move(engine_only));
+    Json ours_only = Json::array();
+    for (const TraceOccluderHit& hit : ray.diff.ours_only) {
+      Json record = Json::object();
+      record.set("index", Json::integer(hit.index));
+      record.set("kind", Json::string(solid_kind_name(hit.kind)));
+      record.set("cluster", Json::integer(hit.cluster));
+      record.set("entry", Json::number(static_cast<double>(hit.entry)));
+      record.set("exit", Json::number(static_cast<double>(hit.exit)));
+      ours_only.push_back(std::move(record));
+    }
+    difference.set("ours_only", std::move(ours_only));
+    item.set("difference", std::move(difference));
+    rays_json.push_back(std::move(item));
+  }
+  payload.set("rays", std::move(rays_json));
   set_ok(out, std::move(payload));
 }
 

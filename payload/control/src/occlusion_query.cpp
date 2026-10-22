@@ -1301,6 +1301,76 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
   }
 }
 
+// --- the engine's own trace (docs/re/bullet-trace.md) --------------------------
+//
+// `TraceLineIntervals` = `FUN_180a19e90` (client.dll RVA 0xa19e90), the call the real
+// bullet makes. The call form was re-derived from the **live** build's own call sites
+// (client.dll sha 5a46a09b…, 2026-10-21) and not from the decompile alone:
+//
+//   TraceLineIntervals(*(client + 0x2227058), &results, &start, &delta,
+//                       filter + 8, -1.0f);
+//
+// * `start` and `delta` are **pointers** to a 12-byte `Vector` (x,y,z floats). The
+//   fourth argument is the **extension** (`end - start`), not the absolute end point:
+//   the engine's own caller builds it as `normalize(direction) * range`
+//   (`FUN_18089ca80`), and the interval consumer scales the fractions by *its* length.
+// * `results` is the `CUtlVector` of 0x38-byte interval records (count @+0x00, data
+//   @+0x08, capacity @+0x10, flags @+0x1C) — the same layout as the overlap query's.
+// * the fifth argument is `filter + 8` (the collision mask qword) and the sixth is
+//   `max_fraction` = -1.0f (the engine's own constant at its call site).
+//
+// The interval record's `+0x0C` is the **fraction** along the ray (the consumer
+// computes the wall thickness as `(leave - enter) * |delta|`), and `+0x32` is 1 for an
+// "enter" record and 0 for a "leave" one.
+constexpr std::uintptr_t k_trace_line_intervals_fallback = 0xA19E90;
+// The interval record's stride (the consumer's own `mov edx, 0x38`).
+constexpr std::uintptr_t k_trace_interval_stride = TRACE_INTERVAL_SIZE;
+
+using TraceLineIntervalsFn = void (*)(void*, void*, const void*, const void*, const void*, float);
+TraceLineIntervalsFn g_trace_line_intervals = nullptr;
+
+// The external results buffer. The engine must never reach tier0's allocator (the
+// payload's thread has no tier0 TLS — docs/handoff.md), so the vector is flagged
+// external and pre-sized; the engine's own call sizes its vector for 64 entries, and
+// this one is larger so a dense scene cannot make it grow.
+alignas(16) unsigned char g_trace_interval_buffer[TRACE_INTERVAL_CAPACITY *
+                                                 k_trace_interval_stride] = {};
+
+// One `TraceLineIntervals` call.
+struct TraceCall {
+  void* iface = nullptr;
+  void* results = nullptr;
+  const void* start = nullptr;
+  const void* delta = nullptr;
+  const void* mask = nullptr;
+  float max_fraction = -1.0F;
+};
+
+void invoke_trace(void* context) {
+  auto* call = static_cast<TraceCall*>(context);
+  if (g_trace_line_intervals != nullptr) {
+    g_trace_line_intervals(call->iface, call->results, call->start, call->delta, call->mask,
+                           call->max_fraction);
+  }
+}
+
+// The guarded call: a wrong ABI must be caught and reported, never a crash (the
+// payload has no registered exception tables). Returns the interval count (0 on a
+// fault or an empty answer).
+auto run_trace_query(void* iface, void* filter, const Vec3& start, const Vec3& delta,
+                     ResultVector& vector, bool* ok) -> std::int32_t {
+  TraceCall call;
+  call.iface = iface;
+  call.results = &vector;
+  call.start = &start;
+  call.delta = &delta;
+  call.mask =
+      reinterpret_cast<const void*>(reinterpret_cast<std::uintptr_t>(filter) + k_filter_mask);
+  call.max_fraction = -1.0F;
+  *ok = cs2::diag::call_guarded(&invoke_trace, &call);
+  return *ok ? vector.count : 0;
+}
+
 }  // namespace
 
 void set_occlusion_exclude_pawns(const std::uintptr_t* pawns, int count) noexcept {
@@ -1480,6 +1550,144 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
   }
   stats->complete = stats->incomplete_reasons == 0;
   return result;
+}
+
+// The probe: our occluder set's answer and the engine's own answer for the same rays,
+// plus the difference. Runs on a game thread (an engine call must not reach tier0's
+// allocator from the payload's own thread — docs/handoff.md).
+auto probe_trace(const std::vector<TraceRay>& rays, bool invoke) -> TraceProbeRun {
+  TraceProbeRun run;
+  if (rays.empty()) {
+    return run;
+  }
+  const cs2::aim::Basis basis = cs2::aim::Basis::world();
+  const Vec3 eye = rays.front().start;
+
+  // The read-only diagnostics: the interface singleton and the filter we would pass.
+  const cs2::game::ModuleInfo client = cs2::game::find_module("client.dll");
+  if (!client.valid()) {
+    return run;
+  }
+  const std::uintptr_t base = client.base;
+  const std::uintptr_t query_global =
+      sdk_client_offset("physics_query_interface", k_query_global_fallback);
+  const std::uintptr_t static_filter =
+      sdk_client_offset("physics_query_filter", k_static_filter_fallback);
+  const std::uintptr_t trace_rva =
+      sdk_client_offset("trace_line_intervals", k_trace_line_intervals_fallback);
+  std::uintptr_t iface = 0;
+  if (!cs2::game::read(base + query_global, iface) || iface == 0) {
+    return run;
+  }
+  run.iface = iface;
+  void* filter = build_bullet_filter(base + static_filter);
+  run.filter = reinterpret_cast<std::uintptr_t>(filter);
+  if (g_bullet_filter_ready) {
+    run.filter_mask = *reinterpret_cast<std::int64_t*>(g_bullet_filter + k_filter_mask);
+    run.filter_group = g_bullet_filter[k_filter_group];
+    run.filter_flags = g_bullet_filter[k_filter_flags];
+  }
+  if (!invoke) {
+    return run;
+  }
+  run.ok = true;
+  g_trace_line_intervals = reinterpret_cast<TraceLineIntervalsFn>(base + trace_rva);
+
+  // The volume the fan covers: the eye and the rays' far ends.
+  Vec3 lo = eye;
+  Vec3 hi = eye;
+  Vec3 far_lo = rays.front().end;
+  Vec3 far_hi = far_lo;
+  for (const TraceRay& ray : rays) {
+    lo.x = std::min(lo.x, ray.end.x);
+    lo.y = std::min(lo.y, ray.end.y);
+    lo.z = std::min(lo.z, ray.end.z);
+    hi.x = std::max(hi.x, ray.end.x);
+    hi.y = std::max(hi.y, ray.end.y);
+    hi.z = std::max(hi.z, ray.end.z);
+    far_lo.x = std::min(far_lo.x, ray.end.x);
+    far_lo.y = std::min(far_lo.y, ray.end.y);
+    far_lo.z = std::min(far_lo.z, ray.end.z);
+    far_hi.x = std::max(far_hi.x, ray.end.x);
+    far_hi.y = std::max(far_hi.y, ray.end.y);
+    far_hi.z = std::max(far_hi.z, ray.end.z);
+  }
+
+  // **Our answer** comes from the solver's own enumeration: the eye→the ray's end
+  // pyramid is the conservative superset the solver uses for a target at that end
+  // (`AabbBvh::query_pyramid`), and `OccluderCell::ray_span` then decides which of
+  // those solids the ray actually enters.
+  const cs2::aim::Aabb target{.min = far_lo, .max = far_hi};
+  OcclusionQueryResult occluders =
+      query_world_occluders(eye, lo, hi, true, nullptr, 0, &target, 1);
+  run.occluders = static_cast<int>(occluders.hulls.size());
+
+  // The projected cells — the very same projection the solver's heatmap uses, so the
+  // probe's answer is the solver's answer.
+  std::vector<cs2::aim::OccluderCell> cells;
+  std::vector<int> clusters;
+  cells.reserve(occluders.hulls.size());
+  clusters.reserve(occluders.hulls.size());
+  int cluster = -1;
+  for (const OcclusionHull& hull : occluders.hulls) {
+    if (hull.kind == cs2::aim::SolidKind::mesh) {
+      ++cluster;
+    }
+    const std::optional<cs2::aim::OccluderCell> cell = project_occlusion_hull(eye, basis, hull);
+    if (!cell.has_value()) {
+      continue;
+    }
+    cells.push_back(*cell);
+    clusters.push_back(hull.kind == cs2::aim::SolidKind::mesh ? cluster : -1);
+  }
+
+  for (const TraceRay& ray : rays) {
+    TraceRayResult result;
+    result.ray = ray;
+    // Our answer for this ray.
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+      const std::optional<cs2::aim::RaySpan> span = cells[i].ray_span(eye, ray.direction);
+      if (!span.has_value()) {
+        continue;
+      }
+      result.ours.push_back(TraceOccluderHit{.entry = span->entry,
+                                             .exit = span->exit,
+                                             .kind = cells[i].kind,
+                                             .index = static_cast<int>(i),
+                                             .cluster = clusters[i]});
+    }
+    run.occluder_hits += static_cast<int>(result.ours.size());
+
+    // The engine's answer for the same ray: the segment is `start` → `start + delta`,
+    // and the fourth argument is the **extension**, not the absolute end point.
+    ResultVector vector;
+    vector.data = g_trace_interval_buffer;
+    vector.capacity = TRACE_INTERVAL_CAPACITY;
+    vector.flags = 0x80000000U;  // external buffer: the engine will not reallocate
+    const Vec3 delta = ray.end - ray.start;
+    bool ok = false;
+    const std::int32_t count =
+        run_trace_query(reinterpret_cast<void*>(iface), filter, ray.start, delta, vector, &ok);
+    result.engine_ok = ok;
+    result.engine_faulted = !ok;
+    result.interval_count = count;
+    run.ok = run.ok && ok;
+    run.faulted = run.faulted || !ok;
+    if (ok && count > 0 && count <= TRACE_INTERVAL_CAPACITY &&
+        vector.data == g_trace_interval_buffer) {
+      const auto* records = reinterpret_cast<const std::uint8_t*>(vector.data);
+      const TraceIntervalBudget budget = trace_interval_budget(count);
+      result.intervals_overflow = budget.overflow;
+      result.intervals.reserve(static_cast<std::size_t>(budget.published));
+      for (int i = 0; i < budget.published; ++i) {
+        result.intervals.push_back(read_trace_interval(
+            records + static_cast<std::size_t>(i) * k_trace_interval_stride, ray.depth));
+      }
+    }
+    result.diff = diff_trace(result.intervals, result.ours, TRACE_MATCH_TOLERANCE);
+    run.rays.push_back(std::move(result));
+  }
+  return run;
 }
 
 }  // namespace cs2::control

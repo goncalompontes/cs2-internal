@@ -425,6 +425,16 @@ class Service {
   // enemy's hitboxes — and their sampled lag records — into one shared angular
   // chart, valued by damage, and return the cells for the Python renderer.
   void do_heatmap(const Json& args, Json& out) noexcept;
+  // The trace probe (`docs/re/bullet-trace.md`): ask the engine **its own** question
+  // (`TraceLineIntervals`, the call the real bullet makes) for a ray, and publish
+  // both answers side by side plus the difference — what the engine's trace hit,
+  // what our occluder set says about the same ray, and where the two disagree.
+  //
+  // The engine call runs on the **game thread** (the CreateMove hook's sink): an
+  // engine call that reaches tier0's allocator faults on the payload's own thread
+  // (`docs/handoff.md`). So the control thread arms the request and waits for the
+  // game thread's answer.
+  void do_trace_probe(const Json& args, Json& out) noexcept;
   // Append one record per live enemy to the store (called from the render thread
   // each frame, before the ragebot's own early-out).
   void sample_records(const game::Snapshot& snapshot) noexcept;
@@ -700,6 +710,15 @@ class Service {
   bool occlusion_inputs_complete_ = true;
   std::vector<OcclusionHull> occlusion_hulls_;
   OcclusionQueryStats occlusion_stats_;
+  // The trace probe's handshake between the control thread (which arms the request
+  // and publishes the answer) and the game thread (which runs the engine call).
+  // The armed flag is atomic so the game thread's hot path does not take the lock
+  // on every tick; the payload itself travels under the mutex.
+  std::mutex trace_probe_mutex_;
+  std::atomic<bool> trace_probe_armed_{false};
+  std::vector<TraceRay> trace_probe_rays_;
+  bool trace_probe_done_ = false;
+  TraceProbeRun trace_probe_run_{};
   // The latest snapshot handed over by the render thread's per-frame refresh, for the
   // game-thread solve. Copied under the mutex so the render thread never blocks on the
   // solve. (The hitboxes are re-read on the hook, so only the player list / eye / weapon

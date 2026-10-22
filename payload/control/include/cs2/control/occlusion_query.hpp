@@ -8,8 +8,13 @@
 // engine call is wrapped in `diag::call_guarded`, so a wrong ABI faults back here
 // instead of killing the process (the payload has no exception tables).
 
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
+#include <optional>
+#include <string_view>
 #include <vector>
 
 #include "cs2/aim/bvh.hpp"
@@ -196,5 +201,338 @@ void set_occlusion_exclude_pawns(const std::uintptr_t* pawns, int count) noexcep
                                          const cs2::aim::Aabb* targets = nullptr,
                                          int target_count = 0, bool verify_enum = false)
     -> OcclusionQueryResult;
+
+// --- the trace probe (docs/re/bullet-trace.md) ---------------------------------
+//
+// The probe asks the engine **its own** question — `TraceLineIntervals`, the call the
+// real bullet makes — for a given ray, and publishes **both** answers side by side plus
+// the difference: what the engine's trace hit, what our occluder set says about the
+// same ray, and where the two disagree.
+//
+// The engine's interval record is 0x38 bytes and only two of its fields are pinned
+// (`docs/re/bullet-trace.md` §"The interval record"): the fraction at `+0x0C` and the
+// enter/exit byte at `+0x32`. The probe therefore publishes the record's **raw bytes**
+// — so a later RE pass can map the rest from the probe's own output — and names the
+// surface `"unmapped"` rather than inventing a field's meaning.
+
+// The interval record's size and its two pinned fields.
+inline constexpr std::size_t TRACE_INTERVAL_SIZE = 0x38;
+inline constexpr std::size_t TRACE_INTERVAL_FRACTION = 0x0C;
+inline constexpr std::size_t TRACE_INTERVAL_ENTER_EXIT = 0x32;
+
+// The probe's bounds: a diagnostic must not be able to stall the game.
+inline constexpr int TRACE_MAX_RAYS = 8;
+inline constexpr int TRACE_MAX_INTERVALS = 64;
+// The external results buffer's capacity. The engine's own call sizes its vector for
+// 64 entries; this is larger so the engine never has to grow it (a growth would reach
+// tier0's allocator, and the payload's thread has no tier0 TLS — docs/handoff.md).
+inline constexpr int TRACE_INTERVAL_CAPACITY = 1024;
+// How far apart the engine's span and our occluder's span may be and still be the
+// same solid (world units). Both are measured along the same ray, so a matching pair
+// lines up to within the solids' own size.
+inline constexpr float TRACE_MATCH_TOLERANCE = 2.0F;
+
+// The engine's answer for one ray: one interval record.
+struct TraceInterval {
+  // The record's `+0x0C`: the **fraction** along the ray (0..1). The engine's own
+  // consumer multiplies the fraction difference by the ray's length to get the wall
+  // thickness (`FUN_180886090`), so the fraction is relative to the ray, not a
+  // distance.
+  float fraction = 0.0F;
+  // The fraction scaled by the ray's length: the same number in world units.
+  float distance = 0.0F;
+  // The record's `+0x32`: 1 = the ray **enters** a solid, 0 = it leaves one.
+  std::uint8_t enter_exit = 0;
+  // The record's raw bytes (the surface is unmapped — see above).
+  std::uint8_t raw[TRACE_INTERVAL_SIZE] = {};
+};
+
+// One of **our** occluders the ray enters — the solver's own answer
+// (`OccluderCell::ray_span`, not a re-implementation of it).
+struct TraceOccluderHit {
+  float entry = 0.0F;  // the distance from the eye where the ray enters the solid
+  float exit = 0.0F;   // the distance where it leaves it
+  cs2::aim::SolidKind kind = cs2::aim::SolidKind::polytope;
+  int index = -1;    // the solid's index in the enumerated set
+  int cluster = -1;  // the mesh cluster's ordinal (-1 for the other kinds)
+};
+
+// A span of the engine's answer: an enter/exit pair of interval records (the solid
+// the ray crossed).
+struct TraceSpan {
+  float entry = 0.0F;
+  float exit = 0.0F;
+  int enter_record = -1;  // the index into the ray's interval records
+  int exit_record = -1;
+};
+
+// How the two answers compare for one ray.
+enum class TraceVerdict : std::uint8_t { agrees, engine_only, ours_only, both };
+
+// The difference between the engine's answer and ours for one ray.
+struct TraceDiff {
+  std::vector<TraceSpan> engine_only;      // the spans our set has nothing for
+  std::vector<TraceOccluderHit> ours_only;  // our solids the engine did not report
+  TraceVerdict verdict = TraceVerdict::agrees;
+};
+
+// The probe's ray: an origin, a unit direction and the endpoints, so the operator
+// can check that the probe's ray and the solver's ray are the same 3-D segment.
+struct TraceRay {
+  cs2::aim::Vec3 start{};
+  cs2::aim::Vec3 direction{};  // unit
+  cs2::aim::Vec3 end{};
+  float depth = 0.0F;  // the ray's length in world units
+};
+
+// Is a fan of `count` rays within the probe's bounds? The command **refuses** a
+// fan that is not: a diagnostic must not be able to stall the game.
+[[nodiscard]] inline auto trace_fan_size_ok(int count) noexcept -> bool {
+  return count >= 1 && count <= TRACE_MAX_RAYS;
+}
+
+// The interval budget: how many of the engine's intervals the probe publishes, and
+// whether the engine returned more than the probe publishes (it refuses to publish
+// them all and says so).
+struct TraceIntervalBudget {
+  int published = 0;
+  bool overflow = false;
+};
+
+[[nodiscard]] inline auto trace_interval_budget(int count) noexcept -> TraceIntervalBudget {
+  if (count < 0) {
+    return TraceIntervalBudget{};
+  }
+  return TraceIntervalBudget{
+      .published = count < TRACE_MAX_INTERVALS ? count : TRACE_MAX_INTERVALS,
+      .overflow = count > TRACE_MAX_INTERVALS};
+}
+
+// One ray's answer: the engine's intervals, our solids and the difference.
+struct TraceRayResult {
+  TraceRay ray{};
+  bool engine_ok = false;       // the engine call returned (no fault)
+  bool engine_faulted = false;  // a guarded fault was recovered
+  int interval_count = 0;       // the intervals the engine returned
+  bool intervals_overflow = false;  // more intervals than the probe publishes
+  std::vector<TraceInterval> intervals;
+  std::vector<TraceOccluderHit> ours;
+  TraceDiff diff;
+};
+
+// The whole probe: the engine's health, our occluder set and the per-ray answers.
+struct TraceProbeRun {
+  bool ok = false;       // the engine call succeeded
+  bool faulted = false;  // a guarded fault was recovered (the probe's own health)
+  std::uintptr_t iface = 0;
+  std::uintptr_t filter = 0;
+  std::int64_t filter_mask = 0;
+  int filter_group = 0;
+  int filter_flags = 0;
+  int occluders = 0;  // the solids our enumeration produced
+  int occluder_hits = 0;
+  std::vector<TraceRayResult> rays;
+};
+
+// The verdict's name (the JSON's one-line answer).
+[[nodiscard]] inline auto to_string(TraceVerdict verdict) noexcept -> const char* {
+  switch (verdict) {
+    case TraceVerdict::agrees:
+      return "agrees";
+    case TraceVerdict::engine_only:
+      return "engine_only";
+    case TraceVerdict::ours_only:
+      return "ours_only";
+    case TraceVerdict::both:
+      return "both";
+  }
+  return "agrees";
+}
+
+// The solid kind's name (a brush hull is a `polytope`; the payload calls it a hull).
+[[nodiscard]] inline auto solid_kind_name(cs2::aim::SolidKind kind) noexcept -> const char* {
+  switch (kind) {
+    case cs2::aim::SolidKind::polytope:
+      return "hull";
+    case cs2::aim::SolidKind::sphere:
+      return "sphere";
+    case cs2::aim::SolidKind::capsule:
+      return "capsule";
+    case cs2::aim::SolidKind::mesh:
+      return "mesh";
+  }
+  return "unknown";
+}
+
+// Read one interval record: the fraction at `+0x0C`, the enter/exit byte at `+0x32`
+// and the raw bytes. `length` is the ray's length — the fraction is relative to it.
+[[nodiscard]] inline auto read_trace_interval(const std::uint8_t* record, float length) noexcept
+    -> TraceInterval {
+  TraceInterval interval;
+  if (record == nullptr) {
+    return interval;
+  }
+  std::memcpy(&interval.fraction, record + TRACE_INTERVAL_FRACTION, sizeof(float));
+  interval.distance = interval.fraction * length;
+  interval.enter_exit = record[TRACE_INTERVAL_ENTER_EXIT];
+  std::memcpy(interval.raw, record, TRACE_INTERVAL_SIZE);
+  return interval;
+}
+
+// Pair the interval records into spans: a record with the enter byte opens a span and
+// the next record that leaves a solid closes it (the engine's own consumer pairs them
+// the same way — `FUN_180886090` reads the enter/exit byte to do it). The pairs are
+// nested (last in, first out), so a ray that enters two solids at once gets both
+// spans. A span the ray never leaves ends at the ray's end.
+[[nodiscard]] inline auto pair_trace_spans(const std::vector<TraceInterval>& intervals)
+    -> std::vector<TraceSpan> {
+  std::vector<TraceSpan> spans;
+  std::vector<int> open;
+  for (int i = 0; i < static_cast<int>(intervals.size()); ++i) {
+    const TraceInterval& interval = intervals[static_cast<std::size_t>(i)];
+    if (interval.enter_exit != 0) {
+      open.push_back(i);
+      continue;
+    }
+    if (open.empty()) {
+      continue;  // a leave without an enter: nothing to pair it with
+    }
+    const int enter = open.back();
+    open.pop_back();
+    spans.push_back(TraceSpan{.entry = intervals[static_cast<std::size_t>(enter)].distance,
+                              .exit = interval.distance,
+                              .enter_record = enter,
+                              .exit_record = i});
+  }
+  for (const int enter : open) {
+    spans.push_back(TraceSpan{.entry = intervals[static_cast<std::size_t>(enter)].distance,
+                              .exit = intervals[static_cast<std::size_t>(enter)].distance,
+                              .enter_record = enter,
+                              .exit_record = -1});
+  }
+  return spans;
+}
+
+// Do a span and an occluder describe the same solid? Their intervals must overlap
+// (within `tolerance`): the engine's span and our occluder's span are both measured
+// along the same ray, so they line up when they cover a common distance.
+[[nodiscard]] inline auto trace_span_matches(const TraceSpan& span, const TraceOccluderHit& hit,
+                                             float tolerance) noexcept -> bool {
+  return span.entry <= hit.exit + tolerance && hit.entry <= span.exit + tolerance;
+}
+
+// The difference between the engine's intervals and our solids for one ray: the
+// spans our set has nothing for, the solids the engine did not report, and the
+// one-line verdict.
+[[nodiscard]] inline auto diff_trace(const std::vector<TraceInterval>& intervals,
+                                     const std::vector<TraceOccluderHit>& ours, float tolerance)
+    -> TraceDiff {
+  TraceDiff diff;
+  const std::vector<TraceSpan> spans = pair_trace_spans(intervals);
+  std::vector<bool> span_matched(spans.size(), false);
+  std::vector<bool> ours_matched(ours.size(), false);
+  for (std::size_t s = 0; s < spans.size(); ++s) {
+    for (std::size_t o = 0; o < ours.size(); ++o) {
+      if (!trace_span_matches(spans[s], ours[o], tolerance)) {
+        continue;
+      }
+      span_matched[s] = true;
+      ours_matched[o] = true;
+    }
+  }
+  for (std::size_t s = 0; s < spans.size(); ++s) {
+    if (!span_matched[s]) {
+      diff.engine_only.push_back(spans[s]);
+    }
+  }
+  for (std::size_t o = 0; o < ours.size(); ++o) {
+    if (!ours_matched[o]) {
+      diff.ours_only.push_back(ours[o]);
+    }
+  }
+  const bool engine_extra = !diff.engine_only.empty();
+  const bool ours_extra = !diff.ours_only.empty();
+  if (engine_extra && ours_extra) {
+    diff.verdict = TraceVerdict::both;
+  } else if (engine_extra) {
+    diff.verdict = TraceVerdict::engine_only;
+  } else if (ours_extra) {
+    diff.verdict = TraceVerdict::ours_only;
+  } else {
+    diff.verdict = TraceVerdict::agrees;
+  }
+  return diff;
+}
+
+// The probe's fan: `count` rays around the view ray, in a **documented, deterministic**
+// order so two runs compare. Ray 0 is the view ray itself; the rest are the
+// golden-angle spiral points of the disc of radius `spread` degrees around it.
+//
+// The direction comes from the chart's own convention (the absolute world yaw/pitch
+// of `docs/ragebot.md`): `yaw`/`pitch` are **degrees**, the Source pitch is positive
+// downwards, and the direction is `Basis::unproject` of the chart point — the very
+// construction the occluder projection uses, so the probe's ray and the solver's ray
+// are the same 3-D segment.
+[[nodiscard]] inline auto build_trace_fan(const cs2::aim::Vec3& eye, const cs2::aim::Basis& basis,
+                                          float yaw_degrees, float pitch_degrees, float spread_degrees,
+                                          int count, float depth) -> std::vector<TraceRay> {
+  constexpr float k_deg_to_rad = 0.01745329251994329577F;
+  constexpr float k_golden_angle = 2.39996322972865332F;  // 137.50776405 degrees
+  std::vector<TraceRay> rays;
+  const int total = count < 0 ? 0 : (count > TRACE_MAX_RAYS ? TRACE_MAX_RAYS : count);
+  rays.reserve(static_cast<std::size_t>(total));
+  const float centre_u = yaw_degrees * k_deg_to_rad;
+  const float centre_v = -pitch_degrees * k_deg_to_rad;  // the Source pitch is positive down
+  const float spread = spread_degrees * k_deg_to_rad;
+  for (int i = 0; i < total; ++i) {
+    float u = centre_u;
+    float v = centre_v;
+    if (i > 0) {
+      // The golden-angle spiral: `r = spread * sqrt(i / count)`, `theta = i * 137.5°`.
+      const float t = static_cast<float>(i) / static_cast<float>(total);
+      const float radius = spread * std::sqrt(t);
+      const float theta = static_cast<float>(i) * k_golden_angle;
+      u = centre_u + radius * std::cos(theta);
+      v = centre_v + radius * std::sin(theta);
+    }
+    const cs2::aim::Vec3 direction = basis.unproject(cs2::aim::Vec2{.x = u, .y = v});
+    rays.push_back(TraceRay{.start = eye,
+                             .direction = direction,
+                             .end = eye + direction * depth,
+                             .depth = depth});
+  }
+  return rays;
+}
+
+// The occluder cell for an enumerated solid — the **same** projection the solver's
+// heatmap uses (`project_occluder` / `project_sphere_occluder` /
+// `project_capsule_occluder` / `project_mesh_occluder`), so the probe's answer is the
+// solver's answer and not a re-implementation of it.
+[[nodiscard]] inline auto project_occlusion_hull(const cs2::aim::Vec3& eye,
+                                                 const cs2::aim::Basis& basis,
+                                                 const OcclusionHull& hull)
+    -> std::optional<cs2::aim::OccluderCell> {
+  if (hull.kind == cs2::aim::SolidKind::sphere) {
+    return cs2::aim::project_sphere_occluder(eye, basis, hull.a, hull.radius,
+                                              hull.surface_modifier);
+  }
+  if (hull.kind == cs2::aim::SolidKind::capsule) {
+    return cs2::aim::project_capsule_occluder(eye, basis, hull.a, hull.b, hull.radius,
+                                               hull.surface_modifier);
+  }
+  if (hull.kind == cs2::aim::SolidKind::mesh) {
+    return cs2::aim::project_mesh_occluder(eye, basis, hull.vertices, hull.triangles,
+                                            hull.surface_modifier, hull.mesh_bvh);
+  }
+  return cs2::aim::project_occluder(eye, basis, hull.vertices, hull.planes,
+                                    hull.surface_modifier);
+}
+
+// The probe: our occluder set's answer and the engine's own answer for the same rays,
+// plus the difference. `invoke == false` fills the read-only diagnostics only (no
+// engine call). The engine call must run on a **game thread** (docs/handoff.md: an
+// engine call that reaches tier0's allocator faults on the payload's own thread), so
+// the caller runs this from the game thread's sink.
+[[nodiscard]] auto probe_trace(const std::vector<TraceRay>& rays, bool invoke) -> TraceProbeRun;
 
 }  // namespace cs2::control
