@@ -661,6 +661,11 @@ specs from the **live build**.
 
 ## 18. The operator's live-test list (2026-10-22, the cleanup tree)
 
+> **Resume here: [`docs/archive/handoff-2026-10-23.md`](archive/handoff-2026-10-23.md)**
+> — the session detail behind these rows (what is fixed, the instruments, the
+> live loop's quirks, the open items in order, and the payload crash that stops
+> `exec` before `ping.state_ready`).
+
 The operator's own list, in their order, after the cleanup merged into `master`.
 It is kept here so no item is lost between sessions. **Item 8 is done**; the rest
 are open, and each says what is already known so the next session starts at the
