@@ -89,7 +89,7 @@ struct RageSettings {
 // clamped view (`features::from_wire_settings`) is what the features may take,
 // and it is a different question. The block's values are what the menu
 // publishes, so they are what the comparison runs on.
-[[nodiscard]] inline auto rage_settings_from_wire(
+[[nodiscard]] constexpr auto rage_settings_from_wire(
     const cs2::overlay::wire::Settings& settings) noexcept -> RageSettings {
   RageSettings out{};
   out.enabled = settings.rage != 0;
