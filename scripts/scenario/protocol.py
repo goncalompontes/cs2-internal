@@ -90,6 +90,16 @@ __all__ = [
     "StepProbeDict",
     "StrafeResult",
     "TeamName",
+    "TraceDifferenceDict",
+    "TraceIntervalDict",
+    "TraceOccluderDict",
+    "TraceProbeEngineDict",
+    "TraceProbeResult",
+    "TraceRayDict",
+    "TraceRayEngineDict",
+    "TraceSolidKind",
+    "TraceSpanDict",
+    "TraceVerdict",
     "UsercmdButtonName",
     "Vec3Dict",
     "WallsDict",
@@ -984,6 +994,119 @@ class HeatmapResult(TypedDict, total=False):
     targets: list[HeatmapTargetDict]
     cell_count: int
     cells: list[HeatmapCellDict]
+
+
+#: The verdicts the trace probe's difference carries
+#: (``Service::do_trace_probe``): the engine's answer and ours agree, only the
+#: engine found something, only we did, or both found something the other did
+#: not.
+TraceVerdict = Literal["agrees", "engine_only", "ours_only", "both"]
+
+#: The solid kinds the probe reports (``cs2::aim::SolidKind``): a brush hull is
+#: a ``polytope`` and the payload calls it a hull.
+TraceSolidKind = Literal["hull", "sphere", "capsule", "mesh"]
+
+
+class TraceIntervalDict(TypedDict):
+    """One interval record of the engine's trace (``Service::do_trace_probe``).
+
+    The record is 0x38 bytes and only two of its fields are mapped: the
+    fraction at ``+0x0C`` and the enter/exit byte at ``+0x32``. The probe
+    publishes the record's **raw bytes** so a later RE pass can map the rest
+    from the probe's own output, and it names the surface ``"unmapped"``
+    rather than inventing a field's meaning.
+    """
+
+    fraction: float
+    distance: float
+    enter_exit: int
+    surface: str
+    raw: str
+
+
+class TraceOccluderDict(TypedDict):
+    """One of **our** occluders the ray enters (the solver's own answer)."""
+
+    index: int
+    kind: str
+    cluster: int
+    entry: float
+    exit: float
+
+
+class TraceSpanDict(TypedDict):
+    """An enter/exit span the engine found and our set has nothing for."""
+
+    entry: float
+    exit: float
+    enter_record: int
+    exit_record: int
+
+
+class TraceRayEngineDict(TypedDict):
+    """The engine's answer for one ray."""
+
+    ok: bool
+    faulted: bool
+    interval_count: int
+    intervals_overflow: bool
+    intervals: list[TraceIntervalDict]
+
+
+class TraceDifferenceDict(TypedDict):
+    """The difference between the engine's answer and ours for one ray."""
+
+    verdict: str
+    engine_only: list[TraceSpanDict]
+    ours_only: list[TraceOccluderDict]
+
+
+class TraceRayDict(TypedDict):
+    """One probed ray: its endpoints, both answers and the difference."""
+
+    start: Vec3Dict
+    direction: Vec3Dict
+    end: Vec3Dict
+    depth: float
+    engine: TraceRayEngineDict
+    ours: list[TraceOccluderDict]
+    difference: TraceDifferenceDict
+
+
+class TraceProbeEngineDict(TypedDict):
+    """The probe's own health: whether the engine call succeeded."""
+
+    ok: bool
+    faulted: bool
+    iface: str
+    filter: str
+    filter_mask: int
+    filter_group: int
+    filter_flags: int
+    occluders: int
+    occluder_hits: int
+
+
+class TraceProbeResult(TypedDict):
+    """The trace probe's answer (``Service::do_trace_probe``).
+
+    The probe asks the engine its own question (``TraceLineIntervals``, the
+    call the real bullet makes) for a ray and publishes **both** answers side
+    by side plus the difference.
+    """
+
+    eye: Vec3Dict
+    yaw: float
+    pitch: float
+    spread: float
+    count: int
+    depth: float
+    max_rays: int
+    max_intervals: int
+    engine: TraceProbeEngineDict
+    ran: bool
+    timeout: bool
+    rays: list[TraceRayDict]
 
 
 # --- the `wait_for` predicate DSL -------------------------------------------
