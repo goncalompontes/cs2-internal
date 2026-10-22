@@ -386,15 +386,15 @@ def the_seed(policy_path: str) -> int:
         print(reason, file=sys.stderr)
         return EXIT_INVALID
 
-    seed = raw.get("seed")
-    if seed is None:
+    policy_seed = raw.get("seed")
+    if policy_seed is None:
         print(no_seed, file=sys.stderr)
         return EXIT_NO_SEED
-    if not is_hexadecimal(seed):
-        print(f"CS2_PROTECT_CONFIG: {policy_path}: the seed is not hexadecimal: '{seed}'",
+    if not isinstance(policy_seed, str) or not is_hexadecimal(policy_seed):
+        print(f"CS2_PROTECT_CONFIG: {policy_path}: the seed is not hexadecimal: '{policy_seed}'",
               file=sys.stderr)
         return EXIT_INVALID
-    sys.stdout.write(seed)
+    sys.stdout.write(policy_seed)
     return 0
 
 
