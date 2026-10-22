@@ -50,7 +50,8 @@ meson compile -C build-payload
   executable-memory/protection helpers (host-tested).
 - `payload/game` — state introspection: safe in-process reads
   (`ReadProcessMemory` on self, so an invalid pointer fails instead of faulting
-  — the payload has no registered exception tables), module lookup, the paged
+  — a fault is only survivable inside `cs2::diag::call_guarded`, and a read
+  needs no call at all), module lookup, the paged
   entity identity table (`EntitySystem`), and `StateReader` (local player +
   every player). Field offsets come from the generated schema (ADR-0001);
   players are enumerated by matching the local pawn's vtable rather than a
@@ -77,13 +78,27 @@ meson compile -C build-payload
 - `payload/tls` — per-thread TLS bootstrap for a manually-mapped image plus an
   `NtCreateThreadEx(SKIP_THREAD_ATTACH)` thread helper (the loader never
   initializes TLS for mapped modules; ADR-0016).
-- `payload/diag` — first-chance/unhandled crash handler and a freeze watchdog
-  (per-thread stacks) that captured the ADR-0015 freeze.
+- `payload/diag` — the crash handler (a first-chance vectored handler and an
+  unhandled filter) and a freeze watchdog (per-thread stacks) that captured the
+  ADR-0015 freeze. The crash handler also owns the payload's **only** recovery
+  mechanism: `cs2::diag::call_guarded` runs an engine call under a vectored
+  handler plus `setjmp`/`longjmp`, so a fault inside the call is logged and the
+  process survives instead of dying. The handler that owns the jump is **not**
+  `noexcept`: a `noexcept` frame is `nounwind`, and the `longjmp` out of it
+  runs the frame's `std::terminate` cleanup and kills the process with
+  0xC0000409 instead of recovering (clang-cl, the compiler the payload ships
+  with). `payload/diag/tests/test_diag_guard.cpp` is built with clang-cl and
+  proves it — ten deliberate faults, ten recoveries, the process alive. The
+  guard's limits (one guarded call at a time, the faulting thread only, the
+  recoverable codes, no resources in the guarded call) are in
+  `payload/diag/include/cs2/diag/crash_handler.hpp`.
 - `injector` — manual-map injector (`injector.exe`, Windows x64) run inside the
   same Proton prefix: parse the payload, map sections + apply relocations into a
   local buffer, resolve imports by reading the target's module export tables,
   register the image in the PEB loader list, register `.pdata`
-  (`RtlAddFunctionTable`), `WriteProcessMemory` the image, then call the entry
+  (`RtlAddFunctionTable` — load-bearing: the guard's `longjmp` unwinds the
+  frames it leaves, so the payload's unwind tables have to be registered),
+  `WriteProcessMemory` the image, then call the entry
   point on a remote thread via a small x64 stub. The import resolver maps API-set
   stubs (`api-ms-win-crt-*` → `ucrtbase.dll`, `api-ms-win-core-*` →
   `kernelbase.dll`; ADR-0019). Bypasses the target's

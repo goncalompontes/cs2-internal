@@ -153,8 +153,13 @@ own call sizes it for 64 entries).
 
 **Open before wiring it live:** pin the exact filter / `CGameTrace` / results
 struct layouts and the argument order (`procedure_pseudo_code` on the call sites
-is ambiguous) — a wrong call faults the game (the payload has no registered
-exception tables), so this is not guessable. The aim solver already consumes
+is ambiguous) — so this is not guessable. A wrong call does **not** have to
+kill the game: made through `cs2::diag::call_guarded` (the payload's only
+recovery mechanism, `payload/diag`), the fault is logged and the call returns a
+failure. The guard is a safety net, not a licence to guess — one guarded call
+at a time per process, the faulting thread only, a fixed set of recoverable
+exception codes, and the guarded call must not own resources (the recovery is a
+`longjmp`). The aim solver already consumes
 occluders (`SolveInput::occluders` → `DamageField::clip`), so only the probe that
 produces them remains.
 

@@ -305,6 +305,27 @@ silhouette. `walls.mesh_clusters` reports the count.
 > the player). Making the list exactly the engine's trace set is the Tier-1
 > `TraceLineIntervals` step (`docs/ragebot.md` §10).
 
+## The engine call and the guard
+
+Any engine call this work adds runs under `cs2::diag::call_guarded`
+(`payload/diag`): the payload is manually mapped, so a fault inside an engine
+call cannot be caught by the C++ machinery, and the guard is the tree's **one**
+recovery mechanism — a vectored exception handler plus `setjmp`/`longjmp`. A
+call that faults is logged and returns a failure; the process lives.
+
+The guard's limits are its contract
+(`payload/diag/include/cs2/diag/crash_handler.hpp`): one guarded call at a time
+per process, the faulting thread only, a fixed set of recoverable exception
+codes, and the guarded call must not own resources (the recovery is a
+`longjmp`, so the frames it leaves are not cleaned up).
+
+**There is one guard, not two.** The tree's test `diag-guard` reads the
+payload's own sources and fails when a second vectored handler, `setjmp` or
+`longjmp` appears outside `payload/diag/src/crash_handler.cpp`. Two
+implementations is how the defect survived: an earlier probe branch carried
+its own copy of the guard because it could not use the shared one — and the
+shared one was the broken one.
+
 ## Still open
 
 1. **Compound (4) shapes** — still skipped (`docs/re/occlusion.md` "Still to pin" 3).

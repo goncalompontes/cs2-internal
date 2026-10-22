@@ -555,7 +555,17 @@ the accuracy work (spread/records, trace cross-validation).
   tier0 TLS**: the allocator (`FUN_1801ffe10` = `*(*(GS:[0x58]) + _tls_index*8) + …`)
   faults with `read addr=0x40`. Fix (done): a `GameThreadSink` on `Input`; the
   CreateMove hook (`Input::apply`) runs the query. `diag::call_guarded`
-  (VEH + `setjmp/longjmp`, no unwind tables needed) is the safety net and is proven.
+  (VEH + `setjmp/longjmp`) is the safety net: it recovers the process from a
+  fault inside the call, logs it, and returns a failure. The `longjmp` unwinds
+  the frames it leaves, so the payload's unwind tables have to be registered —
+  the injector does that (`RtlAddFunctionTable`). The guard is proven by
+  `payload/diag/tests/test_diag_guard.cpp`, which is built with **clang-cl**
+  (the compiler the payload ships with): ten deliberate faults, ten
+  recoveries, the process alive. It was **not** proven before: the handler was
+  `noexcept`, and a `noexcept` frame is `nounwind`, so the `longjmp` out of it
+  ran the frame's `std::terminate` cleanup and killed the process with
+  0xC0000409 instead of recovering. The guard had never fired, so nothing had
+  been lost to the defect — but the safety net was not there.
 - **The game relaunch is flaky** — the map load sometimes crashes on startup; just
   run `scripts/run-scenario.py` again.
 - The game auto-updated mid-session: `client.dll` sha `659940c1…` (was `44af2aa0…`);
@@ -610,8 +620,9 @@ resolved from a live call site: `TraceShapeWithSortedResults` =
 `*client_base + 0x221f058`, filter vtable `+0x1ace848`, mask `0x1c1003`, static
 default filter at `+0x221f070` (`docs/re/aim.md` §"The call convention, pinned from
 a live site"). It was **not** wired up: it needs a dumper signature for the
-singleton + the function (ADR-0012) and live validation, and a wrong call aborts
-the process (the payload has no exception tables), so it deserves its own pass.
+singleton + the function (ADR-0012) and live validation, and a wrong call has
+to go through `cs2::diag::call_guarded` (the payload's only recovery
+mechanism), so it deserves its own pass.
 
 **Tooling added:** `scripts/capture-screen.ps1` and `scripts/capture-game.ps1`
 capture the interactive session (run them via a scheduled task —
@@ -834,7 +845,8 @@ change that wedged the game under Wine/Proton (ADR-0017)**.
 - **State introspection** — local player + every player (health, armor, team,
   weapon, ammo, origin/eye/velocity/angles), live-verified on the updated build.
 - **Payload plumbing** — injector `.pdata` registration (`RtlAddFunctionTable`,
-  ~2043 entries), per-thread TLS bootstrap for the manually-mapped image
+  ~2043 entries; load-bearing: the guard's `longjmp` unwinds the frames it
+  leaves), per-thread TLS bootstrap for the manually-mapped image
   (`payload/tls`), `NtCreateThreadEx(SKIP_THREAD_ATTACH)` thread helper, crash
   handler + freeze watchdog (`payload/diag`).
 - **RE** — the game's present is `CRenderContextBase::Present`
