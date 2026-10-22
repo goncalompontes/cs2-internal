@@ -1409,6 +1409,15 @@ took that stale answer for the player's own state: the player's own press was
 **deleted** from the command, from the PB's held word and from the movement
 services' word. The status line's `player?` is what that case looks like now.)
 
+**The premise, and where it holds.** "A command the payload has not pressed
+carries the engine's own mask" is established for the command the engine has
+**just built** — the engine builds it, so its mask is the engine's own — and
+it is **not** established for the **copy**: the engine copies the command the
+payload has just written to, so the copy may carry the payload's own press.
+That is why the copy's reading is **unknown** when the attack bit is set, and
+why the payload does not depend on the order of the two slots (which was
+never observed at runtime, `docs/re/angle-split.md`).
+
 **What happens when the player holds attack.** Then the engine's own mask
 carries the attack bit on every command, so the engine sees **one continuous
 press**: the semi-automatic weapon fires **once**, exactly as it does for a
@@ -1559,6 +1568,18 @@ operator's live run can show it.
 So the release is written to **all three** — and the earlier claim was false
 for two of them, because the PB's block was guarded by "there is something to
 write" and the movement services' word was only ever *set*.
+
+**The PB's changed word is a best-effort mirror, not a proven edge channel.**
+The engine's own edge machine is not fully re-derived: the press edge is
+`FUN_1804c0f10(&svc->m_nButtonState, bit)`, a three-word machine
+(`edge = C || (A && B)`: held now, changed since the command start, pressed and
+released). The payload writes the PB's changed word when **its own**
+contribution changed — a press or a withdrawal — because a release is a change
+too. Which of the three channels the engine's edge machine actually reads is
+**not** established: the operator observed a semi-automatic weapon firing
+**once** under the old code, so the engine evidently does not take the press
+edge from the PB's changed word. The release that matters is the **held** word
+going to zero, on all three channels — which the fix does deliver.
 
 ### 15.6 The known limits
 
