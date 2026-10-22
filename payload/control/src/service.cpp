@@ -1395,7 +1395,11 @@ void Service::do_animfix(const Json& args, Json& out) noexcept {
   if (const Json* arg = args.find("on"); arg != nullptr && arg->is_bool()) {
     on = arg->as_bool();
   }
-  input_.set_animfix(on);
+  animfix_requested_.store(on, std::memory_order_relaxed);
+  const bool animfix_allowed =
+      (capability_mask_.load(std::memory_order_relaxed) &
+       game::capability_bit(game::Capability::animfix)) != 0;
+  input_.set_animfix(on && animfix_allowed);
   set_ok(out, input_status());
 }
 
@@ -1432,13 +1436,22 @@ void Service::do_antiaim(const Json& args, Json& out) noexcept {
     rebase = false;
   }
   input_.set_anti_aim_move_rebase(rebase);
-  input_.set_anti_aim(on);
+  anti_aim_requested_.store(on, std::memory_order_relaxed);
+  const bool anti_aim_allowed =
+      (capability_mask_.load(std::memory_order_relaxed) &
+       game::capability_bit(game::Capability::anti_aim)) != 0;
+  input_.set_anti_aim(on && anti_aim_allowed);
   set_ok(out, input_status());
 }
 
 void Service::set_movement_features(bool auto_strafe, bool bhop) noexcept {
-  input_.set_strafe(auto_strafe);
-  input_.set_bhop(bhop);
+  movement_strafe_requested_.store(auto_strafe, std::memory_order_relaxed);
+  movement_bhop_requested_.store(bhop, std::memory_order_relaxed);
+  const bool allowed =
+      (capability_mask_.load(std::memory_order_relaxed) &
+       game::capability_bit(game::Capability::movement)) != 0;
+  input_.set_strafe(auto_strafe && allowed);
+  input_.set_bhop(bhop && allowed);
 }
 
 void Service::set_settings_access(SettingsReader reader, SettingsWriter writer,
@@ -1977,6 +1990,34 @@ void Service::on_game_thread() noexcept {
   // The heartbeat: the control thread samples it to tell "the game thread is busy"
   // from "the game thread is not running" when a probe times out.
   game_thread_ticks_.fetch_add(1, std::memory_order_relaxed);
+
+  // The gate: the state machine decides what the current screen permits. The
+  // operator's requested flags are kept; the effective ones are re-applied
+  // here every tick, so a menu toggle (or a control command) cannot bypass a
+  // screen. A dead player, freeze time, the main menu and a lost server all
+  // land here.
+  game::GameState gate;
+  {
+    const std::scoped_lock lock(snapshot_mutex_);
+    if (have_snapshot_.load(std::memory_order_relaxed)) {
+      gate = game::deduce(last_snapshot_);
+    }
+  }
+  capability_mask_.store(gate.capabilities, std::memory_order_relaxed);
+  input_.set_strafe(movement_strafe_requested_.load(std::memory_order_relaxed) &&
+                    gate.can(game::Capability::movement));
+  input_.set_bhop(movement_bhop_requested_.load(std::memory_order_relaxed) &&
+                  gate.can(game::Capability::movement));
+  input_.set_anti_aim(anti_aim_requested_.load(std::memory_order_relaxed) &&
+                      gate.can(game::Capability::anti_aim));
+  input_.set_animfix(animfix_requested_.load(std::memory_order_relaxed) &&
+                     gate.can(game::Capability::animfix));
+  if (!gate.in_level()) {
+    input_.clear_rage_aim();
+    trigger_.reset(input_);
+    reset_rage_fire();
+    return;
+  }
   // Auto-scope through the engine's own `+zoom`/`-zoom`: the command button mask does
   // not reach the weapon's zoom, but the console held-buttons do (measured live). The
   // transition is applied here so it runs on a game thread (Cbuf).
@@ -2121,8 +2162,9 @@ void Service::on_game_thread() noexcept {
   //
   // The triggerbot runs in the same sink (`docs/ragebot.md` §"The trigger"): it is
   // per-tick work on the game thread, and it never writes a view angle.
-  const bool rage_wanted = rage_enabled_.load() || rage_force_.load();
-  const bool trigger_wanted = trigger_.enabled();
+  const bool rage_wanted = (rage_enabled_.load() || rage_force_.load()) &&
+                          gate.can(game::Capability::aim);
+  const bool trigger_wanted = trigger_.enabled() && gate.can(game::Capability::trigger);
   if (!rage_wanted && !trigger_wanted) {
     input_.clear_rage_aim();
     trigger_.reset(input_);
@@ -2168,6 +2210,10 @@ void Service::on_game_thread() noexcept {
 }
 
 void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
+  // The state machine's answer for this frame. Every feature gate reads the
+  // mask; nothing re-derives "can I move/aim now?" from the raw fields.
+  const game::GameState state = game::deduce(snapshot);
+  capability_mask_.store(state.capabilities, std::memory_order_relaxed);
   // Hand the snapshot to the game-thread solve and sample the per-enemy lag records (the
   // heatmap's history) + build the occlusion-query box. The **solve itself runs on the
   // game thread** (`rage_tick` from the CreateMove hook), not here.

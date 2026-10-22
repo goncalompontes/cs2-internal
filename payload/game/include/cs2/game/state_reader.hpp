@@ -109,6 +109,9 @@ class StateReader {
     std::uint32_t rules_time_until_next_phase = 0x80;
     std::uint32_t rules_game_phase = 0x84;
     std::uint32_t rules_total_rounds_played = 0x88;
+    // `C_CSGameRules::m_nOvertimePlaying` and `CGameRules::m_bGamePaused`.
+    std::uint32_t rules_overtime_playing = 0x90;
+    std::uint32_t rules_game_paused = 0x38;
     std::uint32_t rules_has_match_started = 0xb0;
     std::uint32_t rules_bomb_planted = 0x8c7;
     std::uint32_t rules_bomb_dropped = 0x9a8;

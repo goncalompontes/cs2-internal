@@ -465,6 +465,9 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
     snapshot_sink_(snapshot_context_, snapshot);
   }
 
+  if (!game_active_) {
+    return model_;
+  }
   model_.hud.sections.push_back(local_section(snapshot));
   model_.hud.sections.push_back(players_section(snapshot));
   if (rage_status_provider_ != nullptr) {

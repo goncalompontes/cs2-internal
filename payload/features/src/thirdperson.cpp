@@ -330,7 +330,11 @@ void ThirdPerson::update(const game::Angle& view_angles, const game::Vec3& eye_o
   if (!hook_.installed()) {
     (void)install();  // the client may not have been up when the payload booted
   }
-  const game::ThirdPersonParams params = current();
+  game::ThirdPersonParams params = current();
+  // The state machine gates the camera: a death, freeze time or the main
+  // screen releases the engine switch instead of holding a camera the player
+  // cannot use.
+  params.enabled = params.enabled && game_active_.load(std::memory_order_relaxed);
   if (!params.enabled) {
     if (active_.exchange(false)) {
       disable();

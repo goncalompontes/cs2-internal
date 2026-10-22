@@ -483,6 +483,13 @@ class Chams {
   // the hook could not be installed (the chams then do nothing).
   [[nodiscard]] bool install() noexcept;
 
+  // Whether a level is up (the state machine). A draw while it is false is
+  // forwarded untouched: the chams never run in the main menu or on the load
+  // screen.
+  void set_game_active(bool active) noexcept {
+    game_active_.store(active, std::memory_order_relaxed);
+  }
+
   // The per-frame step (the payload's render thread, ~30 Hz): install the
   // hook — retrying until the game is up — keep the material in step with the
   // mode, and refresh the local player and the visibility filter.
@@ -683,6 +690,7 @@ class Chams {
   // The override material, published to the render thread.
   std::atomic<game::Material> material_{0};
   std::atomic<bool> enabled_{false};
+  std::atomic<bool> game_active_{true};
   std::atomic<bool> only_enemies_{true};
   std::atomic<bool> include_local_{false};
   std::atomic<bool> visible_only_{false};

@@ -454,7 +454,8 @@ void Chams::on_draw(void* desc, void* render_context, void* mesh_primitive, cons
   seen_.fetch_add(1, std::memory_order_relaxed);
   // The cheapest way out: with the feature off the draw is forwarded
   // untouched, without touching the engine at all.
-  if (!enabled_.load(std::memory_order_relaxed)) {
+  if (!enabled_.load(std::memory_order_relaxed) ||
+      !game_active_.load(std::memory_order_relaxed)) {
     skipped_.fetch_add(1, std::memory_order_relaxed);
     original(desc, render_context, mesh_primitive, material, material_mode, draw_values, deferred,
              stats, layer);

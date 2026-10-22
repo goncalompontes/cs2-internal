@@ -425,6 +425,12 @@ auto settings_published(void* context) noexcept -> bool {
 void on_snapshot(void* context, const cs2::game::Snapshot& snapshot) noexcept {
   auto* runtime = static_cast<Runtime*>(context);
   runtime->control.on_snapshot(snapshot);
+  // One state machine, every feature: the screen decides what may run. The
+  // features read the same answer the control channel publishes.
+  const cs2::game::GameState state = cs2::game::deduce(snapshot);
+  runtime->overlay.set_game_active(state.in_level());
+  runtime->chams.set_game_active(state.can(cs2::game::Capability::chams));
+  runtime->thirdperson.set_game_active(state.can(cs2::game::Capability::thirdperson));
   // The third-person camera's per-frame step: the console route, the distance
   // knob and the view angles the camera's yaw offset is applied to.
   cs2::game::Angle view{};

@@ -314,9 +314,10 @@ class RulesSnapshotDict(TypedDict):
     game_start_time: float
     warmup_period_start: float
     time_until_next_phase: float
-    #: ``C_CSGameRules::m_nOvertimePlaying`` — **not sent by the payload yet**.
+    # Sent by the current payload; optional for an older one.
+    #: ``C_CSGameRules::m_nOvertimePlaying``.
     overtime_playing: NotRequired[int]
-    #: ``CGameRules::m_bGamePaused`` — **not sent by the payload yet**.
+    #: ``CGameRules::m_bGamePaused``.
     game_paused: NotRequired[bool]
 
 
@@ -349,6 +350,10 @@ class StateSnapshotDict(TypedDict):
     rules: RulesSnapshotDict
     local: PlayerSnapshotDict | None
     players: list[PlayerSnapshotDict]
+    # The payload's state machine: the screen and the capabilities in force.
+    # Optional so a payload that predates the state machine still parses.
+    screen: NotRequired[str]
+    capabilities: NotRequired[dict[str, bool]]
 
 
 # --- the small, closed answers ---------------------------------------------

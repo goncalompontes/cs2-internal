@@ -25,6 +25,12 @@ class Overlay {
   // Refresh (throttled) and return the current model.
   const render::OverlayModel& update(float screen_width, float screen_height);
 
+  // Whether a level is up (the state machine). When false the ESP and the
+  // HUD are not built; the menu is drawn by the present hook independently.
+  void set_game_active(bool active) noexcept {
+    game_active_ = active;
+  }
+
   [[nodiscard]] bool ready() const noexcept {
     return reader_.has_value() && reader_->ready();
   }
@@ -135,6 +141,9 @@ class Overlay {
  private:
   std::optional<game::StateReader> reader_;
   render::OverlayModel model_;
+  // The state machine's answer for the last frame (the ESP is not built when
+  // there is no level).
+  bool game_active_ = true;
   Esp esp_{};
   std::uint64_t last_update_ms_ = 0;
   std::uint64_t last_log_ms_ = 0;

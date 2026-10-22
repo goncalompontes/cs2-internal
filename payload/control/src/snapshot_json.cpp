@@ -1,5 +1,7 @@
 #include "cs2/control/snapshot_json.hpp"
 
+#include "cs2/game/game_state.hpp"
+
 #include <cstddef>
 #include <cstdio>
 #include <string>
@@ -88,6 +90,8 @@ auto to_json(const game::RulesSnapshot& rules) -> Json {
   out.set("round_win_status", Json::integer(rules.round_win_status));
   out.set("round_win_reason", Json::integer(rules.round_win_reason));
   out.set("total_rounds_played", Json::integer(rules.total_rounds_played));
+  out.set("overtime_playing", Json::integer(rules.overtime_playing));
+  out.set("game_paused", Json::boolean(rules.game_paused));
   out.set("match_start_time", Json::number(rules.match_start_time));
   out.set("round_start_time", Json::number(rules.round_start_time));
   out.set("restart_round_time", Json::number(rules.restart_round_time));
@@ -116,6 +120,17 @@ auto to_json(const game::Snapshot& snapshot) -> Json {
   // `_level_up`), because none of the raw facts is sufficient on its own — the
   // main menu has a readable `game_rules` global, a `C_CSGameRulesProxy` entity and
   // hundreds of entities (measured live 2026-10-15).
+  // The reduced state: one screen, and the capabilities in force. The
+  // harness and the features both consume this instead of re-deriving it.
+  const game::GameState state = game::deduce(snapshot);
+  out.set("screen", Json::string(std::string(game::screen_name(state.screen))));
+  { Json capabilities = Json::object();
+    for (int bit = 0; bit < game::k_capability_count; ++bit) {
+      const auto capability = static_cast<game::Capability>(bit);
+      capabilities.set(std::string(game::capability_name(capability)),
+                       Json::boolean(state.can(capability)));
+    }
+    out.set("capabilities", std::move(capabilities)); }
   out.set("local_pawn", Json::number(static_cast<double>(snapshot.local_pawn)));
   out.set("level", to_json(snapshot.level));
   out.set("rules", to_json(snapshot.rules));

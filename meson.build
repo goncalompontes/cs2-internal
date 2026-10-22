@@ -65,6 +65,14 @@ game_matrix_test = executable('game_matrix_test', 'payload/game/tests/test_matri
 )
 test('game-matrix', game_matrix_test)
 
+# The game-state machine: the reducer that decides the screen and what the
+# screen permits. It is pure and header-only, so every screen and capability
+# is host-testable without a game.
+game_state_test = executable('game_state_test', 'payload/game/tests/test_game_state.cpp',
+  include_directories : include_directories('payload/game/include'),
+)
+test('game-state', game_state_test)
+
 # The third-person camera model (the origin/distance/angle composition) and
 # the build guard on the camera's build-specific reads — the model is
 # header-only and platform-independent, and the reads take the engine access

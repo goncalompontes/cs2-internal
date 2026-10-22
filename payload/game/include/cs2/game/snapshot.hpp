@@ -101,6 +101,12 @@ struct RulesSnapshot {
   int round_win_status = 0;         // m_iRoundWinStatus — != 0 ⇒ a winner is set
   int round_win_reason = 0;         // m_eRoundWinReason
   int total_rounds_played = 0;      // m_totalRoundsPlayed
+  // `C_CSGameRules::m_nOvertimePlaying` (client.dll +0x90) and
+  // `CGameRules::m_bGamePaused` (the base at +0x38). The harness used to leave
+  // these out (`PENDING_PAYLOAD_FIELDS`); the state machine needs both to tell
+  // overtime and a timeout from an ordinary live round.
+  int overtime_playing = 0;
+  bool game_paused = false;
   float match_start_time = 0.0F;    // m_fMatchStartTime (game time)
   float round_start_time = 0.0F;    // m_fRoundStartTime (game time)
   float restart_round_time = 0.0F;  // m_flRestartRoundTime (game time)

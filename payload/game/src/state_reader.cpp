@@ -160,6 +160,8 @@ auto StateReader::FieldOffsets::resolve() -> StateReader::FieldOffsets {
   o.rules_bomb_dropped = field("C_CSGameRules", "m_bBombDropped", o.rules_bomb_dropped);
   o.rules_round_win_status = field("C_CSGameRules", "m_iRoundWinStatus", o.rules_round_win_status);
   o.rules_round_win_reason = field("C_CSGameRules", "m_eRoundWinReason", o.rules_round_win_reason);
+  o.rules_overtime_playing = field("C_CSGameRules", "m_nOvertimePlaying", o.rules_overtime_playing);
+  o.rules_game_paused = field("CGameRules", "m_bGamePaused", o.rules_game_paused);
   o.rules_t_cant_buy = field("C_CSGameRules", "m_bTCantBuy", o.rules_t_cant_buy);
   o.rules_ct_cant_buy = field("C_CSGameRules", "m_bCTCantBuy", o.rules_ct_cant_buy);
   o.rules_proxy_game_rules = field("C_CSGameRulesProxy", "m_pGameRules", o.rules_proxy_game_rules);
@@ -355,6 +357,8 @@ auto StateReader::read_rules() const -> RulesSnapshot {
   rules.round_win_status = read_or<std::int32_t>(base + o.rules_round_win_status, 0);
   rules.round_win_reason = read_or<std::int32_t>(base + o.rules_round_win_reason, 0);
   rules.total_rounds_played = read_or<std::int32_t>(base + o.rules_total_rounds_played, 0);
+  rules.overtime_playing = read_or<std::int32_t>(base + o.rules_overtime_playing, 0);
+  rules.game_paused = flag(o.rules_game_paused);
   rules.match_start_time = read_or<float>(base + o.rules_match_start_time, 0.0F);
   rules.round_start_time = read_or<float>(base + o.rules_round_start_time, 0.0F);
   rules.restart_round_time = read_or<float>(base + o.rules_restart_round_time, 0.0F);

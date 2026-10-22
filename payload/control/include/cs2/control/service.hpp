@@ -32,6 +32,7 @@
 #include "cs2/control/settings_access.hpp"
 #include "cs2/control/strafe_geometry.hpp"
 #include "cs2/control/trigger.hpp"
+#include "cs2/game/game_state.hpp"
 #include "cs2/game/state_reader.hpp"
 
 namespace cs2::control {
@@ -539,6 +540,16 @@ class Service {
   void* thread_ = nullptr;  // HANDLE
 #endif
   std::atomic<bool> running_{false};
+  // The capabilities the last snapshot granted (the state machine). The
+  // feature paths read this instead of re-deriving "can I move/aim now?".
+  std::atomic<std::uint32_t> capability_mask_{game::k_read_only};
+  // What the operator asked for; the effective flags are these AND the
+  // current screen (the gate is applied on the game thread, where the state
+  // is fresh).
+  std::atomic<bool> movement_strafe_requested_{false};
+  std::atomic<bool> movement_bhop_requested_{false};
+  std::atomic<bool> anti_aim_requested_{false};
+  std::atomic<bool> animfix_requested_{false};
   std::uint64_t start_tick_ = 0;  // ms, from `GetTickCount64` at construction
   // Ragebot configuration (menu / control command). The solve runs in
   // `on_snapshot`; the aim is stashed in `input_`.

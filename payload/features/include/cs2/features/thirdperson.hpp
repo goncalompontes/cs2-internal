@@ -94,6 +94,12 @@ class ThirdPerson {
   // view angles — the base the camera's yaw offset is applied to — and
   // `eye_origin` the local player's eye, the point the engine's camera
   // orbits.
+  // Whether the state machine allows the camera (a live/level screen). When
+  // it turns false the engine switch is released.
+  void set_game_active(bool active) noexcept {
+    game_active_.store(active, std::memory_order_relaxed);
+  }
+
   void update(const game::Angle& view_angles, const game::Vec3& eye_origin) noexcept;
 
   // The hook's callback: the game's own thread, inside the client's camera
@@ -171,6 +177,7 @@ class ThirdPerson {
   // the detour reaches it through the active instance.
   guard::RecursionGuard camera_guard_{};
   std::atomic<bool> enabled_{false};
+  std::atomic<bool> game_active_{true};
   std::atomic<bool> right_shoulder_{true};
   std::atomic<float> distance_{64.0F};
   std::atomic<float> angle_{0.0F};

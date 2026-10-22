@@ -757,6 +757,25 @@ def deduce(raw: StateSnapshotDict, events: Iterable[str | None] = (),
         return GameState(Screen.LOADING, raw, event_names,
                          ("level load in flight",))
 
+    # The payload owns the state machine too. When it reports a screen, use it:
+    # the payload sees the same snapshot the features gate on, so the harness
+    # and the hack cannot disagree about what is allowed. The harness keeps
+    # the two facts the payload does not have (a load it asked for, a lost
+    # server), which are applied above and here.
+    reported = raw.get("screen")
+    if isinstance(reported, str):
+        try:
+            payload_screen = Screen(reported)
+        except ValueError:
+            payload_screen = None
+        if payload_screen is not None:
+            if _disconnected(event_names):
+                return GameState(Screen.DISCONNECTED, raw, event_names,
+                                 ("the payload reports a screen; the events ",
+                                  "say the server was lost",))
+            return GameState(payload_screen, raw, event_names,
+                             ("the payload's state machine",))
+
     if not raw.get("valid"):
         # The engine has no readable local state yet: it is still booting after
         # injection, or a level teardown is in flight (the `map` command clears
