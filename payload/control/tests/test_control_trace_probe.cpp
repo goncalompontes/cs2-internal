@@ -654,8 +654,7 @@ void test_the_results_buffer_and_its_canary() {
   expect(cs2::control::trace_canary_intact(buffer), "an armed canary is intact");
   // A write one byte **past** the last record is the overrun the canary is for.
   buffer.canary[0] = 0x00U;
-  expect(!cs2::control::trace_canary_intact(buffer),
-         "a write past the records trips the canary");
+  expect(!cs2::control::trace_canary_intact(buffer), "a write past the records trips the canary");
   // ...and a write inside the records does not.
   cs2::control::arm_trace_canary(&buffer);
   buffer.records[cs2::control::TRACE_INTERVAL_RECORDS * cs2::control::TRACE_INTERVAL_SIZE - 1] =
@@ -779,9 +778,9 @@ void test_service_uses_the_rules(const char* root) {
   expect(arm_at != std::string::npos, "the probe arms the canary");
   expect(engine_call_at != std::string::npos, "the probe calls the engine");
   expect(check_at != std::string::npos, "the probe checks the canary");
-  expect(arm_at != std::string::npos && engine_call_at != std::string::npos &&
-             arm_at < engine_call_at,
-         "the canary is armed **before** the engine call");
+  expect(
+      arm_at != std::string::npos && engine_call_at != std::string::npos && arm_at < engine_call_at,
+      "the canary is armed **before** the engine call");
   expect(check_at != std::string::npos && engine_call_at != std::string::npos &&
              check_at > engine_call_at,
          "the canary is checked **after** the engine call");

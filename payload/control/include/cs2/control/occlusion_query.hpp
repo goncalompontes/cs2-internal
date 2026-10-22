@@ -523,8 +523,8 @@ struct TraceIntervalBudget {
 // One ray's answer: the engine's intervals, our solids and the difference.
 struct TraceRayResult {
   TraceRay ray{};
-  bool engine_ok = false;           // the engine call returned (no fault)
-  bool engine_faulted = false;      // a guarded fault was recovered
+  bool engine_ok = false;       // the engine call returned (no fault)
+  bool engine_faulted = false;  // a guarded fault was recovered
   // The engine wrote **past** the results buffer (the canary tripped): the answer
   // cannot be vouched for, and it is refused like a dropped one.
   bool engine_overrun = false;
@@ -543,7 +543,7 @@ struct TraceRayResult {
 
 // The whole probe: the engine's health, our occluder set and the per-ray answers.
 struct TraceProbeRun {
-  bool ok = false;                   // at least one ray's engine call returned
+  bool ok = false;  // at least one ray's engine call returned
   // The **instrument** failed: a ray's engine call faulted, **or** the engine wrote
   // past the results buffer (the canary tripped). Both mean the answer cannot be
   // trusted — `overrun` says which.
