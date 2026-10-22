@@ -519,6 +519,53 @@ control_sound_test = executable('control_sound_test',
 )
 test('control-sound', control_sound_test)
 
+# The payload's fault guard (`cs2::diag::call_guarded`).
+#
+# The guard is the payload's only safety net for an engine call that faults,
+# and what it does depends on the **compiler**: a `noexcept` vectored handler
+# is not `nounwind` -- clang-cl gives its frame a C++ exception-handler unwind
+# record whose cleanup action is `std::terminate`, and the `longjmp` out of
+# that frame runs the action, so the process dies with 0xC0000409. That is
+# clang-cl's behaviour -- clang-cl is the compiler the payload ships with --
+# and not MSVC's: under `cl.exe` the same source recovers.
+#
+# **How the test is run.** The test is registered in **two** builds, and both
+# of them have to be run:
+#
+#   meson test -C build          # this copy (the host build)
+#   meson test -C build-payload  # the payload's own clang-cl build
+#
+# The host copy's behavioural half is only meaningful in a **clang-cl host
+# build**: with `cl.exe` the guard recovers either way, so the half cannot see
+# the defect. This repository's host build is clang-cl (CI sets
+# `CC=clang-cl`/`CXX=clang-cl`), which is why the host copy is worth
+# registering -- and why the defect survived: **there was no test at all**,
+# not because the compiler was wrong.
+#
+# The payload's own copy (`payload/diag/meson.build`) is the one that ships,
+# and it is registered in the payload's build whether or not that build is a
+# cross build -- the test runs wherever the build machine can run the
+# binaries.
+diag_guard_test = executable('diag_guard_test',
+  files(
+    'payload/diag/tests/test_diag_guard.cpp',
+    'payload/diag/src/crash_handler.cpp',
+    'payload/diag/src/text.cpp',
+    'payload/game/src/log.cpp',
+    'payload/game/src/module.cpp',
+    'payload/game/src/memory.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/diag/include'),
+    include_directories('payload/game/include'),
+    core_inc,
+  ],
+)
+test('diag-guard', diag_guard_test,
+  # The source check reads the payload's own sources.
+  args : [meson.current_source_dir() / 'payload'],
+)
+
 # The feature settings foundation: the wire <-> config conversion and the
 # config store's round trip. The settings block is a POD and the conversion is
 # pure, so the feature sources are built natively here (the payload itself

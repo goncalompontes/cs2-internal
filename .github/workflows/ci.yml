@@ -5,6 +5,7 @@
 #
 #   * the host build (meson) and the host test suite,
 #   * the Windows payload, overlay and injector builds (clang-cl),
+#   * the payload's own test suite (the copy that ships with the payload),
 #   * the Python suite (the scenario harness),
 #   * the type gate (mypy),
 #   * the style gate (the clang-tidy sweep's check mode).
@@ -171,6 +172,21 @@ jobs:
 
       - name: the payload build (compile)
         run: meson compile -C build-payload
+
+      # The payload's **own** copy of the fault guard's test
+      # (`payload/diag/tests/test_diag_guard.cpp`), built with clang-cl -- the
+      # compiler the payload ships with, and the one whose `noexcept` handling
+      # the defect turned on. The host copy of the same test runs in the step
+      # above, but only the payload's copy is the one that ships, so both are
+      # run.
+      #
+      # The payload is configured as a cross build (the cross file is what
+      # pins the static CRT), but the runner *is* the target system, so the
+      # test is registered and runs here: `payload/diag/meson.build` registers
+      # it whenever the build machine can run the binaries
+      # (`meson.can_run_host_binaries()`).
+      - name: the payload tests
+        run: meson test -C build-payload
 
       # The Vulkan headers are **git-ignored** (a large, non-redistributable
       # download -- see .gitignore and docs/setup-windows.md §5), so

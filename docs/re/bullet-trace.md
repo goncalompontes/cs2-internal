@@ -305,6 +305,47 @@ silhouette. `walls.mesh_clusters` reports the count.
 > the player). Making the list exactly the engine's trace set is the Tier-1
 > `TraceLineIntervals` step (`docs/ragebot.md` §10).
 
+## The engine call and the guard
+
+Any engine call this work adds runs under `cs2::diag::call_guarded`
+(`payload/diag`): the payload is manually mapped, so a fault inside an engine
+call cannot be caught by the C++ machinery, and the guard is the tree's **one**
+recovery mechanism — a vectored exception handler plus `setjmp`/`longjmp`. A
+call that faults is logged and returns a failure; the process lives.
+
+The guard's limits are its contract
+(`payload/diag/include/cs2/diag/crash_handler.hpp`): one guarded call at a time
+per process, the faulting thread only, a fixed set of recoverable exception
+codes, and the guarded call must not own resources (the recovery is a
+`longjmp`, so the frames it leaves are not cleaned up).
+
+**There is one guard, not two.** The tree's test `diag-guard` reads the
+payload's own sources and fails when a second recovery mechanism appears
+outside `payload/diag/src/crash_handler.cpp`: a second vectored handler, a
+second unhandled filter, a `setjmp`/`longjmp`, or an SEH `__try`/`__except`.
+Two implementations is how the defect survived: an earlier probe branch
+carried its own copy of the guard because it could not use the shared one —
+and the shared one was the broken one.
+
+**Which way the reconciliation goes — `cs2::diag` keeps the one mechanism.**
+`cs2::diag` owns it; the trace probe's own guard goes away. The probe will
+call `cs2::diag::call_guarded(&invoke_trace, &call)` where it calls
+`trace_call_guarded(&invoke_trace, &call)` today — the two signatures are
+identical, so the call site does not change — and
+`payload/control/include/cs2/control/trace_guard.hpp` is **deleted**, with
+`payload/control/tests/test_control_trace_probe_guard.cpp` and the two root
+`meson.build` blocks that register it. (The steps are listed in
+`docs/handoff-wave3.md` §5; the reconciliation is a fix round on T39's
+branch, after this one has merged.)
+
+**Why that way and not the other.** Two vectored handlers with **independent**
+`jmp_buf`s and **independent** `active` flags is exactly the fragility this
+task exists to remove: each one reads correctly on its own, each one calls
+itself "the guard", and the one that is broken is the one nobody is
+testing. That is how a broken guard survived **next to** a working one for a
+whole wave of work. One mechanism, one owner, one test — and the tree's
+`diag-guard` test fails the moment a second one appears.
+
 ## Still open
 
 1. **Compound (4) shapes** — still skipped (`docs/re/occlusion.md` "Still to pin" 3).

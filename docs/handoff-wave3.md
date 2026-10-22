@@ -170,16 +170,28 @@ killed the game.**
   action is `std::terminate`**, so MSVC's `longjmp` — which unwinds the frames
   it leaves — ran that cleanup and the runtime **fast-failed with
   `0xC0000409`**. Because it is a fast fail it **bypasses the vectored
-  handlers**, so the guard never recovered.
-* **It has fired 12 times**, every one the **tier0 allocator fault**
-  (`read addr=0x40` — the fault the guard was written for), and **4 of the 12
-  killed the payload**, which then had to be re-injected.
+  handlers**, so the guard's recovery was not to be relied on (and it was not:
+  of the twelve faults it saw, it recovered eight and lost the payload four —
+  see below).
+* **It has fired 12 times**, in **two different signatures**, and **4 of the 12
+  killed the payload**, which then had to be re-injected:
+  * the **four deaths** are the tier0 allocator fault (`read addr=0x40` — the
+    fault the guard was written for; three of the four) and a null read
+    (`read addr=0x0`; the fourth). Each is preceded by a live `[state]` line
+    and followed **immediately** by a fresh `[crash] handler installed`;
+  * the **eight survivors** are a different signature: a null-pointer access
+    (`addr=0x0`) whose fault frames are in ntdll (`#0 ntdll+0xcc196`,
+    `#1 ntdll+0xcb935`, `#2 ntdll+0x164e3e`), at a **fresh injection** — each
+    is preceded immediately by a `[crash] handler installed`, and they are
+    injections #190–#199, the last ten in the log. The payload kept rendering
+    afterwards.
 * The fix is **one word** (drop the `noexcept`); T42 implements it, with ten
   deliberate faults recovered on **clang-cl** and ten `0xC0000409` against the
   pre-fix code.
-* The **MSVC-built** copy passes on the broken code — which is why the host
-  suite could never have caught it, and why the test must be built with
-  **clang-cl** and **run**.
+* The **MSVC-built** copy passes on the broken code — which is why a test
+  built with `cl.exe` can never see the defect. This repository's host suite
+  is clang-cl, so the test is registered in **both** builds and **run** in
+  both; the defect survived because **no test existed**.
 
 **A correction to the record:** three accounts of the log's split existed
 (4 died / 3 died / 11 died). The measurement that settles it: the line
@@ -193,6 +205,21 @@ survived**.
 > injection's line). The number to use is **four**. The handoff and
 > `docs/known-issues.md` §17 both carry the corrected figure; the branch's
 > commit message does not, and it is not amended (the task forbids it).
+
+**And the eight survivors came from the *broken* handler — measured, not
+inferred.** The injector was run from the integration tree (`cd
+C:\Users\gpmpo\cs2-internal; build-injector\injector.exe cs2.exe
+build-payload\payload.dll`), the **last injection of any kind was at
+02:10:57** on 2026-10-22 (the boot file's last entry is pid 49028, and the
+injector's own output for that minute says `injector: target pid 49028`), and
+T42's fix is **06:01** (commit) / **06:26** (build) — after every one of the
+twelve. The integration tree's handler still spells `noexcept`. So the eight
+recoveries are **not** evidence that the fixed guard has run in the live
+game: it never has. They are evidence that the **broken** guard was not
+uniformly fatal — the same `noexcept` handler recovered eight times and
+killed the payload four times. The measurable difference is the signature
+(the deaths are the tier0 allocator fault; the recoveries are a null access
+three frames down in ntdll); the log does not say why the two differ.
 
 ---
 
@@ -278,11 +305,13 @@ objective, the animfix's graph capture, and the fixed camera.
   is still owed; it is what keeps the shotgun's pattern refused.
 * **The service's spread-pattern wiring** — T38's fix routed the live path
   through `applied_spread_pattern`, and the re-review confirmed it. **Done.**
-* **`docs/re/occlusion.md:321`, `docs/ragebot.md:462`,
-  `docs/re/chams.md:501`** — still carry the *"a wrong call aborts the
-  process, the payload has no exception tables"* claim, which **T42 makes
-  false**. The injector registers the `.pdata`, so the guard's `longjmp` works.
-  **These three lines are still wrong.**
+* **`docs/re/occlusion.md:197` and `:321`, `docs/ragebot.md:88` and `:462`,
+  `docs/re/chams.md:501`** — carried the *"a wrong call aborts the process,
+  the payload has no exception tables"* claim, which **T42 makes false**. The
+  injector registers the `.pdata`, so the guard's `longjmp` works.
+  **Fixed in T42's fix round:** all five now say what is true (the injector
+  registers the `.pdata`, the guard recovers a fault on the armed thread) and
+  spell out the guard's limits, so the risk is not read as a licence.
 
 ---
 

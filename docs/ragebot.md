@@ -84,9 +84,13 @@
   `Π(1 − t(u)·mod/m_flPenetration)` — **no rays** (host test `aim-occlusion`). The
   payload enumerates the solids with `CGamePhysicsQueryInterface::EntitiesInBox`
   (`payload/control/occlusion_query.cpp`, the `walls: true` arg), wrapped in
-  `diag::call_guarded` — a setjmp/longjmp recovery guard, because the manually-mapped
-  payload has no exception tables (a wrong engine ABI faults back instead of killing
-  the process). **The record → shape chain is resolved live** (`docs/re/occlusion.md`):
+  `diag::call_guarded` — a setjmp/longjmp recovery guard: a wrong engine ABI
+  faults back instead of killing the process (the injector registers the payload's
+  `.pdata`, and the guard's vectored handler recovers a fault on the armed
+  thread). The guard's limits: one in-flight guarded call per process, the
+  recoverable codes only, a fault on **another** thread is not guarded, and the
+  recovery skips the guarded call's cleanups. **The record → shape chain is
+  resolved live** (`docs/re/occlusion.md`):
   the record's `+0x58` is a **`CPhysicsBody`**, `body+8` is its data, `data+0x68` the
   shape array (`data+0x60` the count) of `IPhysicsShape`s (`+0x18` type 2 hull,
   `+0xC0` `RnHull_t*`). Entity bodies get the world transform from
@@ -459,7 +463,9 @@ save/restore the engine stream) to keep predictions exact.
    `client_base + 0x1ace848`, mask `0x1c1003`) and a static default at
    `+0x221f070`. Still needs: a dumper **signature** for the singleton + the trace
    function (ADR-0012), the `Ray_t`/`CGameTrace` layouts, then live validation
-   (a wrong call faults the process — the payload has no exception tables). A
+   (a wrong call **faults back** — the injector registers the payload's
+    `.pdata`, and the guard's vectored handler recovers a fault on the armed
+    thread). A
    first step is per-hitbox **visibility** (one trace eye → hitbox centre; drop
    fully-occluded boxes).
 3. **Weapon profile polish.** `m_flRange` / `m_nDamage` are wired; the pellet
