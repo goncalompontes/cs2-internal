@@ -394,6 +394,9 @@ class Service {
   std::string token_{};
   std::string session_file_{};
   bool initialized_ = false;
+  // Set only by an explicit quit/shutdown: an auth failure closes the
+  // connection, it must not stop the service.
+  std::atomic<bool> quit_requested_{false};
 
   [[nodiscard]] Json ping_result() noexcept;
   // Milliseconds since the payload was installed (the control service is built

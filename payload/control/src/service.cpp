@@ -299,7 +299,9 @@ void Service::run() noexcept {
         break;  // client went away
       }
       if (!keep_going) {
-        running_.store(false, std::memory_order_relaxed);
+        if (quit_requested_.exchange(false, std::memory_order_relaxed)) {
+          running_.store(false, std::memory_order_relaxed);
+        }
         break;
       }
     }
@@ -424,6 +426,9 @@ auto Service::handle_rpc(const std::string& line, std::string& response) noexcep
     return true;
   }
   const std::string_view name = method->as_string();
+  if (name == "quit" || name == "shutdown") {
+    quit_requested_.store(true, std::memory_order_relaxed);
+  }
   const Json* params = request->find("params");
   const Json empty = Json::object();
   const Json& arguments = params != nullptr ? *params : empty;
@@ -3887,6 +3892,7 @@ auto Service::start() noexcept -> bool {
     return false;
   }
   write_session_file();
+  quit_requested_.store(false, std::memory_order_relaxed);
   running_.store(true, std::memory_order_relaxed);
   // Skip LdrpInitializeThread (see cs2::tls::create_thread_no_attach).
   void* thread = cs2::tls::create_thread_no_attach(
