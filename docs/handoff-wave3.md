@@ -305,11 +305,13 @@ objective, the animfix's graph capture, and the fixed camera.
   is still owed; it is what keeps the shotgun's pattern refused.
 * **The service's spread-pattern wiring** — T38's fix routed the live path
   through `applied_spread_pattern`, and the re-review confirmed it. **Done.**
-* **`docs/re/occlusion.md:321`, `docs/ragebot.md:462`,
-  `docs/re/chams.md:501`** — still carry the *"a wrong call aborts the
-  process, the payload has no exception tables"* claim, which **T42 makes
-  false**. The injector registers the `.pdata`, so the guard's `longjmp` works.
-  **These three lines are still wrong.**
+* **`docs/re/occlusion.md:197` and `:321`, `docs/ragebot.md:88` and `:462`,
+  `docs/re/chams.md:501`** — carried the *"a wrong call aborts the process,
+  the payload has no exception tables"* claim, which **T42 makes false**. The
+  injector registers the `.pdata`, so the guard's `longjmp` works.
+  **Fixed in T42's fix round:** all five now say what is true (the injector
+  registers the `.pdata`, the guard recovers a fault on the armed thread) and
+  spell out the guard's limits, so the risk is not read as a licence.
 
 ---
 
