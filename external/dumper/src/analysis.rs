@@ -235,11 +235,18 @@ pub fn known_signatures() -> Vec<Signature> {
         // the trampoline live close together), while the anim tick's
         // prologue needs no relocation at all. The pattern is unique; the
         // RIP-relative displacement is relocated by the inline hook. RVA on
-        // 659940c1: `0x8492a0`.
+        // 659940c1: `0x8492a0`; on the 2026-10-23 build: `0x8494d0`.
+        //
+        // The displacement is **part of the pattern** (it is the RIP-relative
+        // load's disp32, so it changes with any shift in the module's layout):
+        // the first pattern hard-coded `A0 0F 3C 01` from `659940c1` and stopped
+        // matching when the game updated. If it stops matching again, search for
+        // the 12 bytes before the displacement (`F3 41 0F 10 08 4C 8B C9 F3 0F
+        // 10 05`, unique) and read the four bytes that follow.
         sig(
             "client.dll",
             "animfix_param_setter",
-            "F3 41 0F 10 08 4C 8B C9 F3 0F 10 05 A0 0F 3C 01",
+            "F3 41 0F 10 08 4C 8B C9 F3 0F 10 05 10 21 3C 01",
             None,
             None,
         ),
