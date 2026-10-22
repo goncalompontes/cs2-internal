@@ -382,7 +382,7 @@ void test_service_uses_the_rules(const char* root) {
          "the service has the trace_probe command");
   expect(service.find("trace_fan_size_ok(") != std::string::npos,
          "the command refuses a fan over the maximum with the rule");
-  expect(service.find("probe_trace(rays, true)") != std::string::npos,
+  expect(service.find("probe_trace(rays, true, abi)") != std::string::npos,
          "the engine call runs on the game thread (in the game-thread sink)");
   expect(service.find("trace_probe_armed_") != std::string::npos,
          "the command and the game thread hand the request over");
@@ -396,7 +396,7 @@ void test_service_uses_the_rules(const char* root) {
   }
   const std::string query((std::istreambuf_iterator<char>(query_file)),
                           std::istreambuf_iterator<char>());
-  expect(query.find("call_guarded(&invoke_trace") != std::string::npos,
+  expect(query.find("trace_call_guarded(&invoke_trace") != std::string::npos,
          "the engine's trace call is fault-guarded");
   expect(query.find("0x80000000U") != std::string::npos,
          "the results vector is external: the engine must not allocate");

@@ -525,6 +525,22 @@ test('control-trace-probe', control_trace_probe_test,
   args : [meson.current_source_dir()],
 )
 
+# The fault guard the probe's engine call runs under. The payload has no
+# registered exception tables, so the guard (the vectored handler +
+# `setjmp`/`longjmp`) is the only thing between a wrong engine ABI and a dead
+# game. The test proves it: a call that deliberately faults is caught and
+# reported, and the process keeps running.
+control_trace_probe_guard_test = executable('control_trace_probe_guard_test',
+  files(
+    'payload/control/tests/test_control_trace_probe_guard.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+  ],
+  dependencies : control_host_dep,
+)
+test('control-trace-probe-guard', control_trace_probe_guard_test)
+
 # The feature settings foundation: the wire <-> config conversion and the
 # config store's round trip. The settings block is a POD and the conversion is
 # pure, so the feature sources are built natively here (the payload itself

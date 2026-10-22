@@ -1802,11 +1802,13 @@ void Service::on_game_thread() noexcept {
   // request and waits for the answer.
   if (trace_probe_armed_.exchange(false, std::memory_order_acq_rel)) {
     std::vector<TraceRay> rays;
+    TraceAbi abi = TraceAbi::correct;
     {
       const std::scoped_lock lock(trace_probe_mutex_);
       rays = trace_probe_rays_;
+      abi = trace_probe_abi_;
     }
-    TraceProbeRun probe = probe_trace(rays, true);
+    TraceProbeRun probe = probe_trace(rays, true, abi);
     const std::scoped_lock lock(trace_probe_mutex_);
     trace_probe_run_ = std::move(probe);
     trace_probe_done_ = true;
@@ -4036,6 +4038,24 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
     }
   }
 
+  // How the engine is called: the pinned call form, or one of the deliberately
+  // wrong ones (the proof that the probe can fail — a wrong argument order or a
+  // wrong filter must give a visibly wrong answer or a caught fault, never a crash).
+  TraceAbi abi = TraceAbi::correct;
+  if (const Json* value = args.find("abi"); value != nullptr && value->is_string()) {
+    const std::string_view name = value->as_string();
+    if (name == "correct") {
+      abi = TraceAbi::correct;
+    } else if (name == "swapped") {
+      abi = TraceAbi::swapped;
+    } else if (name == "static_filter") {
+      abi = TraceAbi::static_filter;
+    } else {
+      set_error(out, "trace_probe: unknown abi '" + std::string(name) + "'");
+      return;
+    }
+  }
+
   // The fan: ray 0 is the view ray itself, the rest are the golden-angle spiral
   // around it (a documented, deterministic order — two runs compare).
   const aim::Basis basis = aim::Basis::world();
@@ -4046,6 +4066,7 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   {
     const std::scoped_lock lock(trace_probe_mutex_);
     trace_probe_rays_ = rays;
+    trace_probe_abi_ = abi;
     trace_probe_done_ = false;
     trace_probe_run_ = TraceProbeRun{};
   }
@@ -4102,6 +4123,7 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   payload.set("depth", Json::number(static_cast<double>(depth)));
   payload.set("max_rays", Json::integer(TRACE_MAX_RAYS));
   payload.set("max_intervals", Json::integer(TRACE_MAX_INTERVALS));
+  payload.set("abi", Json::string(to_string(run.abi)));
   // The probe's own health: whether the engine call succeeded, and loudly whether it
   // faulted (the guard caught it — a probe that faults is a *result*, not a crash).
   Json engine = Json::object();

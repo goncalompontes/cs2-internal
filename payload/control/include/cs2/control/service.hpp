@@ -717,6 +717,7 @@ class Service {
   std::mutex trace_probe_mutex_;
   std::atomic<bool> trace_probe_armed_{false};
   std::vector<TraceRay> trace_probe_rays_;
+  TraceAbi trace_probe_abi_ = TraceAbi::correct;
   bool trace_probe_done_ = false;
   TraceProbeRun trace_probe_run_{};
   // The latest snapshot handed over by the render thread's per-frame refresh, for the

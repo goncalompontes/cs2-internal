@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "cs2/aim/bvh.hpp"
+#include "cs2/control/trace_guard.hpp"
 #include "cs2/diag/crash_handler.hpp"
 #include "cs2/game/memory.hpp"
 #include "cs2/game/module.hpp"
@@ -1355,8 +1356,11 @@ void invoke_trace(void* context) {
 }
 
 // The guarded call: a wrong ABI must be caught and reported, never a crash (the
-// payload has no registered exception tables). Returns the interval count (0 on a
-// fault or an empty answer).
+// payload has no registered exception tables). The probe's own guard is used, not
+// `cs2::diag::call_guarded`: the diag module's vectored handler is `noexcept`, and
+// under clang-cl that makes the recovery impossible (`cs2/control/trace_guard.hpp`
+// has the measurement). Returns the interval count (0 on a fault or an empty
+// answer).
 auto run_trace_query(void* iface, void* filter, const Vec3& start, const Vec3& delta,
                      ResultVector& vector, bool* ok) -> std::int32_t {
   TraceCall call;
@@ -1367,7 +1371,7 @@ auto run_trace_query(void* iface, void* filter, const Vec3& start, const Vec3& d
   call.mask =
       reinterpret_cast<const void*>(reinterpret_cast<std::uintptr_t>(filter) + k_filter_mask);
   call.max_fraction = -1.0F;
-  *ok = cs2::diag::call_guarded(&invoke_trace, &call);
+  *ok = trace_call_guarded(&invoke_trace, &call);
   return *ok ? vector.count : 0;
 }
 
@@ -1555,8 +1559,9 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
 // The probe: our occluder set's answer and the engine's own answer for the same rays,
 // plus the difference. Runs on a game thread (an engine call must not reach tier0's
 // allocator from the payload's own thread — docs/handoff.md).
-auto probe_trace(const std::vector<TraceRay>& rays, bool invoke) -> TraceProbeRun {
+auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -> TraceProbeRun {
   TraceProbeRun run;
+  run.abi = abi;
   if (rays.empty()) {
     return run;
   }
@@ -1580,7 +1585,15 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke) -> TraceProbeRu
     return run;
   }
   run.iface = iface;
+  // The filter we hand the engine: the bullet's own (a copy of the engine's filter
+  // with the shot's mask) — or, in the `static_filter` mode, the engine's static
+  // default object itself (the ~0 mask, i.e. **every** content). The latter is
+  // deliberately wrong: it is the proof that the filter is what makes the answer
+  // the bullet's answer.
   void* filter = build_bullet_filter(base + static_filter);
+  if (abi == TraceAbi::static_filter) {
+    filter = reinterpret_cast<void*>(base + static_filter);
+  }
   run.filter = reinterpret_cast<std::uintptr_t>(filter);
   if (g_bullet_filter_ready) {
     run.filter_mask = *reinterpret_cast<std::int64_t*>(g_bullet_filter + k_filter_mask);
@@ -1659,15 +1672,23 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke) -> TraceProbeRu
     run.occluder_hits += static_cast<int>(result.ours.size());
 
     // The engine's answer for the same ray: the segment is `start` → `start + delta`,
-    // and the fourth argument is the **extension**, not the absolute end point.
+    // and the fourth argument is the **extension**, not the absolute end point. The
+    // `swapped` mode hands the engine the two in the wrong order — the deliberate
+    // wrong ABI that proves the probe can fail.
     ResultVector vector;
     vector.data = g_trace_interval_buffer;
     vector.capacity = TRACE_INTERVAL_CAPACITY;
     vector.flags = 0x80000000U;  // external buffer: the engine will not reallocate
     const Vec3 delta = ray.end - ray.start;
+    const Vec3* start = &ray.start;
+    const Vec3* extension = &delta;
+    if (abi == TraceAbi::swapped) {
+      start = &delta;
+      extension = &ray.start;
+    }
     bool ok = false;
-    const std::int32_t count =
-        run_trace_query(reinterpret_cast<void*>(iface), filter, ray.start, delta, vector, &ok);
+    const std::int32_t count = run_trace_query(reinterpret_cast<void*>(iface), filter, *start,
+                                                *extension, vector, &ok);
     result.engine_ok = ok;
     result.engine_faulted = !ok;
     result.interval_count = count;

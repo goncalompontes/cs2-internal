@@ -285,6 +285,28 @@ struct TraceRay {
   float depth = 0.0F;  // the ray's length in world units
 };
 
+// How the engine is called. The **correct** mode is the call form the RE pinned;
+// the other two are deliberately wrong and exist to prove the probe can fail: a
+// wrong argument order and a wrong filter must produce a visibly wrong answer or a
+// **caught** fault — never a crash (the payload has no exception tables).
+enum class TraceAbi : std::uint8_t {
+  correct,       // the pinned call form
+  swapped,       // the start and the delta are swapped (a wrong argument order)
+  static_filter  // the engine's static default filter (the ~0 mask) instead of the bullet's
+};
+
+[[nodiscard]] inline auto to_string(TraceAbi abi) noexcept -> const char* {
+  switch (abi) {
+    case TraceAbi::correct:
+      return "correct";
+    case TraceAbi::swapped:
+      return "swapped";
+    case TraceAbi::static_filter:
+      return "static_filter";
+  }
+  return "correct";
+}
+
 // Is a fan of `count` rays within the probe's bounds? The command **refuses** a
 // fan that is not: a diagnostic must not be able to stall the game.
 [[nodiscard]] inline auto trace_fan_size_ok(int count) noexcept -> bool {
@@ -324,6 +346,7 @@ struct TraceRayResult {
 struct TraceProbeRun {
   bool ok = false;       // the engine call succeeded
   bool faulted = false;  // a guarded fault was recovered (the probe's own health)
+  TraceAbi abi = TraceAbi::correct;  // how the engine was called
   std::uintptr_t iface = 0;
   std::uintptr_t filter = 0;
   std::int64_t filter_mask = 0;
@@ -530,9 +553,12 @@ struct TraceProbeRun {
 
 // The probe: our occluder set's answer and the engine's own answer for the same rays,
 // plus the difference. `invoke == false` fills the read-only diagnostics only (no
-// engine call). The engine call must run on a **game thread** (docs/handoff.md: an
-// engine call that reaches tier0's allocator faults on the payload's own thread), so
-// the caller runs this from the game thread's sink.
-[[nodiscard]] auto probe_trace(const std::vector<TraceRay>& rays, bool invoke) -> TraceProbeRun;
+// engine call). `abi` selects the call form: the pinned one, or one of the
+// deliberately wrong ones that prove the probe can fail. The engine call must run
+// on a **game thread** (docs/handoff.md: an engine call that reaches tier0's
+// allocator faults on the payload's own thread), so the caller runs this from the
+// game thread's sink.
+[[nodiscard]] auto probe_trace(const std::vector<TraceRay>& rays, bool invoke,
+                               TraceAbi abi = TraceAbi::correct) -> TraceProbeRun;
 
 }  // namespace cs2::control
