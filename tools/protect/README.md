@@ -1013,9 +1013,12 @@ entry:
 ```
 
 * The **scratch** holds the arguments of the call, in the call's order. The
-  hidden pointer is the **first** cell: in LLVM IR the hidden pointer is an
+  hidden pointer is one of the cells — in LLVM IR the hidden pointer is an
   *explicit* argument of the call, so the scratch already holds it in the
-  right place, and the thunk passes it **unchanged**.
+  right place, and the thunk passes it **unchanged**. It is not always the
+  *first* cell: a member function takes the `this` pointer first and the
+  hidden pointer after it, and the `sret` attribute is what says which
+  parameter it is.
 * The scratch lives in the **caller's** frame, next to the temporary the
   callee writes through. The temporary is the caller's: the callee writes
   into the caller's stack, and the interpreter's frame is not involved.
