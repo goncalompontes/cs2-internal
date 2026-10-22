@@ -484,8 +484,9 @@ whether the answer means anything:
    `engine.answer_missing == false` and `difference.engine_answer_usable == true`.
    If either is false, the verdict is `unknown` and **nothing can be concluded** —
    the instrument is broken (not the game). The same goes for
-   `engine.faulted == true`. **And `engine.refused` must be false**: a refused probe
-   measured nothing at all.
+   `engine.faulted == true` (which also covers `engine.overrun`: the engine
+   wrote past the results buffer). **And `engine.refused` must be false**: a
+   refused probe measured nothing at all.
 2. **A verdict of `agrees` with an empty engine list must be impossible** — and it
    is: the difference is computed over the engine's intervals, and when they were
    dropped the verdict is `unknown`. If a live run ever shows `agrees` with
@@ -515,8 +516,8 @@ still open. The measurement settles it, and this is how to read the result:
 | the probe says | the world geometry is lost at |
 |---|---|
 | `engine.refused` is true | **nothing was measured** — the probe refused while the world's cache was cold (`engine.refusal_reason == "world_cache_cold"`). Warm the cache (the heatmap, or the ragebot's own enumeration) and run it again. This is **not** a geometry loss. |
-| `engine.answer_missing` is true (or the verdict is `unknown`) | **the instrument is broken** — the engine's answer was dropped (the call faulted, or the container did not hold the buffer the probe handed it). **Nothing can be concluded**; re-run. A `faulted: true` means the instrument, not the game. |
-| `engine.faulted` is true | the engine call faulted (the guard caught it) — the instrument is broken, not the game |
+| `engine.answer_missing` is true (or the verdict is `unknown`) | **the instrument is broken** — the engine's answer was dropped (the call faulted, the container did not hold the buffer the probe handed it, the count was out of range, or the engine **overran** the results buffer and the canary tripped). **Nothing can be concluded**; re-run. A `faulted: true` means the instrument, not the game. |
+| `engine.faulted` is true | the instrument is broken, not the game: the engine call faulted (the guard caught it) **or** the engine wrote past the results buffer (`engine.overrun` says which). **Nothing can be concluded**; re-run. |
 | the engine's intervals are empty **and** ours is empty | the ray misses everything — **not** a geometry loss (aim elsewhere) |
 | `engine_only` (the engine found spans, we found nothing for them) | **3** (the shapes are parsed but dropped: the cluster cap, the compound skip, the BVH's broad phase, the per-query selection) or **5** (projected, but the ray does not hit them) or **6** (the engine sees something we have no shape for at all) — the `difference.engine_only` entries say *which* span, and the ray's `ours` list says what we had |
 | `ours_only` (we found solids the engine did not report) | the **over-inclusion** the enumeration is known for (a body-box overlap is a superset) — not a loss |
@@ -539,6 +540,7 @@ without re-running the game.
 | key | what it means |
 |---|---|
 | `engine.rays_ok` / `engine.rays_faulted` | how many rays the engine answered, and how many faulted |
+| `engine.overrun` / `engine.rays_overrun` | whether the engine wrote **past** the results buffer (the canary tripped) and how many rays it did it for. The affected rays' answers are **refused** — the records are not ours to read |
 | `engine.filter_mask` / `filter_group` / `filter_flags` | the filter **actually** passed (in the `static_filter` mode: the engine's static one, not the bullet's) |
 | `engine.occluder_cap` / `occluders_truncated` | how many of our solids the probe projects at most, and whether the enumeration produced more |
 | `engine.world_cached` | whether the static world body was already parsed. **`false` means the probe REFUSED** (see `engine.refused`) — it does not pay the world's parse (10k brush shapes) inside the input hook |
@@ -551,8 +553,11 @@ without re-running the game.
 ### The probe's bounds (it must not be able to stall the game)
 
 * **8 rays** per command (`count`), **64 intervals** published per ray;
-* the results buffer is **fixed** (256 records + 64 records of slack) and the
-  engine is given the **external-buffer** bit, so it never allocates;
+* the results buffer is **fixed** (256 records + 256 records of slack = 512
+  records, 28 672 bytes) and the engine is given the **external-buffer** bit, so
+  it never allocates. It is **not** on the game's stack — the probe runs in the
+  game's input path — and a **canary** after the records detects an overrun:
+  a tripped canary publishes `engine.overrun` and **refuses** the answer;
 * the projections are capped at **256** solids;
 * the enumeration runs **once per command**, never per tick;
 * the probe **refuses** while the world's cache is cold, so it never pays the

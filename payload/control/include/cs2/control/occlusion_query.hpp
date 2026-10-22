@@ -223,15 +223,35 @@ inline constexpr std::size_t TRACE_INTERVAL_ENTER_EXIT = 0x32;
 // The probe's bounds: a diagnostic must not be able to stall the game.
 inline constexpr int TRACE_MAX_RAYS = 8;
 inline constexpr int TRACE_MAX_INTERVALS = 64;
-// The results buffer's capacity, in interval records. The engine's own bullet path
-// sizes the same container for 64 entries; this is four times that, so a dense scene
-// cannot make the engine reach past the buffer.
+// The results buffer's **advertised** capacity, in interval records. The engine's
+// own bullet path sizes the same container for 64 entries and grows it; the probe
+// cannot let it grow (the external-buffer bit switches the growth path off), so
+// the probe provides the room itself.
 inline constexpr int TRACE_INTERVAL_CAPACITY = 256;
 // The slack past the advertised capacity. The engine appends **at** `data[count]`
 // (it increments the count afterwards), so a trace that produced more records than
-// the capacity would write past the end of the buffer. The slack absorbs that, and
-// the probe reports the overflow loudly (`intervals_overflow`) instead of hiding it.
-inline constexpr int TRACE_INTERVAL_SLACK = 64;
+// the capacity would write past the end of the records. The slack absorbs that,
+// and the **canary** (below) is what makes an overrun visible instead of silent.
+inline constexpr int TRACE_INTERVAL_SLACK = 256;
+// The records the buffer holds, in total.
+//
+// **The sizing.** The engine's own bullet path starts the same container at **64**
+// records and grows it — so the engine expects a ray to cross a few dozen solids
+// (each crossed solid contributes an "enter" and a "leave" record). 512 records
+// are **eight times** that: 256 solids crossed, which is two orders of magnitude
+// beyond what a bullet ray does. It is **not** a proof — the engine has no hard
+// limit, and its growth is switched off, so a pathological trace could still
+// overrun. That is what the canary is for: the bound is not proved, it is
+// **watched**.
+inline constexpr int TRACE_INTERVAL_RECORDS = TRACE_INTERVAL_CAPACITY + TRACE_INTERVAL_SLACK;
+// The canary's size, in bytes. It sits **after** the records, so it is both the
+// detector (the first byte past the records changes) and a short runway that
+// keeps a modest overshoot inside the payload's own image instead of letting it
+// run into whatever follows.
+inline constexpr std::size_t TRACE_INTERVAL_CANARY_SIZE = 4096;
+// The canary's pattern. A byte the engine never writes, so any change to it is
+// the engine's.
+inline constexpr std::uint8_t TRACE_INTERVAL_CANARY_BYTE = 0xA5;
 // How many of **our** solids the probe projects for a ray. The projection is the
 // expensive half of the probe's work (a convex hull per solid), so it is bounded
 // like the rest of the probe.
@@ -298,6 +318,64 @@ inline constexpr std::size_t TRACE_VECTOR_FLAGS = 0x14;
 // The flags' two top bits (see above).
 inline constexpr std::int32_t TRACE_VECTOR_EXTERNAL_BUFFER = 0x40000000;
 inline constexpr std::int32_t TRACE_VECTOR_NOT_OWNED = 0x80000000;
+
+// The engine's results buffer: the interval records, then the canary.
+//
+// **Not on the game's stack.** The probe runs on the game's **main thread**, in
+// its input path, and tens of kilobytes of stack are not the payload's to spend —
+// and an overrun of a stack buffer is a silent corruption of the game's input
+// path, which the fault guard **cannot** catch (it is not an unmapped page).
+//
+// **Not a local either.** It is a function-local static behind a typed accessor:
+// the ADR-0010 escape hatch the payload already uses for the ESP's provider
+// registry (`cs2/features/esp_cache.hpp`) — constant-initialised (the mapped
+// image never runs the CRT's static-init guard) and trivially destructible (no
+// atexit handler is registered). The injector maps the whole image with
+// `MEM_COMMIT`, so the OS zeroes it.
+//
+// The **canary** sits immediately after the records. The engine's growth is
+// switched off (the external-buffer bit), so a trace with more records than the
+// buffer holds writes past the end of the records. The canary is re-armed before
+// every engine call and checked immediately after it — **before** the count is
+// trusted — so an overrun is visible and costs the answer.
+struct alignas(16) TraceIntervalBuffer {
+  unsigned char records[TRACE_INTERVAL_RECORDS * TRACE_INTERVAL_SIZE];
+  unsigned char canary[TRACE_INTERVAL_CANARY_SIZE];
+};
+static_assert(offsetof(TraceIntervalBuffer, canary) == TRACE_INTERVAL_RECORDS * TRACE_INTERVAL_SIZE,
+              "the canary sits immediately after the records");
+static_assert(sizeof(TraceIntervalBuffer) ==
+                  TRACE_INTERVAL_RECORDS * TRACE_INTERVAL_SIZE + TRACE_INTERVAL_CANARY_SIZE,
+              "the buffer is the records and the canary, and nothing else");
+
+// The buffer's storage: a function-local static behind a typed accessor (the
+// ADR-0010 escape hatch, `cs2/features/esp_cache.hpp`). The accessor is defined
+// in the query's own source, so there is exactly one buffer in the image.
+[[nodiscard]] auto trace_interval_buffer() noexcept -> TraceIntervalBuffer&;
+
+// Arm the canary: the bytes after the records carry the pattern, so a write past
+// the end of the records is visible.
+inline void arm_trace_canary(TraceIntervalBuffer* buffer) noexcept {
+  if (buffer == nullptr) {
+    return;
+  }
+  for (std::size_t i = 0; i < TRACE_INTERVAL_CANARY_SIZE; ++i) {
+    buffer->canary[i] = TRACE_INTERVAL_CANARY_BYTE;
+  }
+}
+
+// Is the canary still intact? A write past the end of the records changed it.
+//
+// This is the check that makes the "bounded" claim true in the only sense that
+// can be made true: the probe **cannot publish an answer it cannot vouch for**.
+[[nodiscard]] inline auto trace_canary_intact(const TraceIntervalBuffer& buffer) noexcept -> bool {
+  for (std::size_t i = 0; i < TRACE_INTERVAL_CANARY_SIZE; ++i) {
+    if (buffer.canary[i] != TRACE_INTERVAL_CANARY_BYTE) {
+      return false;
+    }
+  }
+  return true;
+}
 
 // The engine's answer for one ray: one interval record.
 struct TraceInterval {
@@ -447,12 +525,16 @@ struct TraceRayResult {
   TraceRay ray{};
   bool engine_ok = false;           // the engine call returned (no fault)
   bool engine_faulted = false;      // a guarded fault was recovered
+  // The engine wrote **past** the results buffer (the canary tripped): the answer
+  // cannot be vouched for, and it is refused like a dropped one.
+  bool engine_overrun = false;
   int interval_count = 0;           // the intervals the engine returned
   bool intervals_overflow = false;  // more intervals than the probe publishes
   // The engine's answer could **not** be read: the call faulted, the container did
   // not hold the buffer the probe handed it (the engine reallocated — which the
-  // external-buffer flag forbids), or the count was out of range. The verdict is
-  // then `unknown`; it is never computed over an empty engine list.
+  // external-buffer flag forbids), the count was out of range, or the buffer was
+  // overrun. The verdict is then `unknown`; it is never computed over an empty
+  // engine list.
   bool engine_answer_missing = false;
   std::vector<TraceInterval> intervals;
   std::vector<TraceOccluderHit> ours;
@@ -462,9 +544,15 @@ struct TraceRayResult {
 // The whole probe: the engine's health, our occluder set and the per-ray answers.
 struct TraceProbeRun {
   bool ok = false;                   // at least one ray's engine call returned
-  bool faulted = false;              // at least one ray's engine call faulted
+  // The **instrument** failed: a ray's engine call faulted, **or** the engine wrote
+  // past the results buffer (the canary tripped). Both mean the answer cannot be
+  // trusted — `overrun` says which.
+  bool faulted = false;
+  // At least one ray's engine wrote past the results buffer.
+  bool overrun = false;
   int rays_ok = 0;                   // the rays whose engine call returned
   int rays_faulted = 0;              // the rays whose engine call faulted
+  int rays_overrun = 0;              // the rays whose results buffer was overrun
   TraceAbi abi = TraceAbi::correct;  // how the engine was called
   std::uintptr_t iface = 0;
   std::uintptr_t filter = 0;

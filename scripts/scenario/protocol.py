@@ -1094,11 +1094,16 @@ class TraceRayEngineDict(TypedDict):
 
     ok: bool
     faulted: bool
+    #: The engine wrote **past** the results buffer (the canary tripped): the
+    #: records are not ours to read, so the answer is refused like a dropped one
+    #: (``answer_missing`` is true).
+    overrun: bool
     interval_count: int
     intervals_overflow: bool
     #: The engine's answer could **not** be read (the call faulted, the container
-    #: did not hold the buffer the probe handed it, or the count was out of
-    #: range). The difference's verdict is then ``"unknown"`` — never ``"agrees"``.
+    #: did not hold the buffer the probe handed it, the count was out of range, or
+    #: the buffer was overrun). The difference's verdict is then ``"unknown"`` —
+    #: never ``"agrees"``.
     answer_missing: bool
     #: The interval record's surface is unmapped (only two of its fields are
     #: pinned). The flag says it once for the whole ray.
@@ -1133,14 +1138,21 @@ class TraceProbeEngineDict(TypedDict):
     """The probe's own health: whether the engine call succeeded.
 
     ``ok`` is "**at least one** ray's engine call returned" and ``faulted`` is
-    "at least one ray's engine call faulted"; ``rays_ok``/``rays_faulted`` give
-    the counts. A fault is the **instrument** failing, not the game.
+    "the **instrument** failed": a ray's engine call faulted, **or** the engine
+    wrote past the results buffer (the canary tripped). ``overrun`` says which
+    of the two it was; ``rays_ok``/``rays_faulted``/``rays_overrun`` give the
+    counts. A fault is the **instrument** failing, not the game.
     """
 
     ok: bool
     faulted: bool
+    #: Whether the engine wrote **past** the results buffer (the canary tripped).
+    #: The affected rays' answers are refused.
+    overrun: bool
     rays_ok: int
     rays_faulted: int
+    #: The rays whose results buffer was overrun.
+    rays_overrun: int
     iface: str
     filter: str
     filter_mask: int

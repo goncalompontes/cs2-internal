@@ -108,6 +108,7 @@ def trace_probe_answer() -> TraceProbeResult:
         "engine": {
             "ok": True,
             "faulted": False,
+            "overrun": False,
             "interval_count": 2,
             "intervals_overflow": False,
             "answer_missing": False,
@@ -129,8 +130,10 @@ def trace_probe_answer() -> TraceProbeResult:
         "engine": {
             "ok": True,
             "faulted": False,
+            "overrun": False,
             "rays_ok": 1,
             "rays_faulted": 0,
+            "rays_overrun": 0,
             "iface": "0x7ff600000000",
             "filter": "0x7ff600001000",
             "filter_mask": 0x1C300B,

@@ -616,7 +616,56 @@ void test_target_box() {
   expect(covers, "the fan's target box covers every far end");
 }
 
-// --- 9. the cold-cache refusal -------------------------------------------------
+// --- 9. the results buffer and its canary ---------------------------------------
+//
+// The engine appends **at** `data[count]` and its growth is switched off (the
+// external-buffer bit), so a trace with more records than the buffer holds writes
+// **past** the end of the records. The buffer therefore carries a **canary**,
+// which is re-armed before every engine call and checked immediately after it —
+// before the count is trusted.
+//
+// The bound itself is **not** proved (the engine has no hard limit): what the
+// canary makes true is that an overrun is **visible** and **costs the answer**.
+void test_the_results_buffer_and_its_canary() {
+  // The buffer's layout: the records, then the canary, immediately after them.
+  static_assert(offsetof(cs2::control::TraceIntervalBuffer, canary) ==
+                    cs2::control::TRACE_INTERVAL_RECORDS * cs2::control::TRACE_INTERVAL_SIZE,
+                "the canary sits immediately after the records");
+  static_assert(sizeof(cs2::control::TraceIntervalBuffer) ==
+                    cs2::control::TRACE_INTERVAL_RECORDS * cs2::control::TRACE_INTERVAL_SIZE +
+                        cs2::control::TRACE_INTERVAL_CANARY_SIZE,
+                "the buffer is the records and the canary, and nothing else");
+
+  // The sizing: the records the buffer holds, against the engine's own bullet
+  // path (64 entries, and it grows) and against the published maximum.
+  expect(cs2::control::TRACE_INTERVAL_RECORDS ==
+             cs2::control::TRACE_INTERVAL_CAPACITY + cs2::control::TRACE_INTERVAL_SLACK,
+         "the buffer holds the advertised capacity plus the slack");
+  expect(cs2::control::TRACE_INTERVAL_RECORDS >= cs2::control::TRACE_MAX_INTERVALS,
+         "the buffer is at least as large as the published maximum");
+  expect(cs2::control::TRACE_INTERVAL_RECORDS >= 8 * 64,
+         "the buffer is at least eight times the engine's own bullet sizing (64)");
+  expect(cs2::control::TRACE_INTERVAL_SLACK > 0, "the buffer carries the slack");
+  expect(cs2::control::TRACE_INTERVAL_CANARY_SIZE > 0, "the buffer carries a canary");
+
+  // The canary: armed, intact, and **tripped** by a write past the records.
+  cs2::control::TraceIntervalBuffer buffer{};
+  cs2::control::arm_trace_canary(&buffer);
+  expect(cs2::control::trace_canary_intact(buffer), "an armed canary is intact");
+  // A write one byte **past** the last record is the overrun the canary is for.
+  buffer.canary[0] = 0x00U;
+  expect(!cs2::control::trace_canary_intact(buffer),
+         "a write past the records trips the canary");
+  // ...and a write inside the records does not.
+  cs2::control::arm_trace_canary(&buffer);
+  buffer.records[cs2::control::TRACE_INTERVAL_RECORDS * cs2::control::TRACE_INTERVAL_SIZE - 1] =
+      0x11U;
+  expect(cs2::control::trace_canary_intact(buffer), "a write inside the records does not trip it");
+  // The canary's pattern is a byte the engine never writes.
+  expect(cs2::control::TRACE_INTERVAL_CANARY_BYTE != 0x00U, "the canary's pattern is not zero");
+}
+
+// --- 10. the cold-cache refusal -------------------------------------------------
 //
 // The probe **refuses** to answer while the world's static body is not parsed:
 // paying the world's parse (10k brush shapes) inside the game's CreateMove hook is
@@ -714,6 +763,39 @@ void test_service_uses_the_rules(const char* root) {
          "the interval records are read with the reader");
   expect(probe.find("set_occlusion_exclude_pawns(") != std::string::npos,
          "the probe excludes the players itself");
+
+  // The results buffer: **not** a local array on the game's stack (the probe runs
+  // on the game's main thread, in its input path), and the canary armed before
+  // the engine call and checked after it.
+  expect(probe.find("unsigned char interval_buffer[") == std::string::npos,
+         "the results buffer is not a local array on the game's stack");
+  expect(probe.find("trace_interval_buffer()") != std::string::npos,
+         "the probe takes the shared results buffer");
+  expect(probe.find("vector.data = buffer.records") != std::string::npos,
+         "the probe hands the engine the buffer's records");
+  const std::size_t arm_at = flat_probe.find("arm_trace_canary(");
+  const std::size_t engine_call_at = flat_probe.find("run_trace_query(");
+  const std::size_t check_at = flat_probe.find("trace_canary_intact(");
+  expect(arm_at != std::string::npos, "the probe arms the canary");
+  expect(engine_call_at != std::string::npos, "the probe calls the engine");
+  expect(check_at != std::string::npos, "the probe checks the canary");
+  expect(arm_at != std::string::npos && engine_call_at != std::string::npos &&
+             arm_at < engine_call_at,
+         "the canary is armed **before** the engine call");
+  expect(check_at != std::string::npos && engine_call_at != std::string::npos &&
+             check_at > engine_call_at,
+         "the canary is checked **after** the engine call");
+  // The count is checked against the buffer's **real** size, and an overrun
+  // **costs the answer** — the probe cannot publish an answer it cannot vouch
+  // for.
+  expect(flat_probe.find("count <= TRACE_INTERVAL_RECORDS") != std::string::npos,
+         "the count is checked against the buffer's real size");
+  expect(flat_probe.find(
+             "engine_answer_missing = !ok || !buffer_kept || !count_usable || !buffer_intact") !=
+             std::string::npos,
+         "an overrun refuses the answer");
+  expect(flat_probe.find("run.overrun = run.overrun || !buffer_intact") != std::string::npos,
+         "an overrun is published");
   expect(probe.find("occlusion_world_cache_ready()") != std::string::npos,
          "the probe reads whether the world's cache is cold");
 
@@ -780,6 +862,7 @@ auto main(int argc, char** argv) -> int {
   test_difference();
   test_bounds();
   test_target_box();
+  test_the_results_buffer_and_its_canary();
   test_the_cold_cache_refusal();
   if (argc >= 2) {
     test_service_uses_the_rules(argv[1]);

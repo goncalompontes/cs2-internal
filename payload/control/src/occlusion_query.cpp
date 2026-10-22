@@ -1383,6 +1383,28 @@ auto run_trace_query(TraceLineIntervalsFn entry, void* iface, void* filter, cons
 
 }  // namespace
 
+// The engine's results buffer.
+//
+// A **function-local static** behind a typed accessor — the ADR-0010 escape
+// hatch the payload already uses for the ESP's provider registry
+// (`cs2/features/esp_cache.hpp`): constant-initialised (the mapped image never
+// runs the CRT's static-init guard) and trivially destructible (no atexit
+// handler is registered). The injector maps the whole image with `MEM_COMMIT`, so
+// the OS zeroes it.
+//
+// It is **shared**, and that is safe because the probe is **serial**: it runs on
+// the game's main thread, inside one `on_game_thread` call, and the control
+// thread arms one request at a time.
+//
+// It is **not** on the game's stack: the probe runs in the game's input path, and
+// 32 KB of stack there is not the payload's to spend — and an overrun of a stack
+// buffer is a silent corruption of the game's input path, which the fault guard
+// cannot catch (it is not an unmapped page).
+auto trace_interval_buffer() noexcept -> TraceIntervalBuffer& {
+  static TraceIntervalBuffer buffer{};
+  return buffer;
+}
+
 void set_occlusion_exclude_pawns(const std::uintptr_t* pawns, int count) noexcept {
   g_exclude_pawn_count = 0;
   if (pawns == nullptr) {
@@ -1712,12 +1734,12 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
     hulls.push_back(static_cast<int>(index));
   }
 
-  // The engine's results buffer: a **local** scratch array (the payload adds no
-  // global mutable state — ADR-0010). It holds the advertised capacity plus the
-  // slack, because the engine appends **at** `data[count]`: a trace that produced
-  // more records than the capacity would otherwise write past the end.
-  alignas(16) unsigned char interval_buffer[(TRACE_INTERVAL_CAPACITY + TRACE_INTERVAL_SLACK) *
-                                            k_trace_interval_stride] = {};
+  // The engine's results buffer: **not** a local and **not** on the game's stack
+  // (the probe runs on the game's main thread, in its input path). It holds the
+  // advertised capacity plus the slack, because the engine appends **at**
+  // `data[count]`: a trace that produced more records than the capacity would
+  // otherwise write past the end.
+  TraceIntervalBuffer& buffer = trace_interval_buffer();
 
   for (const TraceRay& ray : rays) {
     TraceRayResult result;
@@ -1746,8 +1768,13 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
     // overlap query's `CUtlVector`, whose record pointer sits at `@+0x10`. With the
     // external-buffer bit set (bit 30 of the flags) both of the engine's writers
     // jump straight past their growth, so the engine never reaches its allocator.
+    //
+    // The canary is armed **before** the call: the engine's growth is switched off,
+    // so a trace with more records than the buffer holds writes past the end of the
+    // records, and the canary is what makes that visible.
+    arm_trace_canary(&buffer);
     TraceResultVector vector;
-    vector.data = interval_buffer;
+    vector.data = buffer.records;
     vector.capacity = TRACE_INTERVAL_CAPACITY;
     vector.flags = TRACE_VECTOR_EXTERNAL_BUFFER | TRACE_VECTOR_NOT_OWNED;
     const Vec3 delta = ray.end - ray.start;
@@ -1760,24 +1787,35 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
     bool ok = false;
     const std::int32_t count = run_trace_query(trace_entry, reinterpret_cast<void*>(iface), filter,
                                                *start, *extension, vector, &ok);
+    // The canary is checked **before** the count is trusted: an overrun means the
+    // engine wrote past the buffer, so the records are not ours to read.
+    const bool buffer_intact = trace_canary_intact(buffer);
     result.engine_ok = ok;
     result.engine_faulted = !ok;
+    result.engine_overrun = !buffer_intact;
     result.interval_count = count;
     if (ok) {
       ++run.rays_ok;
     } else {
       ++run.rays_faulted;
     }
+    if (!buffer_intact) {
+      ++run.rays_overrun;
+    }
     run.ok = run.ok || ok;
-    run.faulted = run.faulted || !ok;
+    // The **instrument** failed: the call faulted, or the engine wrote past the
+    // buffer. Both mean the answer cannot be vouched for.
+    run.faulted = run.faulted || !ok || !buffer_intact;
+    run.overrun = run.overrun || !buffer_intact;
     // The engine's answer is usable only when the call returned **and** the container
-    // still holds the buffer we handed it. A reallocated buffer would mean the
-    // engine grew the vector (it must not) or that the container's layout is wrong —
-    // either way the records are not ours to read, and the difference must not be
-    // computed over an empty engine list.
-    const bool buffer_kept = vector.data == interval_buffer;
-    const bool count_usable = count >= 0 && count <= TRACE_INTERVAL_CAPACITY + TRACE_INTERVAL_SLACK;
-    result.engine_answer_missing = !ok || !buffer_kept || !count_usable;
+    // still holds the buffer we handed it **and** the buffer was not overrun. A
+    // reallocated buffer would mean the engine grew the vector (it must not) or that
+    // the container's layout is wrong; an overrun means the engine wrote past the
+    // records. Either way the records are not ours to read, and the difference must
+    // not be computed over an empty engine list.
+    const bool buffer_kept = vector.data == buffer.records;
+    const bool count_usable = count >= 0 && count <= TRACE_INTERVAL_RECORDS;
+    result.engine_answer_missing = !ok || !buffer_kept || !count_usable || !buffer_intact;
     if (!result.engine_answer_missing && count > 0) {
       const auto* records = reinterpret_cast<const std::uint8_t*>(vector.data);
       const TraceIntervalBudget budget = trace_interval_budget(count);

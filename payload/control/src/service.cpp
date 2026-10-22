@@ -4636,12 +4636,16 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   payload.set("max_intervals", Json::integer(TRACE_MAX_INTERVALS));
   payload.set("abi", Json::string(to_string(run.abi)));
   // The probe's own health: whether the engine call succeeded, and loudly whether it
-  // faulted (the guard caught it — a probe that faults is a *result*, not a crash).
+  // faulted (the guard caught it — a probe that faults is a *result*, not a crash) or
+  // whether the engine wrote past the results buffer (the canary tripped — the
+  // answer cannot be vouched for, so it is refused).
   Json engine = Json::object();
   engine.set("ok", Json::boolean(run.ok));
   engine.set("faulted", Json::boolean(run.faulted));
+  engine.set("overrun", Json::boolean(run.overrun));
   engine.set("rays_ok", Json::integer(run.rays_ok));
   engine.set("rays_faulted", Json::integer(run.rays_faulted));
+  engine.set("rays_overrun", Json::integer(run.rays_overrun));
   engine.set("iface", Json::string(hex(run.iface)));
   engine.set("filter", Json::string(hex(run.filter)));
   engine.set("filter_mask", Json::integer(run.filter_mask));
@@ -4684,6 +4688,9 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
     Json engine_json = Json::object();
     engine_json.set("ok", Json::boolean(ray.engine_ok));
     engine_json.set("faulted", Json::boolean(ray.engine_faulted));
+    // The engine wrote **past** the results buffer (the canary tripped): the
+    // records are not ours to read, so the answer is refused like a dropped one.
+    engine_json.set("overrun", Json::boolean(ray.engine_overrun));
     engine_json.set("interval_count", Json::integer(ray.interval_count));
     engine_json.set("intervals_overflow", Json::boolean(ray.intervals_overflow));
     // The engine's answer could not be read (the call faulted, the container did not

@@ -456,9 +456,36 @@ is what made the engine write through a null pointer.
 
 Because the engine appends **at** `data[count]` (it increments the count
 afterwards), a trace that produced more records than the advertised capacity
-would write past the end of the buffer: the probe's buffer carries a slack of 64
-records, and the answer publishes `intervals_overflow` when the count exceeds the
-published maximum.
+would write past the end of the buffer — and the engine's growth is switched off
+(the external-buffer bit), so nothing stops it. The probe therefore does three
+things about it:
+
+* **The buffer is not on the game's stack.** The probe runs on the game's **main
+  thread**, in its input path, and 32 KB of stack there is not the payload's to
+  spend. It is a function-local static behind a typed accessor — the ADR-0010
+  escape hatch the payload already uses for the ESP's provider registry
+  (`cs2/features/esp_cache.hpp`): constant-initialised, so the mapped image
+  never runs the CRT's static-init guard, and trivially destructible, so no
+  atexit handler is registered. The injector maps the whole image with
+  `MEM_COMMIT`, so the OS zeroes it (the buffer is in the image's `.bss`).
+* **It is sized for a count the engine cannot plausibly exceed.** The buffer
+  holds **512** interval records (28 672 bytes): the engine's own bullet path
+  sizes the same container for **64** records and grows it — so the engine
+  expects a ray to cross a few dozen solids (each crossed solid contributes an
+  "enter" and a "leave" record) — and 512 records are **eight times** that, i.e.
+  256 solids crossed. That is **not a proof**: the engine has no hard limit.
+* **An overrun is detected, and it costs the answer.** A **canary** sits
+  immediately after the records. It is re-armed before every engine call and
+  checked immediately after it — **before** the count is trusted — so a write
+  past the records is visible. A tripped canary publishes `engine.overrun`
+  (and `engine.faulted`), marks the ray's `engine.answer_missing`, and refuses
+  the answer: the verdict is `unknown`, never a comparison over records the
+  probe cannot vouch for.
+
+So the "bounded" claim is not "the engine cannot overrun it" (that is not
+provable) but "**the probe cannot publish an answer it cannot vouch for**".
+The answer also publishes `intervals_overflow` when the count exceeds the
+published maximum (64 records per ray).
 
 **The fourth argument is the EXTENSION (`end - start`), not the absolute end
 point.** The engine's own caller fills it with `normalize(direction) * range`
