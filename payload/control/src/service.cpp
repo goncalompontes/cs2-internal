@@ -81,19 +81,20 @@ struct WeaponFireOffsets {
   std::uint32_t tick_base = 0x6b8;
 };
 
-auto weapon_fire_offsets() -> const WeaponFireOffsets& {
-  // A plain local: a function-local static would need the CRT's TLS guard
-  // (`_tls_index`), which gives a manually mapped image a TLS directory the
-  // injector cannot service. The struct is six integers; building it per call
-  // is cheaper than the guard would be.
-  const WeaponFireOffsets offsets{
+// Returned **by value**: this used to return a reference to a function-local, i.e.
+// a dangling one (the same defect `vdata_offsets()` had). Live, that read
+// `clip = 642732280` and `m_bInReload = 1` for a loaded Glock, so the fire gate
+// refused **every** shot as `reloading` while the state reader read the real clip.
+// Five integers cost nothing to copy, and a local is what the mapped image can have
+// (a function-local `static` would need the CRT's TLS guard).
+[[nodiscard]] auto weapon_fire_offsets() noexcept -> WeaponFireOffsets {
+  return WeaponFireOffsets{
       .clip1 = schema_field("C_BasePlayerWeapon", "m_iClip1", 0x1928),
       .in_reload = schema_field("C_CSWeaponBase", "m_bInReload", 0x1a3c),
       .deploy_tick = schema_field("C_CSWeaponBase", "m_nDeployTick", 0x1a40),
       .next_attack_tick = schema_field("C_BasePlayerWeapon", "m_nNextPrimaryAttackTick", 0x1918),
       .tick_base = schema_field("CBasePlayerController", "m_nTickBase", 0x6b8),
   };
-  return offsets;
 }
 
 // The payload's millisecond clock — the same clock the event log stamps the
@@ -147,7 +148,7 @@ constexpr std::uintptr_t k_vdata_range = 0x830;
 
 // The debug view's line count, for the answer that turns it on (the column itself
 // is bounded by the renderer: `Overlay::append_debug_lines`).
-constexpr int k_debug_view_lines = 8;
+constexpr int k_debug_view_lines = 10;
 
 // Microsecond wall clock (the fire path uses it for its press interval).
 auto now_us() noexcept -> std::uint64_t {
@@ -1691,6 +1692,14 @@ auto Service::effective_rage_tuning(const char* active_weapon) noexcept -> RageT
 // 10 equipment, … are excluded (knife-bot is a later feature). An unknown type (-1)
 // falls back to a designer-name deny-list.
 [[nodiscard]] auto is_rage_weapon(int weapon_type, const std::string& name) noexcept -> bool {
+  // A value outside the engine's `SWeaponType` range is a **bad read**, not a fact
+  // (the C4's VData is a different class, and a dangling offset read once turned
+  // `m_WeaponType` into `642683896` for every weapon). Treat it as unknown and let
+  // the designer name decide: mapping garbage to "not a weapon" is how the ragebot
+  // refused every rifle for a session without saying why.
+  if (weapon_type < -1 || weapon_type > 10) {
+    weapon_type = -1;
+  }
   if (weapon_type >= 1 && weapon_type <= 6) {
     return true;  // pistol / smg / rifle / shotgun / sniper / machinegun
   }
@@ -2268,10 +2277,14 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // tick's verdict on the status, or the operator reads a stale number under
   // another objective's name (`docs/ragebot.md` §13.7).
   publish_monte_carlo(MonteCarloState{});
+  // The solve's own numbers are cleared with the verdict: a tick that returns before
+  // the solve must not publish the previous tick's value as its own.
+  rage_solve_ran_.store(false, std::memory_order_relaxed);
   // Auto-scope is re-decided every tick; the same sink applies the transition (`+zoom`).
   rage_scope_wanted_.store(false);
   const bool forced = rage_force_.load();
   if (!rage_enabled_.load() && !forced) {
+    rage_solve_refusal_.store(static_cast<int>(SolveRefusal::disabled), std::memory_order_relaxed);
     input_.clear_rage_aim();
     return;
   }
@@ -2280,10 +2293,13 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // invocation is what drains the pending occlusion request and can make this gate pass.
   input_.refresh();
   if (!rage_occlusion_query_complete_.load(std::memory_order_relaxed)) {
+    rage_solve_refusal_.store(static_cast<int>(SolveRefusal::occlusion_query),
+                              std::memory_order_relaxed);
     input_.clear_rage_aim_keep_aux();
     return;
   }
   if (!snapshot.valid || !snapshot.local.has_value() || !snapshot.local->alive) {
+    rage_solve_refusal_.store(static_cast<int>(SolveRefusal::no_local), std::memory_order_relaxed);
     input_.clear_rage_aim();
     return;
   }
@@ -2292,6 +2308,8 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // Only real firearms are ragebot targets (`m_WeaponType`): the knife, C4, taser,
   // grenades and equipment are excluded (knife-bot is a later feature).
   if (!is_rage_weapon(local.weapon_type, local.weapon)) {
+    rage_solve_refusal_.store(static_cast<int>(SolveRefusal::not_a_weapon),
+                              std::memory_order_relaxed);
     input_.clear_rage_aim();
     return;
   }
@@ -2399,11 +2417,15 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     }
   }
   if (!engaged) {
+    rage_solve_refusal_.store(static_cast<int>(SolveRefusal::not_engaged),
+                              std::memory_order_relaxed);
     // Drop the aim but keep the predictive assists applied.
     input_.clear_rage_aim_keep_aux();
     return;
   }
   if (candidates.empty()) {
+    rage_solve_refusal_.store(static_cast<int>(SolveRefusal::no_candidates),
+                              std::memory_order_relaxed);
     input_.clear_rage_aim_keep_aux();
     return;
   }
@@ -2454,6 +2476,8 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     }
   }
   if (!multi.has_value() || multi->hitboxes.empty()) {
+    rage_solve_refusal_.store(static_cast<int>(SolveRefusal::no_hitboxes),
+                              std::memory_order_relaxed);
     input_.clear_rage_aim_keep_aux();
     return;
   }
@@ -2466,6 +2490,8 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
       return mode == 1 ? !head : head;
     });
     if (solve_input->hitboxes.empty()) {
+      rage_solve_refusal_.store(static_cast<int>(SolveRefusal::hitbox_filter),
+                                std::memory_order_relaxed);
       input_.clear_rage_aim_keep_aux();
       return;
     }
@@ -2475,21 +2501,79 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // backtracking poses. Only the solids whose AABB can lie between the eye and the
   // candidates are projected (the per-hull AABB is cached, `OcclusionHull::has_bounds`).
   {
+    // The projection set is filtered **per target**, not by the union of every
+    // hitbox. A solid can only occlude a hitbox if it lies in that hitbox's own
+    // eye→hitbox pyramid, and the enumeration already tags each solid with the
+    // target whose pyramid kept it (`OcclusionHull::target`), so a solid outside
+    // its own target's padded box cannot matter to that target. The union box was
+    // what made a dense solve project ~1500 solids a tick (and, with the per-hitbox
+    // cap, fail closed and never shoot).
+    struct TargetBox {
+      int target = -1;
+      game::Vec3 min{};
+      game::Vec3 max{};
+    };
+    constexpr float k_margin = 8.0F;
     game::Vec3 lo = solve_input->eye;
     game::Vec3 hi = solve_input->eye;
+    std::vector<TargetBox> boxes;
+    boxes.reserve(solve_input->hitboxes.size());
     for (const aim::Hitbox& hitbox : solve_input->hitboxes) {
       extend_box(lo, hi, hitbox);
+      game::Vec3 box_lo{};
+      game::Vec3 box_hi{};
+      hitbox_bounds(hitbox, box_lo, box_hi);
+      const auto same = std::find_if(boxes.begin(), boxes.end(), [&](const TargetBox& box) {
+        return box.target == hitbox.target;
+      });
+      if (same == boxes.end()) {
+        boxes.push_back(TargetBox{.target = hitbox.target, .min = box_lo, .max = box_hi});
+        continue;
+      }
+      same->min.x = (std::min)(same->min.x, box_lo.x);
+      same->min.y = (std::min)(same->min.y, box_lo.y);
+      same->min.z = (std::min)(same->min.z, box_lo.z);
+      same->max.x = (std::max)(same->max.x, box_hi.x);
+      same->max.y = (std::max)(same->max.y, box_hi.y);
+      same->max.z = (std::max)(same->max.z, box_hi.z);
     }
-    constexpr float k_margin = 8.0F;
+    for (TargetBox& box : boxes) {
+      box.min = game::Vec3{.x = box.min.x - k_margin, .y = box.min.y - k_margin,
+                           .z = box.min.z - k_margin};
+      box.max = game::Vec3{.x = box.max.x + k_margin, .y = box.max.y + k_margin,
+                           .z = box.max.z + k_margin};
+    }
     lo = game::Vec3{.x = lo.x - k_margin, .y = lo.y - k_margin, .z = lo.z - k_margin};
     hi = game::Vec3{.x = hi.x + k_margin, .y = hi.y + k_margin, .z = hi.z + k_margin};
+    // Could this solid occlude **any** hitbox of the solve? A tagged solid is only
+    // tested against its own target's box; an untagged (shared) one against all.
+    const auto relevant = [&boxes](const OcclusionHull& hull) -> bool {
+      if (!hull.has_bounds) {
+        return true;
+      }
+      for (const TargetBox& box : boxes) {
+        if (hull.target >= 0 && hull.target != box.target) {
+          continue;
+        }
+        if (hull.bounds_max.x < box.min.x || hull.bounds_min.x > box.max.x ||
+            hull.bounds_max.y < box.min.y || hull.bounds_min.y > box.max.y ||
+            hull.bounds_max.z < box.min.z || hull.bounds_min.z > box.max.z) {
+          continue;
+        }
+        return true;
+      }
+      return false;
+    };
     const std::uint64_t t_project = now_us();
     const std::scoped_lock lock(occlusion_mutex_);
     for (const OcclusionHull& hull : occlusion_hulls_) {
       if (hull.has_bounds &&
           (hull.bounds_max.x < lo.x || hull.bounds_min.x > hi.x || hull.bounds_max.y < lo.y ||
            hull.bounds_min.y > hi.y || hull.bounds_max.z < lo.z || hull.bounds_min.z > hi.z)) {
-        continue;  // cannot lie between the eye and the candidates
+        continue;  // outside the solve's whole volume: nothing to do
+      }
+      if (!relevant(hull)) {
+        continue;  // cannot occlude any hitbox of **this** solve
       }
       std::optional<aim::OccluderCell> cell;
       if (hull.kind == aim::SolidKind::sphere) {
@@ -2513,15 +2597,18 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
         solve_input->occlusion.push_back(std::move(*cell));
       }
     }
+    rage_project_us_.store(now_us() - t_project, std::memory_order_relaxed);
   }
-  // Temporary occlusion work bound (`PenetrationParams::max_occluders`). If this
-  // truncates a hitbox's candidates, `solve` fails closed; it never commits the partial
-  // damage score. Remove this cap only after the complete ray-query path is validated.
-  static constexpr int k_max_solve_occluders = 24;
+  // The per-hitbox work bound (`PenetrationParams::max_occluders`). It is a **hard**
+  // bound: the solver fails closed when it trips, so a solve over a dense area never
+  // commits a partial score — and a cap that trips on every tick is why the ragebot
+  // never shot. It is off by default now: the projection is filtered per target
+  // above and the fragment split drops a region as soon as the engine's penetration
+  // budget is spent, so the arrangement is bounded by what can actually block, not
+  // by the map's solid count. Kept as a setting for a regression, not as the fix.
+  int k_max_solve_occluders = 0;
   solve_input->penetration = aim::PenetrationModel::engine;
   solve_input->penetration_params.weapon_penetration = solve_input->weapon.penetration;
-  // Bound arrangement work temporarily. Overflow is surfaced as an incomplete solve, not
-  // accepted as an approximate aim. See `PenetrationParams::max_occluders`.
   solve_input->penetration_params.max_occluders = k_max_solve_occluders;
   rage_occluders_.store(static_cast<int>(solve_input->occlusion.size()));
   solve_input->pose_sigma = rage_sigma_.load();
@@ -2600,11 +2687,18 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   aim::SolveStats solve_stats;
   const std::uint64_t t_solve = now_us();
   const aim::SolveResult multi_result = aim::solve(*solve_input, &solve_stats);
+  rage_solve_us_.store(now_us() - t_solve, std::memory_order_relaxed);
   // Aggregate the solve breakdown here (not after the backtrack) so a gated/early-return
   // frame still attributes its cost.
   rage_occlusion_candidates_complete_.store(multi_result.occlusion_candidates_complete,
                                             std::memory_order_relaxed);
   if (!multi_result.valid) {
+    // The solve fails closed; say **which** closure: a truncated candidate set is a
+    // different fact from "everything is behind cover".
+    rage_solve_refusal_.store(
+        static_cast<int>(multi_result.occlusion_candidates_complete ? SolveRefusal::solve_invalid
+                                                                    : SolveRefusal::occluder_cap),
+        std::memory_order_relaxed);
     input_.clear_rage_aim_keep_aux();
     return;
   }
@@ -2614,6 +2708,7 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // per-enemy). The occlusion set is shared.
   const std::uintptr_t chosen_pawn = pawn_for_index(snapshot, best_target);
   if (chosen_pawn == 0) {
+    rage_solve_refusal_.store(static_cast<int>(SolveRefusal::no_pawn), std::memory_order_relaxed);
     input_.clear_rage_aim_keep_aux();
     return;
   }
@@ -2621,6 +2716,8 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     return hitbox.target != best_target;
   });
   if (solve_input->hitboxes.empty()) {
+    rage_solve_refusal_.store(static_cast<int>(SolveRefusal::no_pose_hitboxes),
+                              std::memory_order_relaxed);
     input_.clear_rage_aim_keep_aux();
     return;
   }
@@ -2687,6 +2784,8 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     rage_occlusion_candidates_complete_.store(backtrack.occlusion_candidates_complete,
                                               std::memory_order_relaxed);
     if (!backtrack.valid) {
+      rage_solve_refusal_.store(static_cast<int>(SolveRefusal::backtrack_invalid),
+                                std::memory_order_relaxed);
       input_.clear_rage_aim_keep_aux();
       return;
     }
@@ -2727,10 +2826,24 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     publish_monte_carlo(state);
   }
 
+  // Publish **what the solve produced**, before the gate can refuse it: the value,
+  // the hitchance, whether a wall is in front, and how many cells the field has.
+  // Stored here (not after the gate) on purpose — the numbers a refusal throws away
+  // are exactly the ones the operator needs to see.
+  rage_solve_ran_.store(true, std::memory_order_relaxed);
+  rage_solve_value_.store(result.value, std::memory_order_relaxed);
+  rage_solve_hitchance_.store(result.hitchance, std::memory_order_relaxed);
+  rage_solve_penetrated_.store(result.penetrated, std::memory_order_relaxed);
+  rage_solve_cells_.store(static_cast<int>(result.cells), std::memory_order_relaxed);
+
   // The aim/fire gate (`docs/ragebot.md` §3): only aim and fire when the solve meets
   // the user's minimum damage and hitchance, and (optionally) when the shot is not
   // attenuated by a wall ("only visible").
   if (result.value < tuning.min_damage || result.hitchance < tuning.min_hitchance) {
+    rage_solve_refusal_.store(
+        static_cast<int>(result.value < tuning.min_damage ? SolveRefusal::gate_damage
+                                                          : SolveRefusal::gate_hitchance),
+        std::memory_order_relaxed);
     input_.clear_rage_aim();
     return;
   }
@@ -2761,6 +2874,7 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     rage_backtracks_.fetch_add(1);
   }
   rage_solves_.fetch_add(1);
+  rage_solve_refusal_.store(static_cast<int>(SolveRefusal::ok), std::memory_order_relaxed);
 
 
 }
@@ -2838,6 +2952,12 @@ void Service::decide_rage_fire(const game::Snapshot& snapshot) noexcept {
     read_weapon_fire_state(local, capability);
   }
   rage_fire_mode_.store(static_cast<int>(capability.mode), std::memory_order_relaxed);
+  // The facts the gate used, published: a gate that refuses must say what it saw.
+  rage_clip_.store(capability.clip, std::memory_order_relaxed);
+  rage_clip_known_.store(capability.clip_known, std::memory_order_relaxed);
+  rage_reloading_.store(capability.reloading, std::memory_order_relaxed);
+  rage_deploying_.store(capability.deploying, std::memory_order_relaxed);
+  rage_ready_.store(capability.ready, std::memory_order_relaxed);
 
   // The **engine's** shots: the clip falls when the weapon fires. The count is
   // the engine's, not the ragebot's — the payload claims a shot only when the
@@ -3424,6 +3544,9 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
   payload.set("weapon_range_modifier",
               Json::number(static_cast<double>(input->weapon.range_modifier)));
   payload.set("weapon_penetration", Json::number(static_cast<double>(input->weapon.penetration)));
+  // The VData's `m_WeaponType`: the ragebot's firearm gate reads it, so the answer
+  // says what the gate saw (0 knife, 1 pistol, 2 smg, 3 rifle, …, 7 c4, -1 unknown).
+  payload.set("weapon_type", Json::integer(input->weapon.weapon_type));
   set_ok(out, std::move(payload));
 }
 
@@ -3656,6 +3779,36 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   payload.set("player_press",
               Json::string(std::string(player_press_name(input_.rage_player_press()))));
   payload.set("occluders", Json::number(static_cast<double>(rage_occluders_.load())));
+  // Why the last tick produced no aim (`FireRefusal`'s `no-solve` says only that
+  // there was none). The stage, not a shrug.
+  payload.set("solve_refusal",
+              Json::string(std::string(solve_refusal_name(static_cast<SolveRefusal>(
+                  rage_solve_refusal_.load(std::memory_order_relaxed))))));
+  // The two stages the occlusion work is spent in, in microseconds (the before/after
+  // of the projection filtering and the layer budget).
+  payload.set("project_us", Json::number(static_cast<double>(
+                                rage_project_us_.load(std::memory_order_relaxed))));
+  payload.set("solve_us", Json::number(static_cast<double>(
+                              rage_solve_us_.load(std::memory_order_relaxed))));
+  // The last solve's own answer (`docs/ragebot.md` §3): what the damage field
+  // produced, and the weapon facts the fire gate used.
+  payload.set("solve_ran", Json::boolean(rage_solve_ran_.load(std::memory_order_relaxed)));
+  payload.set("solve_value",
+              Json::number(static_cast<double>(rage_solve_value_.load(std::memory_order_relaxed))));
+  payload.set("solve_hitchance", Json::number(static_cast<double>(rage_solve_hitchance_.load(
+                                     std::memory_order_relaxed))));
+  payload.set("solve_penetrated",
+              Json::boolean(rage_solve_penetrated_.load(std::memory_order_relaxed)));
+  payload.set("solve_cells",
+              Json::integer(rage_solve_cells_.load(std::memory_order_relaxed)));
+  payload.set("fire_clip", Json::integer(rage_clip_.load(std::memory_order_relaxed)));
+  payload.set("fire_clip_known",
+              Json::boolean(rage_clip_known_.load(std::memory_order_relaxed)));
+  payload.set("fire_reloading",
+              Json::boolean(rage_reloading_.load(std::memory_order_relaxed)));
+  payload.set("fire_deploying",
+              Json::boolean(rage_deploying_.load(std::memory_order_relaxed)));
+  payload.set("fire_ready", Json::boolean(rage_ready_.load(std::memory_order_relaxed)));
   payload.set("occlusion_query_complete",
               Json::boolean(rage_occlusion_query_complete_.load(std::memory_order_relaxed)));
   payload.set("occlusion_query_issues",
@@ -3906,8 +4059,11 @@ auto Service::debug_lines(char* out, std::size_t size) noexcept -> std::size_t {
   };
   add("cs2-internal   screen %s", std::string(game::screen_name(screen)).c_str());
   add("  capabilities 0x%x", capability_mask_.load(std::memory_order_relaxed));
-  add("\nrage %s   active %d   target %d   hitbox %d", rage_enabled_.load() ? "on" : "off",
-      input_.rage_active() ? 1 : 0, input_.rage_target(), input_.rage_hitbox());
+  add("\nrage %s   active %d   target %d   hitbox %d   solve %s",
+      rage_enabled_.load() ? "on" : "off", input_.rage_active() ? 1 : 0, input_.rage_target(),
+      input_.rage_hitbox(),
+      solve_refusal_name(static_cast<SolveRefusal>(
+          rage_solve_refusal_.load(std::memory_order_relaxed))));
   add("\nfire %s   %s   presses %llu   shots %llu",
       fire_mode_name(static_cast<FireMode>(rage_fire_mode_.load(std::memory_order_relaxed))),
       fire_refusal_name(static_cast<FireRefusal>(rage_refusal_.load(std::memory_order_relaxed))),
@@ -3921,8 +4077,33 @@ auto Service::debug_lines(char* out, std::size_t size) noexcept -> std::size_t {
       rage_occluders_.load(), rage_occlusion_query_complete_.load() ? "complete" : "pending",
       rage_occlusion_query_issues_.load(std::memory_order_relaxed),
       static_cast<unsigned long long>(rage_solves_.load()));
+  add("\ntime project %lluus   solve %lluus",
+      static_cast<unsigned long long>(rage_project_us_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(rage_solve_us_.load(std::memory_order_relaxed)));
+  // **The solve's own answer** — what the field produced, and (with `fire_refusal`)
+  // why it did not become a shot.
+  if (rage_solve_ran_.load(std::memory_order_relaxed)) {
+    add("\nsolve value %.1f   hitchance %.2f   wall %s   cells %d",
+        static_cast<double>(rage_solve_value_.load(std::memory_order_relaxed)),
+        static_cast<double>(rage_solve_hitchance_.load(std::memory_order_relaxed)),
+        rage_solve_penetrated_.load(std::memory_order_relaxed) ? "yes" : "no",
+        rage_solve_cells_.load(std::memory_order_relaxed));
+  } else {
+    add("\nsolve value -   (no solve this tick)");
+  }
+  // The weapon facts the fire gate decided on.
+  add("\nfire facts clip %d%s   reload %d   deploy %d   ready %d",
+      rage_clip_.load(std::memory_order_relaxed),
+      rage_clip_known_.load(std::memory_order_relaxed) ? "" : " (unread)",
+      rage_reloading_.load(std::memory_order_relaxed) ? 1 : 0,
+      rage_deploying_.load(std::memory_order_relaxed) ? 1 : 0,
+      rage_ready_.load(std::memory_order_relaxed) ? 1 : 0);
   if (snapshot.local.has_value()) {
     const game::PlayerSnapshot& local = *snapshot.local;
+    add("\nweapon %s   type %d   clip %d", local.weapon.empty() ? "?" : local.weapon.c_str(),
+        local.weapon_type, local.clip);
+    add("\nentity 0x%llx   vdata 0x%llx", static_cast<unsigned long long>(local.weapon_entity),
+        static_cast<unsigned long long>(local.weapon_vdata));
     add("\nlocal hp %d   origin %.1f %.1f %.1f   angles %.1f %.1f", local.health,
         static_cast<double>(local.origin.x), static_cast<double>(local.origin.y),
         static_cast<double>(local.origin.z), static_cast<double>(local.eye_angles.yaw),

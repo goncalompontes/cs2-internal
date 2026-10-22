@@ -203,12 +203,18 @@ auto occlude_polygon(const Vec3& eye, const Basis& basis, const Polygon& silhoue
     std::vector<Fragment> next;
     next.reserve(fragments.size() * 2);
     for (const Fragment& fragment : fragments) {
-      // Only fragments that could already be over budget need the (relatively costly)
-      // exact block test; a fragment with fewer coverings is kept and split.
-      if (fragment.covering.size() > max_penetrations &&
-          fragment_value(fragment_layers(fragment, eye, basis, distance), base, multiplier,
-                         distance, weapon, model, params) <= 0.0F) {
-        continue;  // provably blocked — identical to the value the full split would give
+      if (fragment.covering.size() > max_penetrations) {
+        // The fragment already has more coverings than the engine's budget, so it can
+        // only be worth 0 — but the coverings are *silhouettes*: some may not be on
+        // this fragment's ray at all. So count the layers the ray actually crosses
+        // (cheap: one span per covering solid) and stop at the budget before paying
+        // for the penetration arithmetic. `max_penetrations` walls are applied; the
+        // next one stops the shot, and the solver's own valuation says the same.
+        const std::vector<PenetrationLayer> layers = fragment_layers(fragment, eye, basis, distance);
+        if (layers.size() > static_cast<std::size_t>(max_penetrations) ||
+            fragment_value(layers, base, multiplier, distance, weapon, model, params) <= 0.0F) {
+          continue;  // provably blocked — identical to the value the full split would give
+        }
       }
       Polygon inside;
       std::vector<Polygon> outside;

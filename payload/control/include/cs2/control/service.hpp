@@ -36,6 +36,67 @@
 
 namespace cs2::control {
 
+// Why a rage tick produced no aim. Every gate in `Service::rage_tick` reports the
+// one it refused at, so `rage`'s `solve_refusal` answers "why is there no solve"
+// with a stage instead of a shrug.
+enum class SolveRefusal : std::uint8_t {
+  ok,                // a solve was committed
+  disabled,          // the ragebot is off (and `force` is not set)
+  occlusion_query,   // the world enumeration has not completed yet
+  no_local,          // no snapshot / no local player / dead
+  not_a_weapon,      // the held weapon is not a rage weapon (knife, C4, grenade, …)
+  not_engaged,       // the trigger is not held (the key / mode)
+  no_candidates,     // no enemy inside the FOV cone
+  no_hitboxes,       // the candidates produced no hitboxes
+  hitbox_filter,     // the hitbox filter (head/body only) left nothing
+  solve_invalid,     // the solve produced no field (everything blocked / nothing hittable)
+  occluder_cap,      // the per-hitbox occluder cap truncated the input (fails closed)
+  no_pawn,           // the chosen target's pawn could not be resolved
+  no_pose_hitboxes,  // narrowing to the chosen enemy left no hitbox
+  backtrack_invalid, // the backtracking pass failed closed
+  gate_damage,       // the aim's damage is below `min_damage`
+  gate_hitchance,    // the aim's hitchance is below `min_hitchance`
+};
+
+[[nodiscard]] inline constexpr auto solve_refusal_name(SolveRefusal refusal) noexcept
+    -> const char* {
+  switch (refusal) {
+    case SolveRefusal::ok:
+      return "ok";
+    case SolveRefusal::disabled:
+      return "disabled";
+    case SolveRefusal::occlusion_query:
+      return "occlusion-query";
+    case SolveRefusal::no_local:
+      return "no-local";
+    case SolveRefusal::not_a_weapon:
+      return "not-a-weapon";
+    case SolveRefusal::not_engaged:
+      return "not-engaged";
+    case SolveRefusal::no_candidates:
+      return "no-candidates";
+    case SolveRefusal::no_hitboxes:
+      return "no-hitboxes";
+    case SolveRefusal::hitbox_filter:
+      return "hitbox-filter";
+    case SolveRefusal::solve_invalid:
+      return "solve-invalid";
+    case SolveRefusal::occluder_cap:
+      return "occluder-cap";
+    case SolveRefusal::no_pawn:
+      return "no-pawn";
+    case SolveRefusal::no_pose_hitboxes:
+      return "no-pose-hitboxes";
+    case SolveRefusal::backtrack_invalid:
+      return "backtrack-invalid";
+    case SolveRefusal::gate_damage:
+      return "gate-damage";
+    case SolveRefusal::gate_hitchance:
+      return "gate-hitchance";
+  }
+  return "unknown";
+}
+
 // The command-surface version: the `ping` result's `protocol`.
 //
 // The channel was not versioned, so a stale client and a new payload could
@@ -534,6 +595,32 @@ class Service {
   // The state machine's screen, for the debug view (the `state` command derives it
   // again; the column must not re-derive it per frame).
   std::atomic<int> screen_{0};  // game::GameScreen
+  // Why the last rage tick produced **no aim** (`rage`'s `solve_refusal`). The fire
+  // path's own verdict is `FireRefusal`; this is the stage before it — the reason
+  // `input_.rage_active()` is false. Without it "no-solve" says nothing about which
+  // of a dozen gates refused, and a target in cover looks exactly like a broken
+  // enumeration.
+  std::atomic<int> rage_solve_refusal_{0};  // SolveRefusal
+  // The last tick's occlusion projection and solve cost, in microseconds: the two
+  // stages the per-target projection filtering and the layer-budget pruning move.
+  std::atomic<std::uint64_t> rage_project_us_{0};
+  std::atomic<std::uint64_t> rage_solve_us_{0};
+  // The **last solve's own numbers**, published so the operator can see what the
+  // damage field produced (and, when the gate refuses, what it refused on) instead
+  // of only `no-solve`. `ran` is false when the tick returned before the solve, so a
+  // stale value is never read as this tick's answer.
+  std::atomic<bool> rage_solve_ran_{false};
+  std::atomic<float> rage_solve_value_{0.0F};
+  std::atomic<float> rage_solve_hitchance_{0.0F};
+  std::atomic<bool> rage_solve_penetrated_{false};
+  std::atomic<int> rage_solve_cells_{0};
+  // The weapon facts the **fire gate** decided on, so `reloading`/`deploying` can be
+  // told apart from a field the payload failed to read.
+  std::atomic<int> rage_clip_{-1};
+  std::atomic<bool> rage_clip_known_{false};
+  std::atomic<bool> rage_reloading_{false};
+  std::atomic<bool> rage_deploying_{false};
+  std::atomic<bool> rage_ready_{false};
   // Whether the debug column is drawn (`debug {"on": true}`).
   std::atomic<bool> debug_hud_{false};
   // What the operator asked for; the effective flags are these AND the

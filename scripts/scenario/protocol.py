@@ -722,6 +722,9 @@ class AimResult(TypedDict):
     weapon_headshot: float
     weapon_range_modifier: float
     weapon_penetration: float
+    #: The VData's ``m_WeaponType`` the damage model carried (0 knife, 1 pistol,
+    #: 2 smg, 3 rifle, 4 shotgun, 5 sniper, 6 machinegun, 7 c4, -1 unknown).
+    weapon_type: int
     #: The objective **by name** (``"damage"``, ``"hitchance"``,
     #: ``"expected"``, ``"pellets"``, ``"monte_carlo"``).
     objective: str
@@ -804,6 +807,31 @@ class RageResult(TypedDict, total=False):
     occluders: int
     occlusion_query_complete: bool
     occlusion_query_issues: int
+    #: Why the last tick produced **no aim** (`ok` when it did): the stage of the
+    #: solve that refused (`disabled`, `occlusion-query`, `no-local`,
+    #: `not-a-weapon`, `not-engaged`, `no-candidates`, `no-hitboxes`,
+    #: `hitbox-filter`, `solve-invalid`, `occluder-cap`, `no-pawn`,
+    #: `no-pose-hitboxes`, `backtrack-invalid`, `gate-damage`, `gate-hitchance`).
+    solve_refusal: str
+    #: The last tick's occlusion projection and solve cost, in microseconds.
+    project_us: int
+    solve_us: int
+    #: Whether the tick reached the solve at all (a stale value is never read as
+    #: this tick's answer).
+    solve_ran: bool
+    #: The damage field's answer: the value at the chosen aim, the probability the
+    #: shot lands there, whether a wall is in front of it, and the cell count.
+    solve_value: float
+    solve_hitchance: float
+    solve_penetrated: bool
+    solve_cells: int
+    #: The weapon facts the **fire gate** decided on, so `reloading`/`deploying`
+    #: can be told apart from a field the payload failed to read.
+    fire_clip: int
+    fire_clip_known: bool
+    fire_reloading: bool
+    fire_deploying: bool
+    fire_ready: bool
     backtracks: int
     record: int
     #: Whether the last tick skipped the backtracking because the frame had

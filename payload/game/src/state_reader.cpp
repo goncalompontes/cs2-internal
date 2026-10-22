@@ -87,14 +87,19 @@ struct VDataOffsets {
   std::uint32_t cycle_time = 0x738;
 };
 
-auto vdata_offsets() -> const VDataOffsets& {
-  // A plain local: no TLS guard in the mapped image (see service.cpp).
-  const VDataOffsets offsets{
+// Returned **by value**. This used to return `const VDataOffsets&` bound to a
+// function-local, i.e. a reference to a destroyed object: every caller then read
+// whatever the stack slot had become. Observed live — `m_WeaponType` read
+// `642683896`, so `is_rage_weapon` refused **every** weapon as "not a weapon" and
+// the ragebot never solved (the same object also feeds the fire mode and the cycle
+// time). Three `uint32`s cost nothing to copy, and a local is what the mapped image
+// can have (no TLS guard, no `static`).
+[[nodiscard]] auto vdata_offsets() noexcept -> VDataOffsets {
+  return VDataOffsets{
       .weapon_type = vdata_field("m_WeaponType", 0x520),
       .full_auto = vdata_field("m_bIsFullAuto", 0x72d),
       .cycle_time = vdata_field("m_flCycleTime", 0x738),
   };
-  return offsets;
 }
 
 }  // namespace
