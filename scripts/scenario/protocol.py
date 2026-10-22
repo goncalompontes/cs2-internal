@@ -789,7 +789,29 @@ class RageResult(TypedDict, total=False):
     hitbox: int
     solves: int
     writes: int
+    #: The **engine's** shots: the clip fell while the ragebot was pressing
+    #: (a reload and a failed clip read are not shots).
     shots: int
+    #: The ragebot's **attempts**: the ticks the fire path decided to assert
+    #: the attack.
+    presses: int
+    #: The release->re-press **edges** the fire path produced.
+    edges: int
+    #: The weapon's fire mode as the payload reads it: ``auto``, ``semi`` or
+    #: ``unknown`` (``docs/ragebot.md`` §15).
+    fire_mode: str
+    #: The fire path's gate's verdict: ``ok`` when the shot can be taken, the
+    #: blocking condition's name when it cannot (``no-solve``, ``fire-off``,
+    #: ``clip-unknown``, ``no-ammo``, ``reloading``, ``deploying``, ``edge``,
+    #: ``interval``, ``rate-unknown``).
+    fire_refusal: str
+    #: Whether the **player** is known to be holding the trigger.
+    player_attack: bool
+    #: What the payload knows about the **player's** own press of the trigger:
+    #: ``held``, ``released`` or ``unknown`` (the payload cannot tell the
+    #: player's press from its own, and an unknown reading never removes the
+    #: attack bit).
+    player_press: str
     occluders: int
     occlusion_query_complete: bool
     occlusion_query_issues: int

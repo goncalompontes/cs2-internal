@@ -734,9 +734,28 @@ class Input {
   // even when the trigger is not engaged.
   void clear_rage_aim_keep_aux() noexcept {
     rage_active_.store(false);
+    rage_press_.store(false);
+    rage_press_changed_.store(false);
   }
   void set_rage_fire(bool on) noexcept {
     rage_fire_.store(on);
+  }
+  // The **fire path's** decision (`docs/ragebot.md` §"the fire path"): whether
+  // the ragebot contributes the attack bit to the command.
+  //
+  // The decision is made by the service on the **game thread** — it reads the
+  // weapon's state there — and it is made **once per tick**, so every command
+  // of the tick carries the same answer. The ragebot's contribution is
+  // **replaceable**: the command's attack bit is *recomputed* from its
+  // contributors for every command, so a withdrawal really removes the
+  // payload's own press while the **player's** own press survives
+  // (`strafe_geometry.hpp`'s `compose_command_mask`).
+  void set_rage_fire_press(bool press, bool changed) noexcept {
+    rage_press_.store(press);
+    rage_press_changed_.store(changed);
+  }
+  [[nodiscard]] bool rage_fire_press() const noexcept {
+    return rage_press_.load();
   }
   // The common ragebot assists, applied while a solve is active (`docs/ragebot.md`):
   // auto-stop (hold still for accuracy), auto-scope (press zoom), auto-reload. Owned by
@@ -775,8 +794,25 @@ class Input {
   [[nodiscard]] std::uint64_t rage_writes() const noexcept {
     return rage_writes_.load();
   }
-  [[nodiscard]] std::uint64_t rage_shots() const noexcept {
-    return rage_shots_.load();
+  // The **player's own** press of the attack button: what the payload knows
+  // about it — the engine's own mask, read before the payload's write.
+  //
+  // It matters because the ragebot's release is **scoped to its own
+  // contribution**: with the player holding the trigger, the engine sees one
+  // continuous press and the semi-automatic weapon fires once — the edge is
+  // then the **player's** to make, and the status says so.
+  //
+  // The reading can be **unknown**: the payload cannot always tell the
+  // player's own press from its own (the engine reuses the command objects,
+  // and a copy of a command the payload has written to carries the payload's
+  // press). An unknown reading never removes the attack bit — see
+  // `strafe_geometry.hpp`'s `PlayerPress`.
+  [[nodiscard]] cs2::control::PlayerPress rage_player_press() const noexcept {
+    return static_cast<cs2::control::PlayerPress>(rage_player_press_.load());
+  }
+  // Whether the player is **known** to be holding the trigger.
+  [[nodiscard]] bool rage_player_attack() const noexcept {
+    return rage_player_press() == cs2::control::PlayerPress::held;
   }
   [[nodiscard]] std::uint64_t rage_stops() const noexcept {
     return rage_stops_.load();
@@ -1131,7 +1167,26 @@ class Input {
   // the slot-5 command before the engine builds it, so this tick's raw-angle writes and
   // the command's silent history both use the freshly solved aim.
   void run_game_thread_sink_now() noexcept;
+  // Write the payload's contributions onto one command.
+  //
+  // The two callers are **not** the same thing, and the difference decides
+  // whether the fire path can take its own press back:
+  //
+  //   * `apply(cmd)` — the **slot-25 copy** of the command (`create_move`).
+  //     The engine copies the command it has just built, so the copy can
+  //     already carry the payload's own press. Its mask is therefore **not**
+  //     a sample of the engine's own state.
+  //   * `apply_simulated(cmd)` — the command the engine has **just built** (the
+  //     slot-5 command, `create_move_input`). Its mask **is** the engine's own.
+  //
+  // The engine's own attack bit is cached per command number, so a command
+  // the payload wrote to last tick is composed from what the engine wrote and
+  // never from what the payload wrote (`docs/ragebot.md` §"the fire path").
   void apply(void* cmd) noexcept;
+  void apply_simulated(void* cmd) noexcept;
+  // The shared body: `fresh` is true for the command the engine has just
+  // built (its mask is the engine's own).
+  void apply_command(void* cmd, bool fresh) noexcept;
   // Append a `CSubtickMoveStep` (analog forward/left) to `base->subtick_moves`.
   void* add_analog_step(void* base, float forward, float side, float when) noexcept;
   // A step carrying only `yaw_delta` (+ `pitch_delta = 0`) at `when`.
@@ -1192,11 +1247,20 @@ class Input {
   // angles and the re-based axes, and write them into the command.
   void anti_aim_tick(void* cmd, std::uint8_t* base) noexcept;
   // One tick of the ragebot: write the render-thread solve as the silent sub-tick
-  // view angles and (optionally) press attack.
-  void rage_tick(std::uint8_t* cmd, const std::uint64_t* buttons) noexcept;
+  // view angles. The **attack** is not written here: the command's button mask
+  // is composed in `apply_command` (the fire path's write), so the attack bit
+  // is *replaced* rather than merged.
+  void rage_tick(std::uint8_t* cmd) noexcept;
   // Assert/clear bits in the engine's own held-button word (`CInButtonState` at the
   // movement services `+0x58`); some weapon actions read it instead of the command mask.
   void write_engine_buttons(std::uint64_t set_bits, std::uint64_t clear_bits) noexcept;
+  // The engine's own held-button word, or **null** when it cannot be written
+  // (no local pawn, no movement services, or the word is not writable).
+  //
+  // The fire path's write takes the word as a **port** (`strafe_geometry.hpp`'s
+  // `FireWritePorts`), so the release reaches that channel through the same
+  // call that writes the command's own mask.
+  [[nodiscard]] auto engine_button_state() noexcept -> std::uint64_t*;
   // Write the silent aim into the raw per-sub-tick angle history (`CCSGOInput + 0xbd0`),
   // before the engine builds the command's `input_history` — the channel the shot reads.
   void write_raw_silent_angles(float pitch, float yaw, float roll) noexcept;
@@ -1297,7 +1361,27 @@ class Input {
   std::atomic<bool> rage_recoil_{false};
   std::atomic<float> rage_stop_speed_{0.0F};
   std::atomic<std::uint64_t> rage_writes_{0};
-  std::atomic<std::uint64_t> rage_shots_{0};
+  // The fire path's decision (the service publishes it once per tick) and the
+  // player's own press of the attack button.
+  std::atomic<bool> rage_press_{false};
+  // The payload's **own** contribution to the attack changed since the previous
+  // tick (a press or a withdrawal). A withdrawal is a change too, and the PB's
+  // **changed** word has to say so: that is the release the engine sees.
+  std::atomic<bool> rage_press_changed_{false};
+  // What the payload knows about the **player's own** press of the attack
+  // button (`cs2::control::PlayerPress`, stored as its byte: the enum is
+  // scoped and the payload is manually mapped).
+  std::atomic<std::uint8_t> rage_player_press_{
+      static_cast<std::uint8_t>(cs2::control::PlayerPress::unknown)};
+  // The fire path's **command cache** (the game thread only): the engine's own
+  // attack bit, per command. The payload writes to **two** commands per tick —
+  // the slot-25 copy and the slot-5 command the engine has just built — and
+  // the engine reuses the command objects, so a command the payload wrote last
+  // tick still carries the payload's own press. The cache remembers what the
+  // engine wrote, per command number, so the composition never reads the
+  // payload's own press back as the player's
+  // (`docs/ragebot.md` §"the fire path").
+  FireCommandCache fire_commands_{};
   std::atomic<std::uint64_t> rage_stops_{0};
   // Record-based bunnyhop: diagnostics + the per-command decision cache (the hook
   // can run more than once per frame, and the `fresh` phase must only be sampled
