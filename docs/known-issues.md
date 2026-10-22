@@ -601,3 +601,60 @@ the payload, the overlay and the injector builds.
 **What is not:** the live run. **The operator's steps for this fix are in
 `docs/ragebot.md` §15.6** (not in `docs/operator-live-check.md` §6, which is
 T35's checklist and does not carry the ownership steps).
+
+---
+
+## 17. This session's open items (2026-10-22)
+
+The full handoff is [`docs/handoff-wave3.md`](handoff-wave3.md). These are the
+rows the next session needs; the rest of the wave's state is there.
+
+| # | severity | finding | where | state |
+|---|---|---|---|---|
+| **G1** | **blocker (live)** | **The payload's fault guard does not work on the build it ships in, and it kills the game.** The vectored handler in `payload/diag/src/crash_handler.cpp` was `noexcept`, so its frame carried a **C++ exception-handler record whose action is `std::terminate`**; MSVC's `longjmp` unwinds the frames it leaves, so that cleanup ran and the runtime **fast-failed with `0xC0000409`** — a fast fail **bypasses the vectored handlers**, so the guard never recovered. It has **fired 12 times**, every one the **tier0 allocator fault** (`read addr=0x40`) the guard was written for, and **4 of the 12 killed the payload** (it had to be re-injected). The **MSVC-built** copy of any test passes on the broken code, which is why the host suite could never have caught it. | `payload/diag/src/crash_handler.cpp` | **fixed on `feat/t42-guard-recovery`** (`1695973`), **not merged** — the review never ran (the report is an empty stub) |
+| **G2** | **major** | **The engine trace probe passes the wrong results container.** The probe handed `TraceLineIntervals` the **overlap** query's layout (record pointer at `+0x10`) while the live build reads the trace's record pointer at **`+0x08`** (capacity `+0x10`, flags `+0x14`, the external-buffer bit **`0x40000000`**). The engine either faulted or wrote into a buffer the probe never read — and then the probe published `interval_count > 0` with an **empty** interval list and computed its verdict from that empty list, i.e. it reported **"agrees" while the engine had hit the wall**. | `payload/control/src/occlusion_query.cpp` | **fixed on `feat/t39-trace-probe`** (`fa98422`), re-reviewed **SHIP WITH FIXES** — **not merged**; it must land **after** G1 and be reconciled with it |
+| **G3** | minor | The probe's results buffer is **320 records on the stack** and the engine appends at `data[count]` with its growth skipped, so a ray crossing more than 320 solids would write **past** it — stack corruption in the game's input path, which the guard **cannot** catch. The "bounded" claim rests on an unproven bound. | `payload/control/src/occlusion_query.cpp` | **not fixed** |
+| **G4** | minor | A code comment promises a refusal the probe does not implement: it says *"the probe refuses to answer while the world's cache is cold"*, but the probe **parses ~10 k brush shapes inside the `CreateMove` hook** and only publishes the fact afterwards. | `payload/control/src/service.cpp` | **not fixed** (the published `world_cached` is truthful; only the comment is not) |
+| **G5** | minor | Three documents still claim that a wrong engine call **aborts the process** because the payload has no exception tables. That was **false** (the injector registers the `.pdata`, and the guard's `longjmp` needs them) and G1's fix makes it false in a second way. | `docs/re/occlusion.md:321`, `docs/ragebot.md:462`, `docs/re/chams.md:501` | **not fixed** — the files are outside the tasks' ownership |
+| **G6** | minor | The status now reports **"standard"** for **every** weapon, because the revolver's transform is off while the pending attack type is unknown. The weapon's *class* is lost from the status. | `payload/control/include/cs2/control/rage_objective.hpp` | **not fixed** (T38's re-review) |
+| **G7** | minor | Reading the convar `weapon_accuracy_shotgun_spread_patterns` needs a **new dumper signature** (ADR-0012). It is what keeps the shotgun's pattern **refused** — the table itself is reproducible and the convar is **off by default**, so the payload *could* model the default and be right unless a server enables it. | `external/dumper/src/analysis.rs` | **not fixed** — reported by T38 and T39 |
+| **G8** | nit | The desc-cache probe's flakiness (H12) is **fixed and merged** (`b28e805`), so the row may be **deleted**. | `docs/known-issues.md` §15 | **the row is still here** — deleting it is the next session's first ledger edit |
+
+### 17.1 The orchestrator's decisions this session
+
+**2026-10-22 — a task may merge over a `DO NOT SHIP` review.** The operator
+asked for the ability to live-test features that still carry findings:
+`orchestrate.merge({..., allow_unreviewed: true})` overrides the review gate.
+The **verify loop is not** overridable — the merged tree must compile and pass,
+which is the right line: a behavioural finding may ride to the live test, a
+broken build may not.
+
+**2026-10-22 — the verify loop runs the payload's tests.** The `payload tests`
+step was added to the cs2 project's verify list, because the payload's
+**clang-cl** copy of a test is the only one that can catch a clang-cl-only
+defect — and G1 is exactly that.
+
+**2026-10-22 — the protection workstream is in the integration branch anyway.**
+A **parallel session** merged it (T20a, T23a, T23b, T24) while this session
+worked, although `AGENTS.md` still calls it out of scope. That is the
+**operator's** call, not the orchestrator's; it is in the tree.
+
+### 17.2 The corrections the implementers forced on the orchestrator
+
+Recorded because they are the kind of thing the next spec will get wrong
+again:
+
+* the shotgun pattern table's band **cycles** (`0…N−1,0…`) — it is **not**
+  `min(counter, N−1)`;
+* the trace's results container is **not** the overlap query's: the record
+  pointer is at **`+0x08`** and the external-buffer bit is **`0x40000000`** at
+  `+0x14`;
+* the payload's log was **not** empty: **12** guarded faults, **4** of them
+  fatal (the split must skip the stack-frame lines the diag handler logs before
+  it dies);
+* a `noexcept` frame is not "nounwind with no unwind information" — it carries
+  a **terminate** cleanup, and the runtime's `longjmp` runs it.
+
+**The lesson:** three times, a careful implementer re-derived the engine
+instead of trusting the spec, and **the engine was right every time**. Write the
+specs from the **live build**.
