@@ -299,7 +299,6 @@ inline constexpr std::size_t TRACE_VECTOR_FLAGS = 0x14;
 inline constexpr std::int32_t TRACE_VECTOR_EXTERNAL_BUFFER = 0x40000000;
 inline constexpr std::int32_t TRACE_VECTOR_NOT_OWNED = 0x80000000;
 
-
 // The engine's answer for one ray: one interval record.
 struct TraceInterval {
   // The record's `+0x0C`: the **fraction** along the ray (0..1). The engine's own
@@ -702,6 +701,18 @@ struct TraceProbeRun {
   return cs2::aim::project_occluder(eye, basis, hull.vertices, hull.planes, hull.surface_modifier);
 }
 
+// The players the probe's own enumeration must skip (a player is a target, not an
+// occluder). The enumeration drops a player two ways: the record's **handle index**
+// (`handle & 0x7fff`) and the resolved **entity pointer** — so the probe needs
+// both lists, and it sets them **itself**, so its answer never depends on the
+// solver having run first in the tick.
+struct TraceExclude {
+  const std::uint16_t* handles = nullptr;  // the entity handle indices
+  int handle_count = 0;
+  const std::uintptr_t* entities = nullptr;  // the entity pointers
+  int entity_count = 0;
+};
+
 // The probe: our occluder set's answer and the engine's own answer for the same rays,
 // plus the difference. `invoke == false` fills the read-only diagnostics only (no
 // engine call). `abi` selects the call form: the pinned one, or one of the
@@ -710,14 +721,10 @@ struct TraceProbeRun {
 // allocator faults on the payload's own thread), so the caller runs this from the
 // game thread's sink.
 //
-// `exclude_pawns`/`exclude_count` are the players' entity pointers: the probe
-// excludes them from **its own** enumeration (a player is a target, not an
-// occluder), so the answer does not silently depend on the solver having run first
-// in the tick.
+// `exclude` are the players to skip from the probe's own enumeration.
 [[nodiscard]] auto probe_trace(const std::vector<TraceRay>& rays, bool invoke,
                                TraceAbi abi = TraceAbi::correct,
-                               const std::uintptr_t* exclude_pawns = nullptr,
-                               int exclude_count = 0) -> TraceProbeRun;
+                               const TraceExclude& exclude = TraceExclude{}) -> TraceProbeRun;
 
 // Has the static world body been parsed yet? The probe's enumeration reuses the
 // parsed cache; parsing it inside the input hook is the probe's one expensive case

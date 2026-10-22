@@ -1823,9 +1823,12 @@ void Service::on_game_thread() noexcept {
       abi = trace_probe_abi_;
     }
     // The players are targets, not occluders: the probe excludes them itself, so
-    // its answer never depends on the solver having run first in this tick.
-    std::uintptr_t pawns[k_max_occlusion_exclude] = {};
-    int pawn_count = 0;
+    // its answer never depends on the solver having run first in this tick. The
+    // enumeration drops a player two ways — its handle index and its entity
+    // pointer — so both lists are built here.
+    std::uint16_t handles[k_max_occlusion_exclude] = {};
+    std::uintptr_t entities[k_max_occlusion_exclude] = {};
+    int exclude_count = 0;
     {
       game::Snapshot snapshot;
       bool have_snapshot = false;
@@ -1836,14 +1839,20 @@ void Service::on_game_thread() noexcept {
       }
       if (have_snapshot) {
         for (const game::PlayerSnapshot& player : snapshot.players) {
-          if (pawn_count >= k_max_occlusion_exclude || player.pawn == 0) {
+          if (exclude_count >= k_max_occlusion_exclude || player.pawn == 0 || player.index < 0) {
             continue;
           }
-          pawns[pawn_count++] = player.pawn;
+          handles[exclude_count] = static_cast<std::uint16_t>(player.index & 0x7fff);
+          entities[exclude_count] = player.pawn;
+          ++exclude_count;
         }
       }
     }
-    TraceProbeRun probe = probe_trace(rays, true, abi, pawns, pawn_count);
+    const TraceExclude exclude{.handles = handles,
+                               .handle_count = exclude_count,
+                               .entities = entities,
+                               .entity_count = exclude_count};
+    TraceProbeRun probe = probe_trace(rays, true, abi, exclude);
     const std::scoped_lock lock(trace_probe_mutex_);
     trace_probe_run_ = std::move(probe);
     trace_probe_done_ = true;
@@ -4263,8 +4272,10 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
       Json record = Json::object();
       record.set("entry", Json::number(static_cast<double>(span.entry)));
       record.set("exit", Json::number(static_cast<double>(span.exit)));
-      record.set("enter_record", Json::integer(record_index(span.enter_record, ray.intervals.size())));
-      record.set("exit_record", Json::integer(record_index(span.exit_record, ray.intervals.size())));
+      record.set("enter_record",
+                 Json::integer(record_index(span.enter_record, ray.intervals.size())));
+      record.set("exit_record",
+                 Json::integer(record_index(span.exit_record, ray.intervals.size())));
       engine_only.push_back(std::move(record));
     }
     difference.set("engine_only", std::move(engine_only));

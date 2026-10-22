@@ -1562,7 +1562,7 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
 // plus the difference. Runs on a game thread (an engine call must not reach tier0's
 // allocator from the payload's own thread — docs/handoff.md).
 auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
-                 const std::uintptr_t* exclude_pawns, int exclude_count) -> TraceProbeRun {
+                 const TraceExclude& exclude) -> TraceProbeRun {
   TraceProbeRun run;
   run.abi = abi;
   if (rays.empty()) {
@@ -1653,9 +1653,9 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
   run.world_cached = occlusion_world_cache_ready();
   // The players are targets, not occluders: the probe excludes them **itself**, so
   // the answer never depends on the solver having run first in the tick.
-  set_occlusion_exclude_pawns(exclude_pawns, exclude_count);
+  set_occlusion_exclude_pawns(exclude.entities, exclude.entity_count);
   OcclusionQueryResult occluders =
-      query_world_occluders(eye, lo, hi, true, exclude_pawns, exclude_count, &target, 1);
+      query_world_occluders(eye, lo, hi, true, exclude.handles, exclude.handle_count, &target, 1);
   run.occluders = static_cast<int>(occluders.hulls.size());
 
   // The projected cells — the very same projection the solver's heatmap uses, so the
@@ -1695,7 +1695,7 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
   // slack, because the engine appends **at** `data[count]`: a trace that produced
   // more records than the capacity would otherwise write past the end.
   alignas(16) unsigned char interval_buffer[(TRACE_INTERVAL_CAPACITY + TRACE_INTERVAL_SLACK) *
-                                           k_trace_interval_stride] = {};
+                                            k_trace_interval_stride] = {};
 
   for (const TraceRay& ray : rays) {
     TraceRayResult result;
@@ -1737,7 +1737,7 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
     }
     bool ok = false;
     const std::int32_t count = run_trace_query(trace_entry, reinterpret_cast<void*>(iface), filter,
-                                                *start, *extension, vector, &ok);
+                                               *start, *extension, vector, &ok);
     result.engine_ok = ok;
     result.engine_faulted = !ok;
     result.interval_count = count;
@@ -1766,8 +1766,8 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
             records + static_cast<std::size_t>(i) * k_trace_interval_stride, ray.depth));
       }
     }
-    result.diff =
-        diff_trace(result.intervals, result.ours, TRACE_MATCH_TOLERANCE, !result.engine_answer_missing);
+    result.diff = diff_trace(result.intervals, result.ours, TRACE_MATCH_TOLERANCE,
+                             !result.engine_answer_missing);
     run.rays.push_back(std::move(result));
   }
   return run;

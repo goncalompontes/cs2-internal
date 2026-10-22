@@ -286,7 +286,8 @@ void test_result_vector_layout() {
 
   // The payload's own type must be the same layout — and, above all, **not** the
   // overlap query's (whose record pointer is at +0x10).
-  static_assert(sizeof(cs2::control::TraceResultVector) == 0x18, "the probe's header is 0x18 bytes");
+  static_assert(sizeof(cs2::control::TraceResultVector) == 0x18,
+                "the probe's header is 0x18 bytes");
   static_assert(offsetof(cs2::control::TraceResultVector, count) == 0x00, "the count is at +0x00");
   static_assert(offsetof(cs2::control::TraceResultVector, data) == 0x08,
                 "the record pointer is at +0x08");
@@ -321,7 +322,8 @@ void test_result_vector_layout() {
   };
   cs2::control::TraceResultVector external;
   external.capacity = 4;
-  external.flags = cs2::control::TRACE_VECTOR_EXTERNAL_BUFFER | cs2::control::TRACE_VECTOR_NOT_OWNED;
+  external.flags =
+      cs2::control::TRACE_VECTOR_EXTERNAL_BUFFER | cs2::control::TRACE_VECTOR_NOT_OWNED;
   int allocations = 0;
   for (int i = 0; i < 32; ++i) {
     appends(external, &allocations);
@@ -388,7 +390,8 @@ void test_difference() {
   {
     const std::vector<cs2::control::TraceInterval> intervals = {};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(400.0F, 430.0F)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, k_tolerance, true);
+    const cs2::control::TraceDiff diff =
+        cs2::control::diff_trace(intervals, ours, k_tolerance, true);
     expect(diff.verdict == cs2::control::TraceVerdict::ours_only,
            "an occluder with no interval is ours_only");
     expect(diff.ours_only.size() == 1U, "the unmatched occluder is reported");
@@ -400,7 +403,8 @@ void test_difference() {
     const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
                                                                 interval_at(120.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(101.0F, 119.0F)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, k_tolerance, true);
+    const cs2::control::TraceDiff diff =
+        cs2::control::diff_trace(intervals, ours, k_tolerance, true);
     expect(diff.verdict == cs2::control::TraceVerdict::agrees,
            "the same solid on both sides agrees");
     expect(diff.engine_only.empty() && diff.ours_only.empty(), "the difference is empty");
@@ -412,7 +416,8 @@ void test_difference() {
     const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
                                                                 interval_at(110.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(100.0F, 130.0F)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, k_tolerance, true);
+    const cs2::control::TraceDiff diff =
+        cs2::control::diff_trace(intervals, ours, k_tolerance, true);
     expect(diff.verdict == cs2::control::TraceVerdict::agrees,
            "the same solid at a different depth agrees");
   }
@@ -422,7 +427,8 @@ void test_difference() {
     const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
                                                                 interval_at(120.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(400.0F, 430.0F)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, k_tolerance, true);
+    const cs2::control::TraceDiff diff =
+        cs2::control::diff_trace(intervals, ours, k_tolerance, true);
     expect(diff.verdict == cs2::control::TraceVerdict::both, "two different solids are 'both'");
     expect(diff.engine_only.size() == 1U && diff.ours_only.size() == 1U,
            "both differences are reported");
@@ -452,7 +458,8 @@ void test_difference() {
     const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
                                                                 interval_at(150.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> prop = {hit_at(98.0F, 99.5F)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, prop, k_tolerance, true);
+    const cs2::control::TraceDiff diff =
+        cs2::control::diff_trace(intervals, prop, k_tolerance, true);
     expect(diff.verdict != cs2::control::TraceVerdict::agrees,
            "a real occlusion is never 'agrees'");
     expect(diff.engine_only.size() == 1U, "the wall is reported as the engine's alone");
@@ -475,7 +482,8 @@ void test_difference() {
     const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
                                                                 interval_at(150.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> half = {hit_at(100.0F, 120.0F)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, half, k_tolerance, true);
+    const cs2::control::TraceDiff diff =
+        cs2::control::diff_trace(intervals, half, k_tolerance, true);
     expect(diff.verdict != cs2::control::TraceVerdict::agrees,
            "a solid that covers only part of the wall does not answer for it");
     expect(diff.engine_only.size() == 1U, "the wall is still the engine's alone");
@@ -488,7 +496,8 @@ void test_difference() {
   {
     const std::vector<cs2::control::TraceInterval> intervals = {};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(100.0F, 120.0F)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, k_tolerance, false);
+    const cs2::control::TraceDiff diff =
+        cs2::control::diff_trace(intervals, ours, k_tolerance, false);
     expect(diff.verdict == cs2::control::TraceVerdict::unknown,
            "a dropped engine answer is 'unknown', not 'agrees'");
     expect(!diff.engine_answer_usable, "the difference says the engine's answer was unusable");
@@ -602,7 +611,8 @@ void test_target_box() {
 void test_service_uses_the_rules(const char* root) {
   const std::filesystem::path base(root);
   const std::filesystem::path service_path = base / "payload" / "control" / "src" / "service.cpp";
-  const std::filesystem::path query_path = base / "payload" / "control" / "src" / "occlusion_query.cpp";
+  const std::filesystem::path query_path =
+      base / "payload" / "control" / "src" / "occlusion_query.cpp";
 
   const std::string service = read_source(service_path);
   expect(!service.empty(), "the service's source is readable");
@@ -624,8 +634,7 @@ void test_service_uses_the_rules(const char* root) {
          "the probe calls the engine through the guarded query");
   expect(probe.find("TraceResultVector") != std::string::npos,
          "the probe hands the engine the trace's own results container");
-  expect(probe.find("vector.flags =") != std::string::npos,
-         "the probe sets the container's flags");
+  expect(probe.find("vector.flags =") != std::string::npos, "the probe sets the container's flags");
   expect(probe.find("TRACE_VECTOR_EXTERNAL_BUFFER") != std::string::npos,
          "the probe marks the buffer external: the engine must not allocate");
   expect(probe.find("vector.data =") != std::string::npos &&
