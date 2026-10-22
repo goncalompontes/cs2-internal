@@ -565,7 +565,9 @@ the accuracy work (spread/records, trace cross-validation).
   `noexcept`, and a `noexcept` frame is not `nounwind` — clang-cl gives it a
   C++ exception-handler unwind record whose cleanup action is
   `std::terminate`, so the `longjmp` out of it ran that cleanup and killed the
-  process with 0xC0000409 instead of recovering.
+  process with 0xC0000409 instead of recovering (the recovery was not to be
+  relied on: of the twelve faults it saw, it recovered eight and lost the
+  payload four — see below).
   **It had fired.** The payload's own log (`%LOCALAPPDATA%\cs2-internal\cs2-payload.log`,
   measured 2026-10-22) carries 199 `[crash] handler installed` lines and
   **12 `[crash] guarded` lines** — all of them `EXCEPTION_ACCESS_VIOLATION`,
