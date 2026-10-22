@@ -266,9 +266,12 @@ struct Dispatch {
 
 /// The scratch of a call site: the arguments of the call, in the call's order.
 ///
-/// The hidden pointer of an `sret` call is the **first** cell: in LLVM IR the
-/// hidden pointer is an explicit argument of the call, so the scratch already
-/// holds it in the right place, and the thunk passes it unchanged.
+/// In LLVM IR the hidden pointer of an `sret` call is an explicit argument of
+/// the call, so the scratch already holds it in the right place, and the
+/// thunk passes it unchanged. It is **not** always the first cell: a member
+/// function takes the `this` pointer first, and the hidden pointer after it.
+/// The `sret` attribute is what says which parameter it is, and the call site
+/// carries the same attribute, so the two agree.
 [[nodiscard]] auto scratch_type(llvm::LLVMContext& context, const llvm::CallBase& call)
     -> llvm::StructType* {
   std::vector<llvm::Type*> elements;
@@ -281,8 +284,10 @@ struct Dispatch {
 
 /// The pointer to one cell of the scratch.
 ///
-/// The first cell is the scratch itself: the hidden pointer of an `sret` call
-/// is at offset zero.
+/// The cell at the index zero is the scratch itself: the other cells are at
+/// their offset in it. Which cell holds the hidden pointer is the one the
+/// `sret` attribute names -- the first one for a free function, the second
+/// for a member function, whose `this` pointer comes first.
 [[nodiscard]] auto scratch_cell(llvm::IRBuilder<>& builder, llvm::StructType* scratch,
                                 llvm::Value* base, std::size_t index) -> llvm::Value* {
   if (index == 0) {
@@ -316,9 +321,9 @@ struct Dispatch {
 ///
 /// The thunk adapts the struct-returning call to the **uniform signature**
 /// (`u64 thunk(ptr scratch)`): the scratch holds the arguments of the call in
-/// the call's order, the hidden pointer is the first cell, and the thunk
-/// loads the arguments out of the scratch and calls the callee **with the
-/// `sret` attribute**.
+/// the call's order, the hidden pointer is the cell the `sret` attribute
+/// names, and the thunk loads the arguments out of the scratch and calls the
+/// callee **with the `sret` attribute**.
 ///
 /// The callee is reached through the caller's own table, so the edge stays
 /// hidden: a thunk that called the callee by name would leave the edge in the
@@ -344,7 +349,8 @@ void emit_sret_thunk(llvm::Module& module, llvm::Function* caller, llvm::CallBas
   cells->moveBefore(caller->getEntryBlock().getFirstInsertionPt());
 
   // The stores: the arguments of the call, in the call's order. The hidden
-  // pointer is the first one, and it is stored **unchanged**.
+  // pointer is one of them -- the one the `sret` attribute names -- and it
+  // is stored **unchanged**.
   for (std::size_t index = 0; index < call->arg_size(); ++index) {
     llvm::Value* cell = scratch_cell(at_call, scratch, cells, index);
     at_call.CreateStore(call->getArgOperand(index), cell);
@@ -396,10 +402,25 @@ void emit_sret_thunk(llvm::Module& module, llvm::Function* caller, llvm::CallBas
   builder.CreateRet(llvm::ConstantInt::get(i64_type, 0));
 
   // The call site: the thunk, with the scratch.
+  //
+  // The replacement call keeps the **operand bundles** of the call it
+  // replaces. In the MSVC EH model a catch handler is a funclet, and every
+  // call in it carries a `"funclet"(token ...)` bundle: the bundle is what
+  // tells LLVM's Windows-EH codegen that the call lives in a funclet.
+  // Without it the codegen mis-lowers the funclet -- it drops the body
+  // after the prologue, never emits the parent's `$ehgcr` continuation,
+  // and the image traps.
+  //
+  // The **ordinary** path does not need this: it mutates the call it
+  // rewrites (`site.call->setCalledOperand(callee)`), so the call keeps
+  // its bundles. Only the thunk path builds a *new* call, and only the
+  // thunk path can lose them.
   if (auto* invoke = llvm::dyn_cast<llvm::InvokeInst>(call)) {
-    auto* replacement =
-        llvm::InvokeInst::Create(thunk->getFunctionType(), thunk, invoke->getNormalDest(),
-                                 invoke->getUnwindDest(), {cells}, "", invoke->getIterator());
+    llvm::SmallVector<llvm::OperandBundleDef> bundles;
+    invoke->getOperandBundlesAsDefs(bundles);
+    auto* replacement = llvm::InvokeInst::Create(thunk->getFunctionType(), thunk,
+                                                 invoke->getNormalDest(), invoke->getUnwindDest(),
+                                                 {cells}, bundles, "", invoke->getIterator());
     replacement->setAttributes(thunk_attributes(context, *invoke));
     replacement->setCallingConv(invoke->getCallingConv());
     replacement->setDebugLoc(invoke->getDebugLoc());
@@ -407,8 +428,10 @@ void emit_sret_thunk(llvm::Module& module, llvm::Function* caller, llvm::CallBas
     invoke->eraseFromParent();
     return;
   }
-  auto* replacement =
-      llvm::CallInst::Create(thunk->getFunctionType(), thunk, {cells}, "", call->getIterator());
+  llvm::SmallVector<llvm::OperandBundleDef> bundles;
+  call->getOperandBundlesAsDefs(bundles);
+  auto* replacement = llvm::CallInst::Create(thunk->getFunctionType(), thunk, {cells}, bundles, "",
+                                             call->getIterator());
   replacement->setAttributes(thunk_attributes(context, *call));
   replacement->setCallingConv(call->getCallingConv());
   replacement->setDebugLoc(call->getDebugLoc());

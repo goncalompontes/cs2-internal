@@ -864,6 +864,116 @@ void test_transform_sret_member() {
   }
 }
 
+/// A module with a struct-returning call **inside a catch handler**.
+///
+/// The handler is a funclet in the MSVC EH model: it is a separate
+/// machine-level function, and every call in it carries a `"funclet"(token
+/// ...)` operand bundle. The bundle is what tells LLVM's Windows-EH codegen
+/// that the call lives in a funclet.
+[[nodiscard]] auto build_functlet_module(llvm::LLVMContext& context)
+    -> std::unique_ptr<llvm::Module> {
+  static constexpr std::string_view k_ir = R"(
+declare i32 @__gxx_personality_v0(...)
+declare void @may_throw()
+declare void @external_sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x)
+
+define i32 @caller(i32 %x) personality ptr @__gxx_personality_v0 {
+entry:
+  %out = alloca { i64, i64, i64 }, align 8
+  invoke void @may_throw() to label %cont unwind label %catch.dispatch
+
+catch.dispatch:
+  %cs = catchswitch within none [label %handler] unwind to caller
+
+handler:
+  %cp = catchpad within %cs [ptr null, i32 64, ptr null]
+  call void @external_sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x) [ "funclet"(token %cp) ]
+  catchret from %cp to label %cont
+
+cont:
+  ret i32 0
+}
+)";
+  return build_module_from(context, k_ir, "funclet.obj");
+}
+
+/// The replacement call keeps the **operand bundles** of the call it
+/// replaces.
+///
+/// A catch handler is a funclet, and the calls in it carry a `"funclet"`
+/// bundle. Without the bundle the Windows-EH codegen mis-lowers the funclet:
+/// it drops the body after the prologue, never emits the parent's
+/// continuation, and the image traps. The **ordinary** path does not need
+/// this -- it mutates the call it rewrites, so the call keeps its bundles --
+/// but the thunk path builds a *new* call, and only the thunk path can lose
+/// them.
+void test_transform_sret_functlet() {
+  llvm::LLVMContext context;
+  const auto module = build_functlet_module(context);
+  if (module == nullptr) {
+    return;
+  }
+  // The target the narrowing was measured on: the rule is closed on every
+  // other one, and the call would not be rewritten at all.
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  policy.cross_module.push_back("external_sret_target");
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  check(selection.selected.size() == 1, "the caller is selected");
+  check(selection.cross_matches.size() == 1, "the cross_module entry named the declaration");
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 1, "the call in the funclet is rewritten");
+  check(result.functions[0].skipped.size() == 1, "the invoke of the import is skipped");
+
+  llvm::Function* caller = module->getFunction("caller");
+  check(caller != nullptr, "the caller is still there");
+  if (caller == nullptr) {
+    return;
+  }
+
+  // The catchpad of the handler: it is the token of the bundle.
+  llvm::Value* catchpad = nullptr;
+  for (llvm::BasicBlock& block : *caller) {
+    for (llvm::Instruction& instruction : block) {
+      if (auto* pad = llvm::dyn_cast<llvm::CatchPadInst>(&instruction)) {
+        catchpad = pad;
+      }
+    }
+  }
+  check(catchpad != nullptr, "the catchpad of the handler is still there");
+
+  // The call in the handler goes through the thunk, and the replacement call
+  // keeps the bundle of the call it replaces.
+  bool saw_thunk = false;
+  for (const llvm::CallBase* call : calls_of(*caller)) {
+    const llvm::Function* callee = call->getCalledFunction();
+    if (callee == nullptr || !callee->getName().starts_with("cs2.protect.thunk.")) {
+      continue;
+    }
+    saw_thunk = true;
+    const auto bundle = call->getOperandBundle("funclet");
+    check(bundle.has_value(),
+          "the replacement call lost the funclet bundle of the call it replaces: the backend "
+          "drops the body of the funclet and the image traps");
+    if (bundle.has_value()) {
+      check(bundle->isFuncletOperandBundle(), "the bundle of the replacement call is the funclet");
+      check(bundle->Inputs.size() == 1, "the funclet bundle carries one operand: the token");
+      check(catchpad != nullptr && bundle->Inputs[0].get() == catchpad,
+            "the token of the bundle is the catchpad of the handler");
+    }
+  }
+  check(saw_thunk, "the call in the funclet does not go through the thunk");
+}
+
 /// The transform still refuses the parameters an indirect call cannot carry.
 ///
 /// The refusal **names** the attribute: a refusal that says "byval" is
@@ -2601,6 +2711,7 @@ auto main() -> int {
   test_transform_sret_other_target();
   test_transform_sret();
   test_transform_sret_member();
+  test_transform_sret_functlet();
   test_transform_parameters();
   test_transform_sret_result();
   test_layout_permutation();
