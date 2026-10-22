@@ -887,6 +887,10 @@ class Service {
   std::vector<TraceRay> trace_probe_rays_;
   TraceAbi trace_probe_abi_ = TraceAbi::correct;
   bool trace_probe_box_ = false;
+  // The probe's `at` point: the answer lists the cached solids whose AABB contains it
+  // (`world.at`), so a missing wall can be blamed on the cache or on the selection.
+  game::Vec3 trace_probe_at_{};
+  bool trace_probe_have_at_ = false;
   bool trace_probe_done_ = false;
   TraceProbeRun trace_probe_run_{};
   // The game thread's heartbeat: how many times the CreateMove hook's sink has run.

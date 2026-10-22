@@ -1614,7 +1614,8 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
 // plus the difference. Runs on a game thread (an engine call must not reach tier0's
 // allocator from the payload's own thread — docs/handoff.md).
 auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
-                 const TraceExclude& exclude, bool box_query) -> TraceProbeRun {
+                 const TraceExclude& exclude, bool box_query, const cs2::aim::Vec3* at)
+    -> TraceProbeRun {
   TraceProbeRun run;
   run.abi = abi;
   if (rays.empty()) {
@@ -1725,6 +1726,27 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
   // the answer never depends on the solver having run first in the tick.
   set_occlusion_exclude_pawns(exclude.entities, exclude.entity_count);
   run.enum_box = box_query ? 1 : 0;
+  // The position question, answered before anything else: does the **cache** hold a
+  // solid that contains `at`? ("we have it and the selection dropped it" vs "we do not
+  // have it at all").
+  if (at != nullptr && g_world_cache.count > 0) {
+    run.at_queried = true;
+    for (int i = 0; i < g_world_cache.count; ++i) {
+      const OcclusionHull& hull = g_world_cache.hulls[i];
+      Vec3 mn{};
+      Vec3 mx{};
+      hull_bounds(hull, mn, mx);
+      if (at->x < mn.x || at->x > mx.x || at->y < mn.y || at->y > mx.y || at->z < mn.z ||
+          at->z > mx.z) {
+        continue;
+      }
+      ++run.at_total;
+      if (static_cast<int>(run.at_point.size()) < 16) {
+        run.at_point.push_back(
+            TraceHullInfo{.kind = hull.kind, .min = mn, .max = mx, .target = hull.target});
+      }
+    }
+  }
   OcclusionQueryResult occluders =
       query_world_occluders(eye, lo, hi, true, exclude.handles, exclude.handle_count,
                             box_query ? nullptr : &target, box_query ? 0 : 1);

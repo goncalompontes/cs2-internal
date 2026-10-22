@@ -2110,12 +2110,17 @@ void Service::on_game_thread() noexcept {
     std::vector<TraceRay> rays;
     TraceAbi abi = TraceAbi::correct;
     bool box_query = false;
+    game::Vec3 at{};
+    bool have_at = false;
     {
       const std::scoped_lock lock(trace_probe_mutex_);
       rays = trace_probe_rays_;
       abi = trace_probe_abi_;
       box_query = trace_probe_box_;
+      at = trace_probe_at_;
+      have_at = trace_probe_have_at_;
     }
+    const game::Vec3* at_point = have_at ? &at : nullptr;
     // The players are targets, not occluders: the probe excludes them itself, so
     // its answer never depends on the solver having run in this tick. The
     // enumeration drops a player two ways — its handle index and its entity
@@ -2146,7 +2151,7 @@ void Service::on_game_thread() noexcept {
                                .handle_count = exclude_count,
                                .entities = entities,
                                .entity_count = exclude_count};
-    TraceProbeRun probe = probe_trace(rays, true, abi, exclude, box_query);
+    TraceProbeRun probe = probe_trace(rays, true, abi, exclude, box_query, at_point);
     const std::scoped_lock lock(trace_probe_mutex_);
     trace_probe_run_ = std::move(probe);
     trace_probe_done_ = true;
@@ -4275,6 +4280,19 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
     }
   }
 
+  // `at`: a world point whose cached solids the answer reports (`world.at`), to tell
+  // "the solid is not in the cache" from "the selection dropped it".
+  bool have_at = false;
+  game::Vec3 at{};
+  if (const Json* value = args.find("at");
+      value != nullptr && value->is_array() && value->items().size() == 3) {
+    const std::vector<Json>& items = value->items();
+    at = game::Vec3{.x = static_cast<float>(items[0].as_number()),
+                    .y = static_cast<float>(items[1].as_number()),
+                    .z = static_cast<float>(items[2].as_number())};
+    have_at = true;
+  }
+
   // The fan: ray 0 is the view ray itself, the rest are the golden-angle spiral
   // around it (a documented, deterministic order — two runs compare).
   const aim::Basis basis = aim::Basis::world();
@@ -4286,6 +4304,8 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
     trace_probe_rays_ = rays;
     trace_probe_abi_ = abi;
     trace_probe_box_ = box_query;
+    trace_probe_at_ = at;
+    trace_probe_have_at_ = have_at;
     trace_probe_done_ = false;
     trace_probe_run_ = TraceProbeRun{};
   }
@@ -4409,6 +4429,18 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
     kept.push_back(std::move(item));
   }
   world.set("kept", std::move(kept));
+  if (run.at_queried) {
+    Json hits = Json::array();
+    for (const TraceHullInfo& hull : run.at_point) {
+      Json item = Json::object();
+      item.set("kind", Json::string(solid_kind_name(hull.kind)));
+      item.set("min", vec3_json(hull.min));
+      item.set("max", vec3_json(hull.max));
+      hits.push_back(std::move(item));
+    }
+    world.set("at", std::move(hits));
+    world.set("at_total", Json::integer(run.at_total));
+  }
   engine.set("world", std::move(world));
   payload.set("engine", std::move(engine));
   payload.set("ran", Json::boolean(done));

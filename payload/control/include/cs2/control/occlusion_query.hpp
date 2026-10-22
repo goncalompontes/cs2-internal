@@ -589,6 +589,12 @@ struct TraceProbeRun {
   // The kept solids (bounded), so a missing wall can be looked up by position.
   std::vector<TraceHullInfo> kept;
   static constexpr int k_max_kept_published = 64;
+  // The cached world solids whose AABB **contains the probe's `at` point**, regardless
+  // of any pyramid or ray. This is what tells "the solid is not in the cache" apart
+  // from "the cache has it and the selection dropped it".
+  std::vector<TraceHullInfo> at_point;
+  int at_total = 0;
+  bool at_queried = false;
   // The probe's own bounds: how many solids it projects at most, and whether the
   // enumeration produced more than that (the answer is then incomplete).
   int occluder_cap = TRACE_MAX_OCCLUDERS;
@@ -908,7 +914,8 @@ struct TraceExclude {
 [[nodiscard]] auto probe_trace(const std::vector<TraceRay>& rays, bool invoke,
                                TraceAbi abi = TraceAbi::correct,
                                const TraceExclude& exclude = TraceExclude{},
-                               bool box_query = false) -> TraceProbeRun;
+                               bool box_query = false,
+                               const cs2::aim::Vec3* at = nullptr) -> TraceProbeRun;
 
 // Has the static world body been parsed yet? The probe's enumeration reuses the
 // parsed cache; parsing it inside the input hook is the probe's one expensive case
