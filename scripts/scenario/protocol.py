@@ -799,6 +799,22 @@ class RageResult(TypedDict, total=False):
     objective_value: int
     #: The **global** objective's name (the setting, not the effective one).
     objective_global: str
+    #: Who owns the objective **in force** (the effective one): ``"menu"``,
+    #: ``"control"`` or ``"profile"`` — a per-weapon profile's objective
+    #: comes from the profile file, so no channel owns it.
+    objective_source: str
+    #: Who owns the **global** objective (the setting the two channels
+    #: write): ``"menu"`` or ``"control"``.
+    objective_global_source: str
+    #: The objective the **menu's tab is showing** (the shared block's byte).
+    #: It differs from :attr:`objective` when the control channel owns the
+    #: objective: the menu has three options and cannot show the
+    #: Monte-Carlo one, so the tab and the ragebot can disagree.
+    menu_objective: str
+    #: The rage fields the **menu** owns, comma-separated. A field that is
+    #: not in the list belongs to the control channel. This is the
+    #: **ownership map**, not a log of recent edits.
+    menu_fields: str
     #: The Monte-Carlo objective's own state: the sample count in force, the
     #: seed policy, the numbers the last solve produced and the reason it
     #: refused if it did.
