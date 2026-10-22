@@ -3863,23 +3863,19 @@ auto Service::start() noexcept -> bool {
   if (running_.load(std::memory_order_relaxed)) {
     return true;
   }
-  // The endpoint: `CS2_CONTROL_SOCKET` wins (a path, or "tcp" for the loopback
-  // fallback), otherwise the payload's data directory.
+  // The endpoint: loopback TCP by default (the Windows Python build the MCP
+  // runs on has no AF_UNIX, and TCP needs no filesystem entry). An explicit
+  // `CS2_CONTROL_SOCKET=<path>` selects the Unix socket for clients that
+  // support it; "tcp" keeps TCP.
   std::string socket_path;
-  bool force_tcp = false;
+  bool force_tcp = true;
   if (const char* configured = std::getenv("CS2_CONTROL_SOCKET");
       configured != nullptr && *configured != '\0') {
     if (std::string_view(configured) == "tcp") {
       force_tcp = true;
     } else {
+      force_tcp = false;
       socket_path = configured;
-    }
-  } else {
-    char buffer[260] = {};
-    if (cs2::game::data_file_path(Channel::k_default_socket, buffer, sizeof(buffer))) {
-      socket_path = buffer;
-    } else {
-      force_tcp = true;
     }
   }
   if (const char* configured = std::getenv("CS2_CONTROL_TOKEN")) {
