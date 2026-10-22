@@ -11,10 +11,9 @@ namespace {
 
 // Microseconds since an arbitrary origin (steady clock), for the optional stats.
 [[nodiscard]] auto ticks_us() noexcept -> std::uint64_t {
-  return static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
 }
 
 // The Monte-Carlo objective's dispatch: build the core's input from the solve
@@ -84,13 +83,13 @@ namespace {
     return field.argmax_damage();
   }
   result.monte_carlo = MonteCarloVerdict{.probability = choice->chance.probability,
-                                          .expected_damage = choice->chance.expected_damage,
-                                          .samples = choice->chance.samples,
-                                          .hits = choice->chance.hits,
-                                          .seed_source = choice->chance.source,
-                                          .target = choice->target,
-                                          .hitgroup = choice->hitgroup,
-                                          .can_kill = choice->can_kill};
+                                         .expected_damage = choice->chance.expected_damage,
+                                         .samples = choice->chance.samples,
+                                         .hits = choice->chance.hits,
+                                         .seed_source = choice->chance.source,
+                                         .target = choice->target,
+                                         .hitgroup = choice->hitgroup,
+                                         .can_kill = choice->can_kill};
   return choice->aim;
 }
 

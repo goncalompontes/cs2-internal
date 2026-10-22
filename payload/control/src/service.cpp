@@ -45,17 +45,6 @@ auto now_ms() noexcept -> std::uint64_t {
 #endif
 }
 
-// The Monte-Carlo objective's sample-count bounds (the `rage` command's
-// `samples` argument).
-//
-// **The default is 64** — the only count that fits the frame budget at a
-// live-sized hitbox set (57 hitboxes for three targets, where 128 is over the
-// 12 ms guard and 256 is over the tick; `docs/ragebot.md` §13.6). A different
-// count must be an **explicit** choice, and the status shows which one is in
-// force.
-constexpr int k_min_mc_samples = 1;
-constexpr int k_max_mc_samples = 256;
-
 // The prediction tick the seed context uses: the local controller's
 // `m_nTickBase`, the tick the client is simulating (`docs/re/lagcomp.md`).
 //
@@ -1912,10 +1901,25 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   }
 }
 
+void Service::publish_monte_carlo(const MonteCarloState& state) noexcept {
+  const std::scoped_lock lock(rage_mc_mutex_);
+  rage_mc_state_ = state;
+}
+
+auto Service::read_monte_carlo() const noexcept -> MonteCarloState {
+  const std::scoped_lock lock(rage_mc_mutex_);
+  return rage_mc_state_;
+}
+
 void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // Ragebot instrumentation (`docs/ragebot-perf.md`): time the whole solve and each stage.
   perf_.frames.fetch_add(1, std::memory_order_relaxed);
   const FrameScope frame_scope(perf_.total_us, perf_.last_total_us, perf_.max_total_us);
+  // The Monte-Carlo verdict is **cleared first**: every early return below
+  // (no target, not engaged, no hitbox, ...) must not leave the previous
+  // tick's verdict on the status, or the operator reads a stale number under
+  // another objective's name (`docs/ragebot.md` §13.7).
+  publish_monte_carlo(MonteCarloState{});
   // Auto-scope is re-decided every tick; the same sink applies the transition (`+zoom`).
   rage_scope_wanted_.store(false);
   const bool forced = rage_force_.load();
@@ -1947,6 +1951,10 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // The effective tuning: the per-weapon profile when enabled and the active weapon has
   // one, else the global settings (`effective_rage_tuning`).
   const RageTuning tuning = effective_rage_tuning(local.weapon.c_str());
+  // The objective the solve **runs** is published, so the status names it and
+  // not the global setting: with a per-weapon profile the two differ, and the
+  // numbers mean different things under each (`docs/ragebot.md` §13.7).
+  rage_effective_objective_.store(tuning.objective, std::memory_order_relaxed);
 
   // Target selection (`docs/ragebot.md` §3): the enemies within the FOV cone (degrees;
   // 0 = unlimited), computed **before** the trigger so the assists can be predictive.
@@ -2065,6 +2073,16 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
         weapon.penetration = from_game.penetration;
       }
       weapon.weapon_type = from_game.weapon_type;
+    }
+    // The weapon **type** decides whether the Monte-Carlo kernel may model the
+    // weapon's pellet pattern at all (`pattern_supported`): an unknown type
+    // (-1) counts as "modelled", so a shotgun whose VData could not be read
+    // would be **silently scored with the standard pattern** — the one thing
+    // the core's refusal design exists to prevent. The snapshot carries the
+    // same field, read independently (`state_reader.cpp`), so it is the
+    // fallback when the profile read fails.
+    if (weapon.weapon_type < 0) {
+      weapon.weapon_type = local.weapon_type;
     }
   }
 
@@ -2281,6 +2299,12 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   const bool allow_backtrack =
       rage_backtrack_.load() &&
       perf_.last_total_us.load(std::memory_order_relaxed) <= k_backtrack_budget_us;
+  // The operator sees the backtrack counter stop incrementing and needs to
+  // know **why**: the frame had already blown the guard.
+  rage_backtrack_over_budget_.store(
+      rage_backtrack_.load() &&
+          perf_.last_total_us.load(std::memory_order_relaxed) > k_backtrack_budget_us,
+      std::memory_order_relaxed);
   if (allow_backtrack) {
     const std::scoped_lock lock(records_mutex_);
     const std::int32_t newest =
@@ -2351,34 +2375,28 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   perf_.poses.store(static_cast<std::uint32_t>(poses.size()), std::memory_order_relaxed);
 
   // The Monte-Carlo objective's verdict, published for the status. The solve
-  // runs on the game thread and the status is read on the control thread, so
-  // the numbers cross the boundary as atomics.
+  // runs on the game thread and the status is read on the control **and** the
+  // render thread, so the verdict crosses the boundary as **one value**.
   //
   // **A refusal is published, never swallowed**: the reason is what tells the
   // operator that the aim came from the `damage` objective instead of the
   // Monte-Carlo one.
   if (solve_input->objective == aim::AimObjective::monte_carlo) {
+    MonteCarloState state;
     if (result.monte_carlo.has_value()) {
-      rage_mc_valid_.store(true, std::memory_order_relaxed);
-      rage_mc_hitchance_.store(result.monte_carlo->probability, std::memory_order_relaxed);
-      rage_mc_damage_.store(result.monte_carlo->expected_damage, std::memory_order_relaxed);
-      rage_mc_target_.store(result.monte_carlo->target, std::memory_order_relaxed);
-      rage_mc_refusal_.store(-1, std::memory_order_relaxed);
+      state.valid = true;
+      state.probability = result.monte_carlo->probability;
+      state.expected_damage = result.monte_carlo->expected_damage;
+      state.target = result.monte_carlo->target;
+      state.hitgroup = result.monte_carlo->hitgroup;
+      state.hits = result.monte_carlo->hits;
+      state.can_kill = result.monte_carlo->can_kill;
     } else {
-      rage_mc_valid_.store(false, std::memory_order_relaxed);
-      rage_mc_hitchance_.store(0.0F, std::memory_order_relaxed);
-      rage_mc_damage_.store(0.0F, std::memory_order_relaxed);
-      rage_mc_target_.store(-1, std::memory_order_relaxed);
-      rage_mc_refusal_.store(result.monte_carlo_refusal.has_value()
-                                 ? static_cast<int>(*result.monte_carlo_refusal)
-                                 : -1,
-                             std::memory_order_relaxed);
+      state.refusal = result.monte_carlo_refusal.has_value()
+                          ? static_cast<int>(*result.monte_carlo_refusal)
+                          : -1;
     }
-  } else {
-    // Another objective: the Monte-Carlo's numbers are stale, so they are
-    // cleared rather than left to be read as the current ones.
-    rage_mc_valid_.store(false, std::memory_order_relaxed);
-    rage_mc_refusal_.store(-1, std::memory_order_relaxed);
+    publish_monte_carlo(state);
   }
 
   // The aim/fire gate (`docs/ragebot.md` §3): only aim and fire when the solve meets
@@ -2493,13 +2511,35 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
     std::memcpy(objective, name.data(), length);
     objective[length] = '\0';
   }
+  // **The Monte-Carlo's marker** (`docs/ragebot.md` §13.7): the measured
+  // probability, or the **refusal**.
+  //
+  // §2.4: a fallback to another objective must **never** be silent, and the
+  // HUD is where the operator actually looks — the control channel's JSON is
+  // where the operator *reads*. So the refusal reaches the line too.
+  //
+  // **Stack buffer, no heap**: this line is built on the render thread.
+  char mc[16] = {};
+  {
+    const MonteCarloState state = read_monte_carlo();
+    if (state.valid) {
+      const int percent = static_cast<int>(state.probability * 100.0F + 0.5F);
+      std::snprintf(mc, sizeof(mc), " mc%d%%", percent);
+    } else if (state.refusal >= 0) {
+      std::snprintf(mc, sizeof(mc), " mc-refused");
+    }
+  }
+  // The line's tail carries the two occlusion markers, and they are the first
+  // things the 128-byte buffer truncates — so the record and the occluder
+  // count (both in the `rage` command's JSON status) are left out to make
+  // room for the Monte-Carlo's marker.
   std::snprintf(
-      out, size, "rage: %s target %d box %d obj %s w%llu s%llu bt%llu rec%d occ%d fire %d%s%s%s",
-      input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(), objective,
+      out, size, "rage: %s target %d box %d obj %s%s w%llu s%llu bt%llu fire %d%s%s%s",
+      input_.rage_active() ? "AIM" : "hold", target, input_.rage_hitbox(), objective, mc,
       static_cast<unsigned long long>(input_.rage_writes()),
       static_cast<unsigned long long>(input_.rage_shots()),
-      static_cast<unsigned long long>(rage_backtracks_.load()), rage_last_record_.load(),
-      rage_occluders_.load(), input_.rage_fire() ? 1 : 0, input_.rage_stop() ? " stop" : "",
+      static_cast<unsigned long long>(rage_backtracks_.load()), input_.rage_fire() ? 1 : 0,
+      input_.rage_stop() ? " stop" : "",
       rage_occlusion_query_complete_.load(std::memory_order_relaxed) ? "" : " occlusion-incomplete",
       rage_occlusion_candidates_complete_.load(std::memory_order_relaxed) ? "" : " occlusion-cap");
   return true;
@@ -2788,12 +2828,34 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
       args.find("damage") != nullptr || args.find("range_modifier") != nullptr ||
       args.find("penetration") != nullptr || args.find("headshot") != nullptr;
 
-  auto input = aim::build_input(snapshot, weapon, target, !explicit_weapon);
+  // **The weapon is always read from the game.** The Monte-Carlo kernel is
+  // built from the weapon's **spread**, **inaccuracy** and **type**: with the
+  // caller's profile alone they are 0 / 0 / -1, so every sample lands exactly
+  // on the aim and the "measured probability" is 1.0 for a weapon that really
+  // spreads — and an unknown type counts as "modelled", so a shotgun would be
+  // scored with the standard pattern. The caller's own damage / range /
+  // penetration / headshot are overlaid afterwards, so the caller still wins
+  // on those.
+  auto input = aim::build_input(snapshot, weapon, target, /*weapon_from_game=*/true);
   if (!input.has_value()) {
     set_error(out, "aim unavailable: no local player / live enemy");
     return;
   }
+  if (explicit_weapon) {
+    input->weapon = apply_stated_weapon(input->weapon, weapon);
+  }
+  // The weapon **type**, when the VData could not be read: the snapshot
+  // carries the same field, read independently (`state_reader.cpp`). An
+  // unknown type is "modelled" by the kernel, so it must not be left unknown
+  // when the payload knows it (`pattern_supported`).
+  if (input->weapon.weapon_type < 0 && snapshot.local.has_value()) {
+    input->weapon.weapon_type = snapshot.local->weapon_type;
+  }
   input->pose_sigma = number("sigma", 0.0F);
+  // The sample count the caller asked for and the one in force (the Monte-Carlo
+  // branch sets them; the payload reports the difference).
+  int mc_samples_requested = MC_SAMPLES_DEFAULT;
+  int mc_samples_in_force = MC_SAMPLES_DEFAULT;
   if (const Json* objective = args.find("objective");
       objective != nullptr && objective->is_string()) {
     const std::string_view name = objective->as_string();
@@ -2808,6 +2870,9 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
       // spread/inaccuracy magnitudes come from the caller until the weapon's
       // inaccuracy (`FUN_18080b880`) is wired live (`docs/re/aim.md` §9).
       input->objective = aim::AimObjective::pellets;
+      // **The `seed` key means an integer seed here** (the pellet offsets'
+      // seed); under the Monte-Carlo objective the same key means the seed
+      // *policy's* name. The two are told apart by their type.
       int seed = integer("seed", 0);
       if (seed == 0) {
         seed = aim::md5_pseudo_random(static_cast<std::uint32_t>(integer("sequence", 1)));
@@ -2815,11 +2880,17 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
       const int pellets = integer("pellets", 1);
       // Spread defaults to the shooter's real `m_flSpread`; inaccuracy to the engine's
       // effective value (`m_flInterpolatedInaccuracy`) — both read into the weapon
-      // profile by `build_input`.
-      const float spread = number("spread", input->weapon.spread);
-      const float inaccuracy = number("inaccuracy", input->weapon.inaccuracy);
-      input->pellet_offsets =
-          aim::pellet_offsets(seed, spread, inaccuracy, pellets > 0 ? pellets : 1);
+      // profile by `build_input`. A stated value wins and is **written back**
+      // into the profile, so the report and the cone below use the same numbers
+      // as the pellet offsets.
+      if (args.find("spread") != nullptr) {
+        input->weapon.spread = number("spread", input->weapon.spread);
+      }
+      if (args.find("inaccuracy") != nullptr) {
+        input->weapon.inaccuracy = number("inaccuracy", input->weapon.inaccuracy);
+      }
+      input->pellet_offsets = aim::pellet_offsets(
+          seed, input->weapon.spread, input->weapon.inaccuracy, pellets > 0 ? pellets : 1);
     } else if (input->objective == aim::AimObjective::monte_carlo) {
       // The Monte-Carlo objective (`docs/ragebot.md` section 13.7). The seed
       // context's tick is the prediction tick; the sequence is the **documented
@@ -2828,45 +2899,44 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
       const std::uint32_t tick = prediction_tick(snapshot);
       const int stated_sequence = integer("sequence", 0);
       const int stated_tick = integer("tick", 0);
-      const int samples = integer("samples", 64);
+      const int samples = integer("samples", MC_SAMPLES_DEFAULT);
       int seed_source = SEED_SOURCE_SEQUENCE;
+      // **The `seed` key means the seed *policy's* name here** (an integer
+      // seed under the `pellets` objective): the two are told apart by their
+      // type.
       if (const Json* value = args.find("seed"); value != nullptr && value->is_string()) {
         seed_source = seed_source_for(value->as_string());
       }
-      input->monte_carlo_samples =
-          samples >= k_min_mc_samples && samples <= k_max_mc_samples ? samples : 64;
-      input->monte_carlo_seed =
-          aim::SeedContext{.sequence = stated_sequence > 0
-                                             ? static_cast<std::uint32_t>(stated_sequence)
-                                             : tick,
-                           .tick = stated_tick > 0 ? static_cast<std::uint32_t>(stated_tick) : tick,
-                           .source = static_cast<aim::SeedSource>(seed_source)};
+      // The sample count: an out-of-range count is **ignored**, exactly as the
+      // `rage` command ignores it, so the two entry points behave the same.
+      // The payload says which count is in force and whether it fits the tick.
+      mc_samples_requested = samples;
+      mc_samples_in_force = mc_samples_in_range(samples) ? samples : MC_SAMPLES_DEFAULT;
+      input->monte_carlo_samples = mc_samples_in_force;
+      input->monte_carlo_seed = aim::SeedContext{
+          .sequence = stated_sequence > 0 ? static_cast<std::uint32_t>(stated_sequence) : tick,
+          .tick = stated_tick > 0 ? static_cast<std::uint32_t>(stated_tick) : tick,
+          .source = static_cast<aim::SeedSource>(seed_source)};
       // The weapon's pattern: the core has no default for it, and the designer
       // name is the only thing that tells a revolver from a rifle.
-      input->monte_carlo_pattern = spread_pattern_for(
-          snapshot.local.has_value() ? std::string_view{snapshot.local->weapon}
-                                     : std::string_view{});
-      // The target's own health: the rule's first key is judged against it. The
-      // solve considers **one** target (`build_input` picks the nearest, or the
-      // one the caller named), so the health list carries that one -- the same
-      // rule, so the list and the solve agree.
+      input->monte_carlo_pattern =
+          spread_pattern_for(snapshot.local.has_value() ? std::string_view{snapshot.local->weapon}
+                                                        : std::string_view{});
+      // The target's own health: the rule's first key is judged against it.
+      //
+      // **The index comes from the hitboxes**, which the reader stamped with
+      // the target it chose: the health list and the hitboxes must speak about
+      // **the same** target, or the core's can-kill lookup never matches (the
+      // rule is `cs2/control/rage_objective.hpp`).
       input->monte_carlo_targets.clear();
-      if (snapshot.local.has_value()) {
-        const game::PlayerSnapshot* chosen = nullptr;
+      const int target_index = hitbox_target(input->hitboxes);
+      if (target_index >= 0) {
         for (const game::PlayerSnapshot& player : snapshot.players) {
-          if (player.is_local || !player.alive || player.team == snapshot.local->team) {
-            continue;
+          if (player.index == target_index) {
+            input->monte_carlo_targets.push_back(
+                health_entry_for(input->hitboxes, static_cast<float>(player.health)));
+            break;
           }
-          if (target >= 0 && player.index != target) {
-            continue;
-          }
-          if (chosen == nullptr || player.distance < chosen->distance) {
-            chosen = &player;
-          }
-        }
-        if (chosen != nullptr) {
-          input->monte_carlo_targets.push_back(aim::TargetHealth{
-              .index = chosen->index, .health = static_cast<float>(chosen->health)});
         }
       }
     }
@@ -2922,18 +2992,30 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
   // 13.7). The two objectives' numbers mean different things, so the name is
   // what tells them apart.
   payload.set("objective", Json::string(std::string(objective_name_of(input->objective))));
+  // The sample count in force and what the operator has to know about it: a
+  // count outside 1..256 is ignored, and a count above 64 does not fit the
+  // tick (`cs2/control/rage_objective.hpp`).
+  payload.set("mc_samples", Json::number(static_cast<double>(mc_samples_in_force)));
+  payload.set("mc_samples_requested", Json::number(static_cast<double>(mc_samples_requested)));
+  payload.set(
+      "mc_samples_note",
+      Json::string(std::string(mc_samples_note(mc_samples_requested, mc_samples_in_force))));
   if (result.monte_carlo.has_value()) {
     payload.set("mc_samples", Json::number(static_cast<double>(result.monte_carlo->samples)));
     payload.set("mc_hits", Json::number(static_cast<double>(result.monte_carlo->hits)));
-    payload.set("mc_hitchance",
-                Json::number(static_cast<double>(result.monte_carlo->probability)));
+    payload.set("mc_hitchance", Json::number(static_cast<double>(result.monte_carlo->probability)));
     payload.set("mc_expected_damage",
                 Json::number(static_cast<double>(result.monte_carlo->expected_damage)));
     payload.set("mc_target", Json::number(static_cast<double>(result.monte_carlo->target)));
     payload.set("mc_hitgroup", Json::number(static_cast<double>(result.monte_carlo->hitgroup)));
     payload.set("mc_can_kill", Json::boolean(result.monte_carlo->can_kill));
-    payload.set("mc_seed", Json::string(std::string(seed_source_name(
-        static_cast<int>(result.monte_carlo->seed_source)))));
+    const int seed = static_cast<int>(result.monte_carlo->seed_source);
+    payload.set("mc_seed", Json::string(std::string(seed_source_name(seed))));
+    // **The seed's disclosure** (`docs/ragebot.md` §13.7): under the `sequence`
+    // policy the tick stands in for the command's sequence number, so the
+    // caller must be told that the number is a stand-in.
+    payload.set("mc_seed_fallback", Json::boolean(seed_source_is_fallback(seed)));
+    payload.set("mc_seed_note", Json::string(std::string(seed_source_note(seed))));
   }
   // The refusal is always reported (empty when there was none), so a fallback
   // to another objective is never silent.
@@ -3034,11 +3116,18 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
     rage_mc_seed_.store(seed_source_for(value->as_string()));
   }
   if (const Json* value = args.find("samples"); value != nullptr && value->is_number()) {
-    // The Monte-Carlo sample count. The **default is 64**; a different count
-    // must be an explicit choice, and the status shows which one is in force.
+    // The Monte-Carlo sample count. The **default is 64** — the only count
+    // that fits the frame budget at a live-sized hitbox set (`docs/ragebot.md`
+    // §13.6). A different count must be an explicit choice, and the status
+    // shows which one is in force.
+    //
+    // **A count outside 1..256 is ignored** — exactly as the `aim` command
+    // ignores it, so the two entry points behave the same way. The status says
+    // so (`mc_samples_note`).
     const int samples = static_cast<int>(value->as_number());
-    if (samples >= k_min_mc_samples && samples <= k_max_mc_samples) {
-      rage_mc_samples_.store(samples);
+    rage_mc_samples_requested_.store(samples, std::memory_order_relaxed);
+    if (mc_samples_in_range(samples)) {
+      rage_mc_samples_.store(samples, std::memory_order_relaxed);
     }
   }
   if (const Json* value = args.find("fov"); value != nullptr && value->is_number()) {
@@ -3141,34 +3230,58 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
                   rage_occlusion_query_issues_.load(std::memory_order_relaxed))));
   payload.set("backtracks", Json::number(static_cast<double>(rage_backtracks_.load())));
   payload.set("record", Json::number(static_cast<double>(rage_last_record_.load())));
+  // Whether the last tick **skipped** the backtracking because the frame had
+  // already blown the 12 ms guard: the operator sees the backtrack counter
+  // stop incrementing and needs to know why (`docs/ragebot-perf.md` §3.9).
+  payload.set("backtrack_over_budget",
+              Json::boolean(rage_backtrack_over_budget_.load(std::memory_order_relaxed)));
   // The objective **by name**, not by number: the operator has to be able to
   // tell the Monte-Carlo objective from the others, and the numbers mean
   // different things under each (`docs/ragebot.md` section 13.7). The value is
   // still reported, under its own key.
-  payload.set("objective", Json::string(std::string(objective_name_for(rage_objective_.load()))));
-  payload.set("objective_value", Json::number(static_cast<double>(rage_objective_.load())));
+  //
+  // **The effective objective** is the one the solve ran: with a per-weapon
+  // profile the profile's objective wins (`effective_rage_tuning`), so naming
+  // the global setting would label the numbers with the wrong objective. The
+  // global one is reported under its own key.
+  const int global_objective = rage_objective_.load();
+  const int effective_objective =
+      rage_per_weapon_.load() ? rage_effective_objective_.load() : global_objective;
+  payload.set("objective", Json::string(std::string(objective_name_for(effective_objective))));
+  payload.set("objective_value", Json::number(static_cast<double>(effective_objective)));
+  payload.set("objective_global", Json::string(std::string(objective_name_for(global_objective))));
   // The Monte-Carlo objective's own state: the sample count, the seed policy in
   // force, the numbers the last solve produced, and the reason it refused if it
   // did. **A fallback to another objective is never silent**: `mc_refusal` names
   // it and `mc_fallback` says the aim came from the `damage` objective.
+  //
+  // The verdict is read as **one value** (`read_monte_carlo`): the reader can
+  // never see a half-published verdict, so a refusal can never be hidden.
   {
     const int seed = rage_mc_seed_.load();
-    payload.set("mc_samples", Json::number(static_cast<double>(rage_mc_samples_.load())));
+    const int samples = rage_mc_samples_.load();
+    const MonteCarloState state = read_monte_carlo();
+    payload.set("mc_samples", Json::number(static_cast<double>(samples)));
+    payload.set("mc_samples_note",
+                Json::string(std::string(mc_samples_note(
+                    rage_mc_samples_requested_.load(std::memory_order_relaxed), samples))));
     payload.set("mc_seed", Json::string(std::string(seed_source_name(seed))));
     payload.set("mc_seed_fallback", Json::boolean(seed_source_is_fallback(seed)));
     payload.set("mc_seed_note", Json::string(std::string(seed_source_note(seed))));
-    payload.set("mc_hitchance", Json::number(static_cast<double>(rage_mc_hitchance_.load())));
-    payload.set("mc_expected_damage",
-                Json::number(static_cast<double>(rage_mc_damage_.load())));
-    payload.set("mc_target", Json::number(static_cast<double>(rage_mc_target_.load())));
-    const int refusal = rage_mc_refusal_.load();
+    payload.set("mc_hitchance", Json::number(static_cast<double>(state.probability)));
+    payload.set("mc_expected_damage", Json::number(static_cast<double>(state.expected_damage)));
+    payload.set("mc_target", Json::number(static_cast<double>(state.target)));
+    payload.set("mc_hitgroup", Json::number(static_cast<double>(state.hitgroup)));
+    payload.set("mc_hits", Json::number(static_cast<double>(state.hits)));
+    payload.set("mc_can_kill", Json::boolean(state.can_kill));
+    const int refusal = state.refusal;
     payload.set(
         "mc_refusal",
         Json::string(refusal >= 0
-                        ? std::string(aim::to_string(static_cast<aim::MonteCarloError>(refusal)))
-                        : std::string()));
+                         ? std::string(aim::to_string(static_cast<aim::MonteCarloError>(refusal)))
+                         : std::string()));
     payload.set("mc_fallback", Json::boolean(refusal >= 0));
-    payload.set("mc_valid", Json::boolean(rage_mc_valid_.load()));
+    payload.set("mc_valid", Json::boolean(state.valid));
   }
   payload.set("hitbox_mode", Json::number(static_cast<double>(rage_hitbox_.load())));
   payload.set("fov", Json::number(static_cast<double>(rage_fov_.load())));

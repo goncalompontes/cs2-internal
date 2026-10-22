@@ -27,6 +27,7 @@
 #include "cs2/control/json.hpp"
 #include "cs2/control/occlusion_query.hpp"
 #include "cs2/control/rage_config.hpp"
+#include "cs2/control/rage_objective.hpp"
 #include "cs2/control/settings_access.hpp"
 #include "cs2/control/trigger.hpp"
 #include "cs2/game/state_reader.hpp"
@@ -494,30 +495,58 @@ class Service {
   // sample count, the seed policy, and the last solve's verdict.
   //
   // **The verdict crosses a thread boundary**: the solve runs on the game thread
-  // (the CreateMove hook) and the status is read on the control thread, so the
-  // numbers are published as atomics. They are the only way the operator can
-  // see that the Monte-Carlo solver **refused** — a silent fallback to another
-  // objective is exactly what must not happen.
+  // (the CreateMove hook) and the status is read on **two** threads — the
+  // control thread (the `rage` command) and the render thread (the HUD line,
+  // `payload/features/src/overlay.cpp`). The verdict is the only way the
+  // operator can see that the Monte-Carlo solver **refused** — a silent
+  // fallback to another objective is exactly what must not happen — so it is
+  // published as **one value** (see `MonteCarloState`).
   //
   // The sample count's **default is 64**: it is the only count that fits the
   // frame budget at a live-sized hitbox set (`docs/ragebot.md` §13.6). A
   // different count must be an explicit choice (the `rage` command's `samples`).
-  std::atomic<int> rage_mc_samples_{64};
+  std::atomic<int> rage_mc_samples_{MC_SAMPLES_DEFAULT};
+  // The sample count the operator last asked for. A count outside 1..256 is
+  // **ignored** (both entry points ignore it), so the status compares the two
+  // and says what is in force (`cs2/control/rage_objective.hpp`).
+  std::atomic<int> rage_mc_samples_requested_{MC_SAMPLES_DEFAULT};
   // The seed policy: 0 = the sequence policy (the repo's own RE), 1 = the
   // angle-grid policy (the community's, with the stand-in hash). The values are
   // `cs2::aim::SeedSource`'s own (`cs2/control/rage_objective.hpp`).
   std::atomic<int> rage_mc_seed_{0};
-  // The last Monte-Carlo verdict: the measured probability, the expected damage
-  // and the target the nearest hit named.
-  std::atomic<float> rage_mc_hitchance_{0.0F};
-  std::atomic<float> rage_mc_damage_{0.0F};
-  std::atomic<int> rage_mc_target_{-1};
-  // The last refusal: -1 when the solver produced a number, otherwise the
-  // `cs2::aim::MonteCarloError`'s value (the status names it).
-  std::atomic<int> rage_mc_refusal_{-1};
-  // Whether the last solve produced a Monte-Carlo verdict at all (the
-  // objective was the Monte-Carlo one and it did not refuse).
-  std::atomic<bool> rage_mc_valid_{false};
+  // The last Monte-Carlo verdict, published as **one value**.
+  //
+  // **Why not a handful of relaxed atomics.** Seven independent
+  // `memory_order_relaxed` stores let a reader mix two ticks: `valid` from tick
+  // N+1 next to a refusal from tick N — and the other way round, which **hid
+  // the refusal entirely**. §2.4 forbids a silent fallback, and a hidden
+  // refusal is exactly that. The mutex makes the verdict a single value: the
+  // writer copies the whole struct under it and the reader copies the whole
+  // struct out under it, so a reader can never see a half-published verdict.
+  // The lock is held for a handful of stores and is read at ~1 Hz plus once
+  // per rendered frame, so it is never contended for long.
+  struct MonteCarloState {
+    bool valid = false;            // the solve produced a Monte-Carlo verdict
+    int refusal = -1;              // -1 = none, else the `cs2::aim::MonteCarloError`'s value
+    float probability = 0.0F;      // the measured chance that the shot hits
+    float expected_damage = 0.0F;  // the mean damage over all the samples
+    int target = -1;               // the target of the nearest hit
+    int hitgroup = 0;              // the hitgroup of the nearest hit
+    int hits = 0;                  // how many of the samples hit
+    bool can_kill = false;         // does the attributed damage reach the target's health?
+  };
+  mutable std::mutex rage_mc_mutex_;
+  MonteCarloState rage_mc_state_{};
+  // Publish the Monte-Carlo verdict as **one value** (the game thread writes
+  // it) and read it back as one value (the control thread and the render
+  // thread read it). See `MonteCarloState`.
+  void publish_monte_carlo(const MonteCarloState& state) noexcept;
+  [[nodiscard]] auto read_monte_carlo() const noexcept -> MonteCarloState;
+  // The objective the last solve **ran**: the per-weapon profile's when
+  // `per_weapon` is on and the active weapon has one, else the global one. The
+  // status names this one — naming the global would label the numbers with
+  // the wrong objective (`docs/ragebot.md` §13.7).
+  std::atomic<int> rage_effective_objective_{1};
   // The ragebot's usability gate (`docs/ragebot.md`): the target FOV (degrees; 0 =
   // unlimited), the hitbox filter (0 auto, 1 head, 2 body) and the aim/fire thresholds.
   std::atomic<int> rage_hitbox_{0};
@@ -582,6 +611,10 @@ class Service {
   // live pose, and the tick of the last chosen record (-1 = live).
   std::atomic<std::uint64_t> rage_backtracks_{0};
   std::atomic<int> rage_last_record_{-1};
+  // Whether the last tick **skipped** the backtracking because the frame had
+  // already blown the 12 ms guard (`docs/ragebot-perf.md` §3.9). The operator
+  // sees the backtrack counter stop incrementing and needs to know why.
+  std::atomic<bool> rage_backtrack_over_budget_{false};
   // The number of world solids projected into the last rage solve's chart (the
   // wallbang-aware occlusion, `docs/ragebot.md` §3). 0 = no solids enumerated.
   std::atomic<int> rage_occluders_{0};

@@ -24,14 +24,14 @@ struct RageProfile {
   // live in `cs2/control/rage_objective.hpp` (`objective_value_for`), which is
   // where the mapping is tested.
   std::uint8_t objective = 1;
-  std::uint8_t hitbox = 0;         // 0 = auto, 1 = head, 2 = body
-  std::uint8_t mode = 0;           // 0 = hold key, 1 = always on, 2 = toggle
-  std::uint8_t autostop = 0;       // 0 off / 1 always / 2 when firing
-  std::uint8_t autoscope = 0;      // 0 off / 1 always / 2 when firing
+  std::uint8_t hitbox = 0;     // 0 = auto, 1 = head, 2 = body
+  std::uint8_t mode = 0;       // 0 = hold key, 1 = always on, 2 = toggle
+  std::uint8_t autostop = 0;   // 0 off / 1 always / 2 when firing
+  std::uint8_t autoscope = 0;  // 0 off / 1 always / 2 when firing
   std::uint8_t autoreload = 0;
   std::uint8_t only_visible = 0;
   std::uint8_t fire = 0;
-  std::int32_t key = 0;            // virtual-key code
+  std::int32_t key = 0;  // virtual-key code
   float fov = 0.0F;
   float min_damage = 0.0F;
   float min_hitchance = 0.0F;
@@ -68,8 +68,8 @@ struct RageConfigStore {
 
 // Format one profile into `out` (NUL-terminated). False when the buffer is too
 // small.
-[[nodiscard]] auto rage_profile_format(const RageProfile& profile, char* out, std::size_t size)
-    noexcept -> bool;
+[[nodiscard]] auto rage_profile_format(const RageProfile& profile, char* out,
+                                       std::size_t size) noexcept -> bool;
 
 // Load/save the whole store from/to the payload data file. False on absence/failure
 // (the caller keeps its defaults); a save creates the directory as needed.

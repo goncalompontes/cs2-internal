@@ -18,6 +18,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "cs2/control/rage_objective.hpp"
 
@@ -131,6 +132,10 @@ void test_the_service_uses_the_rules(const std::string& root) {
          "the status uses the seed's fallback rule");
   expect(source.find("seed_source_note(") != std::string::npos,
          "the status uses the seed's note rule");
+  expect(source.find("hitbox_target(") != std::string::npos,
+         "the aim command takes the health list's index from the hitboxes");
+  expect(source.find("health_entry_for(") != std::string::npos,
+         "the aim command builds the health entry with the rule");
   expect(source.find("AimObjective::monte_carlo") != std::string::npos,
          "the service dispatches the Monte-Carlo objective");
   // The **inline** mapping must be gone: a second copy of the truth in the
@@ -144,6 +149,27 @@ void test_the_service_uses_the_rules(const std::string& root) {
          "the inline name -> value mapping is gone");
   expect(code.find("name == \"hitchance\"") == std::string::npos,
          "the inline name -> objective mapping is gone");
+  // The `aim` command must always read the weapon **from the game**: the
+  // Monte-Carlo kernel is built from the spread, the inaccuracy and the type,
+  // and the caller's profile carries none of them.
+  expect(code.find("build_input(snapshot, weapon, target, !explicit_weapon)") == std::string::npos,
+         "the aim command always reads the weapon from the game");
+  expect(code.find("apply_stated_weapon(") != std::string::npos,
+         "the aim command applies the caller's weapon with the rule");
+
+  // The **reader** stamps the hitboxes with the target's index: the health
+  // list and the hitboxes must speak about the same target, or the core's
+  // can-kill key can never match.
+  const std::filesystem::path reader_path =
+      std::filesystem::path(root) / "payload" / "aim" / "src" / "reader.cpp";
+  std::ifstream reader(reader_path);
+  expect(reader.good(), "the reader's source is readable");
+  if (reader.good()) {
+    const std::string reader_source((std::istreambuf_iterator<char>(reader)),
+                                    std::istreambuf_iterator<char>());
+    expect(strip_comments(reader_source).find("hitbox.target = target->index") != std::string::npos,
+           "the reader stamps the hitboxes with the target's index");
+  }
 }
 
 }  // namespace
@@ -346,7 +372,98 @@ auto main(int argc, char** argv) -> int {
            "the standard pattern is named");
   }
 
-  // --- 8. the service uses the rules -----------------------------------------
+  // --- 8. the aim command's weapon rule ---------------------------------------
+  {
+    // The caller's weapon wins on the **damage model**; the game wins on the
+    // **kernel** (the spread, the inaccuracy and the type).
+    //
+    // **The bug this pins.** The `aim` command used to build the weapon from
+    // the caller's profile alone when the caller stated any weapon argument,
+    // so the spread and the inaccuracy stayed 0 and the type stayed unknown:
+    // the Monte-Carlo kernel was degenerate (every sample landed exactly on
+    // the aim, so the "measured probability" was 1.0) and a shotgun would have
+    // been scored with the standard pattern.
+    const cs2::aim::WeaponProfile from_game{.damage = 36.0F,
+                                            .range_modifier = 0.99F,
+                                            .penetration = 2.0F,
+                                            .headshot_multiplier = 4.0F,
+                                            .spread = 0.002F,
+                                            .inaccuracy = 0.001F,
+                                            .weapon_type = 3};
+    const cs2::aim::WeaponProfile stated{.damage = 100.0F,
+                                         .range_modifier = 0.98F,
+                                         .penetration = 1.0F,
+                                         .headshot_multiplier = 4.0F};
+    const cs2::aim::WeaponProfile merged = cs2::control::apply_stated_weapon(from_game, stated);
+    expect(merged.damage == stated.damage, "the stated damage wins");
+    expect(merged.range_modifier == stated.range_modifier, "the stated range modifier wins");
+    expect(merged.penetration == stated.penetration, "the stated penetration wins");
+    expect(merged.headshot_multiplier == stated.headshot_multiplier,
+           "the stated headshot multiplier wins");
+    // **The kernel's terms are the game's** — the ones the Monte-Carlo kernel
+    // is built from.
+    expect(merged.spread == from_game.spread, "the spread is the game's");
+    expect(merged.inaccuracy == from_game.inaccuracy, "the inaccuracy is the game's");
+    expect(merged.weapon_type == from_game.weapon_type, "the weapon type is the game's");
+  }
+
+  // --- 9. the aim command's target rule ---------------------------------------
+  {
+    // The hitboxes carry the target's entity index, and the health entry
+    // carries **the same** one: the core looks a target's health up under the
+    // hitbox's own target index (`TargetHealth::index` against
+    // `Hitbox::target`), so the two must agree.
+    //
+    // **The bug this pins.** The `aim` command used to hand the health list
+    // the entity index while the hitboxes kept their default -1, so the
+    // lookup never matched: `mc_target` was always -1 and `mc_can_kill`
+    // always false — the rule's **first** key was dead.
+    std::vector<cs2::aim::Hitbox> hitboxes;
+    cs2::aim::Hitbox box;
+    box.target = 7;
+    hitboxes.push_back(box);
+    expect(cs2::control::hitbox_target(hitboxes) == 7,
+           "the hitboxes' target index is the target's entity index");
+    const auto entry = cs2::control::health_entry_for(hitboxes, 42.0F);
+    expect(entry.index == 7, "the health entry carries the hitboxes' index");
+    expect(entry.health == 42.0F, "the health entry carries the health");
+    // The health entry's index and the hitboxes' index are **the same
+    // number** — that is the whole rule.
+    expect(entry.index == cs2::control::hitbox_target(hitboxes),
+           "the health entry and the hitboxes agree on the target");
+
+    // No hitboxes: no target, so the health entry names no target and the
+    // core's can-kill key stays false.
+    const std::vector<cs2::aim::Hitbox> none;
+    expect(cs2::control::hitbox_target(none) == -1, "no hitboxes means no target");
+    const auto empty = cs2::control::health_entry_for(none, 42.0F);
+    expect(empty.index < 0, "an unknown target's health entry names no target");
+  }
+
+  // --- 10. the sample count ----------------------------------------------------
+  {
+    // **64 is the default**: the only count that fits the frame budget at a
+    // live-sized hitbox set (`docs/ragebot.md` §13.6).
+    expect(cs2::control::MC_SAMPLES_DEFAULT == 64, "the sample count's default is 64");
+    expect(cs2::control::mc_samples_in_range(1), "one sample is in range");
+    expect(cs2::control::mc_samples_in_range(64), "64 samples are in range");
+    expect(cs2::control::mc_samples_in_range(256), "256 samples are in range");
+    expect(!cs2::control::mc_samples_in_range(0), "no samples is out of range");
+    expect(!cs2::control::mc_samples_in_range(257), "257 samples are out of range");
+    expect(!cs2::control::mc_samples_in_range(-1), "a negative count is out of range");
+    // The note the status carries: a count above 64 does not fit the tick, and
+    // a count outside the range is **ignored** (both entry points ignore it,
+    // so the two behave the same way).
+    expect(cs2::control::mc_samples_note(64, 64).empty(), "the default count needs no note");
+    expect(contains(cs2::control::mc_samples_note(1000, 64), "ignored"),
+           "an out-of-range request is said to be ignored");
+    expect(contains(cs2::control::mc_samples_note(256, 256), "tick"),
+           "a count of 256 is said not to fit the tick");
+    expect(contains(cs2::control::mc_samples_note(128, 128), "tick"),
+           "a count of 128 is said not to fit the tick");
+  }
+
+  // --- 11. the service uses the rules -----------------------------------------
   {
     expect(argc >= 2, "the repository root is an argument");
     if (argc >= 2) {

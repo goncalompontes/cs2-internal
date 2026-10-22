@@ -54,7 +54,7 @@ struct SolveInput {
   PenetrationParams penetration_params{};
   WeaponProfile weapon{};
   AimObjective objective = AimObjective::damage;
-  float pose_sigma = 0.0F;    // pose-uncertainty blur (0 = none)
+  float pose_sigma = 0.0F;  // pose-uncertainty blur (0 = none)
   // The weapon's cone std-dev (inaccuracy + spread, radians): the hitchance objective
   // maximizes the probability the cone lands on the target (`hit_probability`). 0
   // falls back to the Chebyshev-centre margin heuristic.
@@ -111,8 +111,8 @@ struct MonteCarloVerdict {
   // expectation over the next N shots, under `angle_grid` the probability over
   // the shot that would be taken (`cs2/aim/montecarlo.hpp`).
   SeedSource seed_source = SeedSource::sequence;
-  int target = -1;    // the target of the nearest hit
-  int hitgroup = 0;   // the hitgroup of the nearest hit
+  int target = -1;        // the target of the nearest hit
+  int hitgroup = 0;       // the hitgroup of the nearest hit
   bool can_kill = false;  // does the attributed damage reach the target's health?
 };
 

@@ -23,6 +23,7 @@
 // mapped a name it did not know to the hitchance.
 
 #include <cstdint>
+#include <span>
 #include <string_view>
 
 #include "cs2/aim/solver.hpp"
@@ -215,8 +216,7 @@ inline constexpr int SEED_SOURCE_DEFAULT = SEED_SOURCE_SEQUENCE;
 [[nodiscard]] constexpr auto weapon_short_name(std::string_view weapon) noexcept
     -> std::string_view {
   constexpr std::string_view k_prefix = "weapon_";
-  if (weapon.size() > k_prefix.size() &&
-      same_name(weapon.substr(0, k_prefix.size()), k_prefix)) {
+  if (weapon.size() > k_prefix.size() && same_name(weapon.substr(0, k_prefix.size()), k_prefix)) {
     return weapon.substr(k_prefix.size());
   }
   return weapon;
@@ -253,6 +253,97 @@ inline constexpr int SEED_SOURCE_DEFAULT = SEED_SOURCE_SEQUENCE;
 [[nodiscard]] constexpr auto spread_pattern_name(cs2::aim::SpreadPattern pattern) noexcept
     -> std::string_view {
   return pattern == cs2::aim::SpreadPattern::revolver ? "revolver" : "standard";
+}
+
+// --- The aim command's weapon rule ---------------------------------------------
+
+// The caller's explicit weapon values, applied to the profile the **game**
+// supplied.
+//
+// **The kernel's terms are never touched.** The Monte-Carlo kernel is built
+// from the weapon's **spread**, its **inaccuracy** and its **type**: a
+// profile that carried none of them (the caller's own, which sets only the
+// damage model) would build a **degenerate kernel** — every sample lands
+// exactly on the aim, so the "measured probability" is 1.0 for a weapon that
+// really spreads, and an unknown type counts as "modelled", so a shotgun
+// would be scored with the standard pattern.
+//
+// So the two are **merged**: the caller wins on the damage model, the game
+// wins on the kernel.
+[[nodiscard]] constexpr auto apply_stated_weapon(cs2::aim::WeaponProfile profile,
+                                                 const cs2::aim::WeaponProfile& stated)
+    -> cs2::aim::WeaponProfile {
+  profile.damage = stated.damage;
+  profile.range_modifier = stated.range_modifier;
+  profile.penetration = stated.penetration;
+  profile.headshot_multiplier = stated.headshot_multiplier;
+  return profile;
+}
+
+// --- The aim command's target rule --------------------------------------------
+
+// The **target index** the hitboxes carry.
+//
+// The Monte-Carlo rule's first key is judged against a target's own health,
+// and the core looks that health up under the **hitbox's** target index
+// (`Hitbox::target` and `TargetHealth::index` are the same key). The `aim`
+// command used to hand the health list the entity index while the hitboxes
+// kept their default -1, so the lookup never matched: `mc_target` was always
+// -1 and `mc_can_kill` always false — the rule's **first** key was dead.
+//
+// **One rule, one index.** The rule is stated here, so the health list and the
+// hitboxes cannot drift apart.
+[[nodiscard]] constexpr auto hitbox_target(std::span<const cs2::aim::Hitbox> hitboxes) noexcept
+    -> int {
+  return hitboxes.empty() ? -1 : hitboxes.front().target;
+}
+
+// The health entry that goes with a set of hitboxes: **the same index**.
+//
+// A negative index means "no target": the core finds no health for it, so the
+// can-kill key stays false — "an unknown target's health is not a proof, so it
+// does not kill" (`cs2/aim/montecarlo.hpp`).
+[[nodiscard]] constexpr auto health_entry_for(std::span<const cs2::aim::Hitbox> hitboxes,
+                                              float health) noexcept -> cs2::aim::TargetHealth {
+  return cs2::aim::TargetHealth{.index = hitbox_target(hitboxes), .health = health};
+}
+
+// --- The Monte-Carlo's sample count --------------------------------------------
+
+// The sample count the live path uses.
+//
+// **64 is the default**: it is the only count that fits the frame budget at a
+// live-sized hitbox set (`docs/ragebot.md` §13.6 — 4.3 ms at the p50 for 57
+// hitboxes, against a 15.6 ms tick). A larger count is the operator's
+// explicit choice, but 128 and 256 **do not fit the tick**, so the count in
+// force is always said out loud
+// (`docs/orchestration/spec-t35-montecarlo-live.md` §2.1a).
+inline constexpr int MC_SAMPLES_DEFAULT = 64;
+inline constexpr int MC_SAMPLES_MIN = 1;
+inline constexpr int MC_SAMPLES_MAX = 256;
+// The largest count that still fits a 15.6 ms tick.
+inline constexpr int MC_SAMPLES_TICK_BUDGET = 64;
+
+// Whether the count is one the live path accepts.
+[[nodiscard]] constexpr auto mc_samples_in_range(int samples) noexcept -> bool {
+  return samples >= MC_SAMPLES_MIN && samples <= MC_SAMPLES_MAX;
+}
+
+// The note the status carries with the sample count.
+//
+// **Two things the operator has to know**: a count above 64 does not fit the
+// tick, and a count outside 1..256 is **ignored** — by both entry points, so
+// the two behave the same way (`requested` is what the caller asked for,
+// `in_force` is what the solve will use).
+[[nodiscard]] constexpr auto mc_samples_note(int requested, int in_force) noexcept
+    -> std::string_view {
+  if (requested != in_force) {
+    return "out of range (1..256): the request was ignored";
+  }
+  if (in_force > MC_SAMPLES_TICK_BUDGET) {
+    return "over the tick budget: 64 is the count that fits a tick";
+  }
+  return "";
 }
 
 }  // namespace cs2::control
