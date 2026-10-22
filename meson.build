@@ -185,6 +185,10 @@ aim_solver_test = executable('aim_solver_test',
     'payload/aim/src/damage.cpp',
     'payload/aim/src/occlusion.cpp',
     'payload/aim/src/penetration.cpp',
+    # The Monte-Carlo objective (docs/ragebot.md §13): the solver dispatches to
+    # the core, so the test links it and its spread model.
+    'payload/aim/src/montecarlo.cpp',
+    'payload/aim/src/spread.cpp',
   ),
   include_directories : [
     include_directories('payload/aim/include'),
@@ -318,6 +322,50 @@ control_core_test = executable('control_core_test',
   dependencies : [control_host_dep, settings_table_dep],
 )
 test('control-core', control_core_test)
+
+# The live rage objective's **pure rules** (the objective's names and values,
+# the seed policy's names, the weapon's spread pattern) — a pure header, so the
+# test compiles it alone. The mappings used to live inline in `service.cpp`,
+# where no host test can reach them: the Python scenario suite drives a fake
+# pipe and never runs the service, so a test written there would be testing the
+# fake pipe. The header is the same pattern as the chams' target rules
+# (`cs2/features/hook_target.hpp`).
+control_rage_objective_test = executable('control_rage_objective_test',
+  files(
+    'payload/control/tests/test_control_rage_objective.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+)
+test('control-rage-objective', control_rage_objective_test,
+  # The last check is a **source** check: the service needs the game, so the
+  # wiring (the call sites use the rules, they do not re-implement them) is
+  # checked by reading the service's own source.
+  args : [meson.current_source_dir()],
+)
+
+# The per-weapon rage profile's **line codec** (`cs2/control/rage_config.hpp`):
+# the text format of `cs2-rage.cfg` is a property of the file, not of the file
+# system, so the codec is pure and the host test drives it — the round trip
+# (save -> load) with the Monte-Carlo objective, and the refusal of an unknown
+# objective byte. The file's own I/O is Windows-only and unchanged.
+control_rage_config_test = executable('control_rage_config_test',
+  files(
+    'payload/control/tests/test_control_rage_config.cpp',
+    'payload/control/src/rage_config.cpp',
+    'payload/game/src/log.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+  dependencies : control_host_dep,
+)
+test('control-rage-config', control_rage_config_test)
 
 # The auto-strafe's decision maths (the W/A/S/D travel heading, the side's
 # dead zone and hysteresis, and the `AirAccelerate` optimum) — a pure,

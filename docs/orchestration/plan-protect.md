@@ -208,6 +208,8 @@ by looking at the module — the operator declares, the payload check proves).
 | **T21** | `protect-strings` | string/constant encryption with a **runtime-derived** key (the mapped image base) | T18 |
 | **T21b** | `protect-strings-out` | ~~the strings leave the image entirely~~ — **dropped**, see §1.2: the feature-key names are *displayed*, so they must exist in a shipped image. What remains is small: the internal keys by hash, the event table read from the game | T21 || **T22** | `protect-integrity` | post-link binder + runtime self-check | T19, T21 |
 | **T23** | `protect-cross-tu` | the cross-TU call graph of the protected functions leaves the image (today 295 of 332 call sites stay direct) | T19 |
+| **T23a** | `protect-cross-tu-routing` | the 14 ordinary cross-TU edges are routed through the caller's own table; the dispatch count 37 → 51 | T19 |
+| **T23b** | `protect-cross-tu-sret` | the 12 struct-returning edges: T19's refusal of an `sret` callee is a *policy*, not a limit of the target, so the rule can be narrowed | T23a |
 | **T24** | `protect-polymorphism` | the shipped DLL is not signaturable: the build seed is mandatory and drives the layout, the keys and the tables | T19 |
 
 T18-T19 are done. **T20a is done; T20b and T20c are deferred** — the gate

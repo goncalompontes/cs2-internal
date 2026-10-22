@@ -132,7 +132,12 @@ def cmd_baseline(game: Game, out: str, seconds: float, apply: bool) -> int:
     if apply:
         restore(game)
     runs = []
-    for objective in (0, 1):
+    # The objective is a **name**, not a number: the payload's `rage` command
+    # maps a name to the profile's byte (`cs2/control/rage_objective.hpp`).
+    # The sweep used to pass the numbers 0 and 1, which the payload ignored —
+    # so it measured the same objective twice and never measured the
+    # Monte-Carlo one at all.
+    for objective in ("damage", "hitchance", "expected", "monte_carlo"):
         game.rage(on=True, force=True, fire=False, objective=objective)
         time.sleep(1.5)  # settle the cumulative averages onto this objective
         f0, a0, _ = _snapshot(game)

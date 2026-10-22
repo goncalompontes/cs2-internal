@@ -31,6 +31,7 @@
 // the shot is *visible* (or penetrates a wall) remains the existing solver's job
 // (`only_visible` / `penetrated`).
 
+#include <array>
 #include <cstdint>
 #include <expected>
 #include <optional>
@@ -222,6 +223,22 @@ struct Sample {
   int target = -1;        ///< the target of the nearest hit, -1 on a miss
   int hitgroup = 0;       ///< the hitgroup of the nearest hit
   float distance = 0.0F;  ///< the distance to the nearest hit, 0 on a miss
+
+  // The **per-pellet attribution**: what each pellet that hit did, and to whom.
+  //
+  // **A sample's damage does not belong to one target.** A multi-pellet shot can
+  // hit two targets, and the whole sample's damage used to be credited to the
+  // target of the *nearest* hit — so the second target's damage was given to the
+  // first (the review's M2 bug, one level down). The can-kill key then compared
+  // one target's remaining health with the sum of **two** targets' damage, and a
+  // candidate could claim a kill that cannot happen.
+  //
+  // The attribution is therefore **per pellet**: `pellet_damage[k]` is what the
+  // `k`-th pellet that hit did and `pellet_target[k]` is the target it did it to.
+  // `pellets_hit` is how many of the entries are meaningful (the rest are zero).
+  std::array<float, MAX_PELLETS> pellet_damage{};
+  std::array<int, MAX_PELLETS> pellet_target{};
+  int pellets_hit = 0;
 };
 
 // The estimator's verdict for one candidate aim.
@@ -254,6 +271,14 @@ struct HitChance {
 // Whether the hitbox is a **well-formed solid**: every component finite, and the
 // shape not degenerate (a capsule's radius positive, an oriented box's half-extents
 // positive).
+//
+// **The damage multiplier is part of the check.** The multiplier is the hitbox's
+// damage factor (`m_flDamageMultiplier`), and it is used as a **multiplier**: a NaN
+// one makes every damage product a NaN, and *every comparison against a NaN is
+// false* — so the selection rule kept the **first** candidate regardless of its
+// quality and returned a NaN verdict **with no error**. The geometry was checked and
+// the multiplier was not, so a malformed hitbox slipped past the "the solver refuses
+// a malformed hitbox" guarantee (the review's G1).
 //
 // **Why the hit test validates and the span helpers do not.** The span arithmetic
 // (`cs2/aim/ray_span.hpp`) is shared with the occluders, whose behaviour must not

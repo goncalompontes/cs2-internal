@@ -1,18 +1,102 @@
 #include "cs2/aim/solver.hpp"
 
 #include <chrono>
+#include <span>
 
 #include "cs2/aim/damage.hpp"
+#include "cs2/aim/montecarlo.hpp"
 
 namespace cs2::aim {
 namespace {
 
 // Microseconds since an arbitrary origin (steady clock), for the optional stats.
 [[nodiscard]] auto ticks_us() noexcept -> std::uint64_t {
-  return static_cast<std::uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
+  return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count());
+}
+
+// The Monte-Carlo objective's dispatch: build the core's input from the solve
+// input, run the bounded search over the field's cells, and fall back to the
+// `damage` objective when the core refuses.
+//
+// **The refusal is never silent.** The reason lands in
+// `result.monte_carlo_refusal` and the aim comes from `argmax_damage()`, so the
+// caller can tell the operator that the number is **not** the Monte-Carlo's — a
+// silent fallback to a different objective is exactly what must not happen.
+[[nodiscard]] auto solve_monte_carlo(const SolveInput& input, const DamageField& field,
+                                     SolveResult& result) -> Vec2 {
+  // The core's hit test refuses a scene that holds a malformed hitbox
+  // (`hitbox_valid`), and the reader does not validate the shape it reads
+  // (`docs/ragebot.md` §13.3), so the core gets the **filtered** set. The field
+  // keeps the unfiltered one: the four other objectives must not change.
+  //
+  // **The common case copies nothing**: when every hitbox is well formed (the
+  // reader's capsules are), the core reads the caller's own list.
+  std::vector<Hitbox> filtered;
+  std::span<const Hitbox> hitboxes{input.hitboxes};
+  bool all_valid = true;
+  for (const Hitbox& hitbox : input.hitboxes) {
+    if (!hitbox_valid(hitbox)) {
+      all_valid = false;
+      break;
+    }
+  }
+  if (!all_valid) {
+    filtered.reserve(input.hitboxes.size());
+    for (const Hitbox& hitbox : input.hitboxes) {
+      if (hitbox_valid(hitbox)) {
+        filtered.push_back(hitbox);
+      }
+    }
+    hitboxes = std::span<const Hitbox>{filtered};
+  }
+  // **How many the filter dropped.** A dropped hitbox makes the measured
+  // probability a **lower bound** on the truth, so the count travels with the
+  // verdict (`MonteCarloVerdict::filtered_hitboxes`): a silent lower bound is
+  // a number the operator would read as exact.
+  const int filtered_hitboxes = static_cast<int>(input.hitboxes.size() - hitboxes.size());
+  if (hitboxes.empty()) {
+    result.monte_carlo_refusal = MonteCarloError::no_hitboxes;
+    return field.argmax_damage();
+  }
+  // The kernel: the weapon's spread and inaccuracy, with the **pattern** the
+  // caller stated. The core has no default for it (a default would silently drop
+  // the revolver's `1 - r^2`).
+  const auto kernel =
+      spread_kernel(input.weapon, input.monte_carlo_pellets, input.monte_carlo_pattern);
+  if (!kernel.has_value()) {
+    result.monte_carlo_refusal = kernel.error();
+    return field.argmax_damage();
+  }
+  MonteCarloInput mc;
+  mc.eye = input.eye;
+  mc.basis = input.basis;
+  mc.hitboxes = hitboxes;
+  mc.targets = std::span<const TargetHealth>{input.monte_carlo_targets};
+  mc.weapon = input.weapon;
+  mc.kernel = *kernel;
+  mc.seed = input.monte_carlo_seed;
+  mc.samples = input.monte_carlo_samples;
+  // The candidate set is the **field's cells**: they are the occlusion-filtered
+  // fragments, so the aim is always in a visible region. The core has no
+  // penetration model, so the `only_visible` gate still needs the field's
+  // `penetrated` flag.
+  const auto choice = solve_montecarlo(mc, field.cells, input.monte_carlo_budget);
+  if (!choice.has_value()) {
+    result.monte_carlo_refusal = choice.error();
+    return field.argmax_damage();
+  }
+  result.monte_carlo = MonteCarloVerdict{.probability = choice->chance.probability,
+                                         .expected_damage = choice->chance.expected_damage,
+                                         .samples = choice->chance.samples,
+                                         .hits = choice->chance.hits,
+                                         .seed_source = choice->chance.source,
+                                         .target = choice->target,
+                                         .hitgroup = choice->hitgroup,
+                                         .can_kill = choice->can_kill,
+                                         .filtered_hitboxes = filtered_hitboxes};
+  return choice->aim;
 }
 
 }  // namespace
@@ -129,6 +213,9 @@ auto solve(const SolveInput& input, SolveStats* stats) -> SolveResult {
     case AimObjective::pellets:
       aim = field.argmax_pellets(input.pellet_offsets);
       break;
+    case AimObjective::monte_carlo:
+      aim = solve_monte_carlo(input, field, result);
+      break;
     case AimObjective::damage:
     default:
       aim = field.argmax_damage();
@@ -141,13 +228,27 @@ auto solve(const SolveInput& input, SolveStats* stats) -> SolveResult {
   result.valid = true;
   result.aim = aim;
   result.direction = input.basis.unproject(aim);
-  result.value = input.objective == AimObjective::pellets
-                     ? field.value_at_pellets(aim, input.pellet_offsets)
-                     : field.value_at(aim);
-  result.hitchance = field.hit_probability(aim, input.spread_sigma);
+  // The **field's** value at the aim. The Monte-Carlo objective reports its own
+  // numbers below, but the penetration flag is the field's (the Monte-Carlo
+  // solver has no penetration model), so it is computed from the field's value
+  // in every case.
+  const float field_value = input.objective == AimObjective::pellets
+                                ? field.value_at_pellets(aim, input.pellet_offsets)
+                                : field.value_at(aim);
+  if (input.objective == AimObjective::monte_carlo && result.monte_carlo.has_value()) {
+    // The Monte-Carlo objective reports **its own** numbers: the probability it
+    // measured and the damage it expects (a miss contributes 0). They are
+    // neither the field's Gaussian mass nor the field's value — and the two
+    // objectives' numbers mean different things (`docs/research/aim-objective-math.md`).
+    result.value = result.monte_carlo->expected_damage;
+    result.hitchance = result.monte_carlo->probability;
+  } else {
+    result.value = field_value;
+    result.hitchance = field.hit_probability(aim, input.spread_sigma);
+  }
   // Whether the chosen aim is attenuated by a wall in front (the unoccluded value is
   // strictly larger) — the "only shoot through nothing" gate (`SolveResult::penetrated`).
-  result.penetrated = result.value + 1.0e-3F < field.base_value_at(aim);
+  result.penetrated = field_value + 1.0e-3F < field.base_value_at(aim);
   result.cells = field.cells.size();
   if (stats != nullptr) {
     stats->fragments += fragments_emitted;

@@ -722,6 +722,119 @@ auto main() -> int {
     expect(drawn.has_value() && *drawn == 3, "a buffer that fits draws every pellet");
   }
 
+  // --- 12. G1: a NaN damage multiplier is refused ---------------------------
+  {
+    // The geometry was validated and the **multiplier** was not, so a malformed
+    // hitbox slipped past the "the solver refuses a malformed hitbox" guarantee:
+    // a NaN multiplier made every damage product a NaN, and *every comparison
+    // against a NaN is false* — so the selection rule kept the **first**
+    // candidate regardless of its quality and returned a NaN verdict **with no
+    // error** (the review's G1).
+    Hitbox box;
+    box.is_capsule = true;
+    box.capsule = sphere(Vec3{.x = 100.0F, .y = 0.0F, .z = 0.0F}, 2.0F);
+    box.multiplier = 1.0F;
+    box.target = 1;
+    const std::vector<Hitbox> clean{box};
+    MonteCarloInput input;
+    input.hitboxes = clean;
+    input.weapon.damage = 35.0F;
+    input.weapon.range_modifier = 1.0F;
+    input.kernel = SpreadKernel{.spread = 0.02F, .inaccuracy = 0.0F, .pellets = 1};
+    input.samples = 16;
+    const auto clean_chance = cs2::aim::evaluate_hit_chance(input, Vec2{});
+    expect(clean_chance.has_value(), "the clean scene evaluates");
+    expect(clean_chance.has_value() && std::isfinite(clean_chance->expected_damage),
+           "the clean scene's damage is a number");
+
+    Hitbox corrupt = box;
+    corrupt.multiplier = std::nanf("");
+    expect(!cs2::aim::hitbox_valid(corrupt), "a NaN multiplier is not a well-formed hitbox");
+    const std::vector<Hitbox> poisoned{corrupt};
+    input.hitboxes = poisoned;
+    const auto poisoned_chance = cs2::aim::evaluate_hit_chance(input, Vec2{});
+    expect(!poisoned_chance.has_value(), "a scene with a NaN multiplier is refused");
+    expect(!poisoned_chance.has_value() &&
+               poisoned_chance.error() == cs2::aim::MonteCarloError::invalid_geometry,
+           "the refusal names the malformed hitbox");
+    const auto poisoned_sample = cs2::aim::evaluate_sample(input, Vec2{}, 1234);
+    expect(!poisoned_sample.has_value(), "a sample of a NaN-multiplier scene is refused too");
+    const auto poisoned_search =
+        cs2::aim::solve_montecarlo(input, std::span<const cs2::aim::Cell>{});
+    expect(!poisoned_search.has_value(), "the search refuses a NaN-multiplier scene");
+  }
+
+  // --- 13. G2: the attribution is per pellet, not per sample -----------------
+  {
+    // Two pellets, two targets: one pellet hits the **near** target (a chest, 40
+    // damage) and the other the **far** one (a head, 160 damage). The sample's
+    // whole damage used to be credited to the target of the **nearest** hit, so
+    // the near target's slot carried 200 — the M2 bug one level down, and the
+    // can-kill key then compared one target's health with two targets' damage.
+    const SpreadKernel kernel{.spread = 0.05F, .inaccuracy = 0.0F, .pellets = 2};
+    const auto seed = cs2::aim::md5_pseudo_random(4242U);
+    std::vector<Vec2> offsets(2);
+    const auto drawn = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{offsets});
+    expect(drawn.has_value() && *drawn == 2, "the attribution case draws both pellets");
+    const Vec3 first = ray_point_at(offsets[0], 100.0F);
+    const Vec3 second = ray_point_at(offsets[1], 100.0F);
+    const float separation = cs2::game::distance(first, second);
+    expect(separation > 1e-3F, "the two pellet rays are apart");
+    // The nearer ray's target is the one the sample's nearest hit names.
+    const bool first_is_nearer =
+        cs2::game::distance(first, Vec3{}) < cs2::game::distance(second, Vec3{});
+    const Vec3 near_point = first_is_nearer ? first : second;
+    const Vec3 far_point = first_is_nearer ? second : first;
+
+    Hitbox near_box;
+    near_box.is_capsule = true;
+    near_box.capsule = sphere(near_point, separation * 0.25F);
+    near_box.multiplier = 1.0F;
+    near_box.target = 1;
+    near_box.group = cs2::aim::HITGROUP_CHEST;
+    Hitbox far_box = near_box;
+    far_box.capsule = sphere(far_point, separation * 0.25F);
+    far_box.multiplier = 4.0F;
+    far_box.target = 2;
+    far_box.group = cs2::aim::HITGROUP_HEAD;
+    const std::vector<Hitbox> hitboxes{near_box, far_box};
+    const std::vector<TargetHealth> health{TargetHealth{.index = 1, .health = 40.0F},
+                                           TargetHealth{.index = 2, .health = 1000.0F}};
+    MonteCarloInput input;
+    input.hitboxes = hitboxes;
+    input.targets = health;
+    input.weapon.damage = 40.0F;
+    input.weapon.range_modifier = 1.0F;
+    input.kernel = kernel;
+    input.samples = 1;
+    input.seed = SeedContext{.sequence = 4242U};
+
+    const auto chance = cs2::aim::evaluate_hit_chance(input, Vec2{});
+    expect(chance.has_value(), "the two-target, two-pellet case evaluates");
+    expect(chance.has_value() && chance->hits == 1, "the sample hit");
+    // The scene's mean: the sum over the pellets that hit.
+    expect(chance.has_value() && near(chance->expected_damage, 200.0F, 1e-3F),
+           "the scene's mean damage is the sum over the pellets");
+    // The near target's **own** damage: 40, not the 200 the old attribution gave it.
+    expect(chance.has_value() && chance->target == 1, "the nearest hit names the near target");
+    expect(chance.has_value() && near(chance->target_damage, 40.0F, 1e-3F),
+           "the damage attributed to a target is the damage that target took");
+    expect(chance.has_value() && chance->target_damage < chance->expected_damage,
+           "the attributed damage is not the scene's aggregate");
+
+    // The per-pellet attribution is also visible in the sample itself: each pellet
+    // that hit carries its own damage and its own target.
+    const auto sample = cs2::aim::evaluate_sample(input, Vec2{}, seed);
+    expect(sample.has_value(), "the sample of the two-target case evaluates");
+    expect(sample.has_value() && sample->pellets_hit == 2,
+           "both pellets are attributed separately");
+    expect(sample.has_value() && sample->pellet_target[0] != sample->pellet_target[1],
+           "the two pellets hit two different targets");
+    expect(sample.has_value() && near(sample->pellet_damage[0] + sample->pellet_damage[1],
+                                       sample->damage, 1e-3F),
+           "the per-pellet damage sums to the sample's damage");
+  }
+
   if (failures == 0) {
     std::printf("aim-montecarlo: ok\n");
     return 0;

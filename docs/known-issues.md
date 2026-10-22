@@ -304,3 +304,82 @@ does the first, and the research says that is what works in practice.
 built in the injected configuration (`/MT`, importing exactly `KERNEL32`,
 `USER32`, `D3DCOMPILER_47`), and the injector is built. The game is up with a
 bot match in it.
+
+---
+
+## 12. The Monte-Carlo objective in the live path (2026-10-21)
+
+> Added with task T35 (`docs/orchestration/spec-t35-montecarlo-live.md`). The
+> core of §11.2's plan is in the live path: `AimObjective::monte_carlo` is
+> selectable from the control channel and from the per-weapon profile, so the
+> operator can live-test it against the damage-field solver. **The live run is
+> still the operator's** — nothing below has been exercised in the game yet.
+>
+> The four existing objectives (`damage`, `hitchance`, `expected`, `pellets`)
+> are unchanged, and the host test proves it against the field's own optima.
+
+| # | severity | finding | where | fix |
+|---|---|---|---|---|
+| **M1** | minor | **The live path's seed sequence is a fallback, not the game's.** The command's sequence number — the thing `MD5_PseudoRandom(sequence)` is derived from (`docs/re/aim.md` §"The seed") — is **not reachable from where the service sits**: the `Input` module owns the `CUserCmd` pointer and exposes no accessor for the command's number, and the one that exists (`bhop_cmd_number`) is refreshed by the **bunnyhop assist** alone, so it is zero when the assist is off and stale when it is on. The live path uses the **prediction tick** (the local controller's `m_nTickBase`) as the documented fallback, and the status says so (`mc_seed_fallback: true`, `mc_seed_note` names the reason). | `payload/control/src/service.cpp` (`prediction_tick`) | **not fixed — deferred** (it needs an accessor in the `Input` module, which this task does not own) |
+| **M2** | minor | **The `angle_grid` seed's hash is a stand-in.** The engine's `get_tick_view_angles` is not reverse-engineered, so the hash is *ours*: the numbers that policy produces are **indicative, not exact**. The status says so. | `payload/aim/src/montecarlo.cpp` (`angle_seed_hash`) | **not fixed — deferred** (it needs RE) |
+| **M3** | minor | **The Monte-Carlo objective scores the hitbox geometry only.** The repo is Tier-2: the world is projected into the chart, not traced, so whether the shot is *visible* (or penetrates a wall) is still the existing machinery's job — the `only_visible` gate and the `penetrated` flag. | `payload/aim/src/solver.cpp` | **by design** (`docs/ragebot.md` §13.7) |
+| **M4** | minor | **The `min_hitchance` and `min_damage` gates change meaning under the new objective, and not in the same direction.** The same `min_hitchance` passes **more** shots (the old Gaussian mass's σ is √6 too wide — it reports **0.221** where the truth is **0.777**), and the same `min_damage` blocks **more** shots (the Monte-Carlo's value is the **expected** damage: a 50 % hit chance on 100 damage reports **50**, not 100). A ragebot that fires under `hitchance` and does not fire under `monte_carlo` with the same thresholds is the semantics change, not a defect. | the gates (`payload/control/src/service.cpp`) | **by design** (`docs/ragebot.md` §14.2) |
+| **M5** | minor | **The Monte-Carlo objective and the backtracking pass do not fit the frame budget together.** One Monte-Carlo solve is ~4.3 ms at a live-sized hitbox set, and the backtracking pass is a **full solve per pose**, so the two together exceed the 12 ms guard. | the backtracking pass | **not fixed — deferred** (the operator turns the backtracking off while live-testing; the sample count of **64** was chosen for the single-solve budget) |
+| **M6** | nit | **The harness's `AimObjective` type does not know the new name.** `scripts/scenario/protocol.py`'s `Literal["damage", "hitchance", "expected", "pellets"]` becomes the MCP `cs2_rage` tool's JSON schema, so the tool refuses `"monte_carlo"` before the request is sent. The scenario library's `game.rage(objective="monte_carlo")` works (the annotation is not enforced at run time). | `scripts/scenario/protocol.py` | **not fixed — deferred** (one line: add the name to the literal) |
+| **M7** | nit | **The `√6` σ correction is still not applied.** It is blocked on the `sqrt(r)` RE question and on the inaccuracy's units. It does not affect the Monte-Carlo objective (the kernel is sampled, not blurred), but it is why the *old* objective's numbers are not comparable with the new one's. | the field's blur | **not fixed — deferred** (see §11.2) |
+
+**What is verified:** the host tests — `aim-solver` (the objective, its
+fallback, and the four other objectives' unchanged behaviour), `aim-montecarlo`
+(the core, including the two gaps T35 closed), `control-rage-objective` (the
+names, the values, the seed policy, the weapon's pattern) and
+`control-rage-config` (the profile's round trip and the garbage byte).
+
+**What is not:** the live run. The operator's steps are in
+`docs/operator-live-check.md` §6.
+
+---
+
+## 13. The T35 review round (2026-10-22)
+
+> Added with the fix round of task T35
+> (`docs/orchestration/spec-t35-montecarlo-live.md`). The adversarial review
+> of T35 found **no blocker**, four majors and a dozen minors; this section
+> records what each finding was and what the fix round did with it. **The
+> live run is still the operator's** — nothing below has been exercised in the
+> game.
+
+| # | severity | finding | where | fix |
+|---|---|---|---|---|
+| **M1** | major | **The "the four other objectives are unchanged" regression test was vacuous.** Its scene was one symmetric sphere, so every objective's optimum was the same point: pointing `damage` at the hitchance search (or the reverse) left the whole suite green. | `payload/aim/tests/test_aim_solver.cpp` | **fixed** — the scene is two cells (a big body and a small, higher-multiplier head off-centre) chosen so both clear the hitchance objective's value floor; the block now asserts that the optima **differ** from each other, and the Monte-Carlo's fallback is pinned to the `damage` objective's aim (and explicitly not the hitchance objective's) |
+| **M2** | major | **The seed-fallback disclosure had no test at all.** Inverting `seed_source_is_fallback` and replacing `seed_source_note`'s body with "the numbers are exact" left the suite green, so the operator could be told that a stand-in number is the engine's own seed. | `payload/control/include/cs2/control/rage_objective.hpp` | **fixed** — the test pins both flags, both notes (by the word the operator has to read) and that the two policies carry different notes |
+| **M3** | major | **The `aim` command's Monte-Carlo path could never report a target or a kill.** The health list carried the entity index while the hitboxes kept `Hitbox::target`'s default -1, so the core's can-kill lookup never matched: `mc_target` was always -1 and `mc_can_kill` always false. | `payload/aim/src/reader.cpp`, `payload/control/src/service.cpp` | **fixed** — the reader stamps the hitboxes with the index of the target it chose, and the health entry is built from that same index by a pure rule the host test pins |
+| **M4** | major | **The `aim` command's Monte-Carlo path built a degenerate kernel whenever the caller stated any weapon argument.** The weapon was read from the caller's profile alone, so the spread and the inaccuracy stayed 0 and the type stayed unknown: every sample landed on the aim (a "measured probability" of 1.0) and an unknown type counts as "modelled", so a shotgun would have been scored with the standard pattern. | `payload/control/src/service.cpp` | **fixed** — the weapon is always read from the game and the caller's damage model is overlaid on top; the `pellets` branch's spread hole is closed with it |
+| **N1** | minor | **The MCP `cs2_aim`/`cs2_rage` tools refused `"monte_carlo"`.** The `Literal` becomes the tools' advertised schema and the server validates against it before the request is sent. | `scripts/scenario/protocol.py` | **fixed** — the literal carries the name, the test reads the schema from the tools themselves and checks that the validator accepts it. **The running MCP server has to be restarted** to advertise it |
+| **N2** | minor | **The Monte-Carlo's live state was published as seven independent relaxed atomics**, so a reader could mix two ticks — and the inverse **hid the refusal entirely**. | `payload/control/src/service.cpp`, `service.hpp` | **fixed** — the verdict is published as **one value** (a mutex), so a reader never sees a half-published verdict |
+| **N3** | minor | **The Monte-Carlo's state was never cleared on the early returns**, so the status could show a stale verdict under another objective's name. | `payload/control/src/service.cpp` | **fixed** — the verdict is cleared at the top of the tick, so every early return leaves nothing stale |
+| **N4** | minor | **The hitbox filter drops malformed hitboxes silently**, so the measured probability is a silent lower bound. | `payload/aim/src/solver.cpp` | **fixed** — the count travels with the verdict (`MonteCarloVerdict::filtered_hitboxes`) and the status carries it as `mc_filtered`, so a dropped hitbox is visible |
+| **N5** | minor | **The status named the global objective**, but with a per-weapon profile the solve runs the profile's objective. | `payload/control/src/service.cpp` | **fixed** — the status names the **effective** objective and reports the global one under `objective_global` |
+| **N6** | minor | **The status lacked `mc_can_kill`/`mc_hitgroup`/`mc_hits`, and the `aim` payload lacked the seed's disclosure.** | `payload/control/src/service.cpp` | **fixed** |
+| **N7** | minor | **The new code was not clang-format clean** (`service.cpp` 0 → 14 deviations, `solver.cpp` 3 → 10, …). | the touched files | **fixed** — the files this task touched are formatted; the count is **0** for every one of them |
+| **N8** | minor | **The weapon type came only from `read_weapon_profile`**, which fails when the VData or the damage read fails; the type then stayed -1 and `pattern_supported` returned true, so a shotgun would be scored with the standard pattern. | `payload/control/src/service.cpp` | **fixed** — the snapshot's independently-read type is the fallback, in both the rage path and the `aim` path |
+| **N9** | minor | **The backtracking budget was not surfaced**: the operator saw the backtrack counter stop incrementing with no explanation. | `payload/control/src/service.cpp` | **fixed** — `backtrack_over_budget` is in the status, and the operator's checklist says what to look for |
+| **N10** | minor | **The HUD line carried the objective's name but none of the Monte-Carlo's numbers, the refusal or the seed disclosure.** | `payload/control/src/service.cpp` | **fixed** — the line carries the marker (`mc83%` / `mc-refused`); the record and the occluder count moved out of the line (they are in the JSON status), so the line still fits its 128-byte buffer |
+| **N11** | minor | **`RageStatusDict.objective` was still declared as an `int`** and the ten new `mc_*` keys were missing. | `scripts/scenario/protocol.py` | **fixed** |
+| **N12** | minor | **The `aim` command clamped an out-of-range sample count to 64 while the `rage` command ignored it**, and neither said so. | `payload/control/src/service.cpp` | **fixed** — both **ignore** an out-of-range count, and `mc_samples_note` says what is in force and whether it fits the tick |
+| **N13** | nit | **A comment in `rage_config.cpp` invented a bug that was not there.** | `payload/control/src/rage_config.cpp` | **fixed** — the comment says what the code does |
+| **N14** | nit | **The `aim` command's `seed` key means an integer seed for `pellets` and a policy name for `monte_carlo`.** | `payload/control/src/service.cpp` | **fixed** — the two are told apart by their type, and both call sites say so |
+| **N15** | nit | **`scripts/perf-live.py` swept `objective in (0, 1)`**, which the payload ignores (it takes a name), so the live perf script could not measure the Monte-Carlo's cost. | `scripts/perf-live.py` | **fixed** — the sweep uses the names, and it includes `monte_carlo` |
+| **N16** | nit | **The HUD line's buffer is 128 bytes** and the new line was 121 with realistic counters, so the last three `%s` truncated sooner. | `payload/control/src/service.cpp`, `payload/features/src/overlay.cpp` | **fixed** — the line is shorter than it was (the record and the occluder count moved to the JSON status) and the buffer is 192 bytes, so nothing truncates |
+| **N17** | nit | **The source check greps `service.cpp` for literals**, so a comment containing one would fail it spuriously. | `payload/control/tests/test_control_rage_objective.cpp` | **fixed** — the check strips the comments first |
+| **N18** | nit | **The header said the status is read on the control thread**; it is read on two (the control thread and the render thread). | `payload/control/include/cs2/control/service.hpp` | **fixed** — and that is why the verdict is published as one value |
+
+**What is verified:** the host tests — `aim-solver` (the objective, its
+fallback, and the four other objectives' unchanged behaviour **in an
+asymmetric scene**), `aim-montecarlo` (the core, including the two gaps T35
+closed), `control-rage-objective` (the names, the values, the seed policy and
+its disclosure, the weapon's pattern, the target rule and the sample count)
+and `control-rage-config` (the profile's round trip and the garbage byte) —
+plus the scenario suite (the MCP tools' advertised schema).
+
+**What is not:** the live run. The operator's steps are in
+`docs/operator-live-check.md` §6.

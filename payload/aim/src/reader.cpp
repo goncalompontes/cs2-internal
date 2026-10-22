@@ -247,6 +247,19 @@ auto build_input(const game::Snapshot& snapshot, const WeaponProfile& weapon, in
                                             weapon.headshot_multiplier, 1.0F);
     input.hitboxes.assign(boxes.begin(), boxes.end());
   }
+  // The hitboxes belong to **the target this input is about**, so they carry
+  // its entity index.
+  //
+  // **Why the reader stamps it.** The index is the key the Monte-Carlo core
+  // looks a target's health up under (`TargetHealth::index` against
+  // `Hitbox::target`), and the occlusion filter narrows the world solids by it
+  // (`solve`). The reader is the one place that knows which target it chose,
+  // so it is the one place that can say so: the `aim` command used to hand the
+  // health list the entity index while the hitboxes kept their default -1, so
+  // the lookup never matched and the can-kill key was dead.
+  for (Hitbox& hitbox : input.hitboxes) {
+    hitbox.target = target->index;
+  }
   return input;
 }
 
