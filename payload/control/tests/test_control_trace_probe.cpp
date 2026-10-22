@@ -80,6 +80,25 @@ constexpr float k_deg_to_rad = 0.01745329251994329577F;
   return source.substr(begin, end - begin);
 }
 
+// The region's text with the whitespace collapsed, so a check does not depend on
+// how the line was wrapped.
+[[nodiscard]] auto flattened(const std::string& text) -> std::string {
+  std::string flat;
+  bool space = false;
+  for (const char c : text) {
+    if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
+      space = true;
+      continue;
+    }
+    if (space && !flat.empty()) {
+      flat.push_back(' ');
+    }
+    space = false;
+    flat.push_back(c);
+  }
+  return flat;
+}
+
 // --- 1. the ray construction ---------------------------------------------------
 //
 // **The test that keeps the comparison honest:** the probe's ray and the solver's
@@ -644,6 +663,14 @@ void test_service_uses_the_rules(const char* root) {
          "the difference is computed with the rule");
   expect(probe.find("engine_answer_missing") != std::string::npos,
          "the probe says when the engine's answer could not be read");
+  // The flag must be **computed** from the call's outcome, not merely named: a
+  // probe that always says "the answer was read" is the defect this task is
+  // about.
+  const std::string flat_probe = flattened(probe);
+  expect(flat_probe.find("engine_answer_missing = !ok") != std::string::npos,
+         "the dropped-answer flag is computed from the engine call's outcome");
+  expect(flat_probe.find("!result.engine_answer_missing") != std::string::npos,
+         "the verdict is computed only when the engine's answer was read");
   expect(probe.find("read_trace_interval(") != std::string::npos,
          "the interval records are read with the reader");
   expect(probe.find("set_occlusion_exclude_pawns(") != std::string::npos,

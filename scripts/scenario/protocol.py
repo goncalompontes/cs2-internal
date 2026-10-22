@@ -1085,7 +1085,12 @@ class TraceRayDict(TypedDict):
 
 
 class TraceProbeEngineDict(TypedDict):
-    """The probe's own health: whether the engine call succeeded."""
+    """The probe's own health: whether the engine call succeeded.
+
+    ``ok`` is "**at least one** ray's engine call returned" and ``faulted`` is
+    "at least one ray's engine call faulted"; ``rays_ok``/``rays_faulted`` give
+    the counts. A fault is the **instrument** failing, not the game.
+    """
 
     ok: bool
     faulted: bool
