@@ -6,9 +6,10 @@
 > **auto-strafe** accelerate, the **ESP** publish and draw, the payload's
 > hooks install and the animfix's **anim-tick** hook fire. What has **never**
 > run against a real game is the **chams' detour**, the **Monte-Carlo
-> objective**, the animfix's **graph capture** and the **third-person
-> camera**: this page is the checklist for those. (The agent cannot join in —
-> it runs in Windows session 0, with no GPU and no desktop.)
+> objective** and the animfix's **graph capture**; the **third-person
+> camera** crashed once (`docs/known-issues.md` §2) and its **fix** has never
+> run since. This page is the checklist for those. (The agent cannot join in
+> — it runs in Windows session 0, with no GPU and no desktop.)
 >
 > Read it once before the first run; it is deliberately short.
 
@@ -115,7 +116,7 @@ the payload; the MCP tools (`tools.cs2.*`) drive it from an agent session.
 | **the anti-aim** | the camera yaw next to the fake yaw | the **camera does not follow** the fake yaw. If it does, the split is not working — the scenario fails on it |
 | **the chams** | the chams' status: `hook=`, `seen=`, `chams=`, `skip=`, `rec=`, `pool=`, `tdn=`, `gu=` | the hook installs (`hook=installed`), the models are drawn with the flat material, and the colour is the one the operator picked. If the hook is refused, the status names the reason (no offset → the calibration is stale; prologue mismatch → not the build the RE measured). **The counters are the health:** `rec=` (the guard broke a recursion — it should stay **0**, and a climbing one means the hook's target is wrong), `pool=` (**the guard's pool was exhausted — the primitive was not drawn at all**, so a climbing `pool` means the chams are eating the scene), `tdn=` (a draw that arrived while the hook was torn down — one per teardown) and `gu=` (the desc cache's give-ups — the cache's health; it should stay **low**, because while it climbs the draw path pays two engine reads per *primitive* instead of per *model*). **The live run is still owed:** the detour has **never run against the real draw**, the tier0 render-job count is **unmeasured** (the 64-slot pool is headroom, not a measurement), and the fail-closed refusal's real-world frequency is unknown — so these counters are what the operator's first run is for. See `docs/known-issues.md` §14 |
 | **the Monte-Carlo objective** | the `rage` status: `objective` (`"monte_carlo"`), `mc_hitchance`, `mc_expected_damage`, `mc_samples`, `mc_seed`, `mc_refusal`, `mc_fallback` | it is selected over the **control channel** (`{"command": "rage", "args": {"objective": "monte_carlo"}}`) or from the per-weapon profile — **not from the menu**. The numbers are the **measured** probability and the **expected** damage, so `min_hitchance` and `min_damage` now mean **different things**: the same `min_hitchance` passes **more** shots and the same `min_damage` blocks **more** — the two gates move in **opposite** directions (`docs/ragebot.md` §14 has the numbers). **Turn the backtracking off** while live-testing it (`{"command": "rage", "args": {"backtrack": false}}`): the Monte-Carlo solve and the backtracking pass do not fit the frame budget together. **The MCP `cs2_rage` tool refuses `"monte_carlo"` until the server is restarted** (it imported the schema at start-up); the repository's own runner does not have that problem (`python scripts\run-scenario.py rage --set objective=monte_carlo`), and `cs2_run_scenario`'s `args` are free-form, so the objective is live-testable today. §6 has the details |
-| **the third person** | the third-person status line: `hook=`, `status=`, `updates=`, `writes=`, `cmds=` | the camera goes third person, `writes` climbs, and **the game does not die**. (It did, once: `0xc0000005` with a read of `0xFFFFFFFFFFFFFFFF` — §5.1b. The cause was a `thread_local` in the detour, which is **fixed**; the guard is now per owner.) |
+| **the third person** | the third-person status line: `hook=`, `status=`, `updates=`, `writes=`, `cmds=` | the camera goes third person, `writes` climbs, and **the game does not die**. (It did, once: `0xc0000005` with a read of `0xFFFFFFFFFFFFFFFF` — §5.1b. The cause was a `thread_local` in the detour, which is **fixed**; the guard is now per owner.) **The live run is still owed:** the **fixed** camera has never run against a real game, so this row is the first observation of the new guard — see `docs/known-issues.md` §2 |
 | **the triggerbot** | the trigger status | it fires when the crosshair is on a target, and the shot is the game's own |
 
 The scenarios do the same thing from the agent's side:
@@ -162,10 +163,13 @@ scenario's own `jointeam` — or `"auto"`, the server assigned the team).
 ## 5. The rules that exist because of a past crash
 
 - **Inject once.**
-- **A feature that is off must not patch the game's code.** Every hook in
-  this tree installs when the operator turns the feature on and is removed
-  when it is turned off. If a hook is installed while the feature is off, that
-  is a bug — report it.
+- **A feature that is off must not patch the game's code.** The chams' draw
+  hook and the camera's update hook install when the operator turns the
+  feature on and are removed when they turn it off. (Two hooks are not tied
+  to a switch: the present hook installs once at start-up, and the animfix's
+  two install on the game's first CreateMove and are never removed — the
+  animfix's detour is inert while the animfix is off.) If a **feature** hook
+  is installed while its feature is off, that is a bug — report it.
 - **No `thread_local` in a detour.** The payload is manually mapped: only the
   injector's entry thread has a TLS block, and a `thread_local` on a game's
   thread faults (that is what killed the game once — §5.1b).
