@@ -8,10 +8,11 @@ and it protects the functions a policy names.
 * the **transform** phase (the optimizer last) rewrites the calls of a
   selected function into **indirect dispatches through an encrypted
   descriptor**, so that the static call graph is no longer readable from the
-  binary — **the calls of a callee that is defined in the same module
-  only** (§10.6 says how much that is worth in the current payload: 37 of
+  binary — for the callees that are **defined in the same module**
+  (§10.6 says how much that is worth in the current payload: 37 of
   the 332 call sites of the selected functions, and they are predominantly
-  destructor calls; the cross-translation-unit calls stay direct).
+  destructor calls) and for the **cross-translation-unit** callees the
+  policy's `cross_module` list names (§10.7: 14 more, for 51 in all).
 
 The `virtualized` level (moving a body into an interpreter) is **reserved
 for T20**: a policy that asks for it fails the build, because a build that
@@ -37,6 +38,7 @@ tools/protect/
     report.hpp/.cpp     what the pass reports, and the coverage file
     transform.hpp/.cpp  the call encryption
     cipher.hpp/.cpp     the cipher the transform and the virtualizer share
+    strings.hpp/.cpp    the string encryption: the literals of the policy
     vm.hpp              the front end of the virtualizer: the ISA, the frame,
                         the budgets and the refusal reasons
     vm_internal.hpp     what the three front-end files share: the type and
@@ -55,7 +57,11 @@ tools/protect/
     ir_test.py          the shape of the rewritten IR
     diff_test.py        the differential test: the same fixture, with and without
     coverage_test.py    the readers of the coverage: a malformed file is reported,
-                        the coverage of another tree is not counted
+                        the coverage of another tree is not counted, and the two
+                        payload-level rules of the cross-module routing hold
+    str_ir_test.py      the string protection: the literal is gone from the IR
+    str_diff_test.py    the differential test of the string protection
+    image_scan_test.py  the image scan of the protected strings
     vm_ir_test.py       the front end of the virtualizer: the verdict of every
                         function, and the proof that the analysis is read-only
 ```
@@ -266,6 +272,10 @@ leaves one) is trimmed on both sides.
     "cs2::aim::solve",
     { "symbol": "cs2::game::StateReader::*", "module": "state_reader.cpp", "level": "virtualized" }
   ],
+  "cross_module": [
+    "cs2::aim::DamageField::add",
+    "cs2::aim::OccluderCell::lower_bound_distance"
+  ],
   "deny": ["cs2::loader::self_unmap"],
   "seed": "0xA04252B187478C00A40BC6E8B04F1C9A"
 }
@@ -279,6 +289,11 @@ leaves one) is trimmed on both sides.
   `virtualized` (T20 moves the body into an interpreter). The default is
   `call`. **`virtualized` is not implemented yet**: an entry that asks for
   it fails the build (§10.5).
+* A **`cross_module` entry** is a glob too, matched the same way, and it
+  names the **cross-TU callees** whose calls may be routed through the
+  caller's own table (§10.7). The list is a list of plain globs: the entry
+  names a *declaration* (a function with no body in the module that calls
+  it), so a module scope would name the wrong thing.
 * `deny` wins over every selection source.
 * An unknown key is an error, not a warning: a typo in a policy file must
   not be ignored silently.
@@ -349,6 +364,26 @@ check_policy: policy.json: 1 policy entry matched a function that cannot be prot
   cs2::aim::solve (always_inline)
 ```
 
+### A `cross_module` entry that is not routed is an error
+
+A `cross_module` entry names a **declaration** of the payload's own code:
+a function that is defined in another translation unit and called from a
+protected function. The entry that named nothing, or whose call could not
+be routed, protects nothing — the same rule the `protect` entries follow:
+
+```
+check_policy: policy.json: 1 cross_module entry named a declaration whose call could not be routed:
+  cs2::aim::DamageField::add (variadic_callee)
+check_policy: policy.json: 1 cross_module entry matched no declaration:
+  cs2::aim::DamageField::add
+```
+
+The **priority** of the states is the opposite of the `protect` entries':
+a `cross_module` entry has to be routed *everywhere* it is called, so a
+call that could not be routed in one module outranks a routing in another
+one. The aggregation over the modules is therefore "the worst state
+wins", with the worst being `blocked` > `matched` > `unmatched`.
+
 ### The `strings` section: the literals that are protected
 
 The `protect` entries name **functions**. A string is not a function, so the
@@ -375,7 +410,7 @@ strings get their own section:
 The strings are not a `ProtectionLevel`: they are not functions, they do not
 go through the selection phase's function machinery, and they get their own
 selection step in the transform phase. What the pass does with them is
-described in **§14**.
+described in **§15**.
 
 ## 6. The other selection source: the annotation
 
@@ -409,8 +444,8 @@ The selection phase prints one line per selected function to stderr:
 The transform phase prints what it did:
 
 ```
-[cs2-protect] solver.cpp: transform ?solve@aim@cs2@@YA?AUSolveResult@12@… (cs2::aim::solve) rewritten=7 skipped=88 indirect_parameter=9 external_callee=77 invoke=2
-[cs2-protect] solver.cpp: transform table=7 descriptor=11 mixmul=0x1f8b3c5d7e9a2b4c mixxor=0x8e3d5f7a9b1c3d5e rotate=27
+[cs2-protect] solver.cpp: transform ?solve@aim@cs2@@YA?AUSolveResult@12@… (cs2::aim::solve) rewritten=14 skipped=81 indirect_parameter=9 external_callee=26 intrinsic_callee=44 invoke=2 cross_module=7
+[cs2-protect] solver.cpp: transform table=14 descriptor=18 mixmul=0x1f8b3c5d7e9a2b4c mixxor=0x8e3d5f7a9b1c3d5e rotate=27
 [cs2-protect] solver.cpp: layout functions=69 moved=66 seed=0xf2ba62bd9b1ff889
 ```
 
@@ -418,6 +453,8 @@ The transform phase prints what it did:
 * `skipped` — the calls that were left alone, **per reason**:
   `variadic_callee`, `indirect_parameter`, `musttail`, `external_callee`,
   `optnone_callee`, `invoke`, `indirect_callee`.
+* `cross_module` — the rewrites that were **cross-TU**: the calls the
+  policy's `cross_module` list routed through the module's own table.
 * `table` and `descriptor` — the size of the two globals the module gained.
 * `mixmul`, `mixxor` and `rotate` — the **mixer of the build**: the
   multiplier, the xor constant and the rotation the module's calls decode
@@ -439,7 +476,9 @@ With `CS2_PROTECT_VERBOSE=1` the pass also prints every function it
 skipped and why (`not_annotated`, `denied`, `optnone`, `always_inline`,
 `declaration`, `intrinsic`), every skipped **call** of the transform (with
 its callee), the state of every policy entry (`matched`, `blocked`,
-`unimplemented`, `vanished`, `unmatched`), and a summary line per module.
+`unimplemented`, `vanished`, `unmatched`), the state of every
+`cross_module` entry, the cross-TU callees that stayed direct, and a
+summary line per module.
 
 The analysis of the virtualizer has a line of its own (§14):
 
@@ -558,6 +597,44 @@ list**: the number of the definitions, the number of them that moved, and
 the seed it came from. Both lines are **new**: a coverage file of an older
 build has no `layout` line and no `rotate=` field, and a reader that does
 not know them still reads the file (`tools/protect/protect_checks.py`).
+
+The `cross_module` entries have their **own** vocabulary and their own
+priority, in their own lines:
+
+| line | meaning |
+|---|---|
+| `cross matched <pattern> <symbol>` | the entry named a declaration and every call to it was routed |
+| `cross blocked:<reason> <pattern> <symbol>` | a call to the declaration it named could not be routed |
+| `cross unmatched <pattern>` | the entry named no declaration in this module |
+| `direct <symbol> <reason>` | the cross-TU callee that stayed direct, and why |
+
+The `direct` lines name the **distinct** cross-TU callees that a protected
+function still calls directly: the payload check compares them with the
+symbols the payload's own libraries define (§11).
+
+The `direct` lines are **not** only about the payload's own code: they
+name every declaration a protected function calls directly, and that
+includes the CRT's (`atan2f`, `operator delete`, `_Query_perf_counter`).
+Those are imports, the payload does not own them, and the check counts them
+as "left alone" (§11).
+
+The two extra fields — the symbol of a `cross` line and the reason of a
+`direct` line — are **not** in the parent specification's example of the
+format (`cross <state> <pattern>` and `direct <symbol>`). The readers
+accept both: the two fields are optional, so a coverage file written in
+either spelling is read.
+
+The `fn` line carries one more key, `cross=`: the number of the cross-TU
+rewrites of that function.
+
+```
+fn ?solve@aim@cs2@@… rewritten=14 skipped=81 cross=7
+```
+
+The readers of the coverage pick the keys they know and ignore the
+others, and the new lines are **new**: a coverage file of an older build
+has none of them, and a reader that does not know them still reads the
+file.
 
 A source that is compiled into **two targets of the same build** would write
 the same file. The coverage of a module does not depend on the target (the
@@ -749,9 +826,9 @@ reported (with its reason):
 | `variadic_callee` | the indirect call cannot reproduce the variadic ABI |
 | `indirect_parameter` | the callee has a `byval` / `sret` / `inalloca` / `preallocated` parameter: Windows x64 rejects these in an indirect signature |
 | `musttail` | a tail call cannot become an indirect call without breaking the contract |
-| `external_callee` | the callee has no code in this module: it is an import, an intrinsic or an `available_externally` function (the last one would resolve to address zero in the table) |
+| `external_callee` | the callee has no code in this module: it is an import, an intrinsic or an `available_externally` function (the last one would resolve to address zero in the table) — **unless the policy's `cross_module` list names it** (§10.7) |
 | `intrinsic_callee` | the callee is a compiler intrinsic: the backend expands it, there is nothing to call |
-| `invoke` | the pass does not model the EH edges yet |
+| `invoke` | the pass does not model the EH edges yet, unless the policy's `cross_module` list names the callee (§10.7) |
 | `optnone_callee` | rewriting it would defeat the `optnone` intent |
 | `indirect_callee` | the call already goes through a pointer: there is nothing to hide |
 
@@ -781,33 +858,130 @@ reported as *matched*.
 ### 10.6 What the rewrite is worth (and what it is not)
 
 The rewrite applies to the calls of a callee that is **defined in the same
-module** (the specification's §2.4). The calls that cross a translation
-unit stay **direct**: the table of a module holds only the callees of that
-module.
+module** (the specification's §2.4) and to the calls of a callee that is
+defined in **another** module and that the policy's `cross_module` list
+names (§10.7).
 
 In the current payload, with the policy of `tools/protect/policy.local.json`:
 
-| selected function | rewritten | skipped |
-|---|---|---|
-| `cs2::aim::solve` | 7 | 88 (77 cross-module, 9 with an `sret` parameter, 2 `invoke`) |
-| `cs2::aim::occlude_polygon` | 21 | 146 |
-| `cs2::aim::solve_backtrack` | 4 | 15 |
-| `cs2::aim::project_capsule` | 3 | 45 |
-| `cs2::aim::DamageField::hit_probability` | 2 | 1 |
-| `cs2::aim::penetration_survival` | 0 | 0 |
-| **total** | **37** | **295** |
+| selected function | rewritten | of them cross-TU | skipped |
+|---|---|---|---|
+| `cs2::aim::solve` | 14 | 7 | 81 (9 with an `sret` parameter, 2 `invoke`, 26 cross-module, 44 intrinsics) |
+| `cs2::aim::occlude_polygon` | 27 | 6 | 140 |
+| `cs2::aim::solve_backtrack` | 4 | 0 | 15 |
+| `cs2::aim::project_capsule` | 3 | 0 | 45 |
+| `cs2::aim::DamageField::hit_probability` | 3 | 1 | 0 |
+| `cs2::aim::penetration_survival` | 0 | 0 | 0 |
+| **total** | **51** | **14** | **281** |
 
-So **37 of the 332 call sites** of the selected functions became indirect
-dispatches. The table of `solver.cpp` holds seven entries, and they are six
-destructors and one constructor: the calls that carry the aim call graph are
-the **cross-module** ones, and they stay direct calls in the image. The
-static call graph of the interesting code is therefore still readable; what
-leaves the binary is the cleanup code.
+So **51 of the 332 call sites** of the selected functions became indirect
+dispatches, **14** of them the cross-TU edges that carry the aim call
+graph. The cross-TU edges that are **still direct** are the ones the
+`sret` rule refuses (11 functions, 12 call sites): the rule is not narrowed
+by this task, and the payload check names them (§11).
 
-A follow-up is the only way to make the claim true: hoist the shared aim
-code into one translation unit, or rewrite the cross-module calls through a
-per-module table (which needs the table of *another* module — a seam the
-format of the descriptor has to keep open).
+The edges that are still visible are listed in §10.8.
+
+### 10.7 The cross-module routing
+
+A call to a **declaration** — a function with no body in the module that
+calls it — is normally refused with the reason `external_callee`: at the
+IR level an import and an internal cross-TU declaration are the same
+thing, and the pass cannot tell them apart by looking at the module.
+
+The policy's **`cross_module`** list is what tells them apart. An entry is
+a glob, matched exactly like a `protect` entry: against the mangled symbol
+and against the demangled qualified name (`qualified_name()` in
+`src/selection.cpp`). `cs2::aim::DamageField::*` covers every member of
+the struct in one line.
+
+The rule is:
+
+* the entry is matched against a **declaration** in the module (a function
+  with no body here). A same-module callee needs no entry: it is routed by
+  the ordinary rule;
+* a call to a declaration the list names goes into the **caller's own**
+  table, and the call becomes an indirect dispatch through the encrypted
+  descriptor, exactly like a same-module callee;
+* the table entry is the **symbol itself** — `ptr @?project_capsule@…` —
+  and not a copy of its address. The object writer emits an
+  `IMAGE_REL_AMD64_ADDR64` relocation against the external symbol, the
+  linker resolves it inside the DLL, and the mapper applies the DIR64
+  fixup. The table therefore holds a **relocatable pointer**, and the
+  image base is never baked into anything;
+* the **descriptor** still holds plain integers: the index of the entry,
+  `index ^ key`. Nothing about the cipher changes, and the permutation of
+  the table applies to the cross-TU entries too;
+* every other rule still applies. A cross-TU callee that is variadic, or
+  that has a `byval` / `sret` / `inalloca` / `preallocated` parameter, is
+  still refused — with the reason it always had.
+
+**The EH edges.** The `invoke` rule does not hold for a declaration the
+list names. The rule exists because the pass does not model the EH edges,
+and the rewrite does not model them either: it replaces the **callee** and
+leaves the landing pad and the unwind edge exactly as they are. In the
+current tree, four of the fourteen cross-TU edges are EH edges
+(`DamageField::add`, `DamageField::add_hitbox`, `DamageField::clip` and
+`subtract_convex` may throw), and the measurement that counted them as
+ordinary calls could not tell them apart: the rule order reports a call
+to a declaration as `external_callee` whether it is an `invoke` or not. The
+cross-TU graph cannot be closed while they stay direct.
+
+**The list is the operator's data.** It is the operator's declaration of
+"these cross-TU edges must not be readable", and the payload check is the
+proof of the part of it that the pass can reach: the check compares the
+cross-TU callees that stayed direct with the symbols the payload's own
+libraries define (§11).
+
+**What the declaration covers, and what it does not.** The routing rewrites
+the calls **inside the protected functions**. The *same* symbols are still
+called **directly** by the functions the pass does not protect, and those
+edges are still in the image. The `cross_module` list is therefore a
+declaration about the **edges of the protected functions**, not about the
+symbols: `polygon_contains` is unreadable as a *call of a protected
+function*, and it is a plain direct call in `DamageField::value_at`, which
+the pass does not touch. The payload check counts the direct calls that
+are left and prints the number (§11), so the operator sees what the
+routing does not hide.
+
+### 10.8 What is still visible
+
+Stated plainly, because the claim of the protection must not be stronger
+than what it is:
+
+* **The inbound edges.** The callers of the protected functions — the
+  control service and the trigger — call them **directly**. The transform
+  only rewrites the calls *inside* a selected function.
+* **The outbound edges of the *unprotected* functions.** The pass rewrites
+  the calls of the selected functions only, so a cross-TU aim function that
+  an unprotected function calls — `polygon_contains` from
+  `DamageField::value_at`, for instance — is still a **direct call** in the
+  image. The `cross_module` list is a declaration about the edges of the
+  protected functions; it does not make the *symbols* unreadable, and the
+  call graph of the whole payload still has these edges in it. The payload
+  check counts them and prints the number (§11): in the current tree, **46**
+  of them are left — 40 in `field.cpp`, one in `damage.cpp`, two in
+  `geometry.cpp`, two in `montecarlo.cpp` and one in `occlusion.cpp`.
+* **The `sret` edges.** Eleven cross-TU callees return a big aggregate, so
+  the call carries an `sret` parameter and the indirect call cannot
+  reproduce it. The rule is not narrowed by this task; the payload check
+  names the eleven and does not fail for them.
+* **The same-module EH edges.** The pass does not model the EH edges of
+  the calls it does not route, and the `invoke` edges of the same-module
+  calls stay direct.
+* **The intrinsic calls.** `llvm.lifetime.*`, `memset`, `memcpy`, `trap`,
+  `fmuladd`, `sqrt`, `smax`: an intrinsic has no body, the backend
+  expands it, and it carries no call graph of the payload's code.
+* **The CRT calls.** `operator new` / `operator delete`,
+  `_Query_perf_counter`, `_Query_perf_frequency`, `atan2f`, `asinf`,
+  `powf`: they are in the import table, or they are the CRT's own code.
+* **The callee set.** The table is a flat list of addresses in `.rdata`.
+  An analyst who finds the table reads the **set** of functions a module
+  can reach. What this task hides is the **edge**: which call site calls
+  which callee. The code of the callees is still there.
+* **The run-time cost of the dispatch** is not measured by this repository
+  (§10.3): there is no benchmark in it, and a number that cannot be
+  reproduced from the repository is worse than no number.
 
 ## 11. The payload-level checks
 
@@ -844,6 +1018,19 @@ python tools/protect/check_payload.py --protected build-payload-protect/payload.
 * every dispatch **decodes to a callee of the image**: the descriptor,
   decoded with the key the pass used, names an entry of the table of the
   image, and that entry is the code of the image;
+* **no protected function calls the payload's own code directly**: the
+  cross-TU callees that stayed direct (the coverage's `direct` lines) are
+  compared with the symbols the payload's own libraries define;
+* every `cross_module` entry of the policy names a symbol the payload
+  still defines: an entry that names a symbol that is gone is a **stale**
+  entry, and it protects nothing;
+* the **direct calls the payload's own objects still make to the
+  `cross_module` symbols** are counted: the routing rewrites the calls of
+  the *protected* functions, and the calls of the functions it does not
+  protect stay direct. The count is a **measurement**, not a rule -- the
+  direct calls of the unprotected functions are the payload's business --
+  and the operator has to see it: it is what the `cross_module` list does
+  *not* hide (§10.8);
 * the **plaintext of the protected strings** is looked for in the protected
   image (and in the unprotected one): the coverage carries the length and
   the salted digest of every protected literal, and the check hashes the
@@ -852,7 +1039,7 @@ python tools/protect/check_payload.py --protected build-payload-protect/payload.
   as a substring *is* in the image, and the MSVC ABI merges a literal with
   a longer one that ends with it -- and the check reports the number of
   literals it **verified** absent and the ones that are still there with
-  their coverage hash (§14.7). The same scan runs on the unprotected
+  their coverage hash (§15.7). The same scan runs on the unprotected
   image, so that the comparison cannot pass vacuously, and so that the
   verdict does not depend on the layout of the image.
 
@@ -889,6 +1076,89 @@ A dispatch is counted by its **own signature**: an indirect call through the
 table of the transform, or the tail jump the backend emits when the call is
 the last thing a function does (the decode is right before it, and a switch
 table jump has no decode before it). The unprotected image has none.
+
+The **table** of a module is the one the dispatch calls through: the
+register the dispatch uses is tracked back to the `leaq` that loaded it,
+and that address is the table of the module. The tracking is the
+**primary** source, because it keeps the link between a dispatch and *its
+own* table.
+
+The **content** scan is the fallback, for the sites where the tracking
+fails: the register allocation is the backend's business, and a linear
+scan of the disassembly does not model the control flow (a table loaded in
+a loop head is used by a dispatch that the scan reaches by another path,
+and a tail jump copies the table's address into another register). The
+scan looks for a run of `table_size` code addresses in the read-only data
+whose **descriptor** follows it (the linker may leave a gap between the
+two) and whose descriptor decodes with the key of the module. The run may
+be **longer** than the table -- the linker may put two tables next to
+each other, or a global that holds a code address right after the table --
+so every start of the table inside the run is tried, and the descriptor
+that follows it decides which one it is.
+
+The check names the case the table entry is an **import's IAT slot**
+instead of the function: the entry does not hold the callee, the dispatch
+calls the slot, and a `cross_module` entry must not name an import.
+
+### The table of a module, and the payload's own code
+
+Two checks need to know what the payload's own code is, and they read it
+the same way: the SDK's **`llvm-nm`** over the payload's own static
+libraries — the ones in the build directory the check runs in. The
+`llvm-nm` is in the same directory as the `llvm-objdump` the check is
+given, so **no build wiring changes**.
+
+* **The direct calls.** For every symbol in the coverage's `direct` lines
+  the check asks: is this symbol **defined in one of the payload's own
+  libraries**? A symbol the payload defines is the payload's own code, and
+  the edge is still a direct call in the image: the build **fails**, with
+  the name of the symbol and the reason it stayed direct. A symbol the
+  payload does not define (the CRT's `operator new`, `atan2f`,
+  `_Query_perf_counter`, …) is an import or a CRT symbol: it names no aim
+  function, and it is left alone. The check prints the number of the calls
+  it left alone, so the operator sees them.
+* **The advice names the reason.** A callee that is not in the policy's
+  `cross_module` list is refused with `external_callee`, and the list
+  routes it: the advice says to add it. A callee that the list **already**
+  names may still stay direct, because the routing cannot reproduce a
+  variadic call, a tail call or a call to an `optnone` function
+  (`variadic_callee`, `musttail`, `optnone_callee`): no `cross_module`
+  entry will ever route it, and the advice says so instead of sending the
+  operator in a circle.
+* **The `sret` edges are excepted**, and the check **names** them: the
+  rule that refuses them is not narrowed by this task, and the eleven
+  cross-TU callees that return a big aggregate stay direct. The check says
+  so instead of failing on them. The exception is decided per
+  **(module, symbol)** pair and not per symbol: the coverage of one module
+  is the evidence of that module, and a symbol that one module excepts and
+  another module refuses for another reason is a failure, whatever the
+  order the coverage files are read in.
+* **The stale entries.** Every `cross_module` entry that matched a
+  declaration names the mangled symbol it named, and the check asks
+  whether the payload's own libraries define it. An entry that names a
+  symbol the payload does **not** define is stale — the function is gone,
+  or was never there — and the build fails.
+* **The direct calls that are left.** The two rules above look at the
+  calls of the **protected** functions, because that is what the coverage
+  records. The *same* symbols are still called directly by the functions
+  the pass does not protect, and those edges are still in the image. The
+  check counts them too, at the **object** level: a linked image has no
+  relocation left for an internal call, so the object file is the only
+  place where the direct edges are visible, and a REL32 relocation in
+  `.text` against a `cross_module` symbol is one of them. The count is a
+  **measurement**, not a rule — the direct calls of the unprotected
+  functions are the payload's business — and the check prints it.
+
+When the libraries or the `llvm-nm` cannot be found, the check **says so**
+and **fails**: a rule that cannot be evaluated must not be reported as
+passed. The "no coverage, no image comparison" mode of the check (the
+manual run without `--coverage`) skips the rules that need the evidence.
+
+The libraries and the objects are looked for in the **current working
+directory**, so the check has to be run from the build directory (the
+build does that, and a manual run has to `cd` there). Run from anywhere
+else, the check finds no library and **fails** with the message above: it
+does not guess where the payload's own code is.
 
 ### The check is part of the build
 
@@ -1595,7 +1865,7 @@ deleted, and the **link fails** with an unresolved external. That is a loud
 failure -- not a wrong result -- but it is the *build* that fails, not the
 pass, and the pass cannot detect it: a pass sees one translation unit at a
 time. The same assumption is the reason why a literal that is protected in
-one module and **refused** in another is still in the image (§14.7): the
+one module and **refused** in another is still in the image (§15.2): the
 refused module keeps its copy, and the linker keeps the COMDAT.
 
 ### 15.3 Where the plaintext lives: a stack buffer
@@ -1803,7 +2073,7 @@ per module:
 
 **"Protected in this module" is not "absent from the image", and the
 difference is bigger than it looks.** The gate is per module, but a string
-literal is `linkonce_odr` (§14.2): it exists in **every** module that uses
+literal is `linkonce_odr` (§15.2): it exists in **every** module that uses
 it. If module A protects a literal and module B refuses it, B's copy
 survives the link and **the plaintext is in the image**. And the MSVC ABI
 merges a literal with a **longer** literal that ends with it
@@ -1836,7 +2106,7 @@ The 77 survivors have **two** causes, and they are different:
 
 * **35** are refused in **another module** (`escapes_to_initializer` or
   `eh_use`), so that module keeps its copy and the linker keeps the
-  COMDAT. This is the payload's own data model (§14.2).
+  COMDAT. This is the payload's own data model (§15.2).
 * **42** are protected in **every** module that uses them, and their bytes
   survive as the **tail of a longer literal** of the image. This is the
   MSVC ABI's string merging, and the pass cannot see it: it sees one
@@ -1928,7 +2198,7 @@ really left the image.
 The 364 `escapes_to_initializer` refusals are the event names and the event
 fields: they are baked into the `constexpr` arrays of
 `event_names.hpp`, so they cannot be protected by this design at all
-(§14.2). The 35 `eh_use` refusals are the price of the rule: the payload is
+(§15.2). The 35 `eh_use` refusals are the price of the rule: the payload is
 built with `/EHsc`, so a function that owns a `std::string` has a cleanup
 landing pad, and the rule refuses every literal one of them uses. A literal
 that is protected in one module and refused in another is legitimately still

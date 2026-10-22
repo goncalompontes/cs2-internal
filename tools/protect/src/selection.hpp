@@ -76,11 +76,24 @@ struct PolicyMatch {
   std::optional<SkipReason> blocked_reason;  ///< why it cannot be protected.
 };
 
+/// A `cross_module` entry that named a declaration in the module.
+///
+/// The entry is matched against a **declaration**: a function with no body in
+/// this module. A same-module callee is routed by the ordinary rule and
+/// needs no entry, and a *definition* is not a declaration: the entry names
+/// the call of another translation unit, not the function itself.
+struct CrossModuleMatch {
+  std::string pattern;    ///< the glob of the entry.
+  std::string symbol;     ///< the mangled symbol of the declaration.
+  std::string qualified;  ///< the demangled qualified name of the declaration.
+};
+
 /// What the pass decided for one module.
 struct SelectionResult {
   std::vector<Selection> selected;
   std::vector<Skipped> skipped;
   std::vector<PolicyMatch> policy_matches;
+  std::vector<CrossModuleMatch> cross_matches;
 };
 
 /// Decides what to protect in one module. Never throws.

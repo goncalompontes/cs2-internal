@@ -32,17 +32,33 @@
 // would not have caught the crash, and a second copy of the guard would be a
 // second implementation of the same rules.
 //
+// The **wiring** is pinned too, because the per-owner guard exposed three
+// gaps that no check covered:
+//
+//   * **H3** — the switch-off has to **clear** the refusal latch. The rule
+//     is pure (`hook_target::refusal_after_switch`), so what was missing was
+//     the call site: deleting the clear of `install_failed_` left the suite
+//     green.
+//   * **H6** — the guard's scope has to be held **across** the trampoline
+//     call. The old check only asked whether the source mentioned
+//     `guard::Scope` (presence, not ordering), so moving the scope after
+//     the call left the suite green.
+//   * **H7** — the chams' guard **fails closed** and the camera's does not.
+//     The policy is per instance, so the camera's behaviour does not change.
+//
 // The checks are **explicit**: the test counts its failures instead of using
 // `assert`, so it still bites in a release build (Meson's `b_ndebug` default
 // is `if-release`, so `NDEBUG` is defined in the configuration
 // `scripts/release.sh` builds and every `assert` would be compiled out — a
 // test that only bites in the debug build is not a test).
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -51,7 +67,9 @@
 #include <thread>
 #include <vector>
 
+#include "cs2/features/chams.hpp"
 #include "cs2/features/guard_scope.hpp"
+#include "cs2/features/hook_target.hpp"
 #include "cs2/features/recursion_guard.hpp"
 
 namespace {
@@ -436,6 +454,12 @@ void test_the_chams_hold_the_shared_guard(const std::filesystem::path& base) {
 // The tree must hold **exactly one** implementation of the guard: a second
 // copy is a second set of rules, and the two would drift.
 void test_the_tree_holds_one_guard(const std::filesystem::path& features) {
+  // The directory is checked first: a wrong `argv[1]` must **report** the
+  // mistake, not die with an uncaught `filesystem_error`.
+  if (!std::filesystem::is_directory(features)) {
+    expect(false, "the features directory is there");
+    return;
+  }
   int implementations = 0;
   std::string holder;
   for (const auto& entry : std::filesystem::recursive_directory_iterator(features)) {
@@ -463,6 +487,11 @@ void test_the_tree_holds_one_guard(const std::filesystem::path& features) {
 // the caller's buffer — a heap allocation on the render thread, every frame.
 // The sibling providers (`Service::rage_status`, `movement_status`) write
 // straight into the caller's fixed buffer, and so does this one now.
+//
+// The **formatting** is a pure function in the header (`chams_status`), so a
+// host test can drive it with the counters at their maximum (the bound
+// below); the payload's own `status_line` only reads the counters and hands
+// them over.
 void test_the_status_line_does_not_allocate(const std::filesystem::path& base) {
   const std::string header =
       strip_comments(read_file(base / "include" / "cs2" / "features" / "chams.hpp"));
@@ -470,6 +499,9 @@ void test_the_status_line_does_not_allocate(const std::filesystem::path& base) {
          "the status line writes into the caller's buffer");
   expect(header.find("auto status_line() const -> std::string") == std::string::npos,
          "the status line does not return a string");
+  expect(header.find("std::snprintf") != std::string::npos,
+         "the status line is written with snprintf");
+  expect(!contains_word(header, "std::string"), "the status line allocates nothing");
 
   const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
   const std::size_t at = source.find("Chams::status_line");
@@ -478,7 +510,6 @@ void test_the_status_line_does_not_allocate(const std::filesystem::path& base) {
     return;
   }
   const std::string body = source.substr(at, source.size() - at);
-  expect(body.find("snprintf") != std::string::npos, "the status line is written with snprintf");
   expect(!contains_word(body, "std::string"), "the status line allocates nothing");
   // The counters the line shows are read through the accessors, so none of
   // them is dead code.
@@ -486,6 +517,448 @@ void test_the_status_line_does_not_allocate(const std::filesystem::path& base) {
   expect(body.find("drawn()") != std::string::npos, "the status line uses the drawn counter");
   expect(body.find("skipped()") != std::string::npos, "the status line uses the skipped counter");
   expect(body.find("hook_status()") != std::string::npos, "the status line uses the hook state");
+}
+
+// The body of the function that starts at `marker`, braces matched.
+//
+// The rules below are about **one function's** body (the switch-off clears
+// the latch in `configure`, the guard is held across the trampoline call in
+// the detour), so the check has to look at that function and not at the
+// whole file: a rule that is satisfied somewhere else in the file is not
+// satisfied at all.
+auto function_body(const std::string& source, const std::string& marker) -> std::string {
+  const std::size_t at = source.find(marker);
+  if (at == std::string::npos) {
+    return {};
+  }
+  const std::size_t open = source.find('{', at);
+  if (open == std::string::npos) {
+    return {};
+  }
+  int depth = 0;
+  for (std::size_t index = open; index < source.size(); ++index) {
+    if (source[index] == '{') {
+      ++depth;
+    } else if (source[index] == '}') {
+      --depth;
+      if (depth == 0) {
+        return source.substr(open, index - open + 1);
+      }
+    }
+  }
+  return {};
+}
+
+// The arguments of the call whose name starts at `at`, split at the
+// top-level commas.
+//
+// The rules below are about **which value** a call is given, so the check
+// has to look at the arguments and not at the text around them: a rule that
+// is satisfied *somewhere else* in the file is not satisfied at all.
+[[nodiscard]] auto call_arguments(const std::string& source, std::size_t at)
+    -> std::vector<std::string> {
+  std::vector<std::string> arguments;
+  const std::size_t open = source.find('(', at);
+  if (open == std::string::npos) {
+    return arguments;
+  }
+  int depth = 0;
+  std::size_t start = open + 1;
+  for (std::size_t index = open; index < source.size(); ++index) {
+    const char c = source[index];
+    if (c == '(') {
+      ++depth;
+      continue;
+    }
+    if (c == ')') {
+      --depth;
+      if (depth == 0) {
+        arguments.push_back(source.substr(start, index - start));
+        return arguments;
+      }
+      continue;
+    }
+    if (c == ',' && depth == 1) {
+      arguments.push_back(source.substr(start, index - start));
+      start = index + 1;
+    }
+  }
+  return arguments;
+}
+
+// The source with the spaces around it removed.
+[[nodiscard]] auto trimmed(const std::string& text) -> std::string {
+  const auto is_space = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+  std::size_t begin = 0;
+  while (begin < text.size() && is_space(text[begin])) {
+    ++begin;
+  }
+  std::size_t end = text.size();
+  while (end > begin && is_space(text[end - 1])) {
+    --end;
+  }
+  return text.substr(begin, end - begin);
+}
+
+// --- H3: the switch-off clears the refusal latch -----------------------------
+//
+// The refusal latch (`install_failed_`) stops a refused install from being
+// retried and re-reported on every frame. It has to be **cleared** when the
+// operator switches the feature off: a latch that survived the switch-off
+// would make the next switch-on never retry the install, so the refusal
+// would never be reported again and the HUD would say "installing" forever
+// — a lie, because no install is being attempted.
+//
+// The rule is pure (`hook_target::refusal_after_switch`), so what is missing
+// is the **wiring**: the `configure()` call site. Deleting the clear of
+// `install_failed_` used to leave the whole suite green.
+//
+// The check has to pin **the value that is stored**, and not merely that the
+// rule is mentioned nearby: neutering the call — passing a constant instead
+// of the switch's own answer — left the suite green too, and that is the
+// defect the rule exists to prevent (a latch the switch-off never clears).
+void test_the_switch_off_clears_the_refusal_latch(const std::filesystem::path& base) {
+  const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
+  const std::string body = function_body(source, "void Chams::configure(");
+  expect(!body.empty(), "the chams' configure() is there");
+
+  // The latch is stored ...
+  const std::size_t store = body.find("install_failed_.store(");
+  expect(store != std::string::npos, "configure() stores the refusal latch");
+  if (store == std::string::npos) {
+    return;
+  }
+  // ... and the value it stores is the **switch's** answer, not the old
+  // latch: `refusal_after_switch(enabled, refused)` is false when the
+  // feature is off, and that is what clears the latch.
+  const std::size_t rule = body.find("refusal_after_switch", store);
+  expect(rule != std::string::npos && rule - store < 200,
+         "the latch that is stored is the switch's answer (refusal_after_switch)");
+  if (rule == std::string::npos) {
+    return;
+  }
+  const std::vector<std::string> arguments = call_arguments(body, rule);
+  expect(arguments.size() == 2, "the rule is called with the switch and the latch");
+  if (arguments.size() != 2) {
+    return;
+  }
+  // The **first** argument is the switch's own answer — the operator's
+  // setting. A constant there would store a latch the switch-off never
+  // clears, which is the H3 defect.
+  expect(trimmed(arguments[0]) == "visuals.chams",
+         "the rule is given the switch's own answer (visuals.chams)");
+  // The **second** argument is the latch the rule is about.
+  expect(trimmed(arguments[1]).find("install_failed_") != std::string::npos,
+         "the rule is given the latch it is about to clear");
+
+  // The rule itself: the switch-off clears it.
+  expect(!cs2::features::hook_target::refusal_after_switch(false, true),
+         "the rule clears the latch when the feature is switched off");
+  expect(cs2::features::hook_target::refusal_after_switch(true, true),
+         "the rule keeps the latch while the feature is on");
+}
+
+// --- H6: the guard is held across the trampoline call -------------------------
+//
+// The guard exists to break the recursion that happens **inside** the call to
+// the original: the trampoline lands back in the detour, and the guard is
+// what refuses that call. A guard that is released before the call protects
+// nothing.
+//
+// The old check only asked whether the source *mentioned* `guard::Scope` —
+// presence, not ordering — so moving the scope after the trampoline call
+// left the suite green.
+void test_the_guard_is_held_across_the_trampoline_call(const std::filesystem::path& base) {
+  const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
+  const std::string body = function_body(source, "draw_primitive_detour");
+  expect(!body.empty(), "the draw detour is there");
+
+  // The guard's scope.
+  const std::size_t scope = body.find("guard::Scope");
+  expect(scope != std::string::npos, "the detour holds the guard in a scope");
+  // The call that reaches the trampoline: `on_draw` is what calls the
+  // original, so the scope has to be declared **before** it.
+  const std::size_t call = body.find("on_draw(");
+  expect(call != std::string::npos, "the detour calls the draw path");
+  if (scope == std::string::npos || call == std::string::npos) {
+    return;
+  }
+  expect(scope < call, "the guard is held across the trampoline call");
+}
+
+// The declaration of `name` in the source: the identifier followed by a
+// brace or an assignment.
+//
+// A cosmetic reformat of the line (`camera_guard_ = {}`, `camera_guard_ {}`)
+// must not fail the suite, so the check looks at the **declaration** and not
+// at one spelling of it.
+[[nodiscard]] auto declaration_of(const std::string& source, const std::string& name)
+    -> std::string {
+  std::size_t search = 0;
+  while (search < source.size()) {
+    const std::size_t found = source.find(name, search);
+    if (found == std::string::npos) {
+      return {};
+    }
+    std::size_t next = found + name.size();
+    while (next < source.size() && (source[next] == ' ' || source[next] == '\t')) {
+      ++next;
+    }
+    if (next < source.size() && (source[next] == '{' || source[next] == '=')) {
+      const std::size_t end = source.find(';', next);
+      if (end == std::string::npos) {
+        return {};
+      }
+      return source.substr(found, end - found);
+    }
+    search = found + 1;
+  }
+  return {};
+}
+
+// --- H7: the chams' guard fails closed, the camera's does not ----------------
+//
+// The shared guard's fail-open rationale is the **camera's**: refusing a call
+// that is not a recursion would drop a camera update. For the draw path the
+// arithmetic is the other way round: a refusal drops **one primitive**,
+// while failing open lets the recursion run until the stack overflows
+// (0xc00000fd) and takes the renderer with it.
+//
+// The policy is **per instance**, so the camera's behaviour does not change:
+// the camera's guard is built with the default (fail open) and the chams'
+// with `fail_closed`.
+void test_the_chams_fail_closed_and_the_camera_does_not(const std::filesystem::path& base) {
+  const std::string header =
+      strip_comments(read_file(base / "include" / "cs2" / "features" / "chams.hpp"));
+  expect(header.find("RecursionGuard::Policy::fail_closed") != std::string::npos,
+         "the chams' guard fails closed");
+
+  // The shared header's default is the camera's policy.
+  const std::string guard_header =
+      strip_comments(read_file(base / "include" / "cs2" / "features" / "recursion_guard.hpp"));
+  expect(guard_header.find("Policy policy = Policy::fail_open") != std::string::npos,
+         "the guard's default policy is the camera's (fail open)");
+
+  // The camera's guard is built with the default, so it keeps failing open.
+  const std::filesystem::path camera = base / "include" / "cs2" / "features" / "thirdperson.hpp";
+  const std::string camera_header = strip_comments(read_file(camera));
+  expect(!camera_header.empty(), "the camera's header is there");
+  const std::string declaration = declaration_of(camera_header, "camera_guard_");
+  expect(!declaration.empty(), "the camera's guard is declared");
+  expect(declaration.find("Policy") == std::string::npos,
+         "the camera's guard is built with the default policy");
+  expect(camera_header.find("fail_closed") == std::string::npos,
+         "the camera's guard does not fail closed");
+}
+
+// --- The pool: the draw path's is sized for the render jobs ----------------
+//
+// The chams' guard holds its slot for the **whole draw** — the call into the
+// original included, because that is the call the recursion happens inside —
+// so the pool has to hold one slot per **concurrent render job**, not one per
+// thread. The scene system's job count is **unmeasured** (the live run has
+// still not happened), so the pool is sized with headroom: the draw path's
+// pool is 7.1 times the camera's (not eight: eight is the camera's
+// `SLOT_COUNT` without its reserve).
+//
+// The pool is **per instance**, so the camera keeps its pool — and its
+// per-call cost — exactly as it was (its guard *object* grew, because the
+// slots array is sized for the largest pool any guard may ask for).
+//
+// The header is pure, so the pool's size is observable: a fail-closed guard
+// lets exactly `slot_count` owners in and refuses the next one. That is what
+// the old, fixed pool of nine did to the tenth render job: its draw was
+// refused, and the primitive was **not drawn at all**, every frame.
+void test_the_pool_holds_the_concurrent_jobs() {
+  // The camera's pool: the default, unchanged.
+  RecursionGuard camera;
+  expect(camera.slot_count() == cs2::features::guard::TOTAL_SLOT_COUNT,
+         "the default pool is the camera's");
+  RecursionGuard camera_closed{RecursionGuard::Policy::fail_closed};
+  expect(camera_closed.slot_count() == camera.slot_count(), "the policy does not change the pool");
+  for (std::size_t owner = 1; owner <= camera_closed.slot_count(); ++owner) {
+    expect(camera_closed.try_enter(static_cast<OwnerId>(owner)),
+           "the camera's pool takes its owners");
+  }
+  expect(!camera_closed.try_enter(static_cast<OwnerId>(camera_closed.slot_count() + 1)),
+         "the camera's pool refuses the owner that does not fit");
+
+  // The draw path's pool: 7.1 times the camera's, so a tenth concurrent
+  // render job — the case the old pool refused — is let in.
+  RecursionGuard draw{RecursionGuard::Policy::fail_closed,
+                      cs2::features::guard::DRAW_PATH_SLOT_COUNT};
+  expect(draw.slot_count() == cs2::features::guard::DRAW_PATH_SLOT_COUNT,
+         "the draw path's pool is the one that was asked for");
+  expect(draw.slot_count() > camera.slot_count(),
+         "the draw path's pool is bigger than the camera's");
+  for (std::size_t owner = 1; owner <= draw.slot_count(); ++owner) {
+    expect(draw.try_enter(static_cast<OwnerId>(owner)), "the draw pool takes its owners");
+  }
+  expect(!draw.try_enter(static_cast<OwnerId>(draw.slot_count() + 1)),
+         "the draw pool refuses the owner that does not fit");
+}
+
+// The chams' guard must be built with the draw path's pool, and the camera's
+// must not be: the camera's behaviour — and its cost — has to stay exactly as
+// it is.
+void test_the_chams_use_the_draw_pool(const std::filesystem::path& base) {
+  const std::string header =
+      strip_comments(read_file(base / "include" / "cs2" / "features" / "chams.hpp"));
+  const std::size_t at = header.find("draw_guard_{");
+  expect(at != std::string::npos, "the chams hold a draw guard");
+  if (at == std::string::npos) {
+    return;
+  }
+  const std::size_t pool = header.find("DRAW_PATH_SLOT_COUNT", at);
+  expect(pool != std::string::npos && pool - at < 200,
+         "the chams' guard is built with the draw path's pool");
+
+  const std::filesystem::path camera = base / "include" / "cs2" / "features" / "thirdperson.hpp";
+  const std::string camera_header = strip_comments(read_file(camera));
+  expect(!camera_header.empty(), "the camera's header is there");
+  expect(camera_header.find("DRAW_PATH_SLOT_COUNT") == std::string::npos,
+         "the camera's guard keeps the default pool");
+}
+
+// The refusal has to be **counted**: a refused draw is a dropped primitive,
+// and a drop that is not counted is a silent hole in the model.
+//
+// The three **causes** are counted separately: they need different responses
+// (the pool exhaustion drops primitives every frame, the recursion break
+// means the hook's target is wrong, the teardown drop happens once), and the
+// counters are not reset, so a climbing number is the operator's only signal.
+void test_the_refusal_is_counted(const std::filesystem::path& base) {
+  const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
+  const std::string body = function_body(source, "draw_primitive_detour");
+  expect(!body.empty(), "the draw detour is there");
+  expect(body.find("count_refusal_recursion()") != std::string::npos,
+         "the detour counts the recursion it broke");
+  expect(body.find("count_refusal_exhausted()") != std::string::npos,
+         "the detour counts the draw the pool could not take");
+  expect(body.find("count_refusal_teardown()") != std::string::npos,
+         "the detour counts the draw that arrived during the teardown");
+
+  // The counters are reported: the status line shows them. The format string
+  // is a **string literal**, so this check reads the source as it is (the
+  // stripped source has the literals removed). The literal lives in the
+  // header (the formatting is a pure function there), and the accessors are
+  // read in the source.
+  const std::string header = read_file(base / "include" / "cs2" / "features" / "chams.hpp");
+  // The **format literal**, not the prose: the comments name the fields too.
+  expect(header.find("rec=%llu") != std::string::npos,
+         "the status line shows the recursion breaks");
+  expect(header.find("pool=%llu") != std::string::npos,
+         "the status line shows the pool exhaustion");
+  expect(header.find("tdn=%llu") != std::string::npos, "the status line shows the teardown drops");
+
+  const std::string raw = read_file(base / "src" / "chams.cpp");
+  const std::size_t at = raw.find("Chams::status_line");
+  expect(at != std::string::npos, "the status line is there");
+  if (at != std::string::npos) {
+    const std::string line = raw.substr(at, raw.size() - at);
+    const std::string stripped = strip_comments(line);
+    expect(stripped.find("refused_recursion()") != std::string::npos,
+           "the status line reads the recursion counter");
+    expect(stripped.find("refused_exhausted()") != std::string::npos,
+           "the status line reads the exhaustion counter");
+    expect(stripped.find("refused_teardown()") != std::string::npos,
+           "the status line reads the teardown counter");
+  }
+}
+
+// The desc cache's **give-ups** have to be visible.
+//
+// The counter exists to tell the operator that the cache is giving up: while
+// it climbs, the draw path pays two engine reads per *primitive* instead of
+// per *model*, which is the exact cost the cache exists to remove. A counter
+// that is measured and never reported is dead code — and the review's finding
+// was exactly that: the accessor had no caller in the payload.
+void test_the_cache_health_is_reported(const std::filesystem::path& base) {
+  const std::string header = read_file(base / "include" / "cs2" / "features" / "chams.hpp");
+  // The **format literal**, not the prose: the comments name the field too.
+  expect(header.find("tdn=%llu gu=%llu") != std::string::npos,
+         "the status line shows the cache's give-ups");
+
+  const std::string source = strip_comments(read_file(base / "src" / "chams.cpp"));
+  const std::size_t at = source.find("Chams::status_line");
+  expect(at != std::string::npos, "the status line is there");
+  if (at == std::string::npos) {
+    return;
+  }
+  const std::string body = source.substr(at, source.size() - at);
+  expect(body.find("cache_give_ups()") != std::string::npos,
+         "the status line reads the cache's give-up counter");
+}
+
+// The status line has to fit the overlay's **192-byte** HUD buffer, and the
+// bound is a rule: the counters are 64-bit, so the worst case is every one
+// of them at its maximum. The bound used to be a comment — and the comment's
+// numbers were character counts, not bytes with the NUL — so it is checked
+// here instead, over **every** state the hook can report.
+void test_the_status_line_fits_the_hud_buffer() {
+  constexpr std::size_t HUD_BUFFER = 192;
+  const cs2::features::chams_status::Counters worst{
+      .seen = UINT64_MAX,
+      .drawn = UINT64_MAX,
+      .skipped = UINT64_MAX,
+      .recursion = UINT64_MAX,
+      .exhausted = UINT64_MAX,
+      .teardown = UINT64_MAX,
+      .give_ups = UINT64_MAX,
+  };
+  const std::vector<cs2::features::hook_target::Status> states = {
+      cs2::features::hook_target::Status::idle,
+      cs2::features::hook_target::Status::pending,
+      cs2::features::hook_target::Status::accepted,
+      cs2::features::hook_target::Status::installed,
+      cs2::features::hook_target::Status::no_offset,
+      cs2::features::hook_target::Status::no_module,
+      cs2::features::hook_target::Status::outside_module,
+      cs2::features::hook_target::Status::unreadable,
+      cs2::features::hook_target::Status::mismatch,
+      cs2::features::hook_target::Status::refused,
+  };
+  std::size_t longest = 0;
+  for (const auto status : states) {
+    char buffer[HUD_BUFFER] = {};
+    const std::string_view state = cs2::features::hook_target::describe(status);
+    expect(cs2::features::chams_status::format(state, worst, buffer, sizeof(buffer)),
+           "the worst-case status line fits the 192-byte HUD buffer");
+    // The line and its NUL have to fit: the buffer is 192 **bytes**.
+    expect(std::strlen(buffer) + 1 <= HUD_BUFFER,
+           "the worst-case status line fits the 192-byte HUD buffer with its NUL");
+    longest = std::max(longest, std::strlen(buffer));
+    // The fallback shape drops the **derived** `skip` field, but it keeps the
+    // numbers the operator cannot compute for themselves.
+    const std::string line(buffer);
+    expect(line.find("gu=") != std::string::npos,
+           "the fallback status line still shows the cache's give-ups");
+  }
+  std::printf("the worst-case status line: %zu characters (%zu with the NUL)\n", longest,
+              longest + 1);
+
+  // The normal shape: every counter is on the line.
+  const cs2::features::chams_status::Counters normal{
+      .seen = 1234,
+      .drawn = 56,
+      .skipped = 1178,
+      .recursion = 0,
+      .exhausted = 0,
+      .teardown = 0,
+      .give_ups = 7,
+  };
+  char buffer[HUD_BUFFER] = {};
+  expect(cs2::features::chams_status::format("installed", normal, buffer, sizeof(buffer)),
+         "the normal status line fits the 192-byte HUD buffer");
+  const std::string line(buffer);
+  expect(line.find("hook=installed") != std::string::npos, "the line shows the hook's state");
+  expect(line.find("seen=1234") != std::string::npos, "the line shows the draws seen");
+  expect(line.find("chams=56") != std::string::npos, "the line shows the draws chamsed");
+  expect(line.find("skip=1178") != std::string::npos, "the line shows the draws skipped");
+  expect(line.find("rec=0") != std::string::npos, "the line shows the recursion breaks");
+  expect(line.find("pool=0") != std::string::npos, "the line shows the pool exhaustion");
+  expect(line.find("tdn=0") != std::string::npos, "the line shows the teardown drops");
+  expect(line.find("gu=7") != std::string::npos, "the line shows the cache's give-ups");
 }
 
 }  // namespace
@@ -497,6 +970,12 @@ auto main(int argc, char** argv) -> int {
   }
   const std::filesystem::path root = std::filesystem::path(argv[1]);
   const std::filesystem::path features = root / "payload" / "features";
+  // A wrong root is reported, not thrown: the test's verdict is its exit
+  // code, and an uncaught `filesystem_error` would be a crash, not a report.
+  if (!std::filesystem::is_directory(features)) {
+    std::printf("features-chams-draw-hook: the repository root is missing (%s)\n", argv[1]);
+    return 1;
+  }
 
   test_the_first_call_is_not_refused();
   test_the_same_thread_is_refused_the_second_time();
@@ -511,6 +990,14 @@ auto main(int argc, char** argv) -> int {
   test_the_chams_hold_the_shared_guard(features);
   test_the_tree_holds_one_guard(features);
   test_the_status_line_does_not_allocate(features);
+  test_the_switch_off_clears_the_refusal_latch(features);
+  test_the_guard_is_held_across_the_trampoline_call(features);
+  test_the_chams_fail_closed_and_the_camera_does_not(features);
+  test_the_pool_holds_the_concurrent_jobs();
+  test_the_chams_use_the_draw_pool(features);
+  test_the_refusal_is_counted(features);
+  test_the_cache_health_is_reported(features);
+  test_the_status_line_fits_the_hud_buffer();
 
   if (failures != 0) {
     std::printf("features-chams-draw-hook: %d failed check(s)\n", failures);

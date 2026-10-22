@@ -420,6 +420,25 @@ class PeImage:
 # --- The coverage ------------------------------------------------------------
 
 
+#: The priority of the states a `cross_module` entry can be in.
+#:
+#: The worst state wins: a `cross_module` entry has to be routed
+#: *everywhere* it is called, so a call that could not be routed in one
+#: module outranks a routing in another one. The priority of a `protect`
+#: entry is the opposite (`STATE_PRIORITY` in check_policy.py): there, a
+#: match in one module is enough.
+CROSS_STATE_PRIORITY = {
+    "unmatched": 0,
+    "matched": 1,
+    "blocked": 2,
+}
+
+
+def cross_state_priority(state: str) -> int:
+    """The priority of the state of a `cross_module` entry."""
+    return CROSS_STATE_PRIORITY.get(state.split(":", 1)[0], 0)
+
+
 class Coverage:
     """One coverage file of a module."""
 
@@ -445,6 +464,8 @@ class Coverage:
         self.layout_moved = 0
         self.layout_seed = 0
         self.rewritten = 0
+        #: The number of the cross-TU rewrites of the module.
+        self.cross_rewritten = 0
         self.intact = False
         self.malformed = ""
         self.reason = ""
@@ -453,6 +474,12 @@ class Coverage:
         #: section is new: a coverage file of an older build has none, and
         #: a reader that does not know it still reads the file.
         self.vm: dict[str, dict[str, str]] = {}
+        #: The `cross_module` matches of the module: (pattern, symbol, state).
+        #: The section is new, like the `vm` one.
+        self.cross_entries: list[tuple[str, str, str]] = []
+        #: The cross-TU callees that stayed direct: the symbol -> the reason.
+        #: The section is new, like the `vm` one.
+        self.direct: dict[str, str] = {}
         #: The literals of the string protection: the length and the digest
         #: of the content, never the content itself.
         self.strings: list[StringLiteral] = []
@@ -492,6 +519,8 @@ class Coverage:
                     for part in value.split():
                         if part.startswith("rewritten="):
                             self.rewritten += int(part.split("=", 1)[1])
+                        elif part.startswith("cross="):
+                            self.cross_rewritten += int(part.split("=", 1)[1])
                 elif key == "entry":
                     state, _, rest = value.partition(" ")
                     if state in ("blocked", "unimplemented"):
@@ -499,6 +528,10 @@ class Coverage:
                         self.entries[pattern.strip()] = f"{state}:{reason.strip()}"
                     else:
                         self.entries[rest.strip()] = state.strip()
+                elif key == "cross":
+                    self._read_cross(value)
+                elif key == "direct":
+                    self._read_direct(value)
                 elif key == "vm":
                     self._read_vm(value)
                 elif key == "str":
@@ -519,6 +552,62 @@ class Coverage:
     def states(self) -> dict[str, str]:
         """The state of every policy entry of the module."""
         return dict(self.entries)
+
+    def cross_states(self) -> dict[str, str]:
+        """The state of every `cross_module` entry of the module.
+
+        The worst state wins: a `cross_module` entry has to be routed
+        *everywhere* it is called, so a call that could not be routed
+        outranks a routing.
+        """
+        states: dict[str, str] = {}
+        for pattern, _, state in self.cross_entries:
+            if pattern not in states or (
+                cross_state_priority(state) > cross_state_priority(states[pattern])
+            ):
+                states[pattern] = state
+        return states
+
+    def cross_symbols(self) -> list[tuple[str, str]]:
+        """The (pattern, symbol) of every `cross_module` match of the module.
+
+        The symbol is the mangled name of the declaration the pattern named:
+        it is what the payload's own libraries have to define for the entry
+        to be alive.
+        """
+        return [(pattern, symbol) for pattern, symbol, _ in self.cross_entries if symbol]
+
+    def direct_callees(self) -> dict[str, str]:
+        """The cross-TU callees that stayed direct, and why they stayed."""
+        return dict(self.direct)
+
+    def _read_cross(self, value: str) -> None:
+        """The `cross` line: the state of one `cross_module` entry.
+
+        The line is `cross <state> <pattern> [<symbol>]`: the state is
+        `matched`, `blocked:<reason>` or `unmatched`, the pattern is the
+        glob of the entry, and the symbol is the mangled name of the
+        declaration it named (empty when it named none).
+        """
+        parts = value.split()
+        if len(parts) < 2:
+            return
+        state = parts[0]
+        pattern = parts[1]
+        symbol = parts[2] if len(parts) > 2 else ""
+        self.cross_entries.append((pattern, symbol, state))
+
+    def _read_direct(self, value: str) -> None:
+        """The `direct` line: a cross-TU callee that stayed direct.
+
+        The line is `direct <symbol> <reason>`.
+        """
+        parts = value.split()
+        if not parts:
+            return
+        symbol = parts[0]
+        reason = parts[1] if len(parts) > 1 else ""
+        self.direct.setdefault(symbol, reason)
 
     def _read_protect(self, value: str) -> None:
         """The `protect` line: what the transform put into the module."""

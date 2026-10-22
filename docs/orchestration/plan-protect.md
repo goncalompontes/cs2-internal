@@ -214,14 +214,18 @@ T18-T19 are done. **T20a is done; T20b and T20c are deferred** — the gate
 measured the eligible set and it is **empty** for the payload's real code
 (§1.3), so the interpreter would protect nothing.
 
-**T21 is the next task** and **T23a** follows it. The **order changed** in
-2026-10-21 after the survey (§1.1): **T21 is now the highest-value task**,
-and T20 is deliberately scoped down. T21 and T23 are independent of the VM and
-can be interleaved with it.
+**T21 is done** and the string line is closed (§1.2). **T23a** and **T24**
+are in flight; **T23b** (the `sret` edges) and **T22** (the integrity check)
+are specced. The **order changed** in 2026-10-21 after the survey (§1.1):
+**T21 is now the highest-value task**, and T20 is deliberately scoped down.
+T21 and T23 are independent of the VM and can be interleaved with it.
 
 **T21b is the task that would deliver what T21 could not**: the strings are
 encrypted in place, so the image still decrypts itself (§1.2). Getting them
-**out of the image** is what makes a dumped file useless.
+**out of the image** is what makes a dumped file useless — but the feature
+names are *displayed*, so they must exist in a shipped image. **Dropped**, and
+the reasoning is in §1.2.
+
 
 ## 3. The verified toolchain facts (all measured on this machine)
 
@@ -278,6 +282,19 @@ The payload is **manually mapped** into `cs2.exe` by the injector
   code the pass injects must be freestanding**: no `new`, no `std::vector`, no
   global constructors, no unwind tables it cannot justify. This is why the VM
   interpreter is **emitted as LLVM IR** rather than linked in as C++.
+
+  > **Corrected (2026-10-22, by the T22 investigation).** The **mechanism**
+  > was wrong: the built image's entry point **is** `_DllMainCRTStartup` and
+  > the injector calls it (`injector/src/main.cpp` uses the PE's
+  > `entry_point_rva`), so **the CRT startup does run**. What does *not* run
+  > is the payload's **own** C++ global construction: the image references
+  > neither `__xc_a` nor `__xc_z`, so the CRT never walks the user module's
+  > `.CRT$XCU`, and the payload's globals stay **zero-initialised**. The
+  > **conclusion** is unchanged — a pass must not add a global with a dynamic
+  > initialiser, and the injected runtime code must be freestanding — but the
+  > reason is that the payload has no such globals today, not that the CRT is
+  > absent. Adding one would make the CRT walk it, which changes the image's
+  > initialisation semantics and is not wanted.
 
 > **Corrected on 2026-10-21** (the survey found these, and the built image
 > confirms them): the payload is built **`/MD`** (dynamic CRT — the image
