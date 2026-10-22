@@ -932,6 +932,11 @@ struct WorldHullCache {
   OcclusionHull* hulls = nullptr;
   int count = 0;
   std::uint32_t incomplete_reasons = 0;
+  // The shape-type histogram of the parse (`{hull, mesh, sphere, …}`). It has to be
+  // kept **with the cache**: the parse happens once, so a later query would
+  // otherwise report an empty histogram — and the debug view's "hull/mesh" line is
+  // read on every frame, after the cache is warm.
+  int type_counts[8] = {};
 };
 WorldHullCache g_world_cache;
 
@@ -1042,6 +1047,11 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
     if (g_world_cache.count == 0) {
       std::vector<OcclusionHull> parsed;
       OcclusionQueryStats cache_stats;
+      // The parse counts into the cache's own histogram, never into this call's:
+      // the world is parsed once, and every later query merges the cached one
+      // (`+=` below). Counting into `stats` here would also double-count on the
+      // query that happens to build the cache.
+      int cache_shapes = 0;
       for (int j = 0; j < count; ++j) {
         std::uintptr_t shape = 0;
         if (!cs2::game::read(array + static_cast<std::uintptr_t>(j) * 8, shape) ||
@@ -1049,11 +1059,15 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
           mark_incomplete(&cache_stats, OcclusionQueryIssue::parser_failure);
           continue;
         }
-        if (!parse_shape(shape, BodyTransform{}, parsed, shapes, type_counts, &cache_stats)) {
+        if (!parse_shape(shape, BodyTransform{}, parsed, cache_shapes, cache_stats.type_counts,
+                         &cache_stats)) {
           mark_incomplete(&cache_stats, OcclusionQueryIssue::parser_failure);
         }
       }
       g_world_cache.incomplete_reasons = cache_stats.incomplete_reasons;
+      for (int type = 0; type < 8; ++type) {
+        g_world_cache.type_counts[type] = cache_stats.type_counts[type];
+      }
       if (stats != nullptr) {
         stats->surface_hits += cache_stats.surface_hits;
         if (stats->surface_index < 0 && cache_stats.surface_index >= 0) {
@@ -1090,6 +1104,11 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
     if (stats != nullptr && collect) {
       stats->world_cache_body = g_world_cache.body;
       stats->world_cache_hulls = g_world_cache.count;
+      // The histogram belongs to the cache, not to this call: the parse ran once
+      // (possibly on a call whose stats were discarded), so merge the cached one.
+      for (int type = 0; type < 8; ++type) {
+        stats->type_counts[type] += g_world_cache.type_counts[type];
+      }
     }
     int pushed = 0;
     // BVH query: only the hulls that can lie between the eye and a target, in
