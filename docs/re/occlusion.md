@@ -395,25 +395,25 @@ the solids the engine did not report, and a one-line verdict
 
 ### The invocation
 
-The command is answered on the control channel, so it runs from the scenario
-harness (or any client on `\\.\pipe\cs2-internal-control`):
+The command is answered on the control channel (`\\.\pipe\cs2-internal-control`),
+so it runs from the scenario harness — or from any client on that pipe. The
+copy-pasteable form (from the repository root, with the payload injected and the
+game running):
 
 ```powershell
-# The operator's ray: the view ray, the engine's own trace length.
-python scripts\run-scenario.py ... # or, directly:
-#   {"id": 1, "cmd": "trace_probe", "args": {}}
-```
-
-In Python (the harness's own client):
-
-```python
+@'
+import json, pathlib, sys
+sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
 from scenario.control import Control
-
 with Control() as control:
-    answer = control.request("trace_probe", {})            # the view ray
-    answer = control.request("trace_probe", {"spread": 4.0, "count": 5})  # a fan
-    answer = control.request("trace_probe", {"yaw": 90.0, "pitch": -3.0, "depth": 2000.0})
+    answer = control.request("trace_probe", {})          # the view ray
+    print(json.dumps(answer, indent=2))
+'@ | Set-Content -Path $env:TEMP\trace_probe.py -Encoding utf8
+python $env:TEMP\trace_probe.py
 ```
+
+The arguments (all optional): `rays` (`"view"`), `eye` (`[x, y, z]`), `yaw`,
+`pitch` (degrees), `spread` (degrees), `count`, `depth` (world units), `abi`.
 
 The raw wire form (one NDJSON line on the pipe):
 
