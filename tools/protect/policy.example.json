@@ -11,12 +11,10 @@
     "cs2::aim::DamageField::base_value_at",
     "cs2::aim::DamageField::value_at_pellets",
     "cs2::aim::DamageField::hit_probability",
-    "cs2::aim::OccluderCell::lower_bound_distance",
-    "cs2::aim::penetration_damage_at_target",
-    "cs2::aim::polygon_contains",
-    "cs2::aim::polygon_centroid",
-    "cs2::aim::subtract_convex",
-    "cs2::aim::yaw_scale"
+    "cs2::aim::hitbox_valid",
+    "cs2::game::EntitySystem::page",
+    "cs2::game::EntitySystem::resolve",
+    "cs2::game::read_bytes"
   ],
   "deny": [
     "cs2::loader::self_unmap"
