@@ -275,6 +275,35 @@ class ToolCatalogueTest(unittest.TestCase):
         target = tool.input_schema()["properties"]["target"]
         self.assertEqual(target["enum"], [member.value for member in Screen])
 
+    def test_the_monte_carlo_objective_reaches_the_tools(self) -> None:
+        """The ``monte_carlo`` objective must be **usable** through the tools.
+
+        The objective's names are a ``Literal`` in ``protocol.py``, and that
+        literal **is** the tools' advertised schema: the server validates the
+        arguments against it before the request is sent, so an objective
+        missing from the literal is an objective the tools refuse — the
+        feature would exist and be unreachable.
+
+        The schema is read from the tools themselves (``Tool.input_schema``),
+        not from the literal, so the test proves what the server advertises.
+        """
+        self.assertIn("monte_carlo", get_args(protocol.AimObjective))
+        for name in ("cs2_aim", "cs2_rage"):
+            tool = next(t for t in mcp_tools.TOOLS if t.name == name)
+            schema = tool.input_schema()
+            objective = schema["properties"]["objective"]
+            # The property is `AimObjective | None`, so the enum is one branch
+            # of the union.
+            branches = objective.get("anyOf", [objective])
+            enums = [branch["enum"] for branch in branches if "enum" in branch]
+            self.assertTrue(enums, name)
+            for values in enums:
+                self.assertIn("monte_carlo", values, name)
+            # And the validator accepts it: the schema is the contract.
+            self.assertEqual(
+                schema_bridge.validate_arguments(schema, {"objective": "monte_carlo"}),
+                [], name)
+
     def test_the_scenario_name_enum_is_the_registry(self) -> None:
         from scenario.scenarios import SCENARIOS
 

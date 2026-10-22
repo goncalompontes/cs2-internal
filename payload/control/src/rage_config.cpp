@@ -124,9 +124,9 @@ auto rage_profile_parse(const char* line, RageProfile& out) noexcept -> bool {
     return false;
   }
   // The profile is **value-initialised**: a line with fewer fields than the
-  // format has keeps the defaults for the rest. (An uninitialised profile would
-  // hand the caller whatever was on the stack — the load's own bug, and the
-  // reason a truncated line was not reproducible.)
+  // format has keeps the defaults for the rest (`RageProfile` has a default
+  // member initialiser for every field, so the defaults are the profile's
+  // documented ones).
   RageProfile profile{};
   int key = 0;
   const int fields = std::sscanf(

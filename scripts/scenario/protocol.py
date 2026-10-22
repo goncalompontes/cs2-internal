@@ -125,7 +125,13 @@ class ProtocolError(ControlError):
 InputBackend = Literal["console", "usercmd"]
 
 #: The ragebot solve objectives (``Service::do_aim``).
-AimObjective = Literal["damage", "hitchance", "expected", "pellets"]
+#:
+#: ``monte_carlo`` is the engine's own spread kernel, sampled
+#: (``docs/ragebot.md`` §13).  It is in the literal because the literal
+#: **is** the MCP tools' advertised schema: ``cs2_aim`` and ``cs2_rage``
+#: validate their arguments against it before the request is sent, so an
+#: objective missing here is an objective the tools refuse.
+AimObjective = Literal["damage", "hitchance", "expected", "pellets", "monte_carlo"]
 
 #: The penetration models the heatmap can be valued with (``Service::do_heatmap``).
 HeatmapPen = Literal["simple", "engine"]
@@ -700,6 +706,36 @@ class AimResult(TypedDict):
     weapon_headshot: float
     weapon_range_modifier: float
     weapon_penetration: float
+    #: The objective **by name** (``"damage"``, ``"hitchance"``,
+    #: ``"expected"``, ``"pellets"``, ``"monte_carlo"``).
+    objective: str
+    #: The sample count in force (the Monte-Carlo objective).
+    mc_samples: int
+    #: The sample count the caller asked for (it may have been ignored).
+    mc_samples_requested: int
+    #: What the operator has to know about the count: empty when there is
+    #: nothing to say, otherwise why it was ignored or that it does not fit
+    #: the tick.
+    mc_samples_note: str
+    #: The Monte-Carlo objective's own numbers (absent under the other
+    #: objectives, and when the solver refused).
+    mc_hits: int
+    mc_hitchance: float
+    mc_expected_damage: float
+    mc_target: int
+    mc_hitgroup: int
+    mc_can_kill: bool
+    #: The seed policy's name (``"sequence"`` or ``"angle_grid"``).
+    mc_seed: str
+    #: Whether the seed's sequence is a **fallback** (the prediction tick
+    #: stands in for the command's sequence number).
+    mc_seed_fallback: bool
+    #: What the seed's number means.
+    mc_seed_note: str
+    #: The reason the solver refused (empty when it did not).
+    mc_refusal: str
+    #: Whether the solve fell back to another objective.
+    mc_fallback: bool
 
 
 class RagePerfDict(TypedDict, total=False):
@@ -749,7 +785,41 @@ class RageResult(TypedDict, total=False):
     occlusion_query_issues: int
     backtracks: int
     record: int
-    objective: int
+    #: Whether the last tick skipped the backtracking because the frame had
+    #: already blown the 12 ms guard.
+    backtrack_over_budget: bool
+    #: The objective the last solve **ran**, **by name** (the per-weapon
+    #: profile's when there is one — the solve runs the effective objective,
+    #: so the status names that one).
+    objective: str
+    #: The effective objective's value (the profile's byte).
+    objective_value: int
+    #: The **global** objective's name (the setting, not the effective one).
+    objective_global: str
+    #: The Monte-Carlo objective's own state: the sample count in force, the
+    #: seed policy, the numbers the last solve produced and the reason it
+    #: refused if it did.
+    mc_samples: int
+    mc_samples_note: str
+    mc_seed: str
+    #: Whether the seed's sequence is a **fallback** (the prediction tick
+    #: stands in for the command's sequence number).
+    mc_seed_fallback: bool
+    #: What the seed's number means.
+    mc_seed_note: str
+    mc_hitchance: float
+    mc_expected_damage: float
+    mc_target: int
+    mc_hitgroup: int
+    mc_hits: int
+    #: Whether the damage attributed to the target reaches its health.
+    mc_can_kill: bool
+    #: The reason the solver refused (empty when it did not).
+    mc_refusal: str
+    #: Whether the solve fell back to another objective.
+    mc_fallback: bool
+    #: Whether the last solve produced a Monte-Carlo verdict at all.
+    mc_valid: bool
     hitbox_mode: int
     fov: float
     min_damage: float
