@@ -77,8 +77,13 @@ constexpr std::uint64_t k_visibility_interval_ms = 250;
 // gives none and the weapon's range cannot be read (the engine's own trace
 // length is the weapon's `m_flRange`), and how long the control thread waits
 // for the game thread's answer.
+//
+// The fallback is 8192 units — the engine's own maximum trace length — so a probe
+// without a readable weapon still asks the engine the whole segment. The wait is
+// two seconds: the game thread answers within a tick, and the control thread
+// serves the pipe (a probe that cannot be served must not block it for long).
 constexpr float k_trace_probe_default_depth = 8192.0F;
-constexpr std::uint64_t k_trace_probe_timeout_ms = 5000;
+constexpr std::uint64_t k_trace_probe_timeout_ms = 2000;
 // `CCSWeaponBaseVData::m_flRange` (`docs/re/bullet-trace.md` — the shot's trace
 // length).
 constexpr std::uintptr_t k_vdata_range = 0x830;
@@ -1733,6 +1738,9 @@ void Service::game_thread_entry(void* context) noexcept {
 }
 
 void Service::on_game_thread() noexcept {
+  // The heartbeat: the control thread samples it to tell "the game thread is busy"
+  // from "the game thread is not running" when a probe times out.
+  game_thread_ticks_.fetch_add(1, std::memory_order_relaxed);
   // Auto-scope through the engine's own `+zoom`/`-zoom`: the command button mask does
   // not reach the weapon's zoom, but the console held-buttons do (measured live). The
   // transition is applied here so it runs on a game thread (Cbuf).
@@ -1800,6 +1808,12 @@ void Service::on_game_thread() noexcept {
   // (a game thread): an engine call that reaches tier0's allocator faults on the
   // payload's own thread (`docs/handoff.md`). The control thread armed the
   // request and waits for the answer.
+  //
+  // The probe's work is bounded (8 rays, a fixed interval buffer, a capped number
+  // of projections — `occlusion_query.hpp`) and it runs **once per command**, not
+  // per tick. It does not parse the world body: the probe refuses to answer while
+  // the world's cache is cold (`occlusion_world_cache_ready`), because parsing 10k
+  // brush shapes inside the input hook is the one thing that could stall the game.
   if (trace_probe_armed_.exchange(false, std::memory_order_acq_rel)) {
     std::vector<TraceRay> rays;
     TraceAbi abi = TraceAbi::correct;
@@ -1808,7 +1822,28 @@ void Service::on_game_thread() noexcept {
       rays = trace_probe_rays_;
       abi = trace_probe_abi_;
     }
-    TraceProbeRun probe = probe_trace(rays, true, abi);
+    // The players are targets, not occluders: the probe excludes them itself, so
+    // its answer never depends on the solver having run first in this tick.
+    std::uintptr_t pawns[k_max_occlusion_exclude] = {};
+    int pawn_count = 0;
+    {
+      game::Snapshot snapshot;
+      bool have_snapshot = false;
+      {
+        const std::scoped_lock lock(snapshot_mutex_);
+        snapshot = last_snapshot_;
+        have_snapshot = have_snapshot_.load(std::memory_order_relaxed);
+      }
+      if (have_snapshot) {
+        for (const game::PlayerSnapshot& player : snapshot.players) {
+          if (pawn_count >= k_max_occlusion_exclude || player.pawn == 0) {
+            continue;
+          }
+          pawns[pawn_count++] = player.pawn;
+        }
+      }
+    }
+    TraceProbeRun probe = probe_trace(rays, true, abi, pawns, pawn_count);
     const std::scoped_lock lock(trace_probe_mutex_);
     trace_probe_run_ = std::move(probe);
     trace_probe_done_ = true;
@@ -4071,6 +4106,7 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   trace_probe_armed_.store(true, std::memory_order_release);
   input_.refresh();  // install the CreateMove hook (the game-thread query site)
 
+  const std::uint64_t ticks_before = game_thread_ticks_.load(std::memory_order_relaxed);
   const std::uint64_t deadline = now_ms() + k_trace_probe_timeout_ms;
   bool done = false;
   while (!done && now_ms() < deadline) {
@@ -4082,11 +4118,19 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
       Sleep(2);
     }
   }
+  const std::uint64_t ticks_after = game_thread_ticks_.load(std::memory_order_relaxed);
 
   TraceProbeRun run;
   {
     const std::scoped_lock lock(trace_probe_mutex_);
     run = trace_probe_run_;
+  }
+  // Why the answer is missing, when it is: the game thread answered ("answered"),
+  // it is running but did not answer in time ("busy"), or it is not running at all
+  // ("stalled" — the CreateMove hook is not installed).
+  const char* game_thread = "answered";
+  if (!done) {
+    game_thread = ticks_after != ticks_before ? "busy" : "stalled";
   }
 
   const auto vec3_json = [](const game::Vec3& v) -> Json {
@@ -4127,6 +4171,8 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   Json engine = Json::object();
   engine.set("ok", Json::boolean(run.ok));
   engine.set("faulted", Json::boolean(run.faulted));
+  engine.set("rays_ok", Json::integer(run.rays_ok));
+  engine.set("rays_faulted", Json::integer(run.rays_faulted));
   engine.set("iface", Json::string(hex(run.iface)));
   engine.set("filter", Json::string(hex(run.filter)));
   engine.set("filter_mask", Json::integer(run.filter_mask));
@@ -4134,11 +4180,26 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   engine.set("filter_flags", Json::integer(run.filter_flags));
   engine.set("occluders", Json::integer(run.occluders));
   engine.set("occluder_hits", Json::integer(run.occluder_hits));
+  // The probe's own bounds: how many solids it projects at most, whether the set was
+  // truncated, and whether the static world body was already parsed (when it was
+  // not, this run paid the world's parse — 10k brush shapes — inside the input
+  // hook; it happens once per session). The target box's pad decides which solids
+  // the enumeration keeps, so it is published too.
+  engine.set("occluder_cap", Json::integer(run.occluder_cap));
+  engine.set("occluders_truncated", Json::boolean(run.occluders_truncated));
+  engine.set("world_cached", Json::boolean(run.world_cached));
+  engine.set("target_pad", Json::number(static_cast<double>(TRACE_TARGET_PAD)));
   payload.set("engine", std::move(engine));
   payload.set("ran", Json::boolean(done));
   payload.set("timeout", Json::boolean(!done));
+  payload.set("game_thread", Json::string(game_thread));
 
   Json rays_json = Json::array();
+  // The record index the answer carries, or -1 when the span names a record the
+  // answer does not publish (the reader's own bound, in one place).
+  const auto record_index = [](int index, std::size_t published) -> int {
+    return index >= 0 && static_cast<std::size_t>(index) < published ? index : -1;
+  };
   for (const TraceRayResult& ray : run.rays) {
     Json item = Json::object();
     item.set("start", vec3_json(ray.ray.start));
@@ -4152,6 +4213,14 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
     engine_json.set("faulted", Json::boolean(ray.engine_faulted));
     engine_json.set("interval_count", Json::integer(ray.interval_count));
     engine_json.set("intervals_overflow", Json::boolean(ray.intervals_overflow));
+    // The engine's answer could not be read (the call faulted, the container did not
+    // hold the buffer the probe handed it, or the count was out of range). It is
+    // reported **loudly**: the verdict is then "unknown", never "agrees".
+    engine_json.set("answer_missing", Json::boolean(ray.engine_answer_missing));
+    // The interval record's surface is **unmapped** (only two of its fields are
+    // pinned). The flag says it once for the whole ray; the per-record value says
+    // it again, so a record read on its own still carries it.
+    engine_json.set("surface_mapped", Json::boolean(false));
     Json intervals = Json::array();
     for (const TraceInterval& interval : ray.intervals) {
       Json record = Json::object();
@@ -4185,21 +4254,17 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
     // what our set has that the engine did not report.
     Json difference = Json::object();
     difference.set("verdict", Json::string(to_string(ray.diff.verdict)));
+    // Whether the engine's answer could be read at all. When it is false the
+    // verdict is "unknown": the difference was **not** computed over an empty
+    // engine list.
+    difference.set("engine_answer_usable", Json::boolean(ray.diff.engine_answer_usable));
     Json engine_only = Json::array();
     for (const TraceSpan& span : ray.diff.engine_only) {
       Json record = Json::object();
       record.set("entry", Json::number(static_cast<double>(span.entry)));
       record.set("exit", Json::number(static_cast<double>(span.exit)));
-      record.set("enter_record", Json::integer(span.enter_record >= 0 &&
-                                                       static_cast<std::size_t>(span.enter_record) <
-                                                           ray.intervals.size()
-                                                   ? span.enter_record
-                                                   : -1));
-      record.set("exit_record",
-                 Json::integer(span.exit_record >= 0 && static_cast<std::size_t>(span.exit_record) <
-                                                            ray.intervals.size()
-                                   ? span.exit_record
-                                   : -1));
+      record.set("enter_record", Json::integer(record_index(span.enter_record, ray.intervals.size())));
+      record.set("exit_record", Json::integer(record_index(span.exit_record, ray.intervals.size())));
       engine_only.push_back(std::move(record));
     }
     difference.set("engine_only", std::move(engine_only));

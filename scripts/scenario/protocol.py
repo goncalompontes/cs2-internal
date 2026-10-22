@@ -998,9 +998,10 @@ class HeatmapResult(TypedDict, total=False):
 
 #: The verdicts the trace probe's difference carries
 #: (``Service::do_trace_probe``): the engine's answer and ours agree, only the
-#: engine found something, only we did, or both found something the other did
-#: not.
-TraceVerdict = Literal["agrees", "engine_only", "ours_only", "both"]
+#: engine found something, only we did, both found something the other did
+#: not, or the engine's answer could not be read at all (``unknown`` — the
+#: difference was **not** computed over an empty engine list).
+TraceVerdict = Literal["agrees", "engine_only", "ours_only", "both", "unknown"]
 
 #: The solid kinds the probe reports (``cs2::aim::SolidKind``): a brush hull is
 #: a ``polytope`` and the payload calls it a hull.
@@ -1050,6 +1051,13 @@ class TraceRayEngineDict(TypedDict):
     faulted: bool
     interval_count: int
     intervals_overflow: bool
+    #: The engine's answer could **not** be read (the call faulted, the container
+    #: did not hold the buffer the probe handed it, or the count was out of
+    #: range). The difference's verdict is then ``"unknown"`` — never ``"agrees"``.
+    answer_missing: bool
+    #: The interval record's surface is unmapped (only two of its fields are
+    #: pinned). The flag says it once for the whole ray.
+    surface_mapped: bool
     intervals: list[TraceIntervalDict]
 
 
@@ -1057,6 +1065,9 @@ class TraceDifferenceDict(TypedDict):
     """The difference between the engine's answer and ours for one ray."""
 
     verdict: str
+    #: Whether the engine's answer could be read at all. When it is false the
+    #: verdict is ``"unknown"`` and the lists are empty.
+    engine_answer_usable: bool
     engine_only: list[TraceSpanDict]
     ours_only: list[TraceOccluderDict]
 
@@ -1078,6 +1089,8 @@ class TraceProbeEngineDict(TypedDict):
 
     ok: bool
     faulted: bool
+    rays_ok: int
+    rays_faulted: int
     iface: str
     filter: str
     filter_mask: int
@@ -1085,6 +1098,18 @@ class TraceProbeEngineDict(TypedDict):
     filter_flags: int
     occluders: int
     occluder_hits: int
+    #: How many of our solids the probe projects at most.
+    occluder_cap: int
+    #: Whether the enumeration produced more solids than the cap (the answer is
+    #: then incomplete).
+    occluders_truncated: bool
+    #: Whether the static world body was already parsed when the probe ran. When
+    #: it was not, this run paid the world's parse (10k brush shapes) inside the
+    #: input hook — it happens once per session.
+    world_cached: bool
+    #: The pad the probe's target box gets, in world units. It decides which
+    #: solids the enumeration keeps.
+    target_pad: float
 
 
 class TraceProbeResult(TypedDict):
@@ -1106,6 +1131,10 @@ class TraceProbeResult(TypedDict):
     engine: TraceProbeEngineDict
     ran: bool
     timeout: bool
+    #: Why the answer is missing when it is: ``"answered"``, ``"busy"`` (the
+    #: game thread is running but did not answer in time) or ``"stalled"`` (the
+    #: game thread is not running at all).
+    game_thread: str
     rays: list[TraceRayDict]
 
 

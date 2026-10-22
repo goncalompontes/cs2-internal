@@ -8,13 +8,13 @@
 // engine call is wrapped in `diag::call_guarded`, so a wrong ABI faults back here
 // instead of killing the process (the payload has no exception tables).
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <optional>
-#include <string_view>
 #include <vector>
 
 #include "cs2/aim/bvh.hpp"
@@ -223,14 +223,82 @@ inline constexpr std::size_t TRACE_INTERVAL_ENTER_EXIT = 0x32;
 // The probe's bounds: a diagnostic must not be able to stall the game.
 inline constexpr int TRACE_MAX_RAYS = 8;
 inline constexpr int TRACE_MAX_INTERVALS = 64;
-// The external results buffer's capacity. The engine's own call sizes its vector for
-// 64 entries; this is larger so the engine never has to grow it (a growth would reach
-// tier0's allocator, and the payload's thread has no tier0 TLS — docs/handoff.md).
-inline constexpr int TRACE_INTERVAL_CAPACITY = 1024;
+// The results buffer's capacity, in interval records. The engine's own bullet path
+// sizes the same container for 64 entries; this is four times that, so a dense scene
+// cannot make the engine reach past the buffer.
+inline constexpr int TRACE_INTERVAL_CAPACITY = 256;
+// The slack past the advertised capacity. The engine appends **at** `data[count]`
+// (it increments the count afterwards), so a trace that produced more records than
+// the capacity would write past the end of the buffer. The slack absorbs that, and
+// the probe reports the overflow loudly (`intervals_overflow`) instead of hiding it.
+inline constexpr int TRACE_INTERVAL_SLACK = 64;
+// How many of **our** solids the probe projects for a ray. The projection is the
+// expensive half of the probe's work (a convex hull per solid), so it is bounded
+// like the rest of the probe.
+inline constexpr int TRACE_MAX_OCCLUDERS = 256;
+// The pad the probe's target box gets, in world units. It is **not** cosmetic: the
+// pad decides the pyramid's face planes, i.e. **which solids the enumeration
+// keeps**, so it is part of what "our answer" contains and it is published with the
+// answer. A box that is a single point (one ray, no fan) is a degenerate hull — the
+// eye→box pyramid has no face planes and `AabbBvh::query_pyramid` keeps nothing at
+// all — so the pad is what makes the probe's own answer non-empty.
+inline constexpr float TRACE_TARGET_PAD = 8.0F;
 // How far apart the engine's span and our occluder's span may be and still be the
 // same solid (world units). Both are measured along the same ray, so a matching pair
 // lines up to within the solids' own size.
+//
+// The tolerance compares the two spans' **positions** (where each is entered); it is
+// **not** a widening of the overlap test. A solid that merely sits near the engine's
+// span, or that covers only a part of it, is a **different** solid — it must not be
+// allowed to answer for it, or a real occlusion would be reported as "agrees".
 inline constexpr float TRACE_MATCH_TOLERANCE = 2.0F;
+
+// --- the engine's **trace** results container (docs/re/bullet-trace.md) ---------
+//
+// `TraceLineIntervals`'s second argument is **not** the overlap query's
+// `CUtlVector`: it is a different type with a different header. The layout below
+// was re-derived from the **live** build (client.dll sha256 `5a46a09b…`,
+// 2026-10-22) from the two functions that write it:
+//
+// * the physics world's own query (`vphysics2.dll`, the world's vtable `+0x520`,
+//   which `TraceLineIntervals` calls) and
+// * the append helper the second query kind uses (`client.dll`'s
+//   `FUN_18084d1a0`).
+//
+// Both read the count at `+0x00` and the record pointer at `+0x08`, both compare the
+// count against the **capacity** at `+0x10`, and both grow the array **only** when
+// `count == capacity` **and** bit 30 of the **flags** at `+0x14` is clear:
+//
+// ```
+// movsxd r13, dword ptr [r15]              ; count    @ +0x00
+// cmp    r13d, dword ptr [r15 + 0x10]      ; capacity @ +0x10
+// jne    skip_growth
+// test   dword ptr [r15 + 0x14], 0x40000000 ; flags    @ +0x14, bit 30
+// jne    skip_growth                        ; <- an external buffer never grows
+// ```
+//
+// So bit 30 (`0x40000000`) is this type's **external buffer** bit, and bit 31
+// (`0x80000000`) says the buffer is not ours to free (the growth path tests both
+// bits before it frees the old buffer). The overlap vector's `0x80000000` at
+// `+0x1C` belongs to a **different** type and means nothing here.
+struct TraceResultVector {
+  std::int32_t count = 0;
+  std::int32_t reserved = 0;
+  void* data = nullptr;
+  std::int32_t capacity = 0;
+  std::int32_t flags = 0;
+};
+static_assert(sizeof(TraceResultVector) == 0x18, "the trace's results header is 0x18 bytes");
+
+// The header's fields, at the offsets the live build reads them from.
+inline constexpr std::size_t TRACE_VECTOR_COUNT = 0x00;
+inline constexpr std::size_t TRACE_VECTOR_DATA = 0x08;
+inline constexpr std::size_t TRACE_VECTOR_CAPACITY = 0x10;
+inline constexpr std::size_t TRACE_VECTOR_FLAGS = 0x14;
+// The flags' two top bits (see above).
+inline constexpr std::int32_t TRACE_VECTOR_EXTERNAL_BUFFER = 0x40000000;
+inline constexpr std::int32_t TRACE_VECTOR_NOT_OWNED = 0x80000000;
+
 
 // The engine's answer for one ray: one interval record.
 struct TraceInterval {
@@ -267,13 +335,22 @@ struct TraceSpan {
 };
 
 // How the two answers compare for one ray.
-enum class TraceVerdict : std::uint8_t { agrees, engine_only, ours_only, both };
+//
+// `unknown` is the **honest** answer when the engine's answer could not be read
+// (the call faulted, or the container did not hold the buffer the probe handed it):
+// the difference cannot be computed, and computing it over an empty engine list
+// would report "agrees" for a trace the engine never answered.
+enum class TraceVerdict : std::uint8_t { agrees, engine_only, ours_only, both, unknown };
 
 // The difference between the engine's answer and ours for one ray.
 struct TraceDiff {
   std::vector<TraceSpan> engine_only;       // the spans our set has nothing for
   std::vector<TraceOccluderHit> ours_only;  // our solids the engine did not report
   TraceVerdict verdict = TraceVerdict::agrees;
+  // Whether the engine's answer could be read at all. When it is false the verdict
+  // is `unknown` and the two lists are empty: the engine's answer was dropped, and
+  // saying "agrees" would be a lie.
+  bool engine_answer_usable = true;
 };
 
 // The probe's ray: an origin, a unit direction and the endpoints, so the operator
@@ -336,6 +413,11 @@ struct TraceRayResult {
   bool engine_faulted = false;      // a guarded fault was recovered
   int interval_count = 0;           // the intervals the engine returned
   bool intervals_overflow = false;  // more intervals than the probe publishes
+  // The engine's answer could **not** be read: the call faulted, the container did
+  // not hold the buffer the probe handed it (the engine reallocated — which the
+  // external-buffer flag forbids), or the count was out of range. The verdict is
+  // then `unknown`; it is never computed over an empty engine list.
+  bool engine_answer_missing = false;
   std::vector<TraceInterval> intervals;
   std::vector<TraceOccluderHit> ours;
   TraceDiff diff;
@@ -343,8 +425,10 @@ struct TraceRayResult {
 
 // The whole probe: the engine's health, our occluder set and the per-ray answers.
 struct TraceProbeRun {
-  bool ok = false;                   // the engine call succeeded
-  bool faulted = false;              // a guarded fault was recovered (the probe's own health)
+  bool ok = false;                   // at least one ray's engine call returned
+  bool faulted = false;              // at least one ray's engine call faulted
+  int rays_ok = 0;                   // the rays whose engine call returned
+  int rays_faulted = 0;              // the rays whose engine call faulted
   TraceAbi abi = TraceAbi::correct;  // how the engine was called
   std::uintptr_t iface = 0;
   std::uintptr_t filter = 0;
@@ -353,6 +437,14 @@ struct TraceProbeRun {
   int filter_flags = 0;
   int occluders = 0;  // the solids our enumeration produced
   int occluder_hits = 0;
+  // The probe's own bounds: how many solids it projects at most, and whether the
+  // enumeration produced more than that (the answer is then incomplete).
+  int occluder_cap = TRACE_MAX_OCCLUDERS;
+  bool occluders_truncated = false;
+  // Whether the static world body was already parsed when the probe ran. When it
+  // was not, this run paid the world's parse (10k brush shapes) inside the input
+  // hook — the probe's one expensive case, and it happens **once** per session.
+  bool world_cached = false;
   std::vector<TraceRayResult> rays;
 };
 
@@ -367,8 +459,10 @@ struct TraceProbeRun {
       return "ours_only";
     case TraceVerdict::both:
       return "both";
+    case TraceVerdict::unknown:
+      return "unknown";
   }
-  return "agrees";
+  return "unknown";
 }
 
 // The solid kind's name (a brush hull is a `polytope`; the payload calls it a hull).
@@ -435,21 +529,51 @@ struct TraceProbeRun {
   return spans;
 }
 
-// Do a span and an occluder describe the same solid? Their intervals must overlap
-// (within `tolerance`): the engine's span and our occluder's span are both measured
-// along the same ray, so they line up when they cover a common distance.
+// Do a span and an occluder describe the same solid?
+//
+// Both answers are measured along the same ray, so the same solid is **entered at
+// the same place** and our occluder **covers** the stretch of the ray the engine
+// crossed. Both conditions are required:
+//
+// * our occluder must cover the engine's span — it starts no later than the span
+//   (within `tolerance`) and ends no earlier (within `tolerance`). A solid that
+//   only covers a *part* of the engine's span is a different solid: it must not be
+//   allowed to answer for it. This is what keeps a **real occlusion** from being
+//   reported as "agrees" — the engine's wall and our prop 0.5 units in front of it
+//   do not cover each other, so the wall stays `engine_only`;
+// * the two spans must share a stretch of the ray (the overlap is not empty).
+//
+// The `tolerance` is the **position** tolerance (world units): our hull is an
+// approximation of the engine's shape, so the two entry points need not be
+// identical. It is **not** a widening of the overlap test — a solid that merely
+// abuts the engine's span does not match it.
 [[nodiscard]] inline auto trace_span_matches(const TraceSpan& span, const TraceOccluderHit& hit,
                                              float tolerance) noexcept -> bool {
-  return span.entry <= hit.exit + tolerance && hit.entry <= span.exit + tolerance;
+  if (hit.entry > span.entry + tolerance) {
+    return false;  // our solid starts after the engine's span: a different solid
+  }
+  if (span.exit > hit.exit + tolerance) {
+    return false;  // our solid ends before the engine's span: it does not cover it
+  }
+  return std::min(span.exit, hit.exit) > std::max(span.entry, hit.entry);
 }
 
 // The difference between the engine's intervals and our solids for one ray: the
 // spans our set has nothing for, the solids the engine did not report, and the
 // one-line verdict.
+//
+// `engine_answer_usable` says whether the engine's answer could be read at all. When
+// it is false the verdict is `unknown` and the lists are empty — the difference
+// cannot be computed over an answer the probe never got.
 [[nodiscard]] inline auto diff_trace(const std::vector<TraceInterval>& intervals,
-                                     const std::vector<TraceOccluderHit>& ours, float tolerance)
-    -> TraceDiff {
+                                     const std::vector<TraceOccluderHit>& ours, float tolerance,
+                                     bool engine_answer_usable) -> TraceDiff {
   TraceDiff diff;
+  diff.engine_answer_usable = engine_answer_usable;
+  if (!engine_answer_usable) {
+    diff.verdict = TraceVerdict::unknown;
+    return diff;
+  }
   const std::vector<TraceSpan> spans = pair_trace_spans(intervals);
   std::vector<bool> span_matched(spans.size(), false);
   std::vector<bool> ours_matched(ours.size(), false);
@@ -585,7 +709,20 @@ struct TraceProbeRun {
 // on a **game thread** (docs/handoff.md: an engine call that reaches tier0's
 // allocator faults on the payload's own thread), so the caller runs this from the
 // game thread's sink.
+//
+// `exclude_pawns`/`exclude_count` are the players' entity pointers: the probe
+// excludes them from **its own** enumeration (a player is a target, not an
+// occluder), so the answer does not silently depend on the solver having run first
+// in the tick.
 [[nodiscard]] auto probe_trace(const std::vector<TraceRay>& rays, bool invoke,
-                               TraceAbi abi = TraceAbi::correct) -> TraceProbeRun;
+                               TraceAbi abi = TraceAbi::correct,
+                               const std::uintptr_t* exclude_pawns = nullptr,
+                               int exclude_count = 0) -> TraceProbeRun;
+
+// Has the static world body been parsed yet? The probe's enumeration reuses the
+// parsed cache; parsing it inside the input hook is the probe's one expensive case
+// (it happens once per session), so the answer publishes the state
+// (`world_cached`) and the operator can tell a slow first run from the rest.
+[[nodiscard]] auto occlusion_world_cache_ready() noexcept -> bool;
 
 }  // namespace cs2::control

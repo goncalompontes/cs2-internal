@@ -1314,10 +1314,17 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
 //   fourth argument is the **extension** (`end - start`), not the absolute end point:
 //   the engine's own caller builds it as `normalize(direction) * range`
 //   (`FUN_18089ca80`), and the interval consumer scales the fractions by *its* length.
-// * `results` is the `CUtlVector` of 0x38-byte interval records (count @+0x00, data
-//   @+0x08, capacity @+0x10, flags @+0x1C) — the same layout as the overlap query's.
+// * `results` is the engine's **trace** results container — **not** the overlap
+//   query's `CUtlVector`. Its header is count `@+0x00`, the record pointer `@+0x08`,
+//   the capacity `@+0x10` and the flags `@+0x14` (see `TraceResultVector` in the
+//   header: the layout was re-derived from the live build's own two writers). Bit 30
+//   of the flags (`0x40000000`) is that type's **external buffer** bit: with it set,
+//   both writers jump straight past their growth, so the engine never reaches its
+//   allocator — which is what the payload needs (its thread has no tier0 TLS,
+//   docs/handoff.md).
 // * the fifth argument is `filter + 8` (the collision mask qword) and the sixth is
-//   `max_fraction` = -1.0f (the engine's own constant at its call site).
+//   `max_fraction` = -1.0f (the engine's own constant at its call site). In the
+//   Windows x64 convention these are the **5th** and **6th** arguments.
 //
 // The interval record's `+0x0C` is the **fraction** along the ray (the consumer
 // computes the wall thickness as `(leave - enter) * |delta|`), and `+0x32` is 1 for an
@@ -1327,17 +1334,12 @@ constexpr std::uintptr_t k_trace_line_intervals_fallback = 0xA19E90;
 constexpr std::uintptr_t k_trace_interval_stride = TRACE_INTERVAL_SIZE;
 
 using TraceLineIntervalsFn = void (*)(void*, void*, const void*, const void*, const void*, float);
-TraceLineIntervalsFn g_trace_line_intervals = nullptr;
 
-// The external results buffer. The engine must never reach tier0's allocator (the
-// payload's thread has no tier0 TLS — docs/handoff.md), so the vector is flagged
-// external and pre-sized; the engine's own call sizes its vector for 64 entries, and
-// this one is larger so a dense scene cannot make it grow.
-alignas(16) unsigned char g_trace_interval_buffer[TRACE_INTERVAL_CAPACITY *
-                                                  k_trace_interval_stride] = {};
-
-// One `TraceLineIntervals` call.
+// One `TraceLineIntervals` call. The entry point travels **with** the call (it is
+// resolved per probe, not kept in a global): the payload adds no global mutable
+// state (ADR-0010).
 struct TraceCall {
+  TraceLineIntervalsFn entry = nullptr;
   void* iface = nullptr;
   void* results = nullptr;
   const void* start = nullptr;
@@ -1348,9 +1350,9 @@ struct TraceCall {
 
 void invoke_trace(void* context) {
   auto* call = static_cast<TraceCall*>(context);
-  if (g_trace_line_intervals != nullptr) {
-    g_trace_line_intervals(call->iface, call->results, call->start, call->delta, call->mask,
-                           call->max_fraction);
+  if (call->entry != nullptr) {
+    call->entry(call->iface, call->results, call->start, call->delta, call->mask,
+                call->max_fraction);
   }
 }
 
@@ -1360,9 +1362,10 @@ void invoke_trace(void* context) {
 // under clang-cl that makes the recovery impossible (`cs2/control/trace_guard.hpp`
 // has the measurement). Returns the interval count (0 on a fault or an empty
 // answer).
-auto run_trace_query(void* iface, void* filter, const Vec3& start, const Vec3& delta,
-                     ResultVector& vector, bool* ok) -> std::int32_t {
+auto run_trace_query(TraceLineIntervalsFn entry, void* iface, void* filter, const Vec3& start,
+                     const Vec3& delta, TraceResultVector& vector, bool* ok) -> std::int32_t {
   TraceCall call;
+  call.entry = entry;
   call.iface = iface;
   call.results = &vector;
   call.start = &start;
@@ -1558,7 +1561,8 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
 // The probe: our occluder set's answer and the engine's own answer for the same rays,
 // plus the difference. Runs on a game thread (an engine call must not reach tier0's
 // allocator from the payload's own thread — docs/handoff.md).
-auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -> TraceProbeRun {
+auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
+                 const std::uintptr_t* exclude_pawns, int exclude_count) -> TraceProbeRun {
   TraceProbeRun run;
   run.abi = abi;
   if (rays.empty()) {
@@ -1594,7 +1598,20 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
     filter = reinterpret_cast<void*>(base + static_filter);
   }
   run.filter = reinterpret_cast<std::uintptr_t>(filter);
-  if (g_bullet_filter_ready) {
+  // The mask/group/flags **actually used**: the answer must describe the filter the
+  // engine was given, not the bullet's (in the `static_filter` mode the engine's own
+  // static filter is used, and its mask is every content).
+  if (abi == TraceAbi::static_filter) {
+    std::int64_t mask = 0;
+    (void)cs2::game::read(base + static_filter + k_filter_mask, mask);
+    run.filter_mask = mask;
+    unsigned char flags = 0;
+    unsigned char group = 0;
+    (void)cs2::game::read(base + static_filter + k_filter_flags, flags);
+    (void)cs2::game::read(base + static_filter + k_filter_group, group);
+    run.filter_flags = flags;
+    run.filter_group = group;
+  } else if (g_bullet_filter_ready) {
     run.filter_mask = *reinterpret_cast<std::int64_t*>(g_bullet_filter + k_filter_mask);
     run.filter_group = g_bullet_filter[k_filter_group];
     run.filter_flags = g_bullet_filter[k_filter_flags];
@@ -1602,8 +1619,7 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
   if (!invoke) {
     return run;
   }
-  run.ok = true;
-  g_trace_line_intervals = reinterpret_cast<TraceLineIntervalsFn>(base + trace_rva);
+  const TraceLineIntervalsFn trace_entry = reinterpret_cast<TraceLineIntervalsFn>(base + trace_rva);
 
   // The volume the fan covers: the eye and the rays' far ends.
   Vec3 lo = eye;
@@ -1625,13 +1641,26 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
   // The pyramid's target box is padded: a box that is a single point (one ray, no
   // fan) is a degenerate hull — the pyramid has no face planes, and the query
   // would then keep nothing at all (`AabbBvh::query_pyramid` returns early).
-  constexpr float k_target_pad = 8.0F;
-  const cs2::aim::Aabb target = trace_target_box(rays, k_target_pad);
-  OcclusionQueryResult occluders = query_world_occluders(eye, lo, hi, true, nullptr, 0, &target, 1);
+  // The pad decides which solids the enumeration keeps, so it is published with the
+  // answer (`TRACE_TARGET_PAD`).
+  const cs2::aim::Aabb target = trace_target_box(rays, TRACE_TARGET_PAD);
+
+  // The static world body is parsed **once** and cached. The probe's own
+  // enumeration reuses that cache, so the probe's marginal cost is one query — but
+  // the **first** enumeration in a session pays the parse (10k brush shapes), and
+  // the probe runs inside the input hook. The answer says whether this run paid it
+  // (`world_cached`), so the operator can tell a slow first run from the rest.
+  run.world_cached = occlusion_world_cache_ready();
+  // The players are targets, not occluders: the probe excludes them **itself**, so
+  // the answer never depends on the solver having run first in the tick.
+  set_occlusion_exclude_pawns(exclude_pawns, exclude_count);
+  OcclusionQueryResult occluders =
+      query_world_occluders(eye, lo, hi, true, exclude_pawns, exclude_count, &target, 1);
   run.occluders = static_cast<int>(occluders.hulls.size());
 
   // The projected cells — the very same projection the solver's heatmap uses, so the
-  // probe's answer is the solver's answer.
+  // probe's answer is the solver's answer. The number of projections is bounded: the
+  // projection is the expensive half of the probe's work.
   std::vector<cs2::aim::OccluderCell> cells;
   std::vector<int> clusters;
   std::vector<int> hulls;
@@ -1644,6 +1673,13 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
     if (hull.kind == cs2::aim::SolidKind::mesh) {
       ++cluster;
     }
+    if (static_cast<int>(cells.size()) >= TRACE_MAX_OCCLUDERS) {
+      // The projection is the expensive half of the probe's work: it is bounded, and
+      // the answer says so (a truncated set is an incomplete answer, not a complete
+      // one).
+      run.occluders_truncated = true;
+      break;
+    }
     const std::optional<cs2::aim::OccluderCell> cell = project_occlusion_hull(eye, basis, hull);
     if (!cell.has_value()) {
       continue;
@@ -1653,6 +1689,13 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
     // The solid's index in the enumerated set — the identifier the answer carries.
     hulls.push_back(static_cast<int>(index));
   }
+
+  // The engine's results buffer: a **local** scratch array (the payload adds no
+  // global mutable state — ADR-0010). It holds the advertised capacity plus the
+  // slack, because the engine appends **at** `data[count]`: a trace that produced
+  // more records than the capacity would otherwise write past the end.
+  alignas(16) unsigned char interval_buffer[(TRACE_INTERVAL_CAPACITY + TRACE_INTERVAL_SLACK) *
+                                           k_trace_interval_stride] = {};
 
   for (const TraceRay& ray : rays) {
     TraceRayResult result;
@@ -1675,10 +1718,16 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
     // and the fourth argument is the **extension**, not the absolute end point. The
     // `swapped` mode hands the engine the two in the wrong order — the deliberate
     // wrong ABI that proves the probe can fail.
-    ResultVector vector;
-    vector.data = g_trace_interval_buffer;
+    //
+    // The container is the engine's **trace** container (count `@+0x00`, the record
+    // pointer `@+0x08`, the capacity `@+0x10`, the flags `@+0x14`) — **not** the
+    // overlap query's `CUtlVector`, whose record pointer sits at `@+0x10`. With the
+    // external-buffer bit set (bit 30 of the flags) both of the engine's writers
+    // jump straight past their growth, so the engine never reaches its allocator.
+    TraceResultVector vector;
+    vector.data = interval_buffer;
     vector.capacity = TRACE_INTERVAL_CAPACITY;
-    vector.flags = 0x80000000U;  // external buffer: the engine will not reallocate
+    vector.flags = TRACE_VECTOR_EXTERNAL_BUFFER | TRACE_VECTOR_NOT_OWNED;
     const Vec3 delta = ray.end - ray.start;
     const Vec3* start = &ray.start;
     const Vec3* extension = &delta;
@@ -1687,15 +1736,27 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
       extension = &ray.start;
     }
     bool ok = false;
-    const std::int32_t count =
-        run_trace_query(reinterpret_cast<void*>(iface), filter, *start, *extension, vector, &ok);
+    const std::int32_t count = run_trace_query(trace_entry, reinterpret_cast<void*>(iface), filter,
+                                                *start, *extension, vector, &ok);
     result.engine_ok = ok;
     result.engine_faulted = !ok;
     result.interval_count = count;
-    run.ok = run.ok && ok;
+    if (ok) {
+      ++run.rays_ok;
+    } else {
+      ++run.rays_faulted;
+    }
+    run.ok = run.ok || ok;
     run.faulted = run.faulted || !ok;
-    if (ok && count > 0 && count <= TRACE_INTERVAL_CAPACITY &&
-        vector.data == g_trace_interval_buffer) {
+    // The engine's answer is usable only when the call returned **and** the container
+    // still holds the buffer we handed it. A reallocated buffer would mean the
+    // engine grew the vector (it must not) or that the container's layout is wrong —
+    // either way the records are not ours to read, and the difference must not be
+    // computed over an empty engine list.
+    const bool buffer_kept = vector.data == interval_buffer;
+    const bool count_usable = count >= 0 && count <= TRACE_INTERVAL_CAPACITY + TRACE_INTERVAL_SLACK;
+    result.engine_answer_missing = !ok || !buffer_kept || !count_usable;
+    if (!result.engine_answer_missing && count > 0) {
       const auto* records = reinterpret_cast<const std::uint8_t*>(vector.data);
       const TraceIntervalBudget budget = trace_interval_budget(count);
       result.intervals_overflow = budget.overflow;
@@ -1705,10 +1766,15 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi) -
             records + static_cast<std::size_t>(i) * k_trace_interval_stride, ray.depth));
       }
     }
-    result.diff = diff_trace(result.intervals, result.ours, TRACE_MATCH_TOLERANCE);
+    result.diff =
+        diff_trace(result.intervals, result.ours, TRACE_MATCH_TOLERANCE, !result.engine_answer_missing);
     run.rays.push_back(std::move(result));
   }
   return run;
+}
+
+auto occlusion_world_cache_ready() noexcept -> bool {
+  return g_world_cache.count > 0;
 }
 
 }  // namespace cs2::control

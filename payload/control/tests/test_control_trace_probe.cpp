@@ -1,15 +1,17 @@
 // The trace probe's host test (`docs/re/bullet-trace.md`).
 //
-// The probe's answer is only worth reading when two things hold: the probe's ray
-// and the solver's ray are the **same** 3-D segment, and the difference logic
-// turns the two answers into the right verdict. Both are pure, so they are pinned
-// here; the engine call itself needs the game.
+// The probe's answer is only worth reading when four things hold: the probe's ray
+// and the solver's ray are the **same** 3-D segment; the results container has the
+// layout the **engine** reads; the difference logic turns the two answers into the
+// right verdict; and the probe's own wiring uses those rules. The first three are
+// pure, so they are pinned here; the last one is a **source** check (the service is
+// not reachable from a host test — it needs the game).
 //
-// The service is not reachable from a host test (it needs the game), so the last
-// check is a **source** check: the command's own wiring uses the rules the header
-// defines (the same pattern as `control-rage-objective`).
+// Every check below must be able to **fail**: a rule that is written down but not
+// pinned is a rule nobody has to keep.
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -51,6 +53,31 @@ constexpr float k_deg_to_rad = 0.01745329251994329577F;
 // chart (`docs/ragebot.md`) — the Source pitch is positive downwards.
 [[nodiscard]] auto chart_point(float yaw_degrees, float pitch_degrees) noexcept -> cs2::aim::Vec2 {
   return cs2::aim::Vec2{.x = yaw_degrees * k_deg_to_rad, .y = -pitch_degrees * k_deg_to_rad};
+}
+
+// The source of a file, or an empty string when it cannot be read.
+[[nodiscard]] auto read_source(const std::filesystem::path& path) -> std::string {
+  std::ifstream file(path);
+  if (!file.good()) {
+    return {};
+  }
+  return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+}
+
+// The text between two markers (inclusive of the first, exclusive of the second).
+// A missing marker yields an empty string, so a check on the region fails loudly
+// instead of silently looking at the whole file.
+[[nodiscard]] auto region_of(const std::string& source, const char* from, const char* to)
+    -> std::string {
+  const std::size_t begin = source.find(from);
+  if (begin == std::string::npos) {
+    return {};
+  }
+  const std::size_t end = to == nullptr ? std::string::npos : source.find(to, begin);
+  if (end == std::string::npos) {
+    return source.substr(begin);
+  }
+  return source.substr(begin, end - begin);
 }
 
 // --- 1. the ray construction ---------------------------------------------------
@@ -237,7 +264,86 @@ void test_interval_reader() {
          "a missing record reads as empty");
 }
 
-// --- 4. the difference logic ---------------------------------------------------
+// --- 4. the results container --------------------------------------------------
+//
+// The trace's results container is **not** the overlap query's `CUtlVector`: the
+// live build's two writers read the record pointer at `+0x08` and the capacity at
+// `+0x10`. This test pins that layout with the **literal** offsets, so a container
+// with the overlap's layout (the record pointer at `+0x10`) cannot pass.
+void test_result_vector_layout() {
+  struct LiveLayout {
+    std::int32_t count;
+    std::int32_t reserved;
+    void* data;
+    std::int32_t capacity;
+    std::int32_t flags;
+  };
+  static_assert(sizeof(LiveLayout) == 0x18, "the live build's header is 0x18 bytes");
+  static_assert(offsetof(LiveLayout, count) == 0x00, "the count is at +0x00");
+  static_assert(offsetof(LiveLayout, data) == 0x08, "the record pointer is at +0x08");
+  static_assert(offsetof(LiveLayout, capacity) == 0x10, "the capacity is at +0x10");
+  static_assert(offsetof(LiveLayout, flags) == 0x14, "the flags are at +0x14");
+
+  // The payload's own type must be the same layout — and, above all, **not** the
+  // overlap query's (whose record pointer is at +0x10).
+  static_assert(sizeof(cs2::control::TraceResultVector) == 0x18, "the probe's header is 0x18 bytes");
+  static_assert(offsetof(cs2::control::TraceResultVector, count) == 0x00, "the count is at +0x00");
+  static_assert(offsetof(cs2::control::TraceResultVector, data) == 0x08,
+                "the record pointer is at +0x08");
+  static_assert(offsetof(cs2::control::TraceResultVector, capacity) == 0x10,
+                "the capacity is at +0x10");
+  static_assert(offsetof(cs2::control::TraceResultVector, flags) == 0x14, "the flags are at +0x14");
+  static_assert(offsetof(cs2::control::TraceResultVector, data) != 0x10,
+                "the record pointer is NOT at the overlap vector's +0x10");
+
+  // The external-buffer bit is the engine's **bit 30** for this container. The
+  // overlap vector's `0x80000000` belongs to a different type and means nothing
+  // here: with it the engine would grow the array (and reach its allocator).
+  constexpr std::int32_t k_live_external_bit = 0x40000000;
+  constexpr std::int32_t k_overlap_external_bit = 0x80000000;
+  expect(cs2::control::TRACE_VECTOR_EXTERNAL_BUFFER == k_live_external_bit,
+         "the external-buffer bit is the live build's bit 30");
+  expect(cs2::control::TRACE_VECTOR_EXTERNAL_BUFFER != k_overlap_external_bit,
+         "the external-buffer bit is NOT the overlap vector's bit 31");
+  expect((cs2::control::TRACE_VECTOR_EXTERNAL_BUFFER & k_live_external_bit) != 0,
+         "the external-buffer bit sets bit 30");
+
+  // The engine's own growth rule, reproduced: the writer grows the array only when
+  // `count == capacity` **and** bit 30 of the flags is clear. With the bit set the
+  // engine never grows — so it never reaches its allocator (the payload's thread
+  // has no tier0 TLS, docs/handoff.md).
+  const auto appends = [](cs2::control::TraceResultVector& vector, int* allocations) -> void {
+    if (vector.count == vector.capacity && (vector.flags & k_live_external_bit) == 0) {
+      ++(*allocations);
+      vector.capacity += 1;  // the engine's own growth: the capacity plus one
+    }
+    ++vector.count;
+  };
+  cs2::control::TraceResultVector external;
+  external.capacity = 4;
+  external.flags = cs2::control::TRACE_VECTOR_EXTERNAL_BUFFER | cs2::control::TRACE_VECTOR_NOT_OWNED;
+  int allocations = 0;
+  for (int i = 0; i < 32; ++i) {
+    appends(external, &allocations);
+  }
+  expect(allocations == 0, "an external buffer never makes the engine allocate");
+  expect(external.count == 32, "the external buffer still takes every record");
+  // ...which is why the buffer carries the slack: the engine appends **at**
+  // `data[count]`, so it writes past the advertised capacity.
+  expect(external.count > external.capacity,
+         "an external buffer lets the engine write past the advertised capacity");
+
+  cs2::control::TraceResultVector growing;
+  growing.capacity = 4;
+  growing.flags = 0;
+  allocations = 0;
+  for (int i = 0; i < 32; ++i) {
+    appends(growing, &allocations);
+  }
+  expect(allocations > 0, "without the bit the engine grows (and allocates) at the capacity");
+}
+
+// --- 5. the difference logic ---------------------------------------------------
 void test_difference() {
   const auto interval_at = [](float distance, std::uint8_t enter_exit) {
     cs2::control::TraceInterval interval;
@@ -252,10 +358,11 @@ void test_difference() {
     hit.exit = exit;
     return hit;
   };
+  constexpr float k_tolerance = 2.0F;
 
   // Nothing on either side: the two answers agree.
   {
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace({}, {}, 2.0F);
+    const cs2::control::TraceDiff diff = cs2::control::diff_trace({}, {}, k_tolerance, true);
     expect(diff.verdict == cs2::control::TraceVerdict::agrees,
            "no intervals and no occluders agree");
     expect(diff.engine_only.empty() && diff.ours_only.empty(), "the difference is empty");
@@ -265,7 +372,7 @@ void test_difference() {
   {
     const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
                                                                 interval_at(120.0F, 0U)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, {}, 2.0F);
+    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, {}, k_tolerance, true);
     expect(diff.verdict == cs2::control::TraceVerdict::engine_only,
            "an interval with no occluder is engine_only");
     expect(diff.engine_only.size() == 1U, "the unmatched span is reported");
@@ -281,7 +388,7 @@ void test_difference() {
   {
     const std::vector<cs2::control::TraceInterval> intervals = {};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(400.0F, 430.0F)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, 2.0F);
+    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, k_tolerance, true);
     expect(diff.verdict == cs2::control::TraceVerdict::ours_only,
            "an occluder with no interval is ours_only");
     expect(diff.ours_only.size() == 1U, "the unmatched occluder is reported");
@@ -293,19 +400,19 @@ void test_difference() {
     const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
                                                                 interval_at(120.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(101.0F, 119.0F)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, 2.0F);
+    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, k_tolerance, true);
     expect(diff.verdict == cs2::control::TraceVerdict::agrees,
            "the same solid on both sides agrees");
     expect(diff.engine_only.empty() && diff.ours_only.empty(), "the difference is empty");
   }
 
-  // The same solid at a **different depth**: the engine's span and our occluder
-  // overlap, so they are the same solid — our thickness is simply bigger.
+  // The same solid at a **different depth**: our hull is thicker than the engine's
+  // span, so it covers it — they are the same solid.
   {
     const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
                                                                 interval_at(110.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(100.0F, 130.0F)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, 2.0F);
+    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, k_tolerance, true);
     expect(diff.verdict == cs2::control::TraceVerdict::agrees,
            "the same solid at a different depth agrees");
   }
@@ -315,25 +422,78 @@ void test_difference() {
     const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
                                                                 interval_at(120.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(400.0F, 430.0F)};
-    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, 2.0F);
+    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, k_tolerance, true);
     expect(diff.verdict == cs2::control::TraceVerdict::both, "two different solids are 'both'");
     expect(diff.engine_only.size() == 1U && diff.ours_only.size() == 1U,
            "both differences are reported");
   }
 
-  // The tolerance: an occluder a unit away is the same solid, one ten units away
-  // is not.
+  // The tolerance compares the two spans' **positions**, it does not widen the
+  // overlap test: an occluder that starts a unit after the engine's span is a
+  // different solid, and one that ends a unit before it is too.
   {
     const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
                                                                 interval_at(120.0F, 0U)};
     const std::vector<cs2::control::TraceOccluderHit> close = {hit_at(101.0F, 119.0F)};
     const std::vector<cs2::control::TraceOccluderHit> far = {hit_at(130.0F, 150.0F)};
-    expect(cs2::control::diff_trace(intervals, close, 2.0F).verdict ==
+    expect(cs2::control::diff_trace(intervals, close, k_tolerance, true).verdict ==
                cs2::control::TraceVerdict::agrees,
            "an occluder within the tolerance is the same solid");
-    expect(
-        cs2::control::diff_trace(intervals, far, 2.0F).verdict == cs2::control::TraceVerdict::both,
-        "an occluder beyond the tolerance is a different solid");
+    expect(cs2::control::diff_trace(intervals, far, k_tolerance, true).verdict ==
+               cs2::control::TraceVerdict::both,
+           "an occluder beyond the tolerance is a different solid");
+  }
+
+  // **The real occlusion must never be reported as "agrees".** The engine found a
+  // wall from 100 to 150 units; our set holds an unrelated prop from 98 to 99.5 —
+  // a solid that does not cover the wall at all. The wall must stay in
+  // `engine_only`: it must not be answered for by the prop.
+  {
+    const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
+                                                                interval_at(150.0F, 0U)};
+    const std::vector<cs2::control::TraceOccluderHit> prop = {hit_at(98.0F, 99.5F)};
+    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, prop, k_tolerance, true);
+    expect(diff.verdict != cs2::control::TraceVerdict::agrees,
+           "a real occlusion is never 'agrees'");
+    expect(diff.engine_only.size() == 1U, "the wall is reported as the engine's alone");
+    if (!diff.engine_only.empty()) {
+      expect(near(diff.engine_only.front().entry, 100.0F) &&
+                 near(diff.engine_only.front().exit, 150.0F),
+             "the engine's wall is the span that is reported");
+    }
+    expect(diff.ours_only.size() == 1U, "the prop is reported as ours alone");
+    // The same prop, three units further away: the same answer.
+    const std::vector<cs2::control::TraceOccluderHit> further = {hit_at(95.0F, 96.5F)};
+    expect(cs2::control::diff_trace(intervals, further, k_tolerance, true).verdict !=
+               cs2::control::TraceVerdict::agrees,
+           "a prop three units away does not hide the wall either");
+  }
+
+  // A prop that covers only the **first half** of the wall is not the wall: the
+  // wall must stay `engine_only` (our set does not have it).
+  {
+    const std::vector<cs2::control::TraceInterval> intervals = {interval_at(100.0F, 1U),
+                                                                interval_at(150.0F, 0U)};
+    const std::vector<cs2::control::TraceOccluderHit> half = {hit_at(100.0F, 120.0F)};
+    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, half, k_tolerance, true);
+    expect(diff.verdict != cs2::control::TraceVerdict::agrees,
+           "a solid that covers only part of the wall does not answer for it");
+    expect(diff.engine_only.size() == 1U, "the wall is still the engine's alone");
+    expect(diff.ours_only.size() == 1U, "the half-wall is ours alone");
+  }
+
+  // The engine's answer could **not** be read: the verdict is "unknown", never
+  // "agrees" — the defect the probe exists to expose must not be reported
+  // inverted.
+  {
+    const std::vector<cs2::control::TraceInterval> intervals = {};
+    const std::vector<cs2::control::TraceOccluderHit> ours = {hit_at(100.0F, 120.0F)};
+    const cs2::control::TraceDiff diff = cs2::control::diff_trace(intervals, ours, k_tolerance, false);
+    expect(diff.verdict == cs2::control::TraceVerdict::unknown,
+           "a dropped engine answer is 'unknown', not 'agrees'");
+    expect(!diff.engine_answer_usable, "the difference says the engine's answer was unusable");
+    expect(diff.engine_only.empty() && diff.ours_only.empty(),
+           "a dropped engine answer has no difference to report");
   }
 
   // The pairing: the records are paired into spans (an enter opens a span, the
@@ -358,7 +518,7 @@ void test_difference() {
   }
 }
 
-// --- 5. the bounds --------------------------------------------------------------
+// --- 6. the bounds --------------------------------------------------------------
 void test_bounds() {
   // The **documented** maxima (the command's error message and the docs quote
   // them): 8 rays in a fan, 64 published intervals per ray.
@@ -393,13 +553,17 @@ void test_bounds() {
   expect(over.overflow, "the budget reports the overflow");
   expect(cs2::control::TRACE_INTERVAL_CAPACITY >= cs2::control::TRACE_MAX_INTERVALS,
          "the results buffer is at least as large as the published maximum");
+  // The buffer carries the slack the engine's "append at `data[count]`" needs.
+  expect(cs2::control::TRACE_INTERVAL_SLACK > 0, "the results buffer carries the slack");
+  // The probe's own work is bounded: the projections are capped too.
+  expect(cs2::control::TRACE_MAX_OCCLUDERS > 0, "the probe's projection cap is set");
 }
 
-// --- 6. the enumeration's target box ------------------------------------------
+// --- 7. the enumeration's target box ------------------------------------------
 void test_target_box() {
   const cs2::aim::Basis basis = cs2::aim::Basis::world();
   const cs2::aim::Vec3 eye{0.0F, 0.0F, 0.0F};
-  constexpr float k_pad = 8.0F;
+  constexpr float k_pad = cs2::control::TRACE_TARGET_PAD;
 
   // One ray: the far end is a **point**, and an unpadded box would be a degenerate
   // hull — the eye→box pyramid would have no face planes, and the pyramid query
@@ -424,43 +588,83 @@ void test_target_box() {
   expect(covers, "the fan's target box covers every far end");
 }
 
-// --- 7. the service's wiring ----------------------------------------------------
+// --- 8. the service's wiring ----------------------------------------------------
+//
+// The service is not reachable from a host test (it needs the game), so the wiring
+// is checked against the **source** — but the check is scoped to the probe's **own**
+// region, so that a token which occurs everywhere (the overlap query's own
+// `vector.flags = 0x80000000U`) cannot satisfy it.
+//
+// Each of these must fail when the corresponding code is broken:
+//   * the probe's engine call deleted → `run_trace_query(` is gone;
+//   * the external-buffer flag deleted → `vector.flags =` is gone;
+//   * the trace's container replaced by the overlap's → `TraceResultVector` is gone.
 void test_service_uses_the_rules(const char* root) {
-  const std::filesystem::path service_path =
-      std::filesystem::path(root) / "payload" / "control" / "src" / "service.cpp";
-  std::ifstream service_file(service_path);
-  expect(service_file.good(), "the service's source is readable");
-  if (!service_file.good()) {
-    return;
-  }
-  const std::string service((std::istreambuf_iterator<char>(service_file)),
-                            std::istreambuf_iterator<char>());
+  const std::filesystem::path base(root);
+  const std::filesystem::path service_path = base / "payload" / "control" / "src" / "service.cpp";
+  const std::filesystem::path query_path = base / "payload" / "control" / "src" / "occlusion_query.cpp";
+
+  const std::string service = read_source(service_path);
+  expect(!service.empty(), "the service's source is readable");
+  const std::string query = read_source(query_path);
+  expect(!query.empty(), "the occlusion query's source is readable");
+
+  // The command itself.
   expect(service.find("do_trace_probe") != std::string::npos,
          "the service has the trace_probe command");
   expect(service.find("trace_fan_size_ok(") != std::string::npos,
          "the command refuses a fan over the maximum with the rule");
-  expect(service.find("probe_trace(rays, true, abi)") != std::string::npos,
-         "the engine call runs on the game thread (in the game-thread sink)");
   expect(service.find("trace_probe_armed_") != std::string::npos,
          "the command and the game thread hand the request over");
 
-  const std::filesystem::path query_path =
-      std::filesystem::path(root) / "payload" / "control" / "src" / "occlusion_query.cpp";
-  std::ifstream query_file(query_path);
-  expect(query_file.good(), "the occlusion query's source is readable");
-  if (!query_file.good()) {
-    return;
-  }
-  const std::string query((std::istreambuf_iterator<char>(query_file)),
-                          std::istreambuf_iterator<char>());
-  expect(query.find("trace_call_guarded(&invoke_trace") != std::string::npos,
-         "the engine's trace call is fault-guarded");
-  expect(query.find("0x80000000U") != std::string::npos,
-         "the results vector is external: the engine must not allocate");
-  expect(query.find("read_trace_interval(") != std::string::npos,
-         "the interval records are read with the reader");
-  expect(query.find("diff_trace(") != std::string::npos,
+  // The probe's own region: from `probe_trace` to the end of the file.
+  const std::string probe = region_of(query, "auto probe_trace(", nullptr);
+  expect(!probe.empty(), "the probe's own region is found in the occlusion query");
+  expect(probe.find("run_trace_query(") != std::string::npos,
+         "the probe calls the engine through the guarded query");
+  expect(probe.find("TraceResultVector") != std::string::npos,
+         "the probe hands the engine the trace's own results container");
+  expect(probe.find("vector.flags =") != std::string::npos,
+         "the probe sets the container's flags");
+  expect(probe.find("TRACE_VECTOR_EXTERNAL_BUFFER") != std::string::npos,
+         "the probe marks the buffer external: the engine must not allocate");
+  expect(probe.find("vector.data =") != std::string::npos &&
+             probe.find("vector.capacity =") != std::string::npos,
+         "the probe hands the engine its own buffer and capacity");
+  expect(probe.find("diff_trace(") != std::string::npos,
          "the difference is computed with the rule");
+  expect(probe.find("engine_answer_missing") != std::string::npos,
+         "the probe says when the engine's answer could not be read");
+  expect(probe.find("read_trace_interval(") != std::string::npos,
+         "the interval records are read with the reader");
+  expect(probe.find("set_occlusion_exclude_pawns(") != std::string::npos,
+         "the probe excludes the players itself");
+  expect(probe.find("occlusion_world_cache_ready()") != std::string::npos,
+         "the probe does not parse the world body inside the input hook");
+
+  // The guarded call: the engine call is behind the probe's own guard.
+  const std::string guarded = region_of(query, "auto run_trace_query(", "}  // namespace");
+  expect(!guarded.empty(), "the guarded query is found in the occlusion query");
+  expect(guarded.find("trace_call_guarded(") != std::string::npos,
+         "the engine's trace call is fault-guarded");
+
+  // The publication: the answer carries the probe's own health.
+  const std::string publication = region_of(service, "void Service::do_trace_probe", nullptr);
+  expect(!publication.empty(), "the command's publication is found in the service");
+  expect(publication.find("answer_missing") != std::string::npos,
+         "the answer says when the engine's answer was dropped");
+  expect(publication.find("engine_answer_usable") != std::string::npos,
+         "the answer says whether the difference could be computed");
+  expect(publication.find("trace_probe_armed_") != std::string::npos,
+         "the command arms the request for the game thread");
+
+  // The engine call runs in the **game thread's sink** — the CreateMove hook — and
+  // not in the control thread (an engine call that reaches tier0's allocator faults
+  // on the payload's own thread, docs/handoff.md).
+  const std::string sink = region_of(service, "void Service::on_game_thread()", nullptr);
+  expect(!sink.empty(), "the game thread's sink is found in the service");
+  expect(sink.find("probe_trace(") != std::string::npos,
+         "the command runs the probe on the game thread");
 }
 
 }  // namespace
@@ -469,6 +673,7 @@ auto main(int argc, char** argv) -> int {
   test_ray_construction();
   test_fan_order();
   test_interval_reader();
+  test_result_vector_layout();
   test_difference();
   test_bounds();
   test_target_box();

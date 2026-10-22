@@ -720,6 +720,11 @@ class Service {
   TraceAbi trace_probe_abi_ = TraceAbi::correct;
   bool trace_probe_done_ = false;
   TraceProbeRun trace_probe_run_{};
+  // The game thread's heartbeat: how many times the CreateMove hook's sink has run.
+  // The control thread samples it around the probe's wait, so a caller can tell
+  // "the game thread is busy" from "the game thread is not running at all" — the
+  // probe's timeout says neither.
+  std::atomic<std::uint64_t> game_thread_ticks_{0};
   // The latest snapshot handed over by the render thread's per-frame refresh, for the
   // game-thread solve. Copied under the mutex so the render thread never blocks on the
   // solve. (The hitboxes are re-read on the hook, so only the player list / eye / weapon

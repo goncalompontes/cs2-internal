@@ -3,8 +3,9 @@
 The probe asks the engine its own question — ``TraceLineIntervals``, the call the
 real bullet makes — for a ray, and publishes **both** answers side by side plus the
 difference. The wire types are the client's half of that contract; this test pins
-them against the payload's own JSON keys, so a renamed field is a failure here
-rather than a surprise at runtime.
+them against the payload's own JSON keys — it reads the payload's C++ and checks
+that every key the protocol declares is one the payload actually writes — so a
+renamed field is a failure here rather than a surprise at runtime.
 
     python -m unittest discover -s scripts/scenario/tests
 """
@@ -12,6 +13,7 @@ rather than a surprise at runtime.
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 import unittest
 from typing import Any, get_args, get_type_hints
@@ -31,6 +33,38 @@ from scenario.protocol import (  # noqa: E402
 )
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+PAYLOAD_SERVICE = REPO_ROOT / "payload" / "control" / "src" / "service.cpp"
+PAYLOAD_QUERY_HEADER = REPO_ROOT / "payload" / "control" / "include" / "cs2" / "control" / "occlusion_query.hpp"
+
+
+def payload_service_source() -> str:
+    """The payload's control service — the half that writes the answer."""
+    assert PAYLOAD_SERVICE.is_file(), "the payload's service source is there"
+    return PAYLOAD_SERVICE.read_text(encoding="utf-8")
+
+
+def payload_trace_probe_keys() -> set[str]:
+    """The JSON keys the payload's ``trace_probe`` command writes.
+
+    The keys are the ones set inside ``do_trace_probe`` — the command's own
+    publication, not the rest of the service.
+    """
+    source = payload_service_source()
+    marker = "void Service::do_trace_probe"
+    assert marker in source, "the payload has the trace_probe command"
+    region = source.split(marker, 1)[1]
+    return set(re.findall(r'\.set\("([^"]+)"', region))
+
+
+def payload_verdict_names() -> set[str]:
+    """The verdict names the payload's ``to_string`` can produce."""
+    source = PAYLOAD_QUERY_HEADER.read_text(encoding="utf-8")
+    marker = "auto to_string(TraceVerdict verdict)"
+    assert marker in source, "the payload names the verdicts"
+    region = source.split(marker, 1)[1]
+    # The function's own body: the next closing brace at the start of a line.
+    region = region.split("\n}\n", 1)[0]
+    return set(re.findall(r'return "([a-z_]+)";', region))
 
 
 def trace_probe_answer() -> TraceProbeResult:
@@ -62,6 +96,7 @@ def trace_probe_answer() -> TraceProbeResult:
     }
     difference: TraceDifferenceDict = {
         "verdict": "engine_only",
+        "engine_answer_usable": True,
         "engine_only": [span],
         "ours_only": [],
     }
@@ -75,6 +110,8 @@ def trace_probe_answer() -> TraceProbeResult:
             "faulted": False,
             "interval_count": 2,
             "intervals_overflow": False,
+            "answer_missing": False,
+            "surface_mapped": False,
             "intervals": [interval],
         },
         "ours": [occluder],
@@ -92,6 +129,8 @@ def trace_probe_answer() -> TraceProbeResult:
         "engine": {
             "ok": True,
             "faulted": False,
+            "rays_ok": 1,
+            "rays_faulted": 0,
             "iface": "0x7ff600000000",
             "filter": "0x7ff600001000",
             "filter_mask": 0x1C300B,
@@ -99,20 +138,33 @@ def trace_probe_answer() -> TraceProbeResult:
             "filter_flags": 15,
             "occluders": 812,
             "occluder_hits": 1,
+            "occluder_cap": 256,
+            "occluders_truncated": False,
+            "world_cached": True,
+            "target_pad": 8.0,
         },
         "ran": True,
         "timeout": False,
+        "game_thread": "answered",
         "rays": [ray],
     }
 
 
 class TestTraceProbeTypes(unittest.TestCase):
-    def test_the_verdicts_are_the_four_the_payload_publishes(self) -> None:
-        """The difference's one-line verdict has exactly four values."""
+    def test_the_verdicts_are_the_five_the_payload_publishes(self) -> None:
+        """The difference's one-line verdict has exactly the payload's values."""
         self.assertEqual(
             set(get_args(TraceVerdict)),
-            {"agrees", "engine_only", "ours_only", "both"},
+            {"agrees", "engine_only", "ours_only", "both", "unknown"},
         )
+
+    def test_the_verdicts_are_the_payloads_own_names(self) -> None:
+        """The client's verdict names are the payload's ``to_string`` names.
+
+        A verdict the client does not know (or one the payload cannot produce) is a
+        wire break — and it is silent, because both halves are typed.
+        """
+        self.assertEqual(set(get_args(TraceVerdict)), payload_verdict_names())
 
     def test_the_solid_kinds_are_the_solver_ones(self) -> None:
         """The probe reports the kinds `cs2::aim::SolidKind` carries."""
@@ -167,11 +219,47 @@ class TestTraceProbeTypes(unittest.TestCase):
         The command name is the contract: the client asks for ``trace_probe``
         and the payload's command switch must answer it.
         """
-        service = REPO_ROOT / "payload" / "control" / "src" / "service.cpp"
-        self.assertTrue(service.is_file(), "the payload's service source is there")
-        source = service.read_text(encoding="utf-8")
+        source = payload_service_source()
         self.assertIn('command == "trace_probe"', source)
         self.assertIn("do_trace_probe(", source)
+
+    def test_the_protocol_keys_are_the_payloads_own_json_keys(self) -> None:
+        """Every key the protocol declares is a key the payload writes.
+
+        This is the check the docstring promises: it reads the payload's C++ (the
+        same pattern as the other protocol tests), so a **renamed** key in the
+        payload is a failure here rather than a silent wire break. Both halves are
+        typed, so nothing else would notice.
+        """
+        written = payload_trace_probe_keys()
+        self.assertTrue(written, "the payload's command writes keys")
+        for name, typed in (
+            ("TraceProbeResult", TraceProbeResult),
+            ("TraceRayDict", TraceRayDict),
+            ("TraceRayEngineDict", protocol.TraceRayEngineDict),
+            ("TraceDifferenceDict", TraceDifferenceDict),
+            ("TraceIntervalDict", TraceIntervalDict),
+            ("TraceOccluderDict", TraceOccluderDict),
+            ("TraceSpanDict", TraceSpanDict),
+            ("TraceProbeEngineDict", protocol.TraceProbeEngineDict),
+        ):
+            for key in get_type_hints(typed):
+                with self.subTest(type=name, key=key):
+                    self.assertIn(key, written, f"the payload writes {name}.{key}")
+
+    def test_the_dropped_engine_answer_is_part_of_the_contract(self) -> None:
+        """The answer says when the engine's answer could not be read.
+
+        A probe whose engine call faulted (or whose container did not hold the
+        buffer it handed the engine) must not report "agrees" — the difference is
+        ``unknown`` and the answer says so.
+        """
+        answer = trace_probe_answer()
+        ray = answer["rays"][0]
+        self.assertIn("answer_missing", ray["engine"])
+        self.assertIn("engine_answer_usable", ray["difference"])
+        self.assertFalse(ray["engine"]["answer_missing"])
+        self.assertTrue(ray["difference"]["engine_answer_usable"])
 
 
 if __name__ == "__main__":
