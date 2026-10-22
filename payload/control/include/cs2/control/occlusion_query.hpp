@@ -194,12 +194,19 @@ void set_occlusion_exclude_pawns(const std::uintptr_t* pawns, int count) noexcep
 // is exact — a conservative superset of the true occluders, never a subset — and it is
 // what keeps one distant enemy from making the query map-wide (`docs/ragebot-perf.md`
 // §2.1). `box_min`/`box_max` remain the outer bound (and the entity/prop query box).
+// `target_ids` names the entity behind each `targets[i]` box. The solid's
+// `OcclusionHull::target` is set from it, so the solver can feed a hitbox only the
+// solids its own target's pyramid kept. **Without it the tag is `-1` (shared)**: a
+// tag that does not name the entity is worse than no tag, because every consumer
+// compares it against `Hitbox::target`.
 [[nodiscard]] auto query_world_occluders(const cs2::aim::Vec3& from, const cs2::aim::Vec3& box_min,
                                          const cs2::aim::Vec3& box_max, bool invoke,
                                          const std::uint16_t* exclude = nullptr,
                                          int exclude_count = 0,
                                          const cs2::aim::Aabb* targets = nullptr,
-                                         int target_count = 0, bool verify_enum = false)
+                                         int target_count = 0,
+                                         const int* target_ids = nullptr,
+                                         bool verify_enum = false)
     -> OcclusionQueryResult;
 
 // --- the trace probe (docs/re/bullet-trace.md) ---------------------------------

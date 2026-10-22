@@ -825,6 +825,10 @@ class RageResult(TypedDict, total=False):
     solve_hitchance: float
     solve_penetrated: bool
     solve_cells: int
+    #: The chosen aim's direction, in degrees: hand it to the trace probe to check the
+    #: solve's own ray against the engine's trace.
+    solve_yaw: float
+    solve_pitch: float
     #: The weapon facts the **fire gate** decided on, so `reloading`/`deploying`
     #: can be told apart from a field the payload failed to read.
     fire_clip: int

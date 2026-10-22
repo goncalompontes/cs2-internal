@@ -614,6 +614,10 @@ class Service {
   std::atomic<float> rage_solve_hitchance_{0.0F};
   std::atomic<bool> rage_solve_penetrated_{false};
   std::atomic<int> rage_solve_cells_{0};
+  // The chosen aim's direction (degrees), so the solve's own ray can be handed to the
+  // trace probe and compared with the engine's answer for the same segment.
+  std::atomic<float> rage_solve_yaw_{0.0F};
+  std::atomic<float> rage_solve_pitch_{0.0F};
   // The weapon facts the **fire gate** decided on, so `reloading`/`deploying` can be
   // told apart from a field the payload failed to read.
   std::atomic<int> rage_clip_{-1};
@@ -859,6 +863,11 @@ class Service {
   // (`docs/ragebot-perf.md` §2.1). Bounded: the multi-target solve caps candidates.
   static constexpr int k_max_occlusion_targets = 64;
   aim::Aabb occlusion_targets_[k_max_occlusion_targets] = {};
+  // The entity behind each target box (`occlusion_targets_[i]`): the tag the
+  // enumeration writes into every solid it keeps, and the reason it must be an
+  // entity index — `Hitbox::target` is one, and both the solver's per-hitbox
+  // filter and the projection compare against it.
+  int occlusion_target_ids_[k_max_occlusion_targets] = {};
   int occlusion_target_count_ = 0;
   // Entity-handle indices (`handle & 0x7fff`) of the players, so the occlusion query
   // skips their collision bodies (a player is a target, not an occluder).

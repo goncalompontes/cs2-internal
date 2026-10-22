@@ -1850,9 +1850,24 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
   // from stale poses would prune the walls in the real line of sight. The snapshot bounds
   // are always current, and the record ring adds the backtrack poses on top.
   aim::Aabb targets[k_max_occlusion_targets] = {};
+  // The entity behind each box: the solids its pyramid keeps are tagged with it, and
+  // every consumer (the solver, the projection) compares a hitbox's `target` — an
+  // entity index — against that tag.
+  int target_ids[k_max_occlusion_targets] = {};
   std::uintptr_t target_pawns[k_max_occlusion_targets] = {};
   int target_count = 0;
   bool inputs_complete = true;
+  // The entity index of a pawn, so each target box can be **named**: the solids the
+  // enumeration keeps are tagged with it, and every consumer compares a hitbox's
+  // `target` (an entity index) against that tag.
+  const auto index_for_pawn = [&](std::uintptr_t pawn) -> int {
+    for (const game::PlayerSnapshot& player : snapshot.players) {
+      if (player.pawn == pawn) {
+        return player.index;
+      }
+    }
+    return -1;
+  };
   const auto target_for = [&](std::uintptr_t pawn) -> aim::Aabb* {
     for (int i = 0; i < target_count; ++i) {
       if (target_pawns[i] == pawn) {
@@ -1864,6 +1879,7 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
       return nullptr;
     }
     target_pawns[target_count] = pawn;
+    target_ids[target_count] = index_for_pawn(pawn);
     aim::Aabb* target = &targets[target_count++];
     // Seed the base at the eye: the pyramid is `conv(eye, base)`, and the eye is its
     // apex, so adding the eye to the base changes nothing. It keeps "extend" uniform.
@@ -1936,8 +1952,10 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
       have_geometry = true;
       if (target_count < k_max_occlusion_targets) {
         const game::Vec3 pad{.x = 24.0F, .y = 24.0F, .z = 72.0F};  // a player-sized proxy box
-        targets[target_count++] =
+        targets[target_count] =
             aim::Aabb{.min = player.eye_origin - pad, .max = player.eye_origin + pad};
+        target_ids[target_count] = player.index;
+        ++target_count;
       } else {
         inputs_complete = false;
       }
@@ -1957,6 +1975,7 @@ void Service::cache_occlusion_targets(const game::Snapshot& snapshot) noexcept {
   occlusion_inputs_complete_ = inputs_complete;
   for (int i = 0; i < target_count; ++i) {
     occlusion_targets_[i] = targets[i];
+    occlusion_target_ids_[i] = target_ids[i];
   }
   // Exclude the players' own collision bodies (targets, not occluders). `index` is the
   // entity identity index, exactly the record handle's `& 0x7fff`.
@@ -2033,6 +2052,7 @@ void Service::on_game_thread() noexcept {
     std::uint16_t exclude[k_max_occlusion_exclude] = {};
     std::uintptr_t pawns[k_max_occlusion_exclude] = {};
     aim::Aabb targets[k_max_occlusion_targets] = {};
+    int target_ids[k_max_occlusion_targets] = {};
     int exclude_count = 0;
     int target_count = 0;
     bool inputs_complete = true;
@@ -2050,6 +2070,7 @@ void Service::on_game_thread() noexcept {
       }
       for (int i = 0; i < target_count; ++i) {
         targets[i] = occlusion_targets_[i];
+        target_ids[i] = occlusion_target_ids_[i];
       }
     }
     // The payload trace filter rejects the players (a target, not a solid) — the engine
@@ -2064,7 +2085,8 @@ void Service::on_game_thread() noexcept {
     const bool verify_enum = enum_mode == 2;
     OcclusionQueryResult query = query_world_occluders(
         eye, box_min, box_max, occlusion_invoke_.load(), exclude, exclude_count,
-        use_pyramid ? targets : nullptr, use_pyramid ? target_count : 0, verify_enum);
+        use_pyramid ? targets : nullptr, use_pyramid ? target_count : 0,
+        use_pyramid ? target_ids : nullptr, verify_enum);
     if (!inputs_complete) {
       query.stats.complete = false;
       query.stats.incomplete_reasons |=
@@ -2277,9 +2299,6 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // tick's verdict on the status, or the operator reads a stale number under
   // another objective's name (`docs/ragebot.md` §13.7).
   publish_monte_carlo(MonteCarloState{});
-  // The solve's own numbers are cleared with the verdict: a tick that returns before
-  // the solve must not publish the previous tick's value as its own.
-  rage_solve_ran_.store(false, std::memory_order_relaxed);
   // Auto-scope is re-decided every tick; the same sink applies the transition (`+zoom`).
   rage_scope_wanted_.store(false);
   const bool forced = rage_force_.load();
@@ -2835,6 +2854,14 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   rage_solve_hitchance_.store(result.hitchance, std::memory_order_relaxed);
   rage_solve_penetrated_.store(result.penetrated, std::memory_order_relaxed);
   rage_solve_cells_.store(static_cast<int>(result.cells), std::memory_order_relaxed);
+  // The chosen **direction**, in degrees: the ray the solve is claiming damage along,
+  // so it can be handed straight to `trace_probe` (`yaw`/`pitch`) and checked against
+  // the engine's own trace.
+  rage_solve_yaw_.store(std::atan2(result.direction.y, result.direction.x) * (180.0F / 3.14159265F),
+                        std::memory_order_relaxed);
+  rage_solve_pitch_.store(
+      -std::asin(std::clamp(result.direction.z, -1.0F, 1.0F)) * (180.0F / 3.14159265F),
+      std::memory_order_relaxed);
 
   // The aim/fire gate (`docs/ragebot.md` §3): only aim and fire when the solve meets
   // the user's minimum damage and hitchance, and (optionally) when the shot is not
@@ -3031,6 +3058,9 @@ void Service::reset_rage_fire() noexcept {
   // mode) would tell the operator a reason that is no longer true.
   rage_refusal_.store(static_cast<int>(FireRefusal::no_solve), std::memory_order_relaxed);
   rage_fire_mode_.store(static_cast<int>(FireMode::unknown), std::memory_order_relaxed);
+  // The last solve's numbers go with the fire path too: with the ragebot off they would
+  // describe a solve that is no longer running.
+  rage_solve_ran_.store(false, std::memory_order_relaxed);
   input_.set_rage_fire_press(false, false);
 }
 
@@ -3801,6 +3831,10 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
               Json::boolean(rage_solve_penetrated_.load(std::memory_order_relaxed)));
   payload.set("solve_cells",
               Json::integer(rage_solve_cells_.load(std::memory_order_relaxed)));
+  payload.set("solve_yaw",
+              Json::number(static_cast<double>(rage_solve_yaw_.load(std::memory_order_relaxed))));
+  payload.set("solve_pitch",
+              Json::number(static_cast<double>(rage_solve_pitch_.load(std::memory_order_relaxed))));
   payload.set("fire_clip", Json::integer(rage_clip_.load(std::memory_order_relaxed)));
   payload.set("fire_clip_known",
               Json::boolean(rage_clip_known_.load(std::memory_order_relaxed)));
@@ -4082,14 +4116,20 @@ auto Service::debug_lines(char* out, std::size_t size) noexcept -> std::size_t {
       static_cast<unsigned long long>(rage_solve_us_.load(std::memory_order_relaxed)));
   // **The solve's own answer** — what the field produced, and (with `fire_refusal`)
   // why it did not become a shot.
+  // The **last solve's** answer: the numbers a refusing tick throws away are the ones
+  // the operator needs, so they are not cleared per tick — the line above says whether
+  // *this* tick solved (`solve ok` / `solve <stage>`).
   if (rage_solve_ran_.load(std::memory_order_relaxed)) {
-    add("\nsolve value %.1f   hitchance %.2f   wall %s   cells %d",
+    add("\nlast solve value %.1f   hitchance %.2f   wall %s   cells %d",
         static_cast<double>(rage_solve_value_.load(std::memory_order_relaxed)),
         static_cast<double>(rage_solve_hitchance_.load(std::memory_order_relaxed)),
         rage_solve_penetrated_.load(std::memory_order_relaxed) ? "yes" : "no",
         rage_solve_cells_.load(std::memory_order_relaxed));
+    add("\naim yaw %.2f   pitch %.2f",
+        static_cast<double>(rage_solve_yaw_.load(std::memory_order_relaxed)),
+        static_cast<double>(rage_solve_pitch_.load(std::memory_order_relaxed)));
   } else {
-    add("\nsolve value -   (no solve this tick)");
+    add("\nlast solve -   (none since the ragebot started)");
   }
   // The weapon facts the fire gate decided on.
   add("\nfire facts clip %d%s   reload %d   deploy %d   ready %d",

@@ -994,7 +994,7 @@ cs2::aim::AabbBvh g_world_bvh;
 void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3& hi,
                std::vector<OcclusionHull>& out, int& shapes, int* type_counts,
                OcclusionQueryStats* stats, bool collect, const cs2::aim::Aabb* targets,
-               int target_count) {
+               int target_count, const int* target_ids) {
   std::uintptr_t data = 0;
   if (!cs2::game::read(body + k_body_data, data) || data < 0x10000) {
     mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
@@ -1119,13 +1119,19 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
     // otherwise makes the box span the whole map (`docs/ragebot-perf.md` §2.1).
     std::vector<int> hits;
     hits.reserve(1024);
-    std::vector<int> owner;  // per-cached-hull target: -1 none, >=0 one target, -2 shared
+    // The owner of a cached hull: the **entity index** whose pyramid kept it, or
+    // `k_owner_shared` when several did (it then applies to all of them). It is the
+    // entity index — not the box's position in `targets` — because that is what the
+    // solver and the projection compare a hitbox's target against (`hitbox.target`);
+    // tagging with the array index made every tagged solid useless to every hitbox.
+    constexpr int k_owner_unset = -3;
+    constexpr int k_owner_shared = -2;
+    std::vector<int> owner;
     if (targets != nullptr && target_count > 0) {
-      // Owner per cached hull: `t` when only one target's pyramid contains it, `-2` when
-      // several do (then it is shared and applies to all of them).
-      owner.assign(static_cast<std::size_t>(g_world_cache.count), -1);
+      owner.assign(static_cast<std::size_t>(g_world_cache.count), k_owner_unset);
       std::vector<int> target_hits;
       for (int t = 0; t < target_count; ++t) {
+        const int id = target_ids != nullptr ? target_ids[t] : -1;
         target_hits.clear();
         // The pyramid's apex is the **eye**, not the query box corner: a solid occludes a
         // hitbox only if it meets a segment from the eye into that hitbox.
@@ -1133,7 +1139,8 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
         for (const int index : target_hits) {
           hits.push_back(index);
           const int previous = owner[static_cast<std::size_t>(index)];
-          owner[static_cast<std::size_t>(index)] = previous == -1 ? t : (previous == t ? t : -2);
+          owner[static_cast<std::size_t>(index)] =
+              previous == k_owner_unset ? id : (previous == id ? id : k_owner_shared);
         }
       }
       // The per-target queries overlap, so deduplicate before projecting.
@@ -1176,10 +1183,10 @@ void walk_body(std::uintptr_t body, const Vec3& eye, const Vec3& lo, const Vec3&
     for (const int index : hits) {
       const int owner_target = owner.empty() ? -1 : owner[static_cast<std::size_t>(index)];
       out.push_back(g_world_cache.hulls[index]);
-      if (owner_target == -2) {
+      if (owner_target == k_owner_shared) {
         out.back().target = -1;  // shared by several targets: applies to all
-      } else if (owner_target >= 0) {
-        out.back().target = owner_target;
+      } else if (owner_target != k_owner_unset) {
+        out.back().target = owner_target;  // the entity index (or -1 when unknown)
       }
       if (stats != nullptr && collect) {
         ++stats->world_box_kept;
@@ -1225,7 +1232,7 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
                   const Vec3& hi, std::vector<OcclusionHull>& out, OcclusionQueryStats* stats,
                   int& shapes, int* type_counts, bool collect, std::uintptr_t entity_blocks,
                   const std::uint16_t* exclude, int exclude_count, const cs2::aim::Aabb* targets,
-                  int target_count) {
+                  int target_count, const int* target_ids) {
   std::uintptr_t bodies[k_max_bodies] = {};
   int body_count = 0;
 
@@ -1315,7 +1322,7 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
   int* const counts = collect ? type_counts : nullptr;
   for (int b = 0; b < body_count; ++b) {
     walk_body(bodies[b], eye, lo, hi, target, shapes, counts, stats, collect, targets,
-              target_count);
+              target_count, target_ids);
   }
 }
 
@@ -1438,8 +1445,8 @@ void set_occlusion_exclude_pawns(const std::uintptr_t* pawns, int count) noexcep
 
 auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& box_max, bool invoke,
                            const std::uint16_t* exclude, int exclude_count,
-                           const cs2::aim::Aabb* targets, int target_count, bool verify_enum)
-    -> OcclusionQueryResult {
+                           const cs2::aim::Aabb* targets, int target_count, const int* target_ids,
+                           bool verify_enum) -> OcclusionQueryResult {
   OcclusionQueryResult result;
   OcclusionQueryStats* const stats = &result.stats;
   g_verify_enum = verify_enum;
@@ -1574,7 +1581,7 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
     }
     const auto data = reinterpret_cast<std::uintptr_t>(vector.data);
     walk_records(data, count, from, lo, hi, result.hulls, stats, shapes, type_counts, collect,
-                 entity_blocks, exclude, exclude_count, targets, target_count);
+                 entity_blocks, exclude, exclude_count, targets, target_count, target_ids);
   };
 
   // The box spans the eye and every target hitbox (the caller's AABB), plus the
