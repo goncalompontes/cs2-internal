@@ -94,11 +94,12 @@ getting it wrong - is in the plugin's `docs\configuration.md` §"The Windows
 quoting rule".
 
 **The protection pass is not in this loop any more.** It is a separate
-project (`C:\Users\gpmpo\cs2-protect`) with its own CMake build, its own
-tests and its own CI. This tree only *loads* the built DLL when
-`-Dprotect=true` is passed, and `-Dprotect_tools=<repo>` points at the
-checkers. A stale plugin therefore cannot be produced here: it is not built
-here.
+project, checked out at `tools/protect` as a git submodule
+(<https://github.com/goncalompontes/cs2-protect>) with its own CMake build,
+its own tests and its own CI. This tree only *loads* the built DLL when
+`-Dprotect=true` is passed; `protect_tools` and `protect_plugin` default to
+the submodule and its build output. A stale plugin therefore cannot be
+produced here: it is not built here.
 
 The loop runs in the **task's worktree**, and a worktree is only as good as
 its inputs. The `calibration\` dumps are gitignored and the SDK generation

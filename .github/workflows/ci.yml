@@ -14,8 +14,10 @@
 #   * the live game: a CI runner has no GPU and no interactive session, so
 #     nothing here exercises the payload in CS2. The live checks stay manual
 #     (docs/windows-validation.md).
-#   * the protection pass: `-Dprotect=true` needs the LLVM pass plugin and a
-#     policy file, which are not in the tree.
+#   * the protection pass: the `tools/protect` submodule is optional, and the
+#     protected payload build needs the LLVM SDK and a policy file; this
+#     workflow builds the unprotected payload. The plugin's own build and tests
+#     live in that repository (see tools/protect/CONTRIBUTING.md).
 # #   * the injector against a real target: the injector's own test aids
 #     (a benign victim, a trivial DLL) are built, not run against a target.
 #   * the format check: the tree is deliberately not clang-format-clean

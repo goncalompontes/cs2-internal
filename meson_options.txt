@@ -7,8 +7,3 @@ option('live_calibration',
   type: 'boolean',
   value: false,
   description: 'Run live calibration against a running target before rendering SDK headers (requires the target running).')
-
-option('protect_tools',
-  type: 'string',
-  value: '',
-  description: 'Path to the external cs2-protect repository (its checkers); required when protect=true.')

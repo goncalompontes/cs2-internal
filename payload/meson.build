@@ -68,11 +68,27 @@ if protect_enabled
           '/clang:-fpass-plugin=..., which only the clang driver understands (this build ' +
           'uses ' + cpp.get_id() + ')')
   endif
-  if protect_plugin == ''
-    error('-Dprotect=true needs -Dprotect_plugin=<path to Cs2Protect.dll>')
+  protect_tool = get_option('protect_tools')
+  if protect_tool == ''
+    protect_tool = meson.current_source_dir() / '..' / 'tools' / 'protect'
+  elif not fs.is_absolute(protect_tool)
+    protect_tool = meson.current_source_dir() / '..' / protect_tool
   endif
-  if not fs.is_absolute(protect_plugin)
-    error('the plugin path must be absolute: ' + protect_plugin)
+  if not fs.is_dir(protect_tool)
+    error('the protection tools directory does not exist: ' + protect_tool +
+          '\ninitialize the submodule with `git submodule update --init --recursive`')
+  endif
+
+  if protect_plugin == ''
+    protect_plugin = protect_tool / 'build' / 'Cs2Protect.dll'
+  elif not fs.is_absolute(protect_plugin)
+    # A relative path is relative to the cs2-internal root, the same way the
+    # default `tools/protect` is: `payload/` is the current source directory.
+    protect_plugin = meson.current_source_dir() / '..' / protect_plugin
+  endif
+  if not fs.is_file(protect_plugin)
+    error('the protection plugin does not exist: ' + protect_plugin +
+          '\nbuild it with `python tools/protect/scripts/build.py` (the cs2-protect submodule)')
   endif
   if ',' in protect_plugin
     error('the plugin path must not contain a comma (it is one compiler argument): ' + protect_plugin)
@@ -81,17 +97,6 @@ if protect_enabled
     error('the plugin path must not contain a space (it is one compiler argument): ' + protect_plugin)
   endif
 
-  protect_tool = get_option('protect_tools')
-  if protect_tool == ''
-    error('-Dprotect=true needs -Dprotect_tools=<path to the cs2-protect repository> ' +
-          '(it holds verify_plugin.py, check_policy.py and check_payload.py)')
-  endif
-  if not fs.is_absolute(protect_tool)
-    error('the protection tools path must be absolute: ' + protect_tool)
-  endif
-  if not fs.is_dir(protect_tool)
-    error('the protection tools directory does not exist: ' + protect_tool)
-  endif
   protect_verify = find_program(protect_tool / 'verify_plugin.py')
   protect_check = find_program(protect_tool / 'check_policy.py')
   protect_payload_check = find_program(protect_tool / 'check_payload.py')

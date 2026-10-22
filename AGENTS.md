@@ -80,7 +80,13 @@ current work is the **cleanup** branch (`chore/cleanup`):
 * **No diagnostics in the feature code.** `RagePerf`, the trace probe, the
   heatmap *command*, the HUD status sections and the per-frame state dump are
   removed. The crash guard and the event ring stay.
-* **The protection pass is a separate repository** (`C:\Users\gpmpo\cs2-protect`).
+* **The protection pass is a separate repository**, checked out at
+  `tools/protect/` as a git submodule
+  (<https://github.com/goncalompontes/cs2-protect>). Initialize it with
+  `git submodule update --init --recursive` and build it with
+  `python tools/protect/scripts/build.py`. See
+  [`docs/protection.md`](docs/protection.md); the plugin's handoff, plan,
+  specs, research and `CONTRIBUTING.md` are in `tools/protect/`.
 * **One-shot documents are in [`docs/archive/`](docs/archive/).** The
   normative set is `AGENTS.md`, `docs/architecture.md`, `docs/decisions.md`,
   `docs/style-guide.md`, `docs/setup-windows.md`, `docs/control-harness.md`,

@@ -1,0 +1,3 @@
+[submodule "tools/protect"]
+	path = tools/protect
+	url = https://github.com/goncalompontes/cs2-protect.git

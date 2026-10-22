@@ -3,10 +3,15 @@ option('protect',
   value: false,
   description: 'Apply the LLVM protection pass to the payload.')
 
+option('protect_tools',
+  type: 'string',
+  value: '',
+  description: 'Path to the cs2-protect repository (default: the tools/protect submodule); required when protect=true.')
+
 option('protect_plugin',
   type: 'string',
   value: '',
-  description: 'Path to Cs2Protect.dll (the LLVM pass plugin).')
+  description: 'Path to Cs2Protect.dll. Default: <protect_tools>/build/Cs2Protect.dll.')
 
 option('protect_reference',
   type: 'string',

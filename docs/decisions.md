@@ -652,8 +652,11 @@ retired.
   heatmap command, the HUD status sections and the per-frame state dump are
   removed; the crash guard and the event ring stay. The angular-chart math the
   solver uses is not diagnostics and stays.
-- **The protection pass is a separate repository** (`C:\Users\gpmpo\cs2-protect`).
-  This tree loads the built DLL (`-Dprotect=true -Dprotect_tools=<repo>`).
+- **The protection pass is a separate repository**, checked out at
+  `tools/protect` as a git submodule
+  (<https://github.com/goncalompontes/cs2-protect>). This tree loads the built
+  DLL (`-Dprotect=true`; `protect_tools` and `protect_plugin` default to the
+  submodule).
 - **The MCP is the tool surface.** Build, test, offsets, preflight and
   calibration are `tools.cs2.*`; the one-time scripts and task specs are in
   `docs/archive/`.
