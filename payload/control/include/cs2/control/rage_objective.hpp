@@ -224,29 +224,46 @@ inline constexpr int SEED_SOURCE_DEFAULT = SEED_SOURCE_SEQUENCE;
 
 // The weapon's **spread pattern**, decided from its designer name.
 //
-// **The engine's rule is per weapon, not per type.** The engine's spread kernel
-// transforms the radius `r -> 1 - r^2` for the weapons whose VData carries
-// `attackType == 1` (`docs/re/aim.md` §"The spread cone"); in CS2 that is the R8
-// Revolver, whose designer name is `weapon_revolver`. `WeaponProfile` carries
-// the weapon *type* only, and a revolver is type 3 like every rifle, so the
-// pattern cannot be inferred from it — and the core has **no default** for it
-// (`spread_kernel`'s pattern argument is required), because a default would drop
-// the revolver's transform without a word.
+// **This names the weapon's *class*, not the engine's rule.** The engine's rule
+// (docs/re/aim.md §"The attack type") is: the revolver's `1 - r^2` needs the
+// weapon **id** — the VData's `m_bIsRevolver` — **and** the attack type == 1.
+// The designer name is **not** equivalent: it cannot see the attack type, and it
+// is a name, not an id. The rule therefore lives in the **core**
+// (`cs2::aim::radius_transform`), which reads the VData's flag and the attack
+// type from the weapon profile, so this class can only ever **narrow** what the
+// core does — it can never put the revolver's transform on a weapon the engine
+// would not transform.
 //
 // The rule is an **exact match** on the weapon's short name:
 //
-//   * `revolver` -> the revolver's `1 - r^2`;
-//   * every other name -> the standard pattern.
+//   * `revolver` -> the revolver's class;
+//   * every other name -> the standard class.
 //
 // **A weapon the payload could not name** (an empty designer name) gets the
-// standard pattern as well: it is the pattern every weapon except the revolver
-// uses, so it is the conservative choice. The name is what the rule is keyed on
-// and the caller reports it, so an operator can always see which weapon was
+// standard class as well: it is the class every weapon except the revolver uses,
+// so it is the conservative choice. The name is what the class is keyed on and
+// the caller reports it, so an operator can always see which weapon was
 // classified.
 [[nodiscard]] constexpr auto spread_pattern_for(std::string_view weapon) noexcept
     -> cs2::aim::SpreadPattern {
   return same_name(weapon_short_name(weapon), "revolver") ? cs2::aim::SpreadPattern::revolver
                                                           : cs2::aim::SpreadPattern::standard;
+}
+
+// The weapon's **spread pattern**, decided from the weapon's profile.
+//
+// **This is the engine's discriminator**: the VData's own `m_bIsRevolver` flag
+// (+0x71E) — the payload's read of the weapon **id** the engine compares. The
+// deagle's flag is false and the R8's is true, so the two are told apart by the
+// same thing the engine tells them apart by.
+//
+// **The class alone is not the transform.** The core applies the revolver's
+// `1 - r^2` only when the attack type is the secondary one
+// (`cs2::aim::radius_transform`), because the engine's rule needs both.
+[[nodiscard]] constexpr auto spread_pattern_for(const cs2::aim::WeaponProfile& weapon) noexcept
+    -> cs2::aim::SpreadPattern {
+  return weapon.is_revolver ? cs2::aim::SpreadPattern::revolver
+                            : cs2::aim::SpreadPattern::standard;
 }
 
 // The pattern's name (the status).

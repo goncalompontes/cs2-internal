@@ -146,6 +146,33 @@ auto main() -> int {
                primary_offsets[0].y != revolver_offsets[0].y,
            "the revolver's transform needs the secondary attack type");
 
+    // The negev's `r -> 1 - r^(2^k)`: the recoil index 2 is the third shot of a
+    // burst, so the exponent is 1 and both radii become `1 - r^2`.
+    const SpreadKernel negev{.spread = 0.02F,
+                             .inaccuracy = 0.01F,
+                             .pellets = 1,
+                             .pattern = cs2::aim::SpreadPattern::negev,
+                             .rules = cs2::aim::SpreadRules{.recoil_index = 2}};
+    const auto negev_seed = cs2::aim::md5_pseudo_random(31337U);
+    std::vector<Vec2> negev_offsets(1);
+    const auto negev_count =
+        cs2::aim::draw_pellet_offsets(negev_seed, negev, std::span<Vec2>{negev_offsets});
+    expect(negev_count.has_value() && *negev_count == 1, "the negev shot draws its pellet");
+    {
+      cs2::aim::UniformRandomStream stream(negev_seed);
+      float r1 = stream.random_float(0.0F, 1.0F);
+      const float a1 = stream.random_float(0.0F, cs2::aim::TWO_PI);
+      float r2 = stream.random_float(0.0F, 1.0F);
+      const float a2 = stream.random_float(0.0F, cs2::aim::TWO_PI);
+      r1 = r1 * r1;
+      r1 = 1.0F - r1;
+      r2 = r2 * r2;
+      r2 = 1.0F - r2;
+      expect(negev_offsets[0].x == 0.02F * r1 * std::cos(a1) + 0.01F * r2 * std::cos(a2) &&
+                 negev_offsets[0].y == 0.02F * r1 * std::sin(a1) + 0.01F * r2 * std::sin(a2),
+             "the negev's radii are turned to 1 - r^2 on the third shot of a burst");
+    }
+
     // A golden vector: the exact offsets of one seed, so a change in the RNG itself
     // cannot pass unnoticed by the cross-check above (both sides use the same
     // stream). The literal is a **decimal**, so it is compared with a tolerance:

@@ -1,4 +1,11 @@
-# `client.dll` — aim / shot model (build 25815307)
+# `client.dll` — aim / shot model
+
+> **Rewritten 2026-10-22 (T38).** The previous revision of this file described
+> build `25815307` and was **wrong** about the spread model in three ways: it
+> said the sampler draws four numbers *per pellet* (it draws two per pellet),
+> it keyed the revolver's transform on a *distance*, and it carried the old
+> build's addresses. The addresses, the draw order, the attack type, the negev's
+> rule and the pattern table are re-derived below.
 
 Image base `0x180000000`. Addresses are **absolute VAs**; RVA = `VA - 0x180000000`.
 
@@ -7,35 +14,248 @@ Image base `0x180000000`. Addresses are **absolute VAs**; RVA = `VA - 0x18000000
 > (`docs/ragebot.md`) depends on: spread, inaccuracy, the shot seed, the trace
 > API, hitboxes, and the penetration parameters.
 
+## The build
+
+| | sha256 | size | mtime |
+|---|---|---|---|
+| the notes' original build (`25815307`) | `44af2aa0d2c64f90d273444cb393b8b679094f0b02136dbdb89d4ec82a560008` | 39 169 176 B | 2026-10-13 |
+| the RE build (`659940c1`) | `659940c1db362ed981d1df10637cec8c2a3d99409b77fc3b73e435e4649e36b0` | 39 205 528 B | 2026-10-15 |
+| **the live build** | **`5a46a09b521bbd607012146364dafae2abfa50364246638391990d4c7dfb9d49`** | 39 205 528 B | **2026-10-21 18:37** |
+
+**The game auto-updated on 2026-10-21**: the module on disk is no longer
+`659940c1`. Every RVA cited below was re-checked against the on-disk build
+with capstone and **all of them still hold** — the module's size is unchanged
+and the code did not move. The **schema offsets** are unaffected (they come from
+the schema dump, not from a signature).
+
+### The addresses
+
+| | old (`44af2aa0`) | RE build (`659940c1`) | **live (`5a46a09b`)** |
+|---|---|---|---|
+| `FX_FireBullets` | `0xd22c50` | **`0xd237d0`** | **`0xd237d0`** |
+| the cone sampler | `0xd23460` | **`0xd23fe0`** | **`0xd23fe0`** |
+| the pattern lookup | `0x7cd1b0` | **`0x7cdad0`** | **`0x7cdad0`** |
+| the pattern table global | `0x1822195f8` | **`0x1822195e8`** | **`0x1822195e8`** |
+| the region-0/1 builder (recoil) | — | `0x7cae80` | `0x7cae80` |
+| the region-2 builder (pellets) | — | `0x7cb180` | `0x7cb180` |
+
+> **A trap.** On the current build the *old* `0x7cd1b0` falls **inside a
+> different function** (`FUN_1807cd010`, the crosshair/recoil consumer). Anyone
+> re-deriving by address translation lands on the wrong function.
+
 ## TL;DR / decision
 
-**The bullet cone is deterministic.** `FX_FireBullets` → `FUN_180d23460` seeds
+**The bullet cone is deterministic.** `FX_FireBullets` → the cone sampler seeds
 the RNG from the command's `random_seed` and draws the offset from it. Given the
 command sequence (and the weapon's spread/inaccuracy magnitudes) the exact
 pellet direction(s) are computable — there is no random cone to sample. The
 remaining uncertainty is only the target's lag-compensated pose.
 
-## The spread cone — `FUN_180d23460` (RVA `0xd23460`)
+## The spread cone — `FUN_180d23fe0` (RVA `0xd23fe0`)
 
-Called from `FX_FireBullets` (`FUN_180d22c50`, RVA `0xd22c50`), which passes
-`(weaponId, numBullets, attackType, seed, spreadMag, inaccMag, dist, outX, outY)`.
-Assembly-verified:
+Called from `FX_FireBullets` (`FUN_180d237d0`, RVA `0xd237d0`), which passes
+`(weaponId, numBullets, attackType, seed, spreadMag, inaccMag, recoilIndex, out)`.
+Decompiled:
 
 ```
 RandomSeed(seed);
+r1 = 0; a1 = 0;                       // the shot's spread pair
 for each pellet:
-  r1 = RandomFloat(0, 1);   a1 = RandomFloat(0, 2*pi);   // spread      (1.0 @ 0x181ac0074, 2pi @ 0x181b00584)
-  r2 = RandomFloat(0, 1);   a2 = RandomFloat(0, 2*pi);   // inaccuracy
-  // weapon patterns:
-  //   revolver (attackType 1):  r = 1 - r^2
-  //   negev (dist < 3):         r = 1 - r^(2^k)
-  //   shotgun / pattern mode:   FUN_1807cd1b0(table, weaponId, attackType, i, &angle, &radius)
-  //   debug convars:            force r = 1 / force a = pi/2 (0x181c088cc = 1.5708)
-  off_x = r1*cos(a1) + r2*cos(a2);
-  off_y = r1*sin(a1) + r2*sin(a2);
+  if (pellet == 0 || shotgun_patterns_convar) {
+     r1 = RandomFloat(0, 1);  a1 = RandomFloat(0, 2*pi);      // the **spread**
+     r1 = revolver ? 1 - r1^2 : r1;
+     r1 = negev    ? 1 - r1^(2^k) : r1;                        // k = 3 - recoilIndex
+     if (weapon_debug_max_inaccuracy) r1 = 1;
+     r1 = r1 * spreadMag;
+  }
+  if (shotgun_patterns_convar) {
+     (a2, r2) = pattern_table[recoilIndex * numBullets + pellet];   // or the random cone
+  } else {
+     r2 = RandomFloat(0, 1);  a2 = RandomFloat(0, 2*pi);      // the **inaccuracy**
+  }
+  r2 = revolver ? 1 - r2^2 : r2;
+  r2 = negev    ? 1 - r2^(2^k) : r2;
+  if (weapon_debug_max_inaccuracy) r2 = 1;
+  if (weapon_debug_inaccuracy_only_up) a2 = pi/2;
+  off_x = spreadMag*r1*cos(a1) + inaccMag*r2*cos(a2);
+  off_y = spreadMag*r1*sin(a1) + inaccMag*r2*sin(a2);
 ```
 
-The offset is applied in the `(right, up)` tangent frame of the aim direction.
+**The draw order is the engine's, and it is not "four numbers per pellet":**
+
+* the **spread** radius and angle (`r1`, `a1`) are drawn **once**, for pellet 0,
+  and again for every pellet **only** when the
+  `weapon_accuracy_shotgun_spread_patterns` convar is on;
+* the **inaccuracy** radius and angle (`r2`, `a2`) are drawn **per pellet**.
+
+So a single-pellet shot draws exactly `r1, a1, r2, a2` — the same four numbers,
+in the same order, as a "four per pellet" model would draw for pellet 0 — and a
+multi-pellet shot **reuses** the spread pair. The offset is applied in the
+`(right, up)` tangent frame of the aim direction.
+
+> **The repo's model was wrong here.** It drew all four numbers per pellet, so
+> its RNG stream desynchronised from pellet 1 onward: every pellet after the
+> first was wrong. The payload's model is fixed (`payload/aim/src/spread.cpp`),
+> and the single-pellet case is bit-identical to the old one.
+
+### The three debug convars
+
+The cone sampler reads three `ConVar`s by their `ConVar*` (each inside a 16-byte
+`ConVarRef` global, the pointer at **+8**, and the value at **+0x58**):
+
+| ConVarRef | `ConVar*` | name | what it does |
+|---|---|---|---|
+| `0x1825beca8` | `0x1825becb0` | **`weapon_debug_max_inaccuracy`** | forces both radii to 1 ("Force all shots to have maximum inaccuracy") |
+| `0x1825becb8` | `0x1825becc0` | **`weapon_debug_inaccuracy_only_up`** | forces the inaccuracy angle to π/2 ("Force weapon inaccuracy to be in exactly the up direction") |
+| `0x1825becd8` | `0x1825bece0` | **`weapon_accuracy_shotgun_spread_patterns`** | selects the **pattern table** instead of the random cone (off by default) |
+
+The identities are pinned by the **registration code** (the `ConVarRef` each
+name is registered into), not by the order of the globals.
+
+### The negev
+
+* the "distance" the engine tests is **`m_flRecoilIndex`**
+  (`*(float*)(weapon_entity + 0x1A28)`) — a **per-shot counter**, `+1.0` after
+  every shot, reset to 0 when the weapon stops firing. **Not a distance.**
+* the branch is `weaponId == negevId && recoilIndex < 3`, and the exponent is
+  `k = 3 - recoilIndex`: recoil index 0 → `r → 1 - r⁸`, 1 → `1 - r⁴`,
+  2 → `1 - r²`. At 3 and above the branch is not taken at all — **no
+  transform**. So it is the **first three shots of a burst**.
+* the transform is applied to **both** radii (the engine has an identical copy
+  of the branch for each).
+
+### The revolver
+
+* the transform `r → 1 - r²` needs **the weapon id** *and* **the attack type ==
+  1**. The engine compares the weapon's id with the **`weapon_revolver` item
+  definition's** id (`*(short*)(itemDefinition + 0x10)`), not with a designer
+  name.
+* the transform is applied to **both** radii.
+* the payload reads the **VData's** `m_bIsRevolver` flag (VData `+0x71E`) as
+  its stand-in for the id comparison, and the attack type from
+  `m_weaponMode` (see below).
+
+## The attack type
+
+`*(int32*)(weapon_entity + 0x1A00)` = `C_CSWeaponBase::m_weaponMode`, the
+engine's `CSWeaponMode`: `Primary_Mode = 0`, `Secondary_Mode = 1`.
+
+**The payload's SDK already has it** — `payload/sdk/schemas/client_dll.hpp`:
+`{ "weapon_mode", "SWeaponMode", 0x1a00, "m_weaponMode" }`. **No new dumper
+signature is needed.**
+
+### The four fire paths
+
+`FX_FireBullets` has **three** callers, and the one that reaches
+`CSBaseGunFire` (`FUN_180803830`) has **four** call sites. The **attack type**
+each of them passes:
+
+| call site | the attack type it passes |
+|---|---|
+| `0x180822610` | **`m_weaponMode`** — `*(int*)(weapon + 0x1A00)` |
+| `0x180824740` | the literal `1` (the secondary path; it *sets* `m_weaponMode = 1` first) |
+| `0x180831010` | `ammo_in_clip & 1` (a virtual call) |
+| `0x180831060` | the literal `0` |
+
+The third caller of `FX_FireBullets` (`0x18080ac20`) passes the literal `0`,
+and the first (`0x1807a5d50`) passes a **shot-struct field** (`+0x68`) of
+unknown provenance.
+
+**The field is sticky.** One path sets it to 1, the fire path **consumes and
+clears** it. A payload that computes the cone *before* the engine fires
+therefore reads the engine's **previous** decision — and for three of the four
+paths the field is not the engine's attack type at all.
+
+**What the payload does.** It reads the field (`weapon + 0x1A00`) into the
+weapon profile (`WeaponProfile::attack_type`) and reports **-1 (unknown)** when
+the read fails. The engine's rule is applied by the core
+(`cs2::aim::radius_transform`): the revolver's `1 - r²` needs the VData's
+`m_bIsRevolver` **and** `attackType == 1`. **Where the payload cannot know the
+attack type it treats the weapon as NOT in secondary mode**, so the transform is
+not applied and the cone is the standard one. In practice the field is cleared
+by the fire path, so the payload reads 0 (primary) for every shot it takes.
+
+## The pattern table
+
+A global map at **`0x1822195e8`** (RVA `0x22195e8`): `uint16 weapon id` → a
+**0x608-byte block**.
+
+| offset | what |
+|---|---|
+| `+0x004` | region 0: 64 × `{float angle, float radius}` — the recoil/crosshair path |
+| `+0x204` | region 1: the same shape — the recoil/crosshair path |
+| `+0x404` | **region 2: the shotgun pellet pattern** — the one the *bullet* path reads |
+| `+0x604` | an "invalid" flag (set when the weapon fires fewer than two bullets) |
+
+Each region is 64 entries of `{angle, radius}` (8 bytes each), so region 2 ends
+at `+0x603` and the flag is at `+0x604`.
+
+**The lookup** (`FUN_1807cdad0`, RVA `0x7cdad0`):
+
+```
+if (!invalid && index < 0x40) { angle = block[0x404 + index*8]; radius = block[0x408 + index*8]; return; }
+// the fallback: the random cone, from the **global** stream
+angle = RandomFloat(0, 2*pi);  radius = RandomFloat(0, 1);
+```
+
+Note the fallback draws the **angle first**, then the radius — the opposite of
+the normal path.
+
+**The index** is `recoilIndex * numBullets + pelletIndex` and must be `< 0x40`;
+otherwise the engine falls back to the random cone.
+
+**The two builders** (both run at start-up, per weapon):
+
+* `FUN_1807cae80` (RVA `0x7cae80`) fills **regions 0 and 1** from the VData's
+  `recoil_angle` (`0x790`), `recoil_angle_variance` (`0x798`),
+  `recoil_magnitude` (`0x7A0`), `recoil_magnitude_variance` (`0x7A8`) and
+  `recoil_seed` (`0x7D4`). **The bullet path does not use them.**
+* `FUN_1807cb180` (RVA `0x7cb180`) fills **region 2** from the VData's
+  `num_bullets` (`0x730`) and `spread_seed` (`0x7D8`):
+
+  ```
+  CUniformRandomStreamImpl<CThreadNullMutex> stream(spread_seed);
+  if (num_bullets < 2) { invalid = true; return; }
+  N = min(num_bullets, 0x40);
+  for (i = 0; i < 0x40; ++i) {
+     angle  = RandomFloat(0, 2*pi);                 // the **angle first**
+     radius = RandomFloat(k/N, (k+1)/N);            // k cycles 0,1,…,N-1,0,1,…
+  }
+  ```
+
+**The convar gate.** The whole path is gated on
+`weapon_accuracy_shotgun_spread_patterns`, which is **off by default** — so a
+shotgun uses the **random cone** unless the server enables it. The convar is
+the payload's problem: it is a `ConVar` the payload has no address for, and
+reading it would need a **dumper signature** the repo does not have
+(ADR-0012). The Monte-Carlo core therefore still **refuses** the shotgun.
+
+## The RNG
+
+The cone sampler uses the engine's **global** `RandomFloat` (tier0.dll), which
+is `CUniformRandomStreamImpl<CAtomicMutex>::GenerateRandomNumber_Locked` on a
+global stream seeded by `RandomSeed(seed)`. The pattern builder uses the same
+core with a `CThreadNullMutex` template argument — **the same generator**.
+
+The generator is RANROT: Park–Miller (`16807`, `127773`, `2836`, `2^31-1`) with
+the 32-entry Bays–Durham shuffle. The payload's `UniformRandomStream`
+(`payload/aim/src/spread.cpp`) is a faithful re-implementation, and it was
+checked **instruction by instruction** against tier0's
+`GenerateRandomNumber_Locked` (tier0.dll `0x15e1b0`): the warm-up (40 steps,
+the table filled from `j = 39` down to `0`), the Schrage step
+(`m*16807 - q*2147483647`) and the shuffle index (`(iy + (iy<0 ? 0x3ffffff :
+0)) >> 26`, i.e. `NDIV = 2^26`) are **identical** — the integer stream matches
+bit for bit.
+
+**One difference, and it is the payload's.** tier0's `RandomFloat` scales the
+31-bit integer in **single** precision (`(float)i * 2^-31`, capped at
+`0.9999999f`) and finishes in single precision; the payload's
+`random_float` scales it in **double** (`1 / 2147483647`) and finishes in
+double. The two agree on the integer and differ by **at most one float ulp**
+(≤ 6·10⁻⁸) on the scaled value — on about 6 % of the `(0,1)` draws and 68 %
+of the `(0,2π)` draws. That is far below anything the cone's physics can
+notice, but it means the payload's offsets are **not bit-identical** to the
+engine's.
 
 ### The seed
 
@@ -45,12 +265,13 @@ The offset is applied in the `(right, up)` tangent frame of the aim direction.
   Replicated in `payload/aim/spread.hpp` (`md5_pseudo_random` + `UniformRandomStream`
   + `pellet_offsets`); host-tested (`aim-spread`), **pending a live cross-check** of
   the exact input construction.
+- The engine's own `FX_FireBullets` takes the seed from the **pawn's** per-attack
+  seed words (`FUN_180941eb0` / `FUN_180941ee0`, one per attack type), not from
+  the command directly.
 - The pawn carries per-attack seed words (`FUN_180940ff0` / `FUN_180941020`
   read `pawn+0x1918` / `+0x1920`).
 - `CCSPlayerController::m_bFireBulletsSeedSynchronized` (`+2617`) = the
   client/server seed-sync flag.
-- RNG globals: `RandomSeed` `0x1821b20c4`, `g_nRandomSeed` `0x181bd6ca0`,
-  `g_nRandomSeedAlt` `0x181c87250`.
 
 ## Inaccuracy (the magnitudes the cone is scaled by)
 
@@ -60,17 +281,14 @@ The offset is applied in the `(right, up)` tangent frame of the aim direction.
 | `FUN_18080cba0` | `0x18080cba0` / `0x80cba0` | **move** term = `(speed/250) * (1 - |cos(vel, view)|)^e * convar` (directional). |
 
 Convars: `weapon_accuracy_nospread` `0x181bcfeb0`, `weapon_air_spread_scale`
-`0x181bcff30`, `weapon_debug_spread_show` `0x181caf7a0`,
-`weapon_debug_inaccuracy_only_up` `0x181ca1518`, `weapon_debug_max_inaccuracy`
-`0x181ca13f0`, `weapon_accuracy_shotgun_spread_patterns` `0x181ca1588`,
-`sv_turning_inaccuracy_*` / `sv_strafing_inaccuracy_*`.
+`0x181bcff30`, `weapon_debug_spread_show` `0x181caf7a0`, and the three the
+cone sampler reads (see above).
 
-**Current build (2026-10-18).** The RVAs above are for build `25815307`; on the live
-build (`659940c1`) they resolve to unrelated functions, so the composition must be
+**Current build (2026-10-18).** The RVAs above are for build `25815307`; on the
+live build they resolve to unrelated functions, so the composition must be
 re-found. The **VData offsets are current** (`CsWeaponBaseVData`, `calibration/schema.json`):
 `m_flSpread 0x750`, `m_flInaccuracyCrouch 0x758`, `m_flInaccuracyStand 0x760`,
-`m_flInaccuracyJump 0x768`, `m_flInaccuracyLand 0x770`, `m_flInaccuracyLadder 0x778`,
-`m_flInaccuracyFire 0x780`, `m_flInaccuracyMove 0x788`,
+`m_flInaccuracyJump 0x768`, `m_flInaccuracyLand 0x770`, `m_flInaccuracyLadder 0x778`, `m_flInaccuracyFire 0x780`, `m_flInaccuracyMove 0x788`,
 `m_flInaccuracyJumpInitial 0x7B8`, `m_flInaccuracyJumpApex 0x7BC`,
 `m_flInaccuracyReload 0x7C0`. The payload reads them (`read_weapon_profile`) and
 `aim::inaccuracy(...)` is a first-order stand/move cone; the exact engine composition
@@ -83,11 +301,13 @@ Schema offsets (from `calibration/schema.json`, `CCSWeaponBaseVData`):
 
 | Field | Offset |
 |---|---|
-| `m_flSpread` (FiringModeFloat) | 1872 |
+| `m_flSpread` (FiringModeFloat) | 1872 (`0x750`) |
 | `m_flInaccuracyCrouch/Stand/Jump/Land/Ladder/Fire/Move` | 1880–1928 |
 | `m_flRecoilAngle` / `…Variance` / `m_flRecoilMagnitude` / `…Variance` | 1936–1960 |
 | `m_flInaccuracyJumpInitial` / `…JumpApex` / `…Reload` | 1976 / 1980 / 1984 |
 | `m_nRecoilSeed` / `m_nSpreadSeed` | 2004 / 2008 |
+| `m_bIsRevolver` | 1822 (`0x71E`) |
+| `m_nNumBullets` | 1840 (`0x730`) |
 | `m_nDamage` | 2080 |
 | `m_flHeadshotMultiplier` | 2084 |
 | `m_flArmorRatio` | 2088 |
@@ -100,8 +320,8 @@ penetration, range, range-modifier). The **penetration algorithm itself is
 server-side** (`server.dll`); the client has the parameters and the trace.
 
 **Getting the VData pointer (resolved 2026-10-16).** The active weapon entity's
-`C_CSWeaponBase::m_pWeaponVData` is `C_BaseEntity::m_nSubclassID` (`+0x380`) + `8`
-= **`weapon + 0x388`** (verified live: an AK-47 reads `m_nDamage 36`,
+`C_CSWeaponBase::m_pWeaponVData` is `C_BaseEntity::m_nSubclassID` (`+0x380`) +
+`8` = **`weapon + 0x388`** (verified live: an AK-47 reads `m_nDamage 36`,
 `m_flHeadshotMultiplier 4.0`, `m_flPenetration 2.0`, `m_flRangeModifier 0.98`,
 `m_iMaxClip1 30`). Cross-check: community `SCHEMA(CCSWeaponBaseVData*, 0x388,
 m_pWeaponVData)` (YouGame.Biz 378413) and `m_nSubclassID + 0x08` (MitilcC
@@ -178,7 +398,7 @@ CALL 0x180a1a0a0
 ```
 
 So the real signature is `(this=iface, <rdx descriptor>, const Vector& start,
-const Vector& end, ITraceFilter* filter, CUtlVector<CGameTrace>* results)` — **not**
+const Vector& end, ITraceFilter* results…)` — **not**
 the `(iface, filter, start, end, vec, count)` the earlier note assumed. Note the
 2nd argument. A **static default filter** is available at `client_base + 0x221f070`
 (0x18 after the query global), so a first version can pass that instead of
@@ -201,7 +421,7 @@ live-validation pass.
 | **`CModelState::m_pBoneArray`** | **`+0x80`** (= `CSkeletonInstance + 0x1C0`), pointer to the bone array, **stride `0x20`** |
 
 **Resolved** via `CSkeletonInstance::GetTransformsForHitboxList` (`FUN_180aafca0`,
-VA `0xaafca0`): it reads `*(longlong*)(skel + 0x1C0)` (the bone array — `+0x1C0`
+VA `0xaafca0`): it reads `*(longlong*)(skel + 0x1C0)` (the bone array — `0x1C0`
 = `m_modelState(+0x140) + 0x80`) and indexes bones at `boneIndex * 0x20`; it
 reads `m_hModel` at `skel + 0x1E0` (= `m_modelState + 0xA0`), which pins
 `m_modelState = +0x140`. Each bone is a 32-byte `CTransform` — **`{Vector
@@ -277,6 +497,9 @@ solver. There is no hard-coded RVA: only struct offsets, which are stable.
 
 - **Spread is a delta, not a distribution.** The whole "sample 256 spread
   angles" approach solves a problem that has a closed form here.
+- **The spread pair is shared across the pellets.** A weapon with no inaccuracy
+  fires every pellet along the same ray; a model that draws a fresh spread pair
+  per pellet scatters them.
 - The spread the *client renders* (crosshair radius) comes from the weapon's
   inaccuracy + spread; the networked bullet's magnitudes arrive in
   `CMsgTEFireBullets` — but the client can compute them itself
@@ -285,3 +508,6 @@ solver. There is no hard-coded RVA: only struct offsets, which are stable.
   crosshair fields, not the shot values.
 - `sv_showplayerhitboxes` / lag-comp hitbox strings (`0x181bd0b40`,
   `0x181c09050`) are the lag-compensation visualisers.
+- **The payload's offsets are not bit-identical to the engine's** (the RNG's
+  float conversion, §"The RNG"). The difference is at most one float ulp; the
+  live check has still to confirm it.
