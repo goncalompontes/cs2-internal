@@ -107,9 +107,17 @@ void FUN_180a19e90(undefined8 *iface, int *results, undefined8 start, undefined8
 ```
 
 - **Result buffer**: a `CUtlVector`-like header — count `@+0x00`, data pointer `@+0x08`
-  (`*(longlong*)(results+2)` = `results + 8`). **Record stride `0x38`** (56 bytes).
+  (`*(longlong*)(results+2)` = `results + 8`), capacity `@+0x10`, flags `@+0x14`
+  (the live build's two writers and the external-buffer bit are in §"The probe's
+  call form" below). **Record stride `0x38`** (56 bytes).
 - **`mask`** is a *pointer* (`filter + 8`), i.e. the qword holding the collision mask
-  (`0x1c300b`); the low byte's bit 1 selects the second query.
+  (`0x1c300b`); the low byte's bit 1 selects the second query. The engine's own
+  **first** trace **clears** that bit and restores it afterwards
+  (`FUN_1808830e0`: `and rax, 0xfffffffffffffffd; mov qword ptr [r14], rax`), so
+  that trace is answered by the world query alone; the penetration loop's trace
+  leaves it set and gets both query kinds. The probe passes the mask as it is —
+  the bullet's `0x1c300b`, bit 1 set — so it asks the engine the **bullet's**
+  question; both writers honour the external-buffer bit, so neither allocates.
 - **`max_fraction`** = `0xbf800000` = `-1.0f` from every live caller.
 - The world query is the physics-world vtable **`+0x520`** (the sibling `TraceShape`
   uses `+0x560` for the sorted branch, `+0x558` for the single-trace branch).
@@ -341,9 +349,9 @@ at `client + 0x1c32448`; the function spans `0xa19e90..0xa19ff4`).
 0x883164  lea      r9, [rsp + 0x30]              ; arg4 = &the extension (a local)
 0x883169  movss    xmm0, dword ptr [rip + 0x1242f3b]   ; -1.0f
 0x883171  mov      r8, r15                       ; arg3 = &the start vector
-0x883174  movss    dword ptr [rsp + 0x28], xmm0  ; arg8 = max_fraction = -1.0f
+0x883174  movss    dword ptr [rsp + 0x28], xmm0  ; arg6 = max_fraction = -1.0f
 0x88317a  mov      rdx, rdi                      ; arg2 = &results
-0x88317d  mov      qword ptr [rsp + 0x20], r14    ; arg7 = filter + 8
+0x88317d  mov      qword ptr [rsp + 0x20], r14    ; arg5 = filter + 8
 0x88318d  mov      rcx, qword ptr [rip + 0x19a3ec4]  ; arg1 = *(client + 0x2227058)
 0x883196  call     0x180a19e90
 ```
@@ -352,12 +360,61 @@ so the call form is
 
 ```c
 TraceLineIntervals(*(client + 0x2227058),  // arg1: the query interface
-                    &results,               // arg2: the CUtlVector
+                    &results,               // arg2: the trace's results container
                     &start,                 // arg3: a POINTER to a 12-byte Vector
                     &delta,                 // arg4: a POINTER to the EXTENSION
-                    filter + 8,             // arg7: the collision-mask qword
-                    -1.0f);                 // arg8: max_fraction
+                    filter + 8,             // arg5: the collision-mask qword
+                    -1.0f);                 // arg6: max_fraction
 ```
+
+(The mask is the **5th** argument and the float the **6th**: in `FUN_180a19e90`
+they are read from `[entry_rsp + 0x28]` and `[entry_rsp + 0x30]`. An earlier note
+in this file called them the 7th and the 8th — that was wrong.)
+
+**The results container is NOT the overlap query's `CUtlVector`.** It is a
+different type with a different header, and the probe got that wrong once (the
+review's blocker). The layout was re-derived from the **live** build
+(client.dll sha256 `5a46a09b…`, 2026-10-22) from the **two functions that write
+it**:
+
+* the physics world's own query — `vphysics2.dll`, the world's vtable **`+0x520`**,
+  which `TraceLineIntervals` calls (`(*(*world + 0x520))(world, results, start,
+  delta, mask, flags, max_fraction)`); and
+* the append helper the **second** query kind uses — `client.dll`'s
+  `FUN_18084d1a0` (`mov rcx, results; call append`).
+
+Both read the count at **`+0x00`** and the record pointer at **`+0x08`**, both
+compare the count against the **capacity** at **`+0x10`**, and both grow the
+array **only** when `count == capacity` **and** bit 30 of the **flags** at
+**`+0x14`** is clear:
+
+```asm
+; vphysics2.dll +0x64f80 (the world query)          ; client.dll FUN_18084d1a0
+movsxd r13, dword ptr [r15]              ; 0x...75113  movsxd r14, dword ptr [rcx]      ; 0x18084d1b0
+cmp    r13d, dword ptr [r15 + 0x10]      ; 0x...7511d  cmp    r14d, dword ptr [rcx + 0x10] ; 0x18084d1b9
+jne    skip_growth                       ; 0x...75121  jne    skip_growth                ; 0x18084d1bd
+test   dword ptr [r15 + 0x14], 0x40000000; 0x...75127  test dword ptr [rcx + 0x14], 0x40000000 ; 0x18084d1c3
+jne    skip_growth                       ; 0x...7512f  jne    skip_growth                ; 0x18084d1ca
+```
+
+| offset | field |
+|---|---|
+| `+0x00` | `int32` count (the records) |
+| `+0x08` | `void*` data (the record array) |
+| `+0x10` | `int32` capacity (in records) |
+| `+0x14` | `int32` flags: bit 30 (`0x40000000`) = **the buffer is external — never grow**; bits 30/31 (`0xC0000000`) = **never free the buffer** |
+
+**So "the engine never allocates" is established for this container**: with bit 30
+set, *both* writers jump straight past their growth, so neither the allocator nor
+the reallocator is reached. The overlap vector's `0x80000000` at `+0x1C` belongs
+to a **different** type and means nothing here — the probe used to set it, which
+is what made the engine write through a null pointer.
+
+Because the engine appends **at** `data[count]` (it increments the count
+afterwards), a trace that produced more records than the advertised capacity
+would write past the end of the buffer: the probe's buffer carries a slack of 64
+records, and the answer publishes `intervals_overflow` when the count exceeds the
+published maximum.
 
 **The fourth argument is the EXTENSION (`end - start`), not the absolute end
 point.** The engine's own caller fills it with `normalize(direction) * range`
@@ -403,10 +460,35 @@ output** without re-running the game.
 clang-cl build**. Its vectored handler is a `noexcept` function, and clang-cl marks
 a `noexcept` function `nounwind`, so MSVC's `longjmp` refuses to unwind through it
 and raises `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409) instead of returning. The
-evidence is in the payload's own log: nine "[crash] guarded" lines, each followed
-by a fresh "[crash] handler installed" — the process died and was re-injected,
-every time. The same code built with MSVC's `cl.exe` recovers, and so does the
-same code with the handler's `noexcept` dropped.
+same code built with MSVC's `cl.exe` recovers, and so does the same code with the
+handler's `noexcept` dropped — both measured standalone on this machine.
+
+> **The log evidence, re-measured (2026-10-22).** The payload's own log
+> (`%LOCALAPPDATA%\cs2-internal\cs2-payload.log`, 70.6 MB, 548 370 lines) holds
+> **1017** `[crash]` lines, of which **199** are `[crash] handler installed` and
+> **12** are `[crash] guarded`. The earlier claim ("nine `[crash] guarded` lines,
+> each followed by a fresh `[crash] handler installed` — the process died and was
+> re-injected, every time") was **wrong on both counts**:
+>
+> * there are **twelve** guarded lines, not nine — four in the 88 k-line region
+>   (lines 88135, 88387, 88409, 90369) and eight in the 533 k-line region (533404,
+>   533478, 533601, 533680, 533728, 533890, 533950, 534203);
+> * **only the first four** are followed by a fresh `[crash] handler installed` and
+>   the payload's start-up banner — those are the process dying and being
+>   re-injected. The other **eight** are followed by the payload's own continued
+>   `[state]` output: **the process survived** them;
+> * and the log **cannot** support the inference in any case. The `guarded` phase is
+>   logged by the diag handler **on the recovery path**, immediately *before* the
+>   `longjmp` (`payload/diag/src/crash_handler.cpp`: `log_exception("guarded",
+>   info); std::longjmp(g_guard_jmp, 1);`), so a `guarded` line means the handler
+>   was **entered** — it is written in the success case too. A failed recovery
+>   leaves **no** line at all.
+
+So the **diagnosis** stands (the shared guard cannot recover under clang-cl —
+reproduced standalone: a `noexcept` vectored handler fast-fails with 0xC0000409,
+the same program without the `noexcept` prints "recovered" and exits 0), but the
+**evidence as stated was wrong**. The record is corrected here so the next task
+does not cite it.
 
 The repo-wide fix is **one word** — drop the `noexcept` from
 `LONG CALLBACK vectored_handler(...)` in `payload/diag/src/crash_handler.cpp`.

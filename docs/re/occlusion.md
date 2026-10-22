@@ -377,7 +377,7 @@ this one produces.
 | `yaw` / `pitch` | the view direction, in **degrees** (the Source pitch is positive down) | the local player's eye angles |
 | `spread` | an extra angular fan around the view ray, in degrees | `0` |
 | `count` | how many rays in the fan | `1` |
-| `depth` | the ray's length, in world units | the engine's own trace length (the weapon's `m_flRange`) |
+| `depth` | the ray's length, in world units | the engine's own trace length (the weapon's `m_flRange`), or **8192 units** (the engine's maximum trace length) when the weapon's range cannot be read |
 | `abi` | how the engine is called: `correct` / `swapped` / `static_filter` | `correct` |
 
 The fan is **deterministic**: ray 0 is the view ray itself and rays 1..n-1 are the
@@ -390,8 +390,23 @@ pins that.
 The answer, per ray: the engine's intervals (the fraction, the distance, the
 enter/exit byte and the record's **raw 0x38 bytes in hex**), our own occluders'
 spans (with their kind), and the **difference** — the spans we have nothing for,
-the solids the engine did not report, and a one-line verdict
-(`agrees` / `engine_only` / `ours_only` / `both`).
+the solids the engine did not report, and a one-line verdict (`agrees` /
+`engine_only` / `ours_only` / `both` / `unknown`).
+
+**`unknown`** is the verdict when the engine's answer could not be read at all
+(the call faulted, or the container did not hold the buffer the probe handed the
+engine). The difference is then **not** computed over an empty engine list — that
+is the whole point: the defect the probe exists to expose must not be reported
+inverted. The per-ray `engine.answer_missing` and the per-ray
+`difference.engine_answer_usable` say so explicitly.
+
+**The difference's rule.** A span and one of our occluders are the same solid
+only when our occluder **covers** the engine's span — it starts no later than the
+span and ends no earlier (both within a 2-unit position tolerance) — and the two
+share a stretch of the ray. The tolerance compares the two spans' **positions**;
+it is **not** a widening of the overlap test. A solid that merely sits in front of
+the engine's wall, or that covers only a part of it, is a **different** solid and
+does not answer for the wall: the wall stays in `engine_only`.
 
 ### The invocation
 
@@ -421,6 +436,11 @@ The raw wire form (one NDJSON line on the pipe):
 {"id": 1, "cmd": "trace_probe", "args": {"count": 5, "spread": 4.0}}
 ```
 
+**Run the heatmap once first** (`{"cmd": "heatmap"}`), so the static world body is
+already parsed: the probe's own enumeration then reuses that cache and the probe
+does not pay the world's parse inside the input hook. The answer says which
+happened (`engine.world_cached`).
+
 **The proof that the probe can fail** — the deliberately wrong calls (they must
 give a visibly wrong answer or a caught fault, never a crash):
 
@@ -429,26 +449,82 @@ give a visibly wrong answer or a caught fault, never a crash):
 {"id": 3, "cmd": "trace_probe", "args": {"abi": "static_filter"}}  // the engine's ~0 mask instead of the bullet's
 ```
 
+### What the orchestrator must watch for
+
+The live run is the orchestrator's (with the operator). Three things decide
+whether the answer means anything:
+
+1. **The engine's answer must have been read.** For every ray:
+   `engine.answer_missing == false` and `difference.engine_answer_usable == true`.
+   If either is false, the verdict is `unknown` and **nothing can be concluded** —
+   the instrument is broken (not the game). The same goes for
+   `engine.faulted == true`.
+2. **A verdict of `agrees` with an empty engine list must be impossible** — and it
+   is: the difference is computed over the engine's intervals, and when they were
+   dropped the verdict is `unknown`. If a live run ever shows `agrees` with
+   `engine.interval_count == 0` **and** `ours` non-empty, that is a bug in the
+   probe, not a result: report it.
+3. **The ray must actually cross the wall.** `engine.interval_count > 0` and at
+   least one `enter_exit == 1` record is the minimum; if the engine reports
+   nothing, the ray missed the wall (aim elsewhere) and the measurement says
+   nothing about the geometry.
+
+Then the **numbered answer** (§"the measurement" above): which of the six places
+the world geometry is lost.
+
 ### The measurement — **OWED** (not yet run)
 
 The live measurement needs the **operator**: stop the bots, point at a wall that is
 100 % solid, and report the view angles. The probe is built and the engine call's
 form is verified against the running game (the offsets, the interface pointer, the
-filter's mask and the entry RVA — `docs/re/bullet-trace.md` §"The probe's call
-form"), but the probe has **not** been run inside a live game yet: the game on this
-machine was already running a payload, and the rule is not to inject into it.
+filter's mask, the entry RVA and the **results container's layout** —
+`docs/re/bullet-trace.md` §"The probe's call form"), but the probe has **not** been
+run inside a live game yet: the game on this machine was already running a payload,
+and the rule is not to inject into it.
 
 So the **numbered answer** (which of the six places the world geometry is lost) is
 still open. The measurement settles it, and this is how to read the result:
 
 | the probe says | the world geometry is lost at |
 |---|---|
-| the engine's intervals are empty and ours is empty | the ray misses everything — **not** a geometry loss (aim elsewhere) |
+| `engine.answer_missing` is true (or the verdict is `unknown`) | **the instrument is broken** — the engine's answer was dropped (the call faulted, or the container did not hold the buffer the probe handed it). **Nothing can be concluded**; re-run. A `faulted: true` means the instrument, not the game. |
+| `engine.faulted` is true | the engine call faulted (the guard caught it) — the instrument is broken, not the game |
+| the engine's intervals are empty **and** ours is empty | the ray misses everything — **not** a geometry loss (aim elsewhere) |
 | `engine_only` (the engine found spans, we found nothing for them) | **3** (the shapes are parsed but dropped: the cluster cap, the compound skip, the BVH's broad phase, the per-query selection) or **5** (projected, but the ray does not hit them) or **6** (the engine sees something we have no shape for at all) — the `difference.engine_only` entries say *which* span, and the ray's `ours` list says what we had |
 | `ours_only` (we found solids the engine did not report) | the **over-inclusion** the enumeration is known for (a body-box overlap is a superset) — not a loss |
-| `both` | the two answers differ in both directions — the over-inclusion **and** a loss |
+| `both` | the two answers differ in both directions — the over-inclusion **and** a loss. The `engine_only` list says whether a loss is in there. |
 | `agrees` | the two sets are the same for this ray: the world geometry is **not** lost here (the loss, if any, is elsewhere — e.g. the ray does not cross the wall) |
+
+**`agrees` is only a real answer when the engine's answer was read.** The
+difference is computed over the engine's intervals; when they were dropped the
+verdict is `unknown` and the lists are empty — so "agrees with an empty engine
+list" is **impossible** by construction. The check the operator can make in one
+line: `rays[].engine.answer_missing == false` and
+`rays[].difference.engine_answer_usable == true` for every ray.
 
 The raw records are in the answer (`rays[].engine.intervals[].raw`), so the
 **interval record's** remaining fields can be mapped from the probe's own output
 without re-running the game.
+
+### What the probe publishes about itself
+
+| key | what it means |
+|---|---|
+| `engine.rays_ok` / `engine.rays_faulted` | how many rays the engine answered, and how many faulted |
+| `engine.filter_mask` / `filter_group` / `filter_flags` | the filter **actually** passed (in the `static_filter` mode: the engine's static one, not the bullet's) |
+| `engine.occluder_cap` / `occluders_truncated` | how many of our solids the probe projects at most, and whether the enumeration produced more |
+| `engine.world_cached` | whether the static world body was already parsed. **`false` means this run paid the world's parse** (10k brush shapes) inside the input hook — it happens **once** per session, so run the heatmap once first and the probe is cheap |
+| `engine.target_pad` | the pad the probe's target box gets, in world units. It is **not** cosmetic: the pad decides the pyramid's face planes, i.e. **which solids the enumeration keeps** — it is part of what "our answer" contains |
+| `game_thread` (top level) | `answered` / `busy` (the game thread is running but did not answer in time) / `stalled` (it is not running at all — the CreateMove hook is not installed) |
+| `depth` | the ray's length: the weapon's own `m_flRange`, or **8192 units** (the engine's maximum trace length) when the weapon's range cannot be read |
+
+### The probe's bounds (it must not be able to stall the game)
+
+* **8 rays** per command (`count`), **64 intervals** published per ray;
+* the results buffer is **fixed** (256 records + 64 records of slack) and the
+  engine is given the **external-buffer** bit, so it never allocates;
+* the projections are capped at **256** solids;
+* the enumeration runs **once per command**, never per tick;
+* the **worst case** is the world's first parse (10k brush shapes), which happens
+  **once per session** and is reported as `engine.world_cached == false`. Run the
+  heatmap once before the probe and the probe's answer is cheap.

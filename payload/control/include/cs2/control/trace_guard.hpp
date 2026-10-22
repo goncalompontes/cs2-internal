@@ -14,10 +14,17 @@
 // through that frame: it raises `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409) instead
 // of returning. Measured on this machine (clang-cl 22.1.8, MSVC 14.51 CRT):
 //
-// * the shared guard **cannot recover** — the payload's own log shows a
-//   "[crash] guarded" line followed by a fresh "[crash] handler installed" nine
-//   times over (the process died and was re-injected);
-// * the same code built with MSVC's `cl.exe` **does** recover.
+// * a standalone program with a `noexcept` vectored handler fast-fails with
+//   0xC0000409 (exit -1073740791); the same program with the handler **not**
+//   `noexcept` prints "recovered" and exits 0;
+// * the payload's own log holds **12** `[crash] guarded` lines. The "guarded"
+//   phase is logged **on the recovery path**, immediately before the `longjmp`
+//   (`payload/diag/src/crash_handler.cpp`), so a guarded line means the handler
+//   was **entered** — it is written in the success case too, and the log cannot
+//   show a failed recovery at all. Of the twelve, **four** are followed by a
+//   fresh `[crash] handler installed` (the process died and was re-injected) and
+//   **eight** by the payload's own continued `[state]` output (the process
+//   survived).
 //
 // The probe's engine call is the one call that must never kill the game, so it
 // runs under this guard: the same vectored handler + `setjmp`/`longjmp`, with a
