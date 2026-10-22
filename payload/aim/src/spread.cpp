@@ -158,8 +158,9 @@ auto shotgun_pattern_table(int spread_seed, int num_bullets) noexcept
   // **The band bounds are computed in single precision, like the engine's**
   // (`(float)k * (1.0f / (float)N)`, `client.dll` `0x1807cb2b4`/`0x1807cb2ee`).
   // In double the reciprocal and the product round differently: over N = 1…64
-  // the two computations disagree on 937 of the 4 288 bounds by **one ulp**
-  // (5.96e-8), which moves the drawn radius by one ulp on the bands it touches.
+  // the two computations disagree on 464 of the 2 144 band boundaries (`k/N`) by
+  // **one ulp** (5.96e-8), which moves the drawn radius by one ulp on the bands
+  // it touches.
   const float inverse = 1.0F / static_cast<float>(count);
   std::array<ShotgunPatternEntry, PATTERN_TABLE_ENTRIES> table{};
   UniformRandomStream stream(spread_seed);

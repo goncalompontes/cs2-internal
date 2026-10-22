@@ -287,9 +287,9 @@ otherwise the engine falls back to the random cone.
 **The band bounds are computed in single precision** — `(float)k * (1.0f /
 (float)N)` (`0x1807cb2b4` / `0x1807cb2ee`) — and the payload computes them the
 same way. In **double** the reciprocal and the product round differently: over
-N = 1…64 the two computations disagree on **937 of the 4 288** bounds by
-**exactly one ulp** (5.96e-8), and the drawn radius moves with them. The
-payload's table is therefore the single-precision one; the only remaining
+N = 1…64 the two computations disagree on **464 of the 2 144** band boundaries
+(`k/N`) by **exactly one ulp** (5.96e-8), and the drawn radius moves with them.
+The payload's table is therefore the single-precision one; the only remaining
 difference from the engine is the float conversion of the draw itself (§"The
 RNG" below).
 

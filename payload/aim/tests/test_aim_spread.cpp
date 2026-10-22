@@ -314,8 +314,9 @@ auto main() -> int {
 
   // The band bounds are computed in **single** precision, like the engine's
   // (`(float)k * (1.0f / (float)N)`). In double the reciprocal and the product
-  // round differently: over N = 1…64 the two computations disagree on 937 of
-  // the 4 288 bounds by **one ulp**, and the drawn radius moves with them.
+  // round differently: over N = 1…64 the two computations disagree on 464 of
+  // the 2 144 band boundaries (`k/N`) by **one ulp**, and the drawn radius moves
+  // with them.
   //
   // The seven-bullet table is the pin: its third entry's band (2/7 … 3/7) is one
   // of the bounds that differ, and the draw on it differs too — so the entry is
