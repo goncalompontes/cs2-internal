@@ -579,11 +579,16 @@ def _tail(text: str, limit: int = 6000) -> str:
     return text if len(text) <= limit else "..." + text[-limit:]
 
 
-def _run(command: Sequence[str], timeout: float) -> dict[str, Any]:
-    """Run one command in the repository and return a bounded result."""
+def _run(command: Sequence[str] | str, timeout: float) -> dict[str, Any]:
+    """Run one command in the repository and return a bounded result.
+
+    A ``str`` is handed to the platform as-is (the shell form ``_shell`` emits); a
+    sequence is quoted by the platform's own argument rules.
+    """
     try:
         completed = subprocess.run(
-            list(command), cwd=_REPO_ROOT, capture_output=True, text=True,
+            command if isinstance(command, str) else list(command),
+            cwd=_REPO_ROOT, capture_output=True, text=True,
             timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:
@@ -616,12 +621,20 @@ def _vcvars() -> pathlib.Path | None:
     return None
 
 
-def _shell(command: str) -> list[str]:
-    """A shell command with the MSVC environment, where the platform has one."""
+def _shell(command: str) -> str | list[str]:
+    """A shell command with the MSVC environment, where the platform has one.
+
+    Windows returns **one string**, not ``["cmd", "/c", …]``: the vcvars prefix is
+    itself quoted (``call "C:\\Program Files\\…\\vcvars64.bat"``), and an argument
+    list makes Python escape those quotes (``\\"…\\"``), so cmd then looks for a
+    program literally named `"C:\\Program Files\\…"` — the build tools failed with
+    ``'\\"C:\\Program Files\\…\\vcvars64.bat\\"' is not recognized`` before meson ever
+    started. With ``/s`` cmd strips the outer quotes and runs the rest as written.
+    """
     if os.name == "nt":
         vcvars = _vcvars()
         prefix = f'call "{vcvars}" >nul && ' if vcvars is not None else ""
-        return ["cmd", "/c", prefix + command]
+        return f'cmd /d /s /c "{prefix}{command}"'
     return ["sh", "-c", command]
 
 
