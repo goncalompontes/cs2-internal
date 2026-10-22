@@ -452,6 +452,17 @@ class GameState:
         return out
 
     def _capability(self, cap: Can) -> tuple[bool, str]:
+        # The payload's state machine is authoritative when it reports a
+        # capability: it applies the runtime gates the screen table cannot
+        # (the buy window, the C4, the defuser). An older payload omits the
+        # block, so the harness's own table is the fallback.
+        reported = self.raw.get("capabilities")
+        if isinstance(reported, dict):
+            value = reported.get(str(cap))
+            if isinstance(value, bool):
+                if value:
+                    return True, self._reason(cap)
+                return False, f"{self.screen}: the payload denies {cap}"
         allowed = cap in CAPABILITIES.get(self.screen, ())
         if cap is Can.BUY:
             # Buy needs the buy window as well as the screen: LIVE before the

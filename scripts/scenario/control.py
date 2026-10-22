@@ -291,6 +291,11 @@ class Control:
         next to the socket) is read. Environment overrides exist for tests and
         for a payload launched with a custom endpoint.
         """
+        # An explicit path is the whole endpoint. Do not read the session file:
+        # a test (or an operator) that names a socket that does not exist must
+        # fail, not silently connect to whichever payload happens to be live.
+        if self.socket_path and self.socket_path != "tcp":
+            return "unix", self.socket_path, 0, self._token
         session_path = os.path.join(
             os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
             "cs2-internal", SESSION_FILE)

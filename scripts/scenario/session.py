@@ -258,10 +258,6 @@ class Game:
         """Configure the hold-key ragebot (``docs/ragebot.md``)."""
         return self.control.rage(**kwargs)
 
-    def heatmap(self, **kwargs: Any) -> HeatmapResult:
-        """The multi-target damage heatmap (``docs/ragebot.md``)."""
-        return self.control.heatmap(**kwargs)
-
     def move(self, *, forward: float = 0.0, side: float = 0.0, up: float = 0.0,
              clear: bool = False, quantize: bool = False, step: bool = False,
              raw_entry: bool = False) -> MoveResult:
