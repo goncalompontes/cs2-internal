@@ -99,6 +99,17 @@ class Overlay {
     rage_target_context_ = context;
   }
 
+  // The **debug view**: the payload's own one-line answers, drawn as text in the
+  // top-left corner — a shadowed/outlined column of lines, **not** a window (a
+  // window is what the menu is for). The provider writes up to `size` bytes of
+  // `\n`-separated lines and returns how many it wrote; returning 0 (or having no
+  // provider) hides the column. The control channel's `debug` command turns it on.
+  using DebugLinesProvider = std::size_t (*)(void* context, char* out, std::size_t size);
+  void set_debug_lines_provider(DebugLinesProvider provider, void* context) noexcept {
+    debug_lines_provider_ = provider;
+    debug_lines_context_ = context;
+  }
+
 private:
   std::optional<game::StateReader> reader_;
   render::OverlayModel model_;
@@ -120,6 +131,10 @@ private:
   void* hitbox_context_ = nullptr;
   RageTargetProvider rage_target_provider_ = nullptr;
   void* rage_target_context_ = nullptr;
+  DebugLinesProvider debug_lines_provider_ = nullptr;
+  void* debug_lines_context_ = nullptr;
+  // Append the provider's lines to the draw list, top-left, outlined.
+  void append_debug_lines(render::DrawList& out);
 };
 
 }  // namespace cs2::features

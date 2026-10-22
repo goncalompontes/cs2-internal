@@ -458,6 +458,12 @@ auto on_rage_target(void* context) noexcept -> int {
   return static_cast<Runtime*>(context)->control.rage_target_index();
 }
 
+// The debug view's lines: the control service's own answers, formatted on the
+// render thread into the overlay's buffer (no allocation, no window).
+auto on_debug_lines(void* context, char* out, std::size_t size) noexcept -> std::size_t {
+  return static_cast<cs2::control::Service*>(context)->debug_lines(out, size);
+}
+
 // The ESP's sound provider: the control module's sound events, mapped onto
 // the ESP's own event type.
 //
@@ -566,6 +572,8 @@ DWORD WINAPI install_thread(void*) {
     cs2::payload::runtime().overlay.set_hitbox_provider(&on_hitboxes, &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_rage_target_provider(&on_rage_target,
                                                              &cs2::payload::runtime());
+    cs2::payload::runtime().overlay.set_debug_lines_provider(
+        &on_debug_lines, &cs2::payload::runtime().control);
   }
   // The ESP's sound and visibility providers: the data lives in the control
   // module, which the features module cannot depend on, so the features

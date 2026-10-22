@@ -412,7 +412,43 @@ auto players_section(const game::Snapshot& snapshot) -> render::HudSection {
   return section;
 }
 
+// The debug column: the top-left corner, one line per `\n`, every glyph outlined so
+// the text stays readable over bright geometry (the outline is drawn by the backend,
+// `Text::outline`). Bounded: a provider that returns absurd input cannot cover the
+// screen.
+constexpr float k_debug_origin_x = 8.0F;
+constexpr float k_debug_origin_y = 8.0F;
+constexpr float k_debug_line_height = 14.0F;
+constexpr int k_debug_max_lines = 24;
+
 }  // namespace
+
+void Overlay::append_debug_lines(render::DrawList& out) {
+  if (debug_lines_provider_ == nullptr) {
+    return;
+  }
+  char buffer[1536] = {};
+  // `(std::min)` rather than `std::min`: <windows.h> defines `min` as a macro.
+  const std::size_t written =
+      debug_lines_provider_(debug_lines_context_, buffer, sizeof(buffer) - 1);
+  const std::size_t length = (std::min)(written, sizeof(buffer) - 1);
+  if (length == 0) {
+    return;
+  }
+  const render::Color color{236, 236, 236, 240};
+  float y = k_debug_origin_y;
+  std::size_t start = 0;
+  for (int line = 0; line < k_debug_max_lines && start < length; ++line) {
+    std::size_t end = start;
+    while (end < length && buffer[end] != '\n') {
+      ++end;
+    }
+    out.text(k_debug_origin_x, y, color, std::string(buffer + start, end - start),
+             /*centered=*/false, /*outline=*/true);
+    y += k_debug_line_height;
+    start = end + 1;
+  }
+}
 
 void Overlay::initialize() {
   if (initialized_) {
@@ -445,6 +481,9 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
   model_ = render::OverlayModel{};
   model_.show_hud = show_hud_;
   model_.hud.title = "cs2-internal";
+  // The debug column is drawn first, so every later command (the ESP, the menu)
+  // paints over it rather than under it. It is text only: no window, no input.
+  append_debug_lines(model_.draw);
   if (!reader_ || !reader_->ready()) {
     model_.hud.title += "  [waiting for client.dll]";
     return model_;

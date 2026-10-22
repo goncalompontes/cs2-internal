@@ -145,6 +145,10 @@ constexpr std::uint64_t k_trace_probe_timeout_ms = 2000;
 // bullet itself uses.
 constexpr std::uintptr_t k_vdata_range = 0x830;
 
+// The debug view's line count, for the answer that turns it on (the column itself
+// is bounded by the renderer: `Overlay::append_debug_lines`).
+constexpr int k_debug_view_lines = 8;
+
 // Microsecond wall clock (the fire path uses it for its press interval).
 auto now_us() noexcept -> std::uint64_t {
   return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
@@ -370,6 +374,8 @@ auto Service::dispatch_command(std::string_view command, const Json& arguments,
     do_rage(arguments, out);
   } else if (command == "trigger") {
     do_trigger(arguments, out);
+  } else if (command == "debug") {
+    do_debug(arguments, out);
   } else if (command == "trace_probe") {
     do_trace_probe(arguments, out);
   } else if (command == "predict") {
@@ -2190,6 +2196,7 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   // mask; nothing re-derives "can I move/aim now?" from the raw fields.
   const game::GameState state = game::deduce(snapshot);
   capability_mask_.store(state.capabilities, std::memory_order_relaxed);
+  screen_.store(static_cast<int>(state.screen), std::memory_order_relaxed);
   // Hand the snapshot to the game-thread solve and sample the per-enemy lag records (the
   // heatmap's history) + build the occlusion-query box. The **solve itself runs on the
   // game thread** (`rage_tick` from the CreateMove hook), not here.
@@ -3849,6 +3856,82 @@ void Service::do_trigger(const Json& args, Json& out) noexcept {
   // it reaches the command at all (`docs/control-harness.md` §"Input backends").
   payload.set("backend", Json::string(Input::backend_name(input_.backend())));
   set_ok(out, std::move(payload));
+}
+
+// The debug view (`docs/control-harness.md`): the payload's own one-line answers,
+// drawn as an outlined text column in the top-left corner by the in-process
+// renderer. It is a **view**, not a window: no input, no layout, no allocation on
+// the render thread — `debug_lines` formats straight into the caller's buffer.
+void Service::do_debug(const Json& args, Json& out) noexcept {
+  if (const Json* value = args.find("on"); value != nullptr && value->is_bool()) {
+    debug_hud_.store(value->as_bool(), std::memory_order_relaxed);
+  }
+  Json payload = Json::object();
+  payload.set("on", Json::boolean(debug_hud_.load(std::memory_order_relaxed)));
+  payload.set("lines", Json::integer(k_debug_view_lines));
+  // The column's **actual** content, from the same accessor the renderer's provider
+  // calls — so the answer proves the text end to end, not just the switch. Empty
+  // when the view is off (the provider writes nothing then, on purpose).
+  char text[1536] = {};
+  (void)debug_lines(text, sizeof(text));
+  payload.set("text", Json::string(text));
+  set_ok(out, std::move(payload));
+}
+
+auto Service::debug_lines(char* out, std::size_t size) noexcept -> std::size_t {
+  if (out == nullptr || size < 2 || !debug_hud_.load(std::memory_order_relaxed)) {
+    return 0;
+  }
+  OcclusionQueryStats stats;
+  {
+    const std::scoped_lock lock(occlusion_mutex_);
+    stats = occlusion_stats_;
+  }
+  game::Snapshot snapshot;
+  {
+    const std::scoped_lock lock(snapshot_mutex_);
+    snapshot = last_snapshot_;
+  }
+  const auto screen = static_cast<game::GameScreen>(screen_.load(std::memory_order_relaxed));
+  std::size_t used = 0;
+  const auto add = [&](const char* format, auto... values) {
+    if (used + 1 >= size) {
+      return;
+    }
+    const int written = std::snprintf(out + used, size - used, format, values...);
+    if (written > 0) {
+      // `(std::min)`: <windows.h> defines `min` as a macro.
+      used += (std::min)(static_cast<std::size_t>(written), size - used - 1);
+    }
+  };
+  add("cs2-internal   screen %s", std::string(game::screen_name(screen)).c_str());
+  add("  capabilities 0x%x", capability_mask_.load(std::memory_order_relaxed));
+  add("\nrage %s   active %d   target %d   hitbox %d", rage_enabled_.load() ? "on" : "off",
+      input_.rage_active() ? 1 : 0, input_.rage_target(), input_.rage_hitbox());
+  add("\nfire %s   %s   presses %llu   shots %llu",
+      fire_mode_name(static_cast<FireMode>(rage_fire_mode_.load(std::memory_order_relaxed))),
+      fire_refusal_name(static_cast<FireRefusal>(rage_refusal_.load(std::memory_order_relaxed))),
+      static_cast<unsigned long long>(rage_presses_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(rage_shots_.load(std::memory_order_relaxed)));
+  add("\nworld %d solids   %d mesh clusters   kept %d of %d", stats.world_cache_hulls,
+      stats.mesh_clusters, stats.world_box_kept, stats.world_cache_hulls);
+  add("\nshape types hull %d mesh %d sphere %d capsule %d compound %d", stats.type_counts[2],
+      stats.type_counts[3], stats.type_counts[0], stats.type_counts[1], stats.type_counts[4]);
+  add("\nsolve occluders %d   query %s   issues 0x%x   solves %llu",
+      rage_occluders_.load(), rage_occlusion_query_complete_.load() ? "complete" : "pending",
+      rage_occlusion_query_issues_.load(std::memory_order_relaxed),
+      static_cast<unsigned long long>(rage_solves_.load()));
+  if (snapshot.local.has_value()) {
+    const game::PlayerSnapshot& local = *snapshot.local;
+    add("\nlocal hp %d   origin %.1f %.1f %.1f   angles %.1f %.1f", local.health,
+        static_cast<double>(local.origin.x), static_cast<double>(local.origin.y),
+        static_cast<double>(local.origin.z), static_cast<double>(local.eye_angles.yaw),
+        static_cast<double>(local.eye_angles.pitch));
+  } else {
+    add("\nlocal (none)");
+  }
+  out[used < size ? used : size - 1] = '\0';
+  return used;
 }
 
 // The trace probe (`docs/re/bullet-trace.md`): ask the engine its **own** question

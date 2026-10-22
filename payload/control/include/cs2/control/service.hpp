@@ -308,6 +308,10 @@ class Service {
   // aim, which `Input::apply()` writes per tick as the silent sub-tick view angles.
   void on_snapshot(const game::Snapshot& snapshot) noexcept;
 
+  // The debug view's text (see `do_debug`). Public because the renderer's provider
+  // lives in `payload_main`, which owns neither the service's state nor its locks.
+  auto debug_lines(char* out, std::size_t size) noexcept -> std::size_t;
+
   // The ragebot's current target entity index (-1 = none), so the overlay can
   // highlight it.
   [[nodiscard]] int rage_target_index() const noexcept {
@@ -442,6 +446,11 @@ class Service {
   // `pitch_tolerance`, `delay_ms`, `key`, `fire`, `mode`). With no arguments it
   // returns the current state.
   void do_trigger(const Json& args, Json& out) noexcept;
+  // The debug view (`docs/control-harness.md`): the payload's own one-line
+  // answers, drawn as a text column in the top-left corner by the in-process
+  // renderer — no window, no input. `debug` with no arguments is a pure query;
+  // `{"on": true|false}` turns it on or off.
+  void do_debug(const Json& args, Json& out) noexcept;
   // The trace probe (`docs/re/bullet-trace.md`): ask the engine **its own**
   // question (`TraceLineIntervals`, the call the real bullet makes) for a ray, and
   // publish both answers side by side plus the difference — what the engine's
@@ -522,6 +531,11 @@ class Service {
   // The capabilities the last snapshot granted (the state machine). The
   // feature paths read this instead of re-deriving "can I move/aim now?".
   std::atomic<std::uint32_t> capability_mask_{game::k_read_only};
+  // The state machine's screen, for the debug view (the `state` command derives it
+  // again; the column must not re-derive it per frame).
+  std::atomic<int> screen_{0};  // game::GameScreen
+  // Whether the debug column is drawn (`debug {"on": true}`).
+  std::atomic<bool> debug_hud_{false};
   // What the operator asked for; the effective flags are these AND the
   // current screen (the gate is applied on the game thread, where the state
   // is fresh).
