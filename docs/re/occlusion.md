@@ -451,9 +451,21 @@ The raw wire form (one NDJSON line on the pipe):
 {"id": 1, "cmd": "trace_probe", "args": {"count": 5, "spread": 4.0}}
 ```
 
-**Run the heatmap once first** (`{"cmd": "heatmap"}`), so the static world body is
-already parsed: the probe's own enumeration then reuses that cache and the probe
-does not pay the world's parse inside the input hook.
+**Warm the world's cache first.** The static world body is parsed **once** and
+cached; the probe reuses that cache, so it does not pay the world's parse inside
+the input hook. **How to warm it** (the cache is the world's own, and it is
+filled by the game's `EntitiesInBox` query over the eye→target box):
+
+```json
+{"id": 1, "cmd": "heatmap", "args": {"walls": true, "walls_call": true}}
+```
+
+`walls` latches the live enumeration and `walls_call` asks for the engine's box
+query **now**; the game thread runs it on the next tick and the world's ~10k
+brush shapes are parsed and cached. (The ragebot's own enumeration and the
+ESP's visibility toggle populate the same cache, so either of those warms it
+too.) **Wait a tick** (the query runs on the game's main thread) and check
+`engine.world_cached == true` in the probe's answer before reading it.
 
 **The probe REFUSES while the cache is cold.** It does not parse the world body
 itself: parsing ~10k brush shapes inside the game's CreateMove hook is the one
@@ -463,9 +475,7 @@ comparison the probe exists to make would be meaningless. A refused probe
 publishes `engine.refused == true` and `engine.refusal_reason ==
 "world_cache_cold"`, every ray's `engine.answer_missing == true`, the verdict
 `unknown`, and **empty** lists on both sides — and it does **not** run the
-enumeration at all. Warm the cache (the heatmap, or the ragebot's own
-enumeration — both populate the same cache) and run it again. The answer says
-which happened (`engine.world_cached`).
+enumeration at all. Warm the cache as above and run it again.
 
 **The proof that the probe can fail** — the deliberately wrong calls (they must
 give a visibly wrong answer or a caught fault, never a crash):
@@ -562,8 +572,9 @@ without re-running the game.
 * the enumeration runs **once per command**, never per tick;
 * the probe **refuses** while the world's cache is cold, so it never pays the
   world's parse (10k brush shapes) inside the input hook — the answer says so
-  (`engine.refused` / `engine.refusal_reason`). Run the heatmap once (or let
-  the ragebot's own enumeration run) and the probe's answer is cheap.
+  (`engine.refused` / `engine.refusal_reason`). Warm the cache first
+  (`{"cmd": "heatmap", "args": {"walls": true, "walls_call": true}}`) and the
+  probe's answer is cheap.
 
 ### Process notes (recorded here, because they were recorded nowhere)
 
