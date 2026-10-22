@@ -1614,7 +1614,8 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
 // plus the difference. Runs on a game thread (an engine call must not reach tier0's
 // allocator from the payload's own thread — docs/handoff.md).
 auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
-                 const TraceExclude& exclude, bool box_query, const cs2::aim::Vec3* at)
+                 const TraceExclude& exclude, bool box_query, const cs2::aim::Vec3* at,
+                 const cs2::aim::Vec3* box_min, const cs2::aim::Vec3* box_max)
     -> TraceProbeRun {
   TraceProbeRun run;
   run.abi = abi;
@@ -1674,10 +1675,19 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
   }
   const TraceLineIntervalsFn trace_entry = reinterpret_cast<TraceLineIntervalsFn>(base + trace_rva);
 
-  // The volume the fan covers: the eye and the rays' far ends.
+  // The volume the fan covers: the eye and the rays' far ends — unless the caller
+  // named a box, which then **is** the enumeration volume (the "is this solid
+  // reachable at all" question, asked about one small box).
   Vec3 lo = eye;
   Vec3 hi = eye;
+  if (box_min != nullptr && box_max != nullptr) {
+    lo = *box_min;
+    hi = *box_max;
+  }
   for (const TraceRay& ray : rays) {
+    if (box_min != nullptr && box_max != nullptr) {
+      break;
+    }
     lo.x = std::min(lo.x, ray.end.x);
     lo.y = std::min(lo.y, ray.end.y);
     lo.z = std::min(lo.z, ray.end.z);
@@ -1747,11 +1757,19 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
       }
     }
   }
+  // With an explicit box the world selection must be that box too: passing the
+  // ray-end pyramid would answer a different question (the earlier version did, and
+  // reported the **view ray's** solids for a box on the other side of the map).
+  const bool aabb_mode = box_query || (box_min != nullptr && box_max != nullptr);
   OcclusionQueryResult occluders =
       query_world_occluders(eye, lo, hi, true, exclude.handles, exclude.handle_count,
-                            box_query ? nullptr : &target, box_query ? 0 : 1);
+                            aabb_mode ? nullptr : &target, aabb_mode ? 0 : 1);
   run.occluders = static_cast<int>(occluders.hulls.size());
   run.stats = occluders.stats;
+  for (int i = 0; i < 8; ++i) {
+    run.record_handles[i] = occluders.stats.record_handles[i];
+  }
+  run.record_handle_count = occluders.stats.record_handle_count;
   // The kept solids, so a missing wall can be looked up by position: if the wall's
   // bounds are in this list the enumeration kept it, and the loss is downstream
   // (projection or valuation); if they are not, the selection dropped it.

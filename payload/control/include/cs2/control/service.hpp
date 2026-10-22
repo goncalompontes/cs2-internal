@@ -898,6 +898,11 @@ class Service {
   // (`world.at`), so a missing wall can be blamed on the cache or on the selection.
   game::Vec3 trace_probe_at_{};
   bool trace_probe_have_at_ = false;
+  // An explicit enumeration volume (the probe's `box_min`/`box_max`): the "can the
+  // engine reach this solid at all" question, asked about one small box.
+  game::Vec3 trace_probe_box_min_{};
+  game::Vec3 trace_probe_box_max_{};
+  bool trace_probe_have_box_ = false;
   bool trace_probe_done_ = false;
   TraceProbeRun trace_probe_run_{};
   // The game thread's heartbeat: how many times the CreateMove hook's sink has run.

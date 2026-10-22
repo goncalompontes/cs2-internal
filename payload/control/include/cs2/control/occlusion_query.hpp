@@ -595,6 +595,11 @@ struct TraceProbeRun {
   std::vector<TraceHullInfo> at_point;
   int at_total = 0;
   bool at_queried = false;
+  // The first records' raw entity handles (hex), so the answer says **which
+  // bodies** the box query returned: `8000` is the worldspawn, anything else is an
+  // entity body (a prop, a door, a brush entity).
+  std::uint32_t record_handles[8] = {};
+  int record_handle_count = 0;
   // The probe's own bounds: how many solids it projects at most, and whether the
   // enumeration produced more than that (the answer is then incomplete).
   int occluder_cap = TRACE_MAX_OCCLUDERS;
@@ -915,7 +920,9 @@ struct TraceExclude {
                                TraceAbi abi = TraceAbi::correct,
                                const TraceExclude& exclude = TraceExclude{},
                                bool box_query = false,
-                               const cs2::aim::Vec3* at = nullptr) -> TraceProbeRun;
+                               const cs2::aim::Vec3* at = nullptr,
+                               const cs2::aim::Vec3* box_min = nullptr,
+                               const cs2::aim::Vec3* box_max = nullptr) -> TraceProbeRun;
 
 // Has the static world body been parsed yet? The probe's enumeration reuses the
 // parsed cache; parsing it inside the input hook is the probe's one expensive case
