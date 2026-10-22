@@ -46,9 +46,7 @@ CONFIG = REPO_ROOT / "pyproject.toml"
 PACKAGE = "scripts/scenario"
 TARGETS = [
     PACKAGE,
-    "scripts/build-protect-plugin.py",
     "scripts/resolve-offsets-offline.py",
-    "tools/protect",
 ]
 
 #: The automake "skip" code — the gate could not run, it did not fail.

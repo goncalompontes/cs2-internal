@@ -7,7 +7,7 @@ namespace cs2::features {
 namespace {
 
 // A NaN-safe clamp. `std::clamp` lets a NaN through (`v < low` and `high < v`
-// are both false for a NaN), and a corrupt shared segment must not be able to
+// are both false for a NaN), and a corrupt block must not be able to
 // put a NaN into a slider.
 auto clamp_value(float value, float low, float high) noexcept -> float {
   if (!(value == value)) {
@@ -267,34 +267,9 @@ auto from_wire_settings(const cs2::overlay::wire::Settings& settings) -> Config 
   return config;
 }
 
-// The menu's defaults: the shared defaults of the settings block. The Vulkan
-// layer's `default_ui_settings()` uses the same function, so the two can never
-// disagree about what a fresh segment means.
+// The menu's defaults: the defaults of the settings block.
 auto default_wire_settings() -> cs2::overlay::wire::Settings {
   return cs2::overlay::wire::default_settings();
-}
-
-void SettingsProtocol::publish(cs2::overlay::wire::Shared& shared,
-                               const cs2::overlay::wire::Settings& settings) noexcept {
-  cs2::overlay::wire::write_settings(shared, settings);
-  // The latch is deliberately **not** updated: the reader has to notice the
-  // published block. A publisher that recorded the sequence it had just
-  // written made the next read report "no change", and the published block
-  // (a loaded configuration) never reached the ESP.
-}
-
-auto SettingsProtocol::adopt(cs2::overlay::wire::Shared& shared,
-                             cs2::overlay::wire::Settings& out) noexcept -> SettingsStatus {
-  std::uint32_t sequence = 0;
-  if (!cs2::overlay::wire::read_settings(shared, out, &sequence)) {
-    return SettingsStatus::failed;  // a torn read; the caller keeps its copy
-  }
-  if (adopted_ && sequence == adopted_sequence_) {
-    return SettingsStatus::unchanged;
-  }
-  adopted_ = true;
-  adopted_sequence_ = sequence;
-  return SettingsStatus::adopted;
 }
 
 }  // namespace cs2::features

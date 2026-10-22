@@ -33,46 +33,4 @@ namespace cs2::features {
 // elements on, the debug HUD on, the movement/rage features off).
 [[nodiscard]] auto default_wire_settings() -> cs2::overlay::wire::Settings;
 
-// The outcome of a settings read.
-enum class SettingsStatus : std::uint8_t {
-  failed,     // the block could not be read (a torn read); the caller keeps its copy
-  unchanged,  // the block is the one the caller already has
-  adopted,    // the block changed; the caller has to apply it
-};
-
-// The settings block's publish/adopt protocol.
-//
-// The block lives in a shared segment that **two** processes write — the
-// layer's menu edits it, and the payload publishes a loaded configuration back
-// into it — so it is read under a seqlock and verified with the block's own
-// checksum (`wire.hpp`).
-//
-// The latch is what makes "the block changed" detectable: a reader adopts the
-// block only when the sequence moved since the last adoption, so a frame that
-// reads the same block does not re-apply the configuration.
-//
-// **A publish must not touch the latch.** The whole point of publishing a
-// block is that the reader has to notice it: a publisher that recorded the
-// sequence it had just written made the next read report "no change", and the
-// published block was never applied.
-class SettingsProtocol {
- public:
-  // Publish `settings` into `shared` (under the seqlock, with the checksum).
-  void publish(cs2::overlay::wire::Shared& shared,
-               const cs2::overlay::wire::Settings& settings) noexcept;
-
-  // Read the block out of `shared` and adopt it when it changed.
-  //
-  // `out` always holds the block that was read — the previous copy when the
-  // read failed — so the caller can push it to the features every frame.
-  [[nodiscard]] auto adopt(cs2::overlay::wire::Shared& shared,
-                           cs2::overlay::wire::Settings& out) noexcept -> SettingsStatus;
-
- private:
-  // The sequence of the last adopted block.
-  std::uint32_t adopted_sequence_{0};
-  // Whether a block was adopted at all (the first read always is).
-  bool adopted_{false};
-};
-
 }  // namespace cs2::features

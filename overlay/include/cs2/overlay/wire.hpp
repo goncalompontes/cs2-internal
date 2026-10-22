@@ -1,97 +1,21 @@
 #pragma once
 
-// Portable shared-memory wire format for the overlay model (ADR-0016).
+// The settings block: the one configuration both the menu and the features
+// read (ADR-0021). It is a plain POD with a fixed layout, so the host tests,
+// the payload and the control channel can all include it.
 //
-// Written by the injected Windows payload (`features::ModelPublisher`), read by
-// the Vulkan present layer. POD only — no Vulkan, no platform types — and the
-// same header is compiled by both the MSVC-ABI payload (clang-cl) and the Linux
-// layer (gcc), so the layouts must agree. Only fixed-size arrays and 4-byte
-// scalars are used to keep the layout identical across ABIs.
-//
-// Synchronization: `sequence` is a seqlock around `model`. The payload writes
-// an odd value, updates `model`, then writes the next even value. The layer
-// retries while the sequence is odd or changed during the copy. `screen_width`/
-// `screen_height` are written by the layer so the payload knows the presented
-// size to project world coordinates against.
-//
-// The **settings** block has two writers (the layer's menu edits it, the
-// payload publishes a loaded configuration back into it) and the two share no
-// lock, so its seqlock alone cannot rule out a torn read: the block carries
-// its own checksum (`settings_checksum`) and both readers verify it.
+// The block used to be shared with the external Vulkan layer through a mapped
+// segment; the layer is gone, so there is no seqlock, no checksum and no other
+// writer. The in-process menu owns the block; the control channel reads and
+// patches it through the menu (see `settings.hpp`).
 
-#include <array>
-#include <atomic>
-#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <type_traits>
 
 namespace cs2::overlay::wire {
 
-inline constexpr uint32_t k_magic = 0x324F5343U;  // 'CSO2'
-// v13: the settings block gained a checksum (it has two writers) and the
-// config path field grew to `MAX_PATH`. A stale binary refuses the segment
-// (`segment_is_compatible`) instead of reading a block it cannot verify.
-inline constexpr uint32_t k_version = 13;
-
-inline constexpr int k_max_sections = 16;
-inline constexpr int k_max_lines = 64;
-inline constexpr int k_max_draws = 12288;
-inline constexpr int k_max_vertices = 16384;  // xy pairs for filled polygons
-inline constexpr int k_max_title = 64;
-inline constexpr int k_max_label = 48;
-inline constexpr int k_max_value = 200;
-inline constexpr int k_max_text = 192;
-
-// Force byte-identical layout across the MSVC-ABI payload and the gcc-built
-// layer (their default padding for these structs differs).
 #pragma pack(push, 1)
-
-struct Line {
-  char label[k_max_label];
-  char value[k_max_value];
-};
-
-struct Section {
-  char title[k_max_title];
-  uint32_t line_count;
-  Line lines[k_max_lines];
-};
-
-enum class DrawKind : uint32_t {
-  rect = 0,
-  filled_rect = 1,
-  line = 2,
-  text = 3,
-  // A filled convex polygon; `vertex_offset`/`vertex_count` index `Model.vertices`
-  // (xy pairs, screen space). Used for the solid hitbox capsules.
-  filled_poly = 4,
-};
-
-struct Draw {
-  DrawKind kind;
-  float x0;
-  float y0;
-  float x1;
-  float y1;
-  float thickness;
-  uint8_t r;
-  uint8_t g;
-  uint8_t b;
-  uint8_t a;
-  uint8_t centered;
-  uint8_t shadow;   // 1px drop shadow
-  uint8_t outline;  // 1px outline on every side
-  uint8_t reserved;
-  uint32_t vertex_offset;  // filled_poly: index into Model.vertices (xy pairs)
-  uint32_t vertex_count;   // filled_poly: number of points
-  char text[k_max_text];
-};
-
-// Menu-editable configuration (ADR-0021). Written by the layer's menu, read by
-// the payload that builds the ESP, under `settings_sequence` (seqlock, same
-// convention as `model`).
 struct Settings {
   uint8_t box;
   uint8_t health_bar;
@@ -118,7 +42,7 @@ struct Settings {
   // target cone in degrees (0 = unlimited); `rage_min_damage`/`rage_min_hitchance` gate
   // the aim/fire; `rage_objective` selects the solve objective; `rage_hitbox` filters it.
   uint8_t rage_objective;    // 0 = damage, 1 = hitchance, 2 = expected
-  uint8_t rage_hitbox;       // 0 = auto (head→body), 1 = head only, 2 = body only
+  uint8_t rage_hitbox;       // 0 = auto (head???body), 1 = head only, 2 = body only
   float rage_fov;            // degrees; 0 = no limit
   float rage_min_damage;     // don't aim/fire below this damage (0 = any)
   float rage_min_hitchance;  // don't fire below this hitchance (0-1; 0 = any)
@@ -145,7 +69,7 @@ struct Settings {
   // this speed, the fastest movement that does not add spread).
   uint8_t rage_recoil;
   float rage_stop_speed;
-  // Lag-record backtracking (`docs/ragebot.md` §8). **Off by default**: the sampled lag
+  // Lag-record backtracking (`docs/ragebot.md` -?8). **Off by default**: the sampled lag
   // poses cost a full solve each and the record sampling itself is ~0.6 ms/tick, so the
   // feature is kept but disabled until the perf work lands.
   uint8_t rage_backtrack;
@@ -209,135 +133,7 @@ struct Settings {
   // refused rather than truncated to a different file).
   char menu_config_path[260];
 };
-
-struct Model {
-  char title[k_max_title];
-  uint32_t section_count;
-  Section sections[k_max_sections];
-  uint32_t draw_count;
-  Draw draws[k_max_draws];
-  // Pool for `filled_poly` vertices: xy pairs, indexed by `Draw.vertex_offset`.
-  uint32_t vertex_count;
-  float vertices[k_max_vertices * 2];
-  uint32_t in_game;  // 1 when a local player is present (menu may interact)
-};
-
-struct Shared {
-  uint32_t magic;
-  uint32_t version;
-  std::atomic<uint32_t> screen_width;       // written by the layer
-  std::atomic<uint32_t> screen_height;      // written by the layer
-  std::atomic<uint32_t> sequence;           // seqlock, written by the payload
-  std::atomic<uint32_t> settings_sequence;  // seqlock, written by both sides
-  // The checksum of `settings` (FNV-1a over its bytes), written inside the
-  // settings seqlock window. It is an atomic so the readers never tear it,
-  // and it sits **before** the block so it keeps a 4-byte aligned offset —
-  // `std::atomic` requires its natural alignment.
-  std::atomic<uint32_t> settings_checksum;
-  Settings settings;
-  Model model;
-};
-
 #pragma pack(pop)
-
-// The settings block is memcpy'd across an ABI boundary between two separately
-// compiled translation units (the MSVC-ABI payload and the gcc-built layer), so
-// it has to stay a plain, copyable POD: anything else would let the layout
-// depend on the compiler's ABI choices.
-static_assert(std::is_standard_layout_v<Settings>,
-              "wire::Settings must be standard-layout: it is shared across an ABI boundary");
-static_assert(std::is_trivially_copyable_v<Settings>,
-              "wire::Settings must be trivially copyable: it is shared across an ABI boundary");
-// The settings block is packed, so `Settings` has no padding: every byte of
-// the block carries a setting and the checksum below is well defined.
-static_assert(std::is_standard_layout_v<Shared>,
-              "wire::Shared must be standard-layout: it is shared across an ABI boundary");
-
-// The checksum lives in an atomic, and an atomic needs its natural alignment.
-static_assert(offsetof(Shared, settings_checksum) % alignof(std::atomic<uint32_t>) == 0,
-              "wire::Shared::settings_checksum must stay naturally aligned");
-
-// The settings block's checksum.
-//
-// The block is written by **two** processes — the layer's menu edits it, and
-// the payload publishes a loaded configuration back into it — and the two
-// share no lock, so a reader can see a torn block: a colour byte from one
-// write, a flag from the other. A seqlock cannot catch that on its own: it
-// only sees the sequence, and two writers interleave their sequence updates
-// as well.
-//
-// The block is therefore self-verifying: the writer computes the checksum
-// inside the seqlock window, the reader recomputes it over the copy it took
-// and rejects a mismatch, so a torn read is always detected.
-//
-// FNV-1a over the block's bytes. The function lives in this header — the one
-// both sides compile — so the payload and the layer can never compute
-// different values for the same block.
-[[nodiscard]] constexpr auto settings_checksum(const Settings& settings) noexcept -> uint32_t {
-  const auto bytes = std::bit_cast<std::array<unsigned char, sizeof(Settings)>>(settings);
-  uint32_t hash = 2166136261U;  // the FNV-1a offset basis
-  for (const unsigned char byte : bytes) {
-    hash ^= static_cast<uint32_t>(byte);
-    hash *= 16777619U;  // the FNV-1a prime
-  }
-  return hash;
-}
-
-// The segment is usable only when the magic and the version match.
-//
-// A stale binary must **refuse** a segment it does not understand rather than
-// read a block whose layout — and whose checksum — it does not know. Both
-// sides check this before they touch the block.
-[[nodiscard]] constexpr auto segment_is_compatible(uint32_t magic, uint32_t version) noexcept
-    -> bool {
-  return magic == k_magic && version == k_version;
-}
-
-// Write the settings block into the segment under the settings seqlock.
-//
-// The checksum is written **inside** the window, right after the block, so a
-// reader that takes the block and the checksum under the same window either
-// sees a consistent pair or rejects it.
-inline void write_settings(Shared& shared, const Settings& in) noexcept {
-  const uint32_t sequence = shared.settings_sequence.load(std::memory_order_relaxed);
-  shared.settings_sequence.store(sequence + 1, std::memory_order_relaxed);  // odd: writing
-  std::memcpy(&shared.settings, &in, sizeof(Settings));
-  shared.settings_checksum.store(settings_checksum(in), std::memory_order_relaxed);
-  shared.settings_sequence.store(sequence + 2, std::memory_order_release);  // even: stable
-}
-
-// Read the settings block out of the segment.
-//
-// The copy is taken under the settings seqlock and **verified**: the checksum
-// that was written with the block has to match the copy, or the read was torn
-// (the block has two writers) and the caller has to try again.
-//
-// `sequence` (optional) receives the seqlock sequence the copy was taken at,
-// so the caller can tell whether the block changed since the last read.
-[[nodiscard]] inline auto read_settings(const Shared& shared, Settings& out,
-                                        uint32_t* sequence = nullptr) noexcept -> bool {
-  for (int attempt = 0; attempt < 3; ++attempt) {
-    const uint32_t first = shared.settings_sequence.load(std::memory_order_acquire);
-    if ((first & 1U) != 0U) {
-      continue;  // a write is in progress
-    }
-    Settings copy{};
-    std::memcpy(&copy, &shared.settings, sizeof(Settings));
-    const uint32_t checksum = shared.settings_checksum.load(std::memory_order_relaxed);
-    if (shared.settings_sequence.load(std::memory_order_acquire) != first) {
-      continue;  // the block changed under the copy
-    }
-    if (checksum != settings_checksum(copy)) {
-      continue;  // a torn read: two writers share the block
-    }
-    out = copy;
-    if (sequence != nullptr) {
-      *sequence = first;
-    }
-    return true;
-  }
-  return false;
-}
 
 // --- The settings patch -------------------------------------------------------
 //
@@ -383,9 +179,9 @@ inline void apply_settings_patch(Settings& block, const SettingsPatch& patch) no
 
 // The shared defaults for the settings block.
 //
-// Both sides derive their defaults from this one function — the payload's
+// Both sides derive their defaults from this one function ??? the payload's
 // `features::default_wire_settings()` and the Vulkan layer's
-// `default_ui_settings()` — so the two can never disagree about what a fresh
+// `default_ui_settings()` ??? so the two can never disagree about what a fresh
 // segment means. The values mirror `features::Config`'s defaults; the host test
 // `features-config` asserts that the two stay in step.
 //
@@ -523,21 +319,5 @@ inline void apply_settings_patch(Settings& block, const SettingsPatch& patch) no
   return settings;
 }
 
-// The checksum of the default settings block.
-//
-// The payload and the layer compile this header, so the constant pins the two
-// builds to the same checksum: a change to the block's layout or to the
-// checksum function breaks the build on **both** sides instead of producing a
-// block the other side cannot verify.
-//
-// **Changing a default in `default_settings()` changes this constant.** The
-// assertion below then fires in all three builds (the host suite, the payload
-// and the Vulkan layer); recompute it and say so in the commit. The failure is
-// deliberate: a default that moves without the constant moving would let the
-// two binaries disagree about what the block's checksum is.
-inline constexpr uint32_t k_default_settings_checksum = 3909154372U;
-
-static_assert(settings_checksum(default_settings()) == k_default_settings_checksum,
-              "the settings checksum changed: the payload and the layer must agree on it");
-
 }  // namespace cs2::overlay::wire
+

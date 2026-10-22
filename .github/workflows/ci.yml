@@ -4,7 +4,7 @@
 # prescribe, on a Windows runner:
 #
 #   * the host build (meson) and the host test suite,
-#   * the Windows payload, overlay and injector builds (clang-cl),
+#   * the Windows payload and injector builds (clang-cl),
 #   * the payload's own test suite (the copy that ships with the payload),
 #   * the Python suite (the scenario harness),
 #   * the type gate (mypy),
@@ -16,8 +16,7 @@
 #     (docs/windows-validation.md).
 #   * the protection pass: `-Dprotect=true` needs the LLVM pass plugin and a
 #     policy file, which are not in the tree.
-#   * the Vulkan layer's runtime behaviour: the layer is only compiled here.
-#   * the injector against a real target: the injector's own test aids
+# #   * the injector against a real target: the injector's own test aids
 #     (a benign victim, a trivial DLL) are built, not run against a target.
 #   * the format check: the tree is deliberately not clang-format-clean
 #     (docs/style-guide.md §7 rule 3), so a format check would be red on
@@ -187,25 +186,6 @@ jobs:
       # (`meson.can_run_host_binaries()`).
       - name: the payload tests
         run: meson test -C build-payload
-
-      # The Vulkan headers are **git-ignored** (a large, non-redistributable
-      # download -- see .gitignore and docs/setup-windows.md §5), so
-      # `actions/checkout` cannot fetch them: the overlay's
-      # `include_directories('../external/Vulkan-Headers/include')` fails at
-      # *configure* time without them, and the whole job is red. The runner
-      # clones them here, exactly as docs/setup-windows.md §5 says a
-      # developer does. The tag is pinned: the gate must build the same
-      # headers every run.
-      - name: the Vulkan headers
-        run: |
-          git clone --depth 1 --branch vulkan-sdk-1.4.363.0 `
-            https://github.com/KhronosGroup/Vulkan-Headers external/Vulkan-Headers
-
-      - name: the overlay build (configure)
-        run: meson setup build-overlay overlay
-
-      - name: the overlay build (compile)
-        run: meson compile -C build-overlay
 
       - name: the injector build (configure)
         run: meson setup build-injector injector

@@ -70,13 +70,8 @@ if ($vcvars) {
 
 Write-Host ""
 Write-Host "-- repo inputs --" -ForegroundColor Cyan
-if (Test-Path (Join-Path $RepoRoot 'external\Vulkan-Headers\include\vulkan\vulkan.h')) {
-  Result 'PASS' 'Vulkan-Headers' 'external\Vulkan-Headers present'
-} else {
-  Result 'FAIL' 'Vulkan-Headers' 'missing; clone KhronosGroup/Vulkan-Headers into external\Vulkan-Headers'
-}
 
-foreach ($b in 'build', 'build-payload', 'build-injector', 'build-overlay') {
+foreach ($b in 'build', 'build-payload', 'build-injector') {
   if (Test-Path (Join-Path $RepoRoot $b)) {
     Result 'PASS' $b 'configured'
   } else {
@@ -122,15 +117,6 @@ if (Get-ScheduledTask -TaskName 'CS2Launch' -ErrorAction SilentlyContinue) {
 } else {
   Result 'WARN' 'CS2Launch task' 'missing; create it so the game launches in the interactive session'
 }
-
-# Vulkan implicit layer (machine-wide, HKLM) for the overlay on native Windows.
-$layer = Get-ItemProperty 'HKLM:\SOFTWARE\Khronos\Vulkan\ImplicitLayers' -ErrorAction SilentlyContinue
-$registered = $false
-if ($layer) {
-  $registered = ($layer.PSObject.Properties | Where-Object { $_.Name -like '*cs2_overlay_layer.json' }).Count -gt 0
-}
-if ($registered) { Result 'PASS' 'Vulkan layer' 'cs2_overlay_layer.json registered under HKLM' }
-else { Result 'WARN' 'Vulkan layer' 'not registered (needed for the overlay; see docs/setup-windows.md)' }
 
 # Payload import hygiene (docs/handoff.md gotchas): a non-POD payload global or a
 # function-local `static` drags in a CRT import the manual-map injector cannot

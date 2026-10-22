@@ -18,9 +18,7 @@
 #include "cs2/features/chams.hpp"
 #include "cs2/features/config_store.hpp"
 #include "cs2/features/esp.hpp"
-#include "cs2/features/game_present_hook.hpp"
 #include "cs2/features/menu.hpp"
-#include "cs2/features/model_publisher.hpp"
 #include "cs2/features/overlay.hpp"
 #include "cs2/features/present_hook.hpp"
 #include "cs2/features/settings.hpp"
@@ -49,12 +47,9 @@ namespace {
 
 // The live feature settings block (ADR-0021) as the control channel sees it.
 //
-// The block is **owned** elsewhere: the in-process overlay menu owns it, and
-// in the Vulkan-layer mode the shared segment does (the layer's menu writes
-// it, the payload publishes it). The owner publishes the block every frame
-// through the settings sink, so the control thread reads that copy — it never
-// touches the shared segment's seqlock (the publisher owns that) and never
-// reads the menu's block while the menu is writing it.
+// The block is **owned** by the in-process menu. The menu publishes it every
+// frame through the settings sink, so the control thread reads that copy
+// instead of the menu's live block.
 struct LiveSettings {
   mutable std::mutex mutex;
   cs2::overlay::wire::Settings block{};
@@ -87,8 +82,6 @@ struct Runtime {
   render::ImGuiBackend backend;
   features::Overlay overlay;
   features::Menu menu{overlay};
-  features::ModelPublisher publisher{overlay};
-  features::GamePresentHook game_present{publisher};
   features::PresentHook present{backend, overlay, &menu};
   // The third-person camera: the engine's own camera, driven by the
   // operator's parameters.
@@ -119,10 +112,6 @@ struct Runtime {
   // Whether a publication has been applied yet: the **first** one applies the
   // whole group (there is no earlier view to compare against).
   bool rage_menu_view_valid = false;
-  // Whether the shared segment (the Vulkan layer) owns the settings block, or
-  // the in-process menu does. The render mode decides it, and the render mode
-  // can still fall back from the in-process renderer to the layer.
-  std::atomic<bool> layer_owns_settings{false};
 };
 
 Runtime g_runtime;
@@ -132,36 +121,9 @@ auto runtime() -> Runtime& {
 }
 
 #if defined(_WIN32)
-// Which renderer the payload drives.
-enum class RenderMode {
-  present,       // in-process D3D11/DXGI Present + the payload's own menu (default)
-  layer,         // external Vulkan layer: publish the model on the game's present
-  layer_thread,  // external Vulkan layer via a dedicated publish thread (Wine-safe)
-};
-
-// `CS2_PAYLOAD_RENDER` picks explicitly. Otherwise the graphics stack decides: a
-// Vulkan/DXVK stack (a loaded `vulkan-1.dll`) uses the external layer, and
-// everything else (native D3D11) renders in-process. The game inherits its
-// environment from Steam, so the env is only a hint — the module check is the
-// reliable signal. `CS2_PAYLOAD_PUB_THREAD` selects the Wine-safe layer variant.
-auto render_mode() noexcept -> RenderMode {
-  if (const char* mode = std::getenv("CS2_PAYLOAD_RENDER"); mode != nullptr) {
-    if (std::string(mode) == "present") {
-      return RenderMode::present;
-    }
-    if (std::string(mode) == "layer") {
-      return RenderMode::layer;
-    }
-    if (std::string(mode) == "layer-thread") {
-      return RenderMode::layer_thread;
-    }
-  }
-  if (GetModuleHandleW(L"vulkan-1.dll") != nullptr) {
-    return std::getenv("CS2_PAYLOAD_PUB_THREAD") != nullptr ? RenderMode::layer_thread
-                                                            : RenderMode::layer;
-  }
-  return RenderMode::present;
-}
+// The payload has **one** render path: the in-process Present hook (DXGI +
+// D3D11). The external Vulkan layer, its shared-memory model and its settings
+// segment are gone; there is no render mode to select.
 #endif
 
 // `CS2_PAYLOAD_MOVEMENT` — the payload's own switch for the movement features
@@ -300,9 +262,9 @@ auto parse_trigger_env() noexcept -> cs2::control::TriggerConfig {
   return config;
 }
 
-// The overlay menu's `Movement`/`Ragebot` tabs write the shared settings; the
-// publisher calls this on every published frame, and the payload's features follow (so
-// the menu is the single owner of the block).
+// The overlay menu's `Movement`/`Ragebot` tabs write the settings block; the
+// menu calls this on every frame, and the payload's features follow (so the
+// menu is the single owner of the block).
 //
 // **The ragebot's settings are the exception**: the control channel drives the
 // ragebot too, and it is the only way to reach the Monte-Carlo objective (the
@@ -366,10 +328,6 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
   // publication never disturbs the menu's in-flight edits.
   if (cs2::features::publish_config_path(live)) {
     runtime->menu.set_config_path(live.menu_config_path);
-#if defined(_WIN32)
-    // The Vulkan layer's menu reads the shared segment.
-    runtime->publisher.publish_settings_block(live);
-#endif
   }
 
   // The third-person camera. The engine supports the switch and the distance;
@@ -406,25 +364,19 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
 
   // The menu's one-shot config op (save / load / reset the settings file). The op
   // runs **once per token** — the token bookkeeping lives in the store's state,
-  // so the two callers of this sink (the menu and the publisher) cannot both
-  // fire it.
+  // so two publications cannot both fire it.
   //
   // The op runs against the **live** block: the store rebuilds the payload's
   // configuration from it first, so a save persists the settings the user is
   // looking at and not the defaults. A load or a reset changes the
-  // configuration, so the result has to reach the owner of the live block: the
-  // in-process menu (`runtime->menu`) and the shared segment (the Vulkan
-  // layer's menu, ADR-0016). Both get the same block. A save changes nothing,
-  // so it does not touch the live block at all.
+  // configuration, so the result has to reach the owner of the live block (the
+  // in-process menu). A save changes nothing, so it does not touch the block.
   const cs2::features::ConfigOpOutcome outcome =
       cs2::features::apply_pending_op(runtime->config, live, runtime->config_op);
   if (outcome.changed) {
     runtime->menu.replace_settings(outcome.block);
     runtime->overlay.set_esp_config(cs2::features::from_wire_settings(outcome.block));
     runtime->overlay.set_show_hud(outcome.block.show_hud != 0);
-#if defined(_WIN32)
-    runtime->publisher.publish_settings_block(outcome.block);
-#endif
   }
 }
 
@@ -436,10 +388,9 @@ void on_local_pawn(void* context, std::uintptr_t pawn) noexcept {
 
 // The control channel's read access to the live settings block (ADR-0021).
 //
-// The block belongs to its owner (the in-process menu, or the shared segment
-// in the Vulkan-layer mode). The owner publishes it every frame through the
-// settings sink, so the control thread reads that copy: a consistent snapshot,
-// and no seqlock of the control channel's own.
+// The block belongs to the in-process menu, which publishes it every frame
+// through the settings sink, so the control thread reads that copy: a
+// consistent snapshot, and no lock of the control channel's own.
 void read_settings(void* context, cs2::overlay::wire::Settings& out) noexcept {
   static_cast<Runtime*>(context)->live_settings.read(out);
 }
@@ -454,17 +405,9 @@ void read_settings(void* context, cs2::overlay::wire::Settings& out) noexcept {
 // without a lock is a data race.
 void write_settings(void* context, const cs2::overlay::wire::SettingsPatch& patch) noexcept {
   auto* runtime = static_cast<Runtime*>(context);
-  cs2::overlay::wire::Settings merged{};
-  if (runtime->layer_owns_settings.load()) {
-    // The Vulkan layer's menu owns the block in the shared segment; the
-    // publisher merges the fields into it (the same seqlock the layer reads it
-    // with).
-    merged = runtime->publisher.merge_settings_block(patch);
-  } else {
-    // The in-process menu owns the block; it merges the fields and hands the
-    // result to the features on its next frame.
-    merged = runtime->menu.merge_settings(patch);
-  }
+  // The in-process menu owns the block; it merges the fields and hands the
+  // result to the features on its next frame.
+  const cs2::overlay::wire::Settings merged = runtime->menu.merge_settings(patch);
   // The control channel's own copy follows the owner: it is the block the
   // `settings` command reads, and the block the next request is merged
   // against.
@@ -610,12 +553,8 @@ DWORD WINAPI install_thread(void*) {
     };
     cs2::game::append_log(std::string("[cs2-payload] movement: strafe=") +
                           (movement.strafe ? "1" : "0") + " bhop=" + (movement.bhop ? "1" : "0") +
-                          " | env: MOVEMENT=" + env_value("CS2_PAYLOAD_MOVEMENT") +
-                          " PUB_THREAD=" + env_value("CS2_PAYLOAD_PUB_THREAD") +
-                          " OVERLAY=" + env_value("CS2_OVERLAY") +
-                          " OVERLAY_LOG=" + env_value("CS2_OVERLAY_LOG"));
+                          " | env: MOVEMENT=" + env_value("CS2_PAYLOAD_MOVEMENT"));
     cs2::payload::runtime().control.set_movement_features(movement.strafe, movement.bhop);
-    cs2::payload::runtime().publisher.set_movement_defaults(movement.strafe, movement.bhop);
     cs2::payload::runtime().menu.set_movement_defaults(movement.strafe, movement.bhop);
     const RageConfig rage = parse_rage_env();
     cs2::game::append_log(std::string("[cs2-payload] rage: enabled=") + (rage.enabled ? "1" : "0") +
@@ -625,7 +564,6 @@ DWORD WINAPI install_thread(void*) {
         false, false, 0 /*hold*/, false, "", 0, 0, true /*recoil*/, 0.0F,
         false /*backtrack: off by default*/, cs2::control::RAGE_FIELD_ALL,
         cs2::control::RageSource::control);
-    cs2::payload::runtime().publisher.set_rage_defaults(rage.enabled, rage.key, rage.fire);
     cs2::payload::runtime().menu.set_rage_defaults(rage.enabled, rage.key, rage.fire);
     // The triggerbot (`docs/ragebot.md` §"The trigger"): the environment's
     // defaults, then the `trigger` control command owns the feature. The
@@ -643,16 +581,7 @@ DWORD WINAPI install_thread(void*) {
       cs2::payload::runtime().control.set_trigger_features(trigger);
     }
     // The in-process menu's settings sink: the features follow the **menu's**
-    // block every frame.
-    //
-    // The shared segment's block belongs to the Vulkan layer's menu, and the
-    // publisher only pushes it when the layer owns the settings (the
-    // render-mode block below): **only the owner's block reaches the
-    // features**. The two blocks disagree — the segment's copy is never
-    // refreshed from the payload's menu — so pushing both of them would write
-    // the strafe's settings twice per frame, from two threads, with different
-    // values: the last writer would win and the user's choice would
-    // flip-flop.
+    // block every frame. The menu is the only owner of the block.
     cs2::payload::runtime().menu.set_settings_sink(&on_movement_settings, &cs2::payload::runtime());
     // The control channel's access to the live settings block (ADR-0021): the
     // same block the menu owns, read and written through its owner.
@@ -687,45 +616,13 @@ DWORD WINAPI install_thread(void*) {
   // client build the offsets were not verified on; the console route then
   // carries the feature on its own.
   (void)cs2::payload::runtime().thirdperson.install();
-  // Render path (workstream A): the ESP + menu render in-process from the game's
-  // D3D11/DXGI Present by default; the external Vulkan layer (the shm publisher +
-  // `game_present`) is the fallback for a Vulkan/DXVK stack.
+  // The render path: the ESP + menu render in-process from the game's
+  // D3D11/DXGI Present. That is the only renderer.
   if (std::getenv("CS2_PAYLOAD_NO_PUBLISH") == nullptr) {
-    RenderMode mode = render_mode();
-    if (mode == RenderMode::present && !cs2::payload::runtime().present.install()) {
-      mode = RenderMode::layer;  // dxgi/d3d11 unavailable: fall back
-    }
-    switch (mode) {
-      case RenderMode::present:
-        // In-process renderer: the ESP + menu render from the game's D3D11/DXGI
-        // Present; no shared memory, no Vulkan layer.
-        cs2::game::append_log("[cs2-payload] render: in-process Present (DXGI) + menu");
-        break;
-      case RenderMode::layer_thread:
-        (void)cs2::payload::runtime().publisher.map();
-        (void)cs2::payload::runtime().publisher.start();  // dedicated publish thread
-        cs2::game::append_log("[cs2-payload] render: external Vulkan layer (publish thread)");
-        break;
-      case RenderMode::layer:
-      default:
-        // Publish the model to shared memory and let the external Vulkan layer
-        // draw it, driven from the game's own present hook.
-        (void)cs2::payload::runtime().publisher.map();
-        (void)cs2::payload::runtime().game_present.install();
-        cs2::game::append_log("[cs2-payload] render: external Vulkan layer (present hook)");
-        break;
-    }
-    // The settings block's owner follows the render mode (ADR-0021): the
-    // in-process menu owns it, and in the layer modes the shared segment does.
-    // The render mode can still fall back from the in-process renderer to the
-    // layer, so the flag is set from the mode that was actually installed.
-    const bool layer_owns = mode != RenderMode::present;
-    cs2::payload::runtime().layer_owns_settings.store(layer_owns);
-    if (layer_owns) {
-      // The shared segment owns the block: the features follow the segment's
-      // copy, and the publisher is the only thing that pushes it.
-      cs2::payload::runtime().publisher.set_settings_sink(&on_movement_settings,
-                                                          &cs2::payload::runtime());
+    if (!cs2::payload::runtime().present.install()) {
+      cs2::game::append_log("[cs2-payload] render: the Present hook could not be installed");
+    } else {
+      cs2::game::append_log("[cs2-payload] render: in-process Present (DXGI) + menu");
     }
   }
   return 0;
@@ -799,19 +696,10 @@ void boot() {
   // CS2/DXVK; create it skipping thread attach instead (the routine bootstraps
   // its own TLS).
   //
-  // The in-process renderer is the exception: its DXGI/D3D11 probe (method-table
-  // discovery) faults inside dxgi when called from a thread that never ran module
-  // thread-attach, so that path uses a normal thread (safe on native Windows
-  // D3D11). The layer paths keep the TLS-skip thread (the Wine/DXVK wedge in
-  // ADR-0017).
-  if (render_mode() == RenderMode::present) {
-    (void)CreateThread(nullptr, 0, &install_thread, nullptr, 0, nullptr);
-  } else {
-    (void)cs2::tls::create_thread_no_attach(reinterpret_cast<void* (*)(void*)>(&install_thread),
-                                            nullptr);
-  }
-#else
-  runtime().publisher.start();
+  // The DXGI/D3D11 probe (method-table discovery) faults inside dxgi when
+  // called from a thread that never ran module thread-attach, so the install
+  // thread is a normal one (safe on native Windows D3D11).
+  (void)CreateThread(nullptr, 0, &install_thread, nullptr, 0, nullptr);
 #endif
 }
 

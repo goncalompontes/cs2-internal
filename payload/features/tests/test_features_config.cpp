@@ -300,8 +300,7 @@ auto test_field_pairing() -> void {
   }
 }
 
-// The defaults of the typed config and the shared wire defaults agree, so the
-// payload and the Vulkan layer can never disagree about a fresh segment.
+// The defaults of the typed config and the shared wire defaults agree.
 auto test_defaults_agree() -> void {
   const Settings shared = cs2::overlay::wire::default_settings();
   expect(same_settings(cs2::features::default_wire_settings(), shared),
@@ -473,153 +472,6 @@ auto test_store_rejects_garbage() -> void {
          "the colour's components are applied");
 
   std::filesystem::remove(path, error);
-}
-
-// The settings block's checksum.
-//
-// The block has two writers (the layer's menu and the payload), so a reader
-// has to be able to tell a whole block from a torn one. The checksum is
-// computed in the shared header, so the payload and the layer cannot disagree
-// about it; the golden value in the header pins the two builds together.
-auto test_settings_checksum() -> void {
-  using cs2::overlay::wire::default_settings;
-  using cs2::overlay::wire::k_default_settings_checksum;
-  using cs2::overlay::wire::settings_checksum;
-
-  expect(settings_checksum(default_settings()) == k_default_settings_checksum,
-         "the default block carries the golden checksum");
-
-  // One changed byte changes the checksum.
-  const Settings original = default_settings();
-  Settings changed = original;
-  changed.esp_color_enemy[0] = static_cast<std::uint8_t>(changed.esp_color_enemy[0] + 1);
-  expect(settings_checksum(changed) != settings_checksum(original),
-         "one changed byte changes the checksum");
-
-  // A clean round trip through the segment keeps the checksum.
-  // The segment is 3 MB, so it lives in the static storage, not on the stack.
-  static cs2::overlay::wire::Shared shared{};
-  shared.magic = cs2::overlay::wire::k_magic;
-  shared.version = cs2::overlay::wire::k_version;
-  cs2::overlay::wire::write_settings(shared, changed);
-  Settings copy{};
-  expect(cs2::overlay::wire::read_settings(shared, copy), "a whole block is read");
-  expect(settings_checksum(copy) == settings_checksum(changed),
-         "the round trip keeps the checksum");
-  expect(std::memcmp(&copy, &changed, sizeof(Settings)) == 0, "the round trip keeps every byte");
-}
-
-// A torn read is always detected.
-//
-// The settings block is written by two processes that share no lock, so a
-// reader can see a block that is half of one write and half of the other. The
-// seqlock alone cannot catch that — the sequence is even and stable when the
-// read happens — so the block carries its own checksum.
-auto test_torn_read_is_detected() -> void {
-  using cs2::overlay::wire::k_magic;
-  using cs2::overlay::wire::k_version;
-  using cs2::overlay::wire::settings_checksum;
-
-  // The segment is 3 MB, so it lives in the static storage, not on the stack.
-  static cs2::overlay::wire::Shared shared{};
-  shared.magic = k_magic;
-  shared.version = k_version;
-  Settings first = cs2::overlay::wire::default_settings();
-  first.esp_color_enemy[0] = 11;
-  first.esp_color_offscreen[0] = 33;
-  Settings second = cs2::overlay::wire::default_settings();
-  second.esp_color_enemy[0] = 22;
-  second.esp_color_offscreen[0] = 44;
-
-  auto* bytes = reinterpret_cast<unsigned char*>(&shared.settings);
-  // The split falls inside the ESP colour block, so the two writers differ on
-  // **both** sides of it: the torn block is neither of them.
-  constexpr std::size_t k_split = 120;
-  std::uint32_t sequence = shared.settings_sequence.load();
-
-  // Writer A: the first half of its block, with its checksum.
-  shared.settings_sequence.store(sequence + 1);
-  std::memcpy(bytes, &first, k_split);
-  shared.settings_checksum.store(settings_checksum(first));
-  shared.settings_sequence.store(sequence + 2);
-
-  // Writer B: the whole block, with its own checksum.
-  shared.settings_sequence.store(sequence + 3);
-  std::memcpy(bytes, &second, sizeof(Settings));
-  shared.settings_checksum.store(settings_checksum(second));
-  shared.settings_sequence.store(sequence + 4);
-
-  // Writer A: the second half of its block lands after B's write. The block is
-  // now torn, but the sequence is even and stable: only the checksum can tell.
-  shared.settings_sequence.store(sequence + 5);
-  std::memcpy(bytes + k_split, reinterpret_cast<const unsigned char*>(&first) + k_split,
-              sizeof(Settings) - k_split);
-  shared.settings_sequence.store(sequence + 6);
-
-  Settings copy{};
-  std::uint32_t read_sequence = 0;
-  expect(!cs2::overlay::wire::read_settings(shared, copy, &read_sequence),
-         "a torn block is rejected");
-
-  // A block that was not torn is read back unchanged.
-  cs2::overlay::wire::write_settings(shared, first);
-  expect(cs2::overlay::wire::read_settings(shared, copy, &read_sequence), "a whole block is read");
-  expect(std::memcmp(&copy, &first, sizeof(Settings)) == 0, "the whole block comes back unchanged");
-}
-
-// A stale binary refuses a segment it does not understand: the version is
-// checked before the block is read, so a layer that does not know the
-// checksum never touches the block.
-auto test_segment_version() -> void {
-  using cs2::overlay::wire::k_magic;
-  using cs2::overlay::wire::k_version;
-  using cs2::overlay::wire::segment_is_compatible;
-
-  expect(segment_is_compatible(k_magic, k_version), "the current segment is compatible");
-  expect(!segment_is_compatible(k_magic, k_version - 1), "an older segment is refused");
-  expect(!segment_is_compatible(k_magic, k_version + 1), "a newer segment is refused");
-  expect(!segment_is_compatible(0x12345678U, k_version), "a foreign segment is refused");
-}
-
-// A block published back has to be adopted by the next read.
-//
-// The regression: the publisher recorded the sequence it had just written, so
-// the next read reported "no change" and the published block — the loaded
-// configuration — never reached the ESP.
-auto test_published_block_is_adopted() -> void {
-  using cs2::features::SettingsProtocol;
-  using cs2::features::SettingsStatus;
-
-  // The segment is 3 MB, so it lives in the static storage, not on the stack.
-  static cs2::overlay::wire::Shared shared{};
-  shared.magic = cs2::overlay::wire::k_magic;
-  shared.version = cs2::overlay::wire::k_version;
-
-  SettingsProtocol protocol;
-  Settings copy{};
-
-  // The layer's menu writes the block.
-  Settings menu_block = cs2::overlay::wire::default_settings();
-  menu_block.esp_skeleton = 1;
-  cs2::overlay::wire::write_settings(shared, menu_block);
-  expect(protocol.adopt(shared, copy) == SettingsStatus::adopted, "the menu's block is adopted");
-  expect(copy.esp_skeleton == 1, "the menu's block reaches the copy");
-
-  // The payload publishes a loaded configuration back into the segment.
-  Settings loaded = cs2::overlay::wire::default_settings();
-  loaded.esp_max_box_scale = 1.75F;
-  protocol.publish(shared, loaded);
-
-  // The next read has to notice the change and adopt the published block: that
-  // is the only path from the published block to the ESP's configuration.
-  expect(protocol.adopt(shared, copy) == SettingsStatus::adopted, "the published block is adopted");
-  expect(copy.esp_max_box_scale == 1.75F, "the published block reaches the copy");
-  expect(cs2::features::from_wire_settings(copy).esp.max_box_scale == 1.75F,
-         "the published block reaches the configuration");
-
-  // A frame that reads the same block again does not re-apply it.
-  expect(protocol.adopt(shared, copy) == SettingsStatus::unchanged,
-         "an unchanged block is not re-applied");
 }
 
 // The config file's path is published into the live block.
@@ -824,10 +676,6 @@ auto main() -> int {
   test_clamping();
   test_store_round_trip();
   test_store_rejects_garbage();
-  test_settings_checksum();
-  test_torn_read_is_detected();
-  test_segment_version();
-  test_published_block_is_adopted();
   test_config_path_is_published();
   test_op_protocol();
   test_save_persists_live_settings();
