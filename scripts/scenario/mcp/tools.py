@@ -116,6 +116,7 @@ class TraceProbeArgs(TypedDict, total=False):
     depth: float
     abi: str
     enum: str
+    at: list[float]
 
 
 class LookArgs(TypedDict, total=False):

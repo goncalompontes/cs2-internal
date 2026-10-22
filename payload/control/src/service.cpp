@@ -4057,9 +4057,10 @@ void Service::do_trigger(const Json& args, Json& out) noexcept {
 void Service::do_debug(const Json& args, Json& out) noexcept {
   if (const Json* value = args.find("on"); value != nullptr && value->is_bool()) {
     debug_hud_.store(value->as_bool(), std::memory_order_relaxed);
+    debug_hud_forced_.store(true, std::memory_order_relaxed);
   }
   Json payload = Json::object();
-  payload.set("on", Json::boolean(debug_hud_.load(std::memory_order_relaxed)));
+  payload.set("on", Json::boolean(debug_view_wanted()));
   payload.set("lines", Json::integer(k_debug_view_lines));
   // The column's **actual** content, from the same accessor the renderer's provider
   // calls — so the answer proves the text end to end, not just the switch. Empty
@@ -4070,8 +4071,23 @@ void Service::do_debug(const Json& args, Json& out) noexcept {
   set_ok(out, std::move(payload));
 }
 
+auto Service::debug_view_wanted() const noexcept -> bool {
+  // The control channel's switch wins once it has been used; otherwise the menu's
+  // **persisted** "show HUD" toggle decides. Without this the column was in-memory
+  // only, so every game restart turned it off and it looked broken.
+  if (debug_hud_forced_.load(std::memory_order_relaxed)) {
+    return debug_hud_.load(std::memory_order_relaxed);
+  }
+  if (!settings_access_.available() || !settings_access_.ready()) {
+    return debug_hud_.load(std::memory_order_relaxed);
+  }
+  cs2::overlay::wire::Settings block{};
+  settings_access_.read(block);
+  return block.show_hud != 0;
+}
+
 auto Service::debug_lines(char* out, std::size_t size) noexcept -> std::size_t {
-  if (out == nullptr || size < 2 || !debug_hud_.load(std::memory_order_relaxed)) {
+  if (out == nullptr || size < 2 || !debug_view_wanted()) {
     return 0;
   }
   OcclusionQueryStats stats;

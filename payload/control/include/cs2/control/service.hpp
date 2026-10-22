@@ -625,8 +625,15 @@ class Service {
   std::atomic<bool> rage_reloading_{false};
   std::atomic<bool> rage_deploying_{false};
   std::atomic<bool> rage_ready_{false};
-  // Whether the debug column is drawn (`debug {"on": true}`).
+  // Whether the debug column is drawn (`debug {"on": true}`), and whether the control
+  // channel has spoken. Until it has, the **menu's** persisted `show_hud` toggle
+  // decides — an in-memory-only switch turned the column off on every game restart,
+  // which reads as "the debug lines are broken".
   std::atomic<bool> debug_hud_{false};
+  std::atomic<bool> debug_hud_forced_{false};
+  // Whether the debug column is wanted right now: the control channel's switch when it
+  // has been used, else the live settings block's `show_hud`.
+  [[nodiscard]] auto debug_view_wanted() const noexcept -> bool;
   // What the operator asked for; the effective flags are these AND the
   // current screen (the gate is applied on the game thread, where the state
   // is fresh).
