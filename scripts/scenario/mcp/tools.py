@@ -31,7 +31,11 @@ the console, and the commands that would end the game are refused there (see
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping, Required, Sequence, TypedDict
+import os
+import pathlib
+import subprocess
+import sys
+from typing import Any, Callable, Literal, Mapping, Required, Sequence, TypedDict
 
 from .. import screens
 from ..control import Control
@@ -227,6 +231,39 @@ class InjectArgs(TypedDict, total=False):
 
     confirm: Required[bool]
     pid: int | None
+
+
+class BuildArgs(TypedDict, total=False):
+    """``cs2_build``: compile one of the Windows targets (or all of them)."""
+
+    target: Literal["host", "payload", "injector", "all"]
+    timeout: float
+
+
+class TestArgs(TypedDict, total=False):
+    """``cs2_test``: run one of the suites (or all of them)."""
+
+    suite: Literal["host", "payload", "python", "all"]
+    timeout: float
+
+
+class OffsetsArgs(TypedDict, total=False):
+    """``cs2_offsets``: refresh (or check) the offline offset dump."""
+
+    check: bool
+
+
+class PreflightArgs(TypedDict, total=False):
+    """``cs2_preflight``: inspect the host for the build and live-run inputs."""
+
+    timeout: float
+
+
+class CalibrateArgs(TypedDict, total=False):
+    """``cs2_calibrate``: resolve the interfaces and the schema from the game."""
+
+    check: bool
+    timeout: float
 
 
 #: The aim arguments the ``aim`` command takes (the rest are ignored).
@@ -532,6 +569,117 @@ def _tool_inject(args: Mapping[str, Any], session: Session) -> Any:
     return {"injected": True, "pid": int(pid)}
 
 
+# --- the build/test tools --------------------------------------------------
+# The one-time scripts are gone; these run the same commands behind the MCP.
+_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+
+def _tail(text: str, limit: int = 6000) -> str:
+    """The end of a command's output (the part a failure is in)."""
+    return text if len(text) <= limit else "..." + text[-limit:]
+
+
+def _run(command: Sequence[str], timeout: float) -> dict[str, Any]:
+    """Run one command in the repository and return a bounded result."""
+    try:
+        completed = subprocess.run(
+            list(command), cwd=_REPO_ROOT, capture_output=True, text=True,
+            timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "returncode": None, "timeout": True,
+                "stdout": "", "stderr": f"timed out after {timeout:.0f}s"}
+    except OSError as error:
+        return {"ok": False, "returncode": None, "timeout": False,
+                "stdout": "", "stderr": str(error)}
+    return {"ok": completed.returncode == 0, "returncode": completed.returncode,
+            "timeout": False, "stdout": _tail(completed.stdout),
+            "stderr": _tail(completed.stderr)}
+
+
+def _vcvars() -> pathlib.Path | None:
+    """The Visual Studio vcvars64.bat, when this is Windows and it exists."""
+    if os.name != "nt":
+        return None
+    vswhere = pathlib.Path(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe")
+    if vswhere.is_file():
+        try:
+            installation = subprocess.run(
+                [str(vswhere), "-latest", "-property", "installationPath"],
+                capture_output=True, text=True, check=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            installation = ""
+        if installation:
+            script = pathlib.Path(installation) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+            if script.is_file():
+                return script
+    return None
+
+
+def _shell(command: str) -> list[str]:
+    """A shell command with the MSVC environment, where the platform has one."""
+    if os.name == "nt":
+        vcvars = _vcvars()
+        prefix = f'call "{vcvars}" >nul && ' if vcvars is not None else ""
+        return ["cmd", "/c", prefix + command]
+    return ["sh", "-c", command]
+
+
+def _tool_build(args: Mapping[str, Any], session: Session) -> Any:
+    """Compile the requested target(s); never needs the game."""
+    target = str(args.get("target", "all"))
+    timeout = float(args.get("timeout", 1800.0))
+    targets = ["host", "payload", "injector"] if target == "all" else [target]
+    results: dict[str, Any] = {}
+    for name in targets:
+        directory = {"host": "build", "payload": "build-payload",
+                     "injector": "build-injector"}[name]
+        results[name] = _run(_shell(f"meson compile -C {directory}"), timeout)
+        if not results[name]["ok"]:
+            break
+    return {"ok": all(result["ok"] for result in results.values()), "targets": results}
+
+
+def _tool_test(args: Mapping[str, Any], session: Session) -> Any:
+    """Run the host, payload or Python suite (or all of them)."""
+    suite = str(args.get("suite", "all"))
+    timeout = float(args.get("timeout", 1800.0))
+    suites = ["host", "payload", "python"] if suite == "all" else [suite]
+    commands = {
+        "host": _shell("meson test -C build --print-errorlogs"),
+        "payload": _shell("meson test -C build-payload --print-errorlogs"),
+        "python": [sys.executable, "-m", "unittest", "discover",
+                   "-s", "scripts/scenario/tests", "-t", "scripts"],
+    }
+    results: dict[str, Any] = {}
+    for name in suites:
+        results[name] = _run(commands[name], timeout)
+        if not results[name]["ok"]:
+            break
+    return {"ok": all(result["ok"] for result in results.values()), "suites": results}
+
+
+def _tool_offsets(args: Mapping[str, Any], session: Session) -> Any:
+    """Refresh the offsets from the module on disk (or compare, writing nothing)."""
+    command = [sys.executable, "scripts/resolve-offsets-offline.py"]
+    if bool(args.get("check", False)):
+        command.append("--check")
+    return _run(command, 600.0)
+
+
+def _tool_preflight(args: Mapping[str, Any], session: Session) -> Any:
+    """Inspect the host for the toolchain, the launch task and the payload."""
+    timeout = float(args.get("timeout", 300.0))
+    return _run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", "scripts/preflight-windows.ps1"], timeout)
+
+
+def _tool_calibrate(args: Mapping[str, Any], session: Session) -> Any:
+    """Resolve the live interfaces and schema (the game must be running)."""
+    timeout = float(args.get("timeout", 600.0))
+    return _run([sys.executable, "scripts/calibrate-live.py"], timeout)
+
+
 # --- the catalogue ---------------------------------------------------------
 TOOLS: tuple[Tool, ...] = (
     Tool(
@@ -772,6 +920,57 @@ TOOLS: tuple[Tool, ...] = (
         ),
         shape=InjectArgs,
         handler=_tool_inject,
+    ),
+    Tool(
+        name="cs2_build",
+        description=(
+            "Compile the tree: the host build and tests' code ('host'), the "
+            "injected payload ('payload'), the injector ('injector') or all "
+            "three. Runs under the MSVC environment. Does not need the game."
+        ),
+        shape=BuildArgs,
+        handler=_tool_build,
+    ),
+    Tool(
+        name="cs2_test",
+        description=(
+            "Run a suite: the C++ host tests ('host'), the payload's clang-cl "
+            "tests ('payload'), the scenario/Python suite ('python') or all "
+            "three. Returns the command's tail, not its whole log."
+        ),
+        shape=TestArgs,
+        handler=_tool_test,
+    ),
+    Tool(
+        name="cs2_offsets",
+        description=(
+            "Resolve the curated signatures from the module on disk and write "
+            "calibration/offsets.json (or check: true to compare and write "
+            "nothing). No game is needed; the interfaces and the schema still "
+            "need cs2_calibrate."
+        ),
+        shape=OffsetsArgs,
+        handler=_tool_offsets,
+    ),
+    Tool(
+        name="cs2_preflight",
+        description=(
+            "Check the machine for the build and live-run inputs: the MSVC "
+            "toolchain, the build directories, the launch task, the payload's "
+            "imports and the calibration files. Reports PASS/WARN/FAIL."
+        ),
+        shape=PreflightArgs,
+        handler=_tool_preflight,
+    ),
+    Tool(
+        name="cs2_calibrate",
+        description=(
+            "Resolve the live interfaces and the schema from the running game "
+            "and write the calibration dumps. Needs the game to be running and "
+            "the payload to be injected; cs2_offsets covers the offline half."
+        ),
+        shape=CalibrateArgs,
+        handler=_tool_calibrate,
     ),
 )
 

@@ -63,100 +63,40 @@ patterns in a binary. See [`docs/re/offsets.md`](docs/re/offsets.md) and
 
 ## Where to resume (current work)
 
-**Start at [`NEXT_SESSION_WAVE3.md`](NEXT_SESSION_WAVE3.md) →
-[`docs/handoff-wave3.md`](docs/handoff-wave3.md).**
+**Read [`docs/handoff.md`](docs/archive/handoff.md) only for history.** The
+current work is the **cleanup** branch (`chore/cleanup`):
 
-That is the 2026-10-22 handoff: what landed (eight tasks — the chams' desc
-cache, the Monte-Carlo core and its live wiring, the fire path, the spread
-patterns, the settings ownership, the ledger and the flaky-test fix), the **two
-branches that are not merged** (the payload's fault guard, and the engine trace
-probe — **in that order**, and the probe must be reconciled with the guard),
-and the **live test** the operator has been asking for: rebuild, restart the
-game, inject once, point at a solid wall, and compare the engine's trace with
-our occluder logic. The earlier handoff is
-[`docs/handoff-wave2.md`](docs/handoff-wave2.md).
+* **One render path.** The external Vulkan layer, the shared-memory model and
+  the settings segment are gone; the payload draws in-process from the game's
+  DXGI/D3D11 Present. The old layer documents are archived.
+* **JSON-RPC control.** The named pipe is gone. The payload listens on an
+  AF_UNIX socket (`%LOCALAPPDATA%\cs2-internal\control.sock`, TCP loopback as a
+  fallback), framed with `Content-Length`, with a per-session token in the
+  session file (`control.json`). The client and the MCP server are unchanged at
+  the command level.
+* **One state machine.** `payload/game/include/cs2/game/game_state.hpp` reduces
+  every snapshot to a `GameScreen` and a capability mask; every feature asks it
+  before acting. `state` publishes `screen` + `capabilities`.
+* **No diagnostics in the feature code.** `RagePerf`, the trace probe, the
+  heatmap *command*, the HUD status sections and the per-frame state dump are
+  removed. The crash guard and the event ring stay.
+* **The protection pass is a separate repository** (`C:\Users\gpmpo\cs2-protect`).
+* **One-shot documents are in [`docs/archive/`](docs/archive/).** The
+  normative set is `AGENTS.md`, `docs/architecture.md`, `docs/decisions.md`,
+  `docs/style-guide.md`, `docs/setup-windows.md`, `docs/control-harness.md`,
+  `docs/known-issues.md`, `docs/operator-live-check.md`, `docs/ragebot*.md`,
+  `docs/re/**` and `docs/research/**`.
 
-That is the 2026-10-21 handoff for the feature wave: where every artifact lives
-(the repo, the task worktrees, the neverlose reversal, the Linux box, the OpenCode
-config), what landed, what is open, and the **orchestration playbook** — a
-written spec per task, one git worktree per agent, an implementer sub-agent, an
-**adversarial** reviewer sub-agent that reads the same spec, a fix round, and a
-merge with the full verify loop. The mechanics of that loop are a plugin: it
-runs **plan → verify → review → fix → merge** over eight `tools.orchestrate.*`
-tools: `plan` makes the task's worktree, `verify` runs the verify loop in that
-worktree, `review` points a review worktree at the commit, `fix` returns the
-findings to the implementer, `merge` merges the branch into the integration
-branch, `status` is the task board, `size` explains the worktrees' size, and
-`cleanup` removes the worktrees that are done with (report-only without
-`apply: true`; a worktree with a modified tracked file needs `force: true`).
-The plugin's **source** — the thing to read and the thing to edit — is its own
-repository (`C:\Users\gpmpo\orchestration-plugin`); the installed copy is a
-**copy** of it, in the same shape, so `node scripts/install.mjs` is what makes
-an edit live. **The merge verifies the merged tree before it commits** and
-**refuses a branch with no review** (or a *DO NOT SHIP* one) unless
-`allow_unreviewed: true`; an *older* review still counts, with a warning. The
-index is [`docs/orchestration/README.md`](docs/orchestration/README.md) — the
-tool table, the merge rules and this repository's orchestration files are there
-— and the detail is the plugin's own `README.md`.
+**The work bench is the MCP server** (`tools.cs2.*`). It carries the game
+(`cs2_launch`, `cs2_inject`, `cs2_state`, `cs2_screen`, `cs2_ensure`, input,
+settings, scenarios) and the build (`cs2_build`, `cs2_test`, `cs2_offsets`,
+`cs2_preflight`, `cs2_calibrate`). The one-time scripts are gone; do not add a
+new `scripts/*.sh` or a new one-off `.md` for a task — extend the tool.
 
-**Do this first:** the operator reported that the movement (the auto-strafer or
-the bhop) **no longer accelerates**. That is **settled** (`docs/handoff-wave2.md`
-§5.1, `docs/re/strafing.md` §"The gate"): the silent encoding is the only one
-that gains speed, it works out of the box (the server honours the sub-tick view
-angles by default), and the payload now **reports** the outcome (`strafe_gain`)
-and the gate (`strafe_steered` / `strafe_ignored`) instead of doing nothing
-quietly. The next open item is the **chams' hook target** (§5.2).
-
-**The earlier, ragebot-focused handoff is still in
-[`docs/next-session-ragebot-research.md`](docs/next-session-ragebot-research.md)**
-(it is the follow-up section at the top) and the deep briefs are indexed at
-[`docs/research/README.md`](docs/research/README.md). It describes the ragebot's
-remaining *exactness* gaps, which are a separate, deeper project from this wave.
-
-**Live measurement caveat:** a "before/after" is *not* comparable across a game restart —
-the bots respawn elsewhere, so the cell count changes and dominates the timings. Use the
-host benchmark over a saved cell set for timing, and live runs (`scripts/perf-live.py`)
-for correctness.
-
-The ragebot itself (Tier-2 occlusion, angle-correct field, multi-target, assists,
-per-weapon profiles) is described in `docs/ragebot.md` and audited in
-`docs/ragebot-review.md`; the perf work is in `docs/ragebot-perf.md`. The payload,
-injection, live state and overlay are validated on native Windows — see
-`docs/handoff.md` and `docs/windows-validation.md`.
-
-**Uncommitted:** no — the integration tree is clean (2026-10-22). The
-open work is in the task worktrees under `C:\Users\gpmpo\cs2-wt\` (one per
-agent, each on its own branch) and in the task board
-(`orchestrate.status({project: "cs2"})`).
-
-**What is open now** (the specifications are in `docs/orchestration/`):
-
-* **T42 — the payload's fault guard.** It is the only safety net for an engine
-  call that faults, and it **killed the payload 4 times in 12** on the fault it
-  was written for. It is **implemented and green but was never reviewed** — run
-  the review, then the fix round, then the merge. **This is first.**
-* **T39 — the engine trace probe.** The instrument for the occlusion
-  investigation: it asks the engine its own question (`TraceLineIntervals`) and
-  publishes both answers plus the difference. It is **re-reviewed** and must
-  land **after T42**, reconciled with T42's one-guard rule.
-* **The live run.** The chams' detour, the Monte-Carlo objective, the animfix's
-  graph capture and the **fixed** camera have never run in a real game. The
-  procedure is in `docs/handoff-wave3.md` §4.
-* **The earlier wave's items are closed or recorded**: the chams' draw hook
-  (T26), the third-person camera's crash (T27) and the curated offsets (T28)
-  are merged and re-reviewed — their findings are in
-  `docs/known-issues.md` §2, §5 and §6. See `docs/handoff-wave2.md` §5.
-
-**The protection pass is a separate project** — `C:\Users\gpmpo\cs2-protect`
-(its own repository, CMake build, LLVM SDK, tests and docs). This repository
-consumes the built `Cs2Protect.dll`; it does not build, test or document it.
-See [`docs/protection.md`](docs/protection.md) for the wiring
-(`-Dprotect_tools=<repo>`). The protection workstream's handoff, plan, specs
-and research live in that repository's `docs/`.
-
-**The live run** — the one thing static review cannot close — has its own
-checklist: **[`docs/operator-live-check.md`](docs/operator-live-check.md)**.
-
+**Still owed:** the live run (chams, Monte-Carlo, animfix capture, fixed
+camera), and the Tier-1 trace replacement after the probe's measurement. The
+operator runs the live validation; the payload no longer carries instrumentation
+for it.
 ## Static RE tooling (REA + Ghidra)
 
 > **Start here: [`docs/re/README.md`](docs/re/README.md)** — the agent guide for

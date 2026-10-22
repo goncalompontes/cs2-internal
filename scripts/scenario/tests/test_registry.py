@@ -85,13 +85,14 @@ class TestRegistry(unittest.TestCase):
                 self.assertNotIn("_", name)
                 self.assertNotIn(" ", name)
 
-    def test_the_runner_lists_exactly_the_registry(self) -> None:
-        """``--list`` and the registry must not drift apart."""
-        finished = subprocess.run([sys.executable, str(RUNNER), "--list"],
-                                  capture_output=True, text=True, timeout=120)
-        self.assertEqual(finished.returncode, 0, finished.stderr)
-        listed = [line for line in finished.stdout.splitlines() if line]
-        self.assertEqual(sorted(listed), sorted(SCENARIOS))
+    def test_the_mcp_tool_lists_exactly_the_registry(self) -> None:
+        """The ``cs2_run_scenario`` enum and the registry must not drift apart."""
+        from scenario.mcp import tools
+
+        tool = next(entry for entry in tools.TOOLS
+                    if entry.name == "cs2_run_scenario")
+        schema = tool.input_schema()
+        self.assertEqual(set(schema["properties"]["name"]["enum"]), set(SCENARIOS))
 
 
 class TestTooling(unittest.TestCase):
