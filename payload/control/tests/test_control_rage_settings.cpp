@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -270,6 +271,41 @@ void test_an_unchanged_block_reports_nothing() {
          "a float that differs in the last bit is a change");
 }
 
+// A **NaN** in the block is not a change.
+//
+// The block is written by another process (the Vulkan layer's menu) and the
+// repo plans for a corrupt shared segment, so a NaN can reach it. A plain
+// `!=` says a NaN differs from itself: the field would be reported as changed
+// on **every** publication, the menu's clamped value would be applied on
+// every frame, and the control channel's value for that field would be
+// clobbered every frame — the defect the rule exists to remove.
+void test_a_nan_is_not_a_change() {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  for (const auto& field : {&cs2::control::RageSettings::fov,
+                             &cs2::control::RageSettings::min_damage,
+                             &cs2::control::RageSettings::min_hitchance,
+                             &cs2::control::RageSettings::stop_speed}) {
+    cs2::control::RageSettings before = default_snapshot();
+    before.*field = nan;
+    const cs2::control::RageSettings after = before;
+    expect(cs2::control::rage_changed_fields(after, before) == 0,
+           "a NaN is not a change: the field is treated as unchanged");
+    // A NaN against a real value **is** a change: the field moved off the NaN.
+    cs2::control::RageSettings real = before;
+    real.*field = 90.0F;
+    expect(cs2::control::rage_changed_fields(real, before) != 0,
+           "a NaN against a real value is a change");
+  }
+  // A signed zero is not a change either: `==` says `-0.0 == 0.0`, and a
+  // bitwise comparison would report it on every frame.
+  cs2::control::RageSettings negative_zero = default_snapshot();
+  negative_zero.fov = -0.0F;
+  cs2::control::RageSettings positive_zero = default_snapshot();
+  positive_zero.fov = 0.0F;
+  expect(cs2::control::rage_changed_fields(negative_zero, positive_zero) == 0,
+         "a signed zero is not a change");
+}
+
 // The menu does **not** republish a recomputed value.
 //
 // The one widget that writes the block without an operator action is the
@@ -408,6 +444,18 @@ void test_the_rule_keeps_the_control_channels_value() {
     in_force = edited.objective;
   }
   expect(in_force == 0, "the menu's objective wins when the operator changes it");
+  // **The rule's limit** (`docs/ragebot.md` §15.1): the operator picks the
+  // objective the menu **already shows**. Dear ImGui's combo writes its index
+  // only when the selection differs, so the block does not change, the mask
+  // is empty, and the control channel's objective stays in force. This is the
+  // documented behaviour, pinned here so it cannot drift silently.
+  auto reselected = published;
+  reselected.objective = published.objective;  // the same value, clicked again
+  const std::uint32_t again = cs2::control::rage_changed_fields(reselected, published);
+  if ((again & cs2::control::RAGE_FIELD_OBJECTIVE) != 0) {
+    in_force = reselected.objective;
+  }
+  expect(in_force == 0, "re-selecting the objective the menu already shows changes nothing");
 }
 
 // The status says **which channel owns the objective**.
@@ -543,6 +591,7 @@ void test_the_menu_does_not_recompute_the_floats(const std::string& root) {
 auto main(int argc, char** argv) -> int {
   test_the_comparison_covers_every_field();
   test_an_unchanged_block_reports_nothing();
+  test_a_nan_is_not_a_change();
   test_the_menus_recompute_converges();
   test_the_weapon_key_is_compared_as_a_name();
   test_the_rule_keeps_the_control_channels_value();

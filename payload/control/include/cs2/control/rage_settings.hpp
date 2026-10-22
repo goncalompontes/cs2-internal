@@ -21,6 +21,7 @@
 // binaries, and a version bump is a silent-corruption risk.
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -224,11 +225,41 @@ inline constexpr RageFieldName k_rage_field_names[] = {
   return true;
 }
 
+// Whether two float values are the **same value**.
+//
+// **NaN-safe.** A NaN is not equal to itself, so a plain `!=` reports a NaN as
+// changed on **every** publication — and the rule would then apply the menu's
+// clamped value on every frame, which is the very defect the rule exists to
+// remove (the control channel's value for that field would be clobbered every
+// frame).
+//
+// The block is written by **another process** (the Vulkan layer's menu), and
+// the repo plans for "a corrupt shared segment"
+// (`payload/features/src/settings.cpp` — `clamp_value` is NaN-safe for
+// exactly that reason), so a NaN in the block must not defeat the rule.
+//
+// **A NaN therefore compares equal to a NaN**: the field is treated as
+// unchanged. A NaN against a real value is still a change — the operator (or
+// the corrupt segment) moved the field off the NaN.
+//
+// **`-0.0` and `0.0` stay equal** (`==` says so), so a signed zero is not a
+// change either: the menu's slider cannot flip the sign of a zero on its own,
+// and a bitwise comparison would report it on every frame.
+[[nodiscard]] constexpr auto float_value_equal(float left, float right) noexcept -> bool {
+  if (left == right) {
+    return true;
+  }
+  // The only values that are not equal to themselves are the NaNs.
+  return std::isnan(left) && std::isnan(right);
+}
+
 // The fields whose values differ between `now` and `before`.
 //
 // **The comparison is exact.** Every field is compared with `==`, the floats
 // included: a float that differs in the last bit is a value the operator
 // moved, and a slider that was not touched writes the bits it already held.
+// The floats go through `float_value_equal`, which is the same comparison
+// **plus** the NaN rule (a NaN is not a change).
 //
 // **The menu does not republish a recomputed value.** Dear ImGui's widgets
 // write the block only when the operator acts on them (a slider writes back
@@ -238,6 +269,13 @@ inline constexpr RageFieldName k_rage_field_names[] = {
 // widget's range — writes the **same** value for an in-range byte. So the
 // comparison converges: the value the menu publishes is the value the callback
 // last saw, and the rule does not degenerate into "always changed".
+//
+// **A menu action that leaves the value unchanged is invisible.** Dear ImGui's
+// combo writes its index **only when the selection differs**
+// (`imgui_widgets.cpp`: `Selectable(...) && *current_item != i`), so picking
+// the entry the widget already shows writes nothing into the block — and a
+// rule that decides from the **value** cannot see that action. This is the
+// rule's limit, and it is the operator's to know (`docs/ragebot.md` §15.1).
 //
 // **The weapon's bytes are compared as a name**, not byte by byte: the menu's
 // text field leaves the bytes after the NUL stale, and a stale byte is not a
@@ -261,13 +299,13 @@ inline constexpr RageFieldName k_rage_field_names[] = {
   if (now.hitbox != before.hitbox) {
     changed |= RAGE_FIELD_HITBOX;
   }
-  if (now.fov != before.fov) {
+  if (!float_value_equal(now.fov, before.fov)) {
     changed |= RAGE_FIELD_FOV;
   }
-  if (now.min_damage != before.min_damage) {
+  if (!float_value_equal(now.min_damage, before.min_damage)) {
     changed |= RAGE_FIELD_MIN_DAMAGE;
   }
-  if (now.min_hitchance != before.min_hitchance) {
+  if (!float_value_equal(now.min_hitchance, before.min_hitchance)) {
     changed |= RAGE_FIELD_MIN_HITCHANCE;
   }
   if (now.autostop != before.autostop) {
@@ -294,7 +332,7 @@ inline constexpr RageFieldName k_rage_field_names[] = {
   if (now.recoil != before.recoil) {
     changed |= RAGE_FIELD_RECOIL;
   }
-  if (now.stop_speed != before.stop_speed) {
+  if (!float_value_equal(now.stop_speed, before.stop_speed)) {
     changed |= RAGE_FIELD_STOP_SPEED;
   }
   if (now.backtrack != before.backtrack) {
