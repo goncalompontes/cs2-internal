@@ -562,6 +562,10 @@ void test_the_service_applies_only_the_masked_fields(const std::string& root) {
   const std::string code = strip_comments(body);
   // Every field is masked: a field the write stores without a mask is a field
   // that keeps clobbering the control channel.
+  //
+  // **The check is anchored**: the bit has to be ANDed with the write's mask,
+  // not merely to appear somewhere in the function. A bare mention of the bit
+  // would satisfy a substring search and prove nothing.
   const char* const k_bits[] = {
       "RAGE_FIELD_ENABLED",    "RAGE_FIELD_KEY",           "RAGE_FIELD_FIRE",
       "RAGE_FIELD_OBJECTIVE",  "RAGE_FIELD_HITBOX",        "RAGE_FIELD_FOV",
@@ -571,7 +575,8 @@ void test_the_service_applies_only_the_masked_fields(const std::string& root) {
       "RAGE_FIELD_RECOIL",     "RAGE_FIELD_STOP_SPEED",    "RAGE_FIELD_BACKTRACK",
   };
   for (const char* bit : k_bits) {
-    expect(code.find(bit) != std::string::npos, "the service masks every rage field");
+    const std::string guard = "fields & " + std::string(bit);
+    expect(code.find(guard) != std::string::npos, "the service masks every rage field");
   }
   // The ownership is recorded.
   expect(code.find("note_rage_owner(") != std::string::npos,
