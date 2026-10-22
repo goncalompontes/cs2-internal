@@ -685,7 +685,9 @@ class AimResult(TypedDict):
     """The ragebot solve (``Service::do_aim``).
 
     The payload answers with an error instead of a result when there is no
-    hittable target, so every key is always present when the answer is there.
+    hittable target, so every key is present when the answer is there — with
+    one exception: the Monte-Carlo's own numbers are sent **only** when the
+    Monte-Carlo produced a verdict, so they are ``NotRequired`` here.
     """
 
     valid: bool
@@ -717,24 +719,29 @@ class AimResult(TypedDict):
     #: nothing to say, otherwise why it was ignored or that it does not fit
     #: the tick.
     mc_samples_note: str
-    #: The Monte-Carlo objective's own numbers (absent under the other
-    #: objectives, and when the solver refused).
-    mc_hits: int
-    mc_hitchance: float
-    mc_expected_damage: float
-    mc_target: int
-    mc_hitgroup: int
-    mc_can_kill: bool
+    #: The Monte-Carlo objective's own numbers.  The payload publishes them
+    #: **only when the Monte-Carlo produced a verdict** — under the other four
+    #: objectives, and when the solver refused, they are **absent**.  So they
+    #: are optional here: a type that promised them would promise keys the
+    #: payload does not send, and a reader that trusted it would look for a
+    #: key that is not there (``Service::do_aim``'s
+    #: ``if (result.monte_carlo.has_value())`` block).
+    mc_hits: NotRequired[int]
+    mc_hitchance: NotRequired[float]
+    mc_expected_damage: NotRequired[float]
+    mc_target: NotRequired[int]
+    mc_hitgroup: NotRequired[int]
+    mc_can_kill: NotRequired[bool]
     #: How many hitboxes the filter dropped for the core (a dropped hitbox
     #: makes the measured probability a lower bound on the truth).
-    mc_filtered: int
+    mc_filtered: NotRequired[int]
     #: The seed policy's name (``"sequence"`` or ``"angle_grid"``).
-    mc_seed: str
+    mc_seed: NotRequired[str]
     #: Whether the seed's sequence is a **fallback** (the prediction tick
     #: stands in for the command's sequence number).
-    mc_seed_fallback: bool
+    mc_seed_fallback: NotRequired[bool]
     #: What the seed's number means.
-    mc_seed_note: str
+    mc_seed_note: NotRequired[str]
     #: The reason the solver refused (empty when it did not).
     mc_refusal: str
     #: Whether the solve fell back to another objective.
