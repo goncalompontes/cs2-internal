@@ -6,12 +6,16 @@ through an encrypted descriptor. A mistake shows up as a *wrong call target*,
 not as a crash, so the test asserts on the shape of the rewritten IR:
 
   * the direct call to the target is gone;
+  * the direct call to the **cross-TU** callee the policy names is gone too
+    (the declaration goes into the caller's own table as a relocatable
+    pointer to the external symbol);
   * an indirect call is present;
   * the caller's function type is unchanged (the ABI is preserved by
     construction, and the test proves it);
-  * the table global exists and holds the target pointer;
+  * the table global exists and holds the target pointer and the external
+    symbol;
   * the descriptor global exists and its bytes are not the plain index;
-  * decoding the descriptor really yields the index of the target (the test
+  * decoding the descriptor really yields the index of the callee (the test
     recomputes the key from the three constants of the image and the mixer);
   * the calls that must be skipped -- a variadic callee, a callee with an
     `sret` parameter, a `musttail` call -- are untouched.
@@ -123,11 +127,16 @@ def check_ir(ir: str) -> None:
     """The assertions of the IR test."""
     caller = body_of(ir, "caller")
 
-    # The direct call is gone, and an indirect call took its place.
+    # The direct calls are gone, and indirect calls took their place: the
+    # same-module callee and the cross-TU one the policy names.
     check("call i32 @target(" not in caller, "the direct call to the target is still there")
     check(
-        re.search(r"call i32 %\d+\(i32 %x\)", caller) is not None,
-        "there is no indirect call in the caller",
+        "call i32 @external_target(" not in caller,
+        "the direct call to the external callee is still there",
+    )
+    check(
+        len(re.findall(r"call i32 %\d+\(i32 %x\)", caller)) == 2,
+        "there are not two indirect calls in the caller",
     )
 
     # The function type of the caller is unchanged: the ABI is preserved by
@@ -137,15 +146,17 @@ def check_ir(ir: str) -> None:
         "the function type of the caller changed",
     )
 
-    # The table holds the target, and the descriptor holds an encrypted index.
+    # The table holds the target and the external symbol, and the descriptor
+    # holds an encrypted index.
     table = re.search(
         r"@cs2\.protect\.table = private unnamed_addr constant \[(\d+) x ptr\] \[([^\]]*)\]", ir
     )
     check(table is not None, "the table global is missing")
     assert table is not None
     table_size = int(table.group(1))
-    check(table_size >= 1, "the table is empty")
+    check(table_size >= 2, "the table does not hold the two callees")
     check("@target" in table.group(2), "the table does not hold the target")
+    check("@external_target" in table.group(2), "the table does not hold the external symbol")
 
     descriptor = re.search(
         r"@cs2\.protect\.desc = private unnamed_addr constant \[(\d+) x i64\] \[([^\]]*)\]", ir
@@ -172,14 +183,16 @@ def check_ir(ir: str) -> None:
     check(len(set(parts)) == 3, "the key is not split into three different constants")
     key = mix64(parts[0] ^ parts[1] ^ parts[2])
 
-    entries = re.findall(r"ptr (@\S+)", table.group(2))
+    entries = re.findall(r"ptr (@[A-Za-z0-9_.$]+)", table.group(2))
+    decoded: set[str] = set()
     for value in values:
         index = (value & MASK64) ^ key
         check(index < len(entries), "the decoded index is outside the table")
-        check(
-            entries[index] == "@target",
-            f"the decoded index points at '{entries[index]}' and not at the target",
-        )
+        decoded.add(entries[index])
+    check(
+        decoded == {"@target", "@external_target"},
+        f"the decoded indices point at {sorted(decoded)} and not at the two callees",
+    )
 
     # The calls that must be skipped are untouched.
     check(
@@ -195,11 +208,11 @@ def check_ir(ir: str) -> None:
         "the musttail call was rewritten",
     )
 
-    # The decode is inline: the caller makes exactly the four calls it made
+    # The decode is inline: the caller makes exactly the six calls it made
     # before, and none of them is a call to a shared helper (a helper would
     # add a stack frame to every call site).
     calls = re.findall(r"\bcall\b", caller)
-    check(len(calls) == 4, f"the caller makes {len(calls)} calls and not four")
+    check(len(calls) == 5, f"the caller makes {len(calls)} calls and not five")
     symbols = set(re.findall(r"@[A-Za-z0-9_.$]+\(", "\n".join(caller.splitlines()[1:])))
     check(
         symbols == {"@variadic_target(", "@sret_target(", "@musttail_target("},
@@ -215,8 +228,8 @@ def check_ir(ir: str) -> None:
     # barrier is still there.
     volatile_loads = re.findall(r"load volatile i64", caller)
     check(
-        len(volatile_loads) == 6,
-        f"the decode has {len(volatile_loads)} volatile loads and not six",
+        len(volatile_loads) == 12,
+        f"the two dispatches have {len(volatile_loads)} volatile loads and not twelve",
     )
 
     # The constants of the mixer live in globals and not in the instruction

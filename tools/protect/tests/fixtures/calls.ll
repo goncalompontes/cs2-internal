@@ -1,9 +1,13 @@
 ; The fixture of the IR test.
 ;
-; "caller" is the function the policy selects. It makes five calls:
+; "caller" is the function the policy selects. It makes six calls:
 ;
 ;   * @target is defined in this module, so the pass rewrites the call into
 ;     an indirect dispatch through the encrypted descriptor;
+;   * @external_target is a **declaration** (no body in this module): the
+;     policy's `cross_module` list names it, so the pass rewrites the call
+;     too, and the table holds the symbol itself (a relocatable pointer
+;     the linker resolves);
 ;   * @variadic_target is variadic, so the pass leaves the call alone;
 ;   * @sret_target has an `sret` parameter, so the pass leaves the call
 ;     alone;
@@ -11,9 +15,10 @@
 ;     pass leaves the call alone;
 ;   * @printf is an import, so the pass leaves the call alone.
 ;
-; The pass must touch the first call and nothing else.
+; The pass must touch the first two calls and nothing else.
 
 declare i32 @printf(ptr, ...)
+declare i32 @external_target(i32 %x)
 
 define i32 @target(i32 %x) {
 entry:
@@ -44,6 +49,7 @@ define i32 @caller(i32 %x) {
 entry:
   %out = alloca { i64, i64, i64 }, align 8
   %a = call i32 @target(i32 %x)
+  %e = call i32 @external_target(i32 %x)
   %b = call i32 (i32, ...) @variadic_target(i32 %x, i32 %x)
   call void @sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x)
   %d = add i32 %a, %b

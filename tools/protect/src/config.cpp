@@ -277,11 +277,11 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
     return std::unexpected(std::string("the policy file must contain a JSON object"));
   }
   for (const std::string& key : sorted_keys(*object)) {
-    if (key != "protect" && key != "deny" && key != "seed" && key != "strings" &&
-        key != "strings_deny" && key != "strings_min_length") {
+    if (key != "protect" && key != "cross_module" && key != "deny" && key != "seed" &&
+        key != "strings" && key != "strings_deny" && key != "strings_min_length") {
       return std::unexpected(std::string("unknown key in the policy file: '") + key +
-                             "' (expected 'protect', 'deny', 'seed', 'strings', 'strings_deny' "
-                             "or 'strings_min_length')");
+                             "' (expected 'protect', 'cross_module', 'deny', 'seed', 'strings', "
+                             "'strings_deny' or 'strings_min_length')");
     }
   }
 
@@ -296,6 +296,22 @@ void report_truncated_seed(std::string_view origin, std::string_view text) {
     }
   } else if (object->get("protect") != nullptr) {
     return std::unexpected(std::string("'protect' must be an array"));
+  }
+
+  // The `cross_module` list: the globs of the cross-TU callees whose calls
+  // may be routed through the caller's own table. A bare glob only: the
+  // list names *declarations*, and the module a declaration lives in is the
+  // module that calls it, so a scope would name the wrong thing.
+  if (const llvm::json::Array* cross = object->getArray("cross_module"); cross != nullptr) {
+    for (const llvm::json::Value& item : *cross) {
+      const auto pattern = item.getAsString();
+      if (!pattern.has_value()) {
+        return std::unexpected(std::string("a 'cross_module' entry must be a string"));
+      }
+      policy.cross_module.emplace_back(*pattern);
+    }
+  } else if (object->get("cross_module") != nullptr) {
+    return std::unexpected(std::string("'cross_module' must be an array"));
   }
 
   if (const llvm::json::Array* deny = object->getArray("deny"); deny != nullptr) {

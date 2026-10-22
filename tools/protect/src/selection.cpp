@@ -405,6 +405,39 @@ void unimplement_entry(PolicyMatch& match) {
   match.blocked_reason = std::nullopt;
 }
 
+/// The declarations of the module that a `cross_module` entry names.
+///
+/// The entry is matched against a **declaration**: a function with no body in
+/// this module. A same-module callee is routed by the ordinary rule and
+/// needs no entry, and a definition is not a declaration -- the entry names
+/// the *call* of another translation unit, not the function itself.
+///
+/// An intrinsic and an `available_externally` function are not declarations
+/// the pass may route: the first has no code to point at, and the second
+/// resolves to address zero in the table.
+[[nodiscard]] auto cross_module_matches(const llvm::Module& module, const Config& config)
+    -> std::vector<CrossModuleMatch> {
+  std::vector<CrossModuleMatch> result;
+  if (!config.policy.has_value()) {
+    return result;
+  }
+  for (const std::string& pattern : config.policy->cross_module) {
+    for (const llvm::Function& function : module) {
+      if (!function.isDeclaration() || function.isIntrinsic() ||
+          function.hasAvailableExternallyLinkage()) {
+        continue;
+      }
+      const std::string symbol = function.getName().str();
+      const std::string qualified = qualified_name(symbol);
+      if (!matches(pattern, symbol, qualified)) {
+        continue;
+      }
+      result.push_back(CrossModuleMatch{pattern, symbol, qualified});
+    }
+  }
+  return result;
+}
+
 auto select_functions(const llvm::Module& module, const Config& config) -> SelectionResult {
   SelectionResult result;
   const std::string& module_id = module.getSourceFileName();
@@ -545,6 +578,12 @@ auto select_functions(const llvm::Module& module, const Config& config) -> Selec
       }
     }
   }
+
+  // The declarations the policy's `cross_module` list names. The list is
+  // matched here, in the phase that knows the policy, and the result is
+  // handed over to the transform phase through the module's metadata: the
+  // transform phase decides, per call site, whether the call may be routed.
+  result.cross_matches = cross_module_matches(module, config);
 
   return result;
 }

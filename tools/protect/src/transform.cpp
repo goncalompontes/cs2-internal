@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -46,6 +48,8 @@ constexpr std::string_view k_xor_name = "cs2.protect.mixxor";
 /// The named metadata the early phase records the selection in.
 constexpr std::string_view k_functions_metadata = "cs2.protect.functions";
 constexpr std::string_view k_entries_metadata = "cs2.protect.entries";
+/// The named metadata the early phase records the `cross_module` matches in.
+constexpr std::string_view k_cross_metadata = "cs2.protect.cross";
 
 /// Permutes the table, so that the index in the descriptor is not a
 /// predictable table position and the table does not have the same shape in
@@ -76,13 +80,18 @@ void permute(std::vector<llvm::Function*>& callees, std::uint64_t seed) {
   return text->getString().str();
 }
 
-}  // namespace
-
 /// Why a call is not rewritten, if it is not.
 ///
 /// The order of the rules is the order of the specification's table: the
 /// first rule that holds is the reason that is reported.
-auto skip_reason(const llvm::CallBase& call) -> std::optional<CallSkipReason> {
+///
+/// The `routable` flag is the one rule that depends on the *policy* rather
+/// than on the call: the `external_callee` rule does not hold for a
+/// declaration the policy's `cross_module` list names, because the caller
+/// routes it through its own table as a relocatable pointer to the external
+/// symbol.
+[[nodiscard]] auto skip_reason_impl(const llvm::CallBase& call, bool routable)
+    -> std::optional<CallSkipReason> {
   const llvm::Function* callee = call.getCalledFunction();
   if (callee != nullptr && callee->isVarArg()) {
     return CallSkipReason::variadic_callee;
@@ -108,10 +117,27 @@ auto skip_reason(const llvm::CallBase& call) -> std::optional<CallSkipReason> {
     return CallSkipReason::intrinsic_callee;
   }
   if (callee->isDeclarationForLinker()) {
-    // An import, an intrinsic or an `available_externally` function: none of
-    // them has code in this module, so a table entry for it would resolve to
-    // zero and the dispatch would call address zero.
-    return CallSkipReason::external_callee;
+    if (!routable) {
+      // An import, an intrinsic or an `available_externally` function: none of
+      // them has code in this module, so a table entry for it would resolve to
+      // zero and the dispatch would call address zero.
+      return CallSkipReason::external_callee;
+    }
+    // The declaration is one the policy named: it has no code in this module
+    // either, but the caller routes it through its own table.
+    //
+    // The `invoke` rule does not hold here either. The rule exists because
+    // the pass does not model the EH edges, and the rewrite does not model
+    // them either: it replaces the *callee* and leaves the landing pad and
+    // the unwind edge exactly as they are. The parent's measurement of the
+    // tree counted the cross-TU calls that are EH edges among the ordinary
+    // ones (the rule order reported them as `external_callee`, so the
+    // measurement could not tell them apart), and the cross-TU graph cannot
+    // be closed while they stay direct.
+    if (callee->hasFnAttribute(llvm::Attribute::OptimizeNone)) {
+      return CallSkipReason::optnone_callee;
+    }
+    return std::nullopt;
   }
   if (llvm::isa<llvm::InvokeInst>(call)) {
     return CallSkipReason::invoke;
@@ -120,6 +146,16 @@ auto skip_reason(const llvm::CallBase& call) -> std::optional<CallSkipReason> {
     return CallSkipReason::optnone_callee;
   }
   return std::nullopt;
+}
+
+}  // namespace
+
+auto skip_reason(const llvm::CallBase& call) -> std::optional<CallSkipReason> {
+  return skip_reason_impl(call, false);
+}
+
+auto skip_reason_routed(const llvm::CallBase& call) -> std::optional<CallSkipReason> {
+  return skip_reason_impl(call, true);
 }
 
 [[nodiscard]] auto to_string(CallSkipReason reason) noexcept -> const char* {
@@ -147,6 +183,18 @@ auto skip_reason(const llvm::CallBase& call) -> std::optional<CallSkipReason> {
   }
 }
 
+[[nodiscard]] auto to_string(CrossState state) noexcept -> const char* {
+  switch (state) {
+    case CrossState::matched:
+      return "matched";
+    case CrossState::blocked:
+      return "blocked";
+    case CrossState::unmatched:
+    default:
+      return "unmatched";
+  }
+}
+
 void record_selection(llvm::Module& module, const SelectionResult& result) {
   llvm::LLVMContext& context = module.getContext();
 
@@ -155,6 +203,9 @@ void record_selection(llvm::Module& module, const SelectionResult& result) {
     module.eraseNamedMetadata(previous);
   }
   if (llvm::NamedMDNode* previous = module.getNamedMetadata(k_entries_metadata)) {
+    module.eraseNamedMetadata(previous);
+  }
+  if (llvm::NamedMDNode* previous = module.getNamedMetadata(k_cross_metadata)) {
     module.eraseNamedMetadata(previous);
   }
 
@@ -192,6 +243,18 @@ void record_selection(llvm::Module& module, const SelectionResult& result) {
             llvm::MDString::get(context, state), llvm::MDString::get(context, reason),
             llvm::MDString::get(context, to_string(match.level))});
     entries->addOperand(node);
+  }
+
+  // The `cross_module` matches: the declarations the policy's list named in
+  // this module. The late phase routes the calls to them, and it cannot know
+  // them on its own: it does not read the policy's list.
+  llvm::NamedMDNode* cross = module.getOrInsertNamedMetadata(k_cross_metadata);
+  for (const CrossModuleMatch& match : result.cross_matches) {
+    llvm::MDNode* node = llvm::MDNode::get(
+        context, llvm::ArrayRef<llvm::Metadata*>{llvm::MDString::get(context, match.pattern),
+                                                 llvm::MDString::get(context, match.symbol),
+                                                 llvm::MDString::get(context, match.qualified)});
+    cross->addOperand(node);
   }
 }
 
@@ -231,6 +294,20 @@ void record_selection(llvm::Module& module, const SelectionResult& result) {
     }
   }
 
+  const llvm::NamedMDNode* cross = module.getNamedMetadata(k_cross_metadata);
+  if (cross != nullptr) {
+    for (const llvm::MDNode* node : cross->operands()) {
+      if (node->getNumOperands() < 3) {
+        continue;
+      }
+      RecordedCross match;
+      match.pattern = md_string(node->getOperand(0));
+      match.symbol = md_string(node->getOperand(1));
+      match.qualified = md_string(node->getOperand(2));
+      selection.cross.push_back(std::move(match));
+    }
+  }
+
   return selection;
 }
 
@@ -258,15 +335,33 @@ auto transform_module(llvm::Module& module, const Config& config,
     alive.push_back(&function);
   }
 
+  // The declarations the policy's `cross_module` list named in this module.
+  // The key is the mangled symbol: the call site names the callee, and the
+  // symbol is what the two phases agree on.
+  std::set<std::string> routable;
+  for (const RecordedCross& match : selection.cross) {
+    routable.insert(match.symbol);
+  }
+
   // The call sites that are rewritten, and the callees they name.
   struct Site {
-    llvm::CallInst* call{nullptr};
+    llvm::CallBase* call{nullptr};
     llvm::Function* callee{nullptr};
     std::size_t function{0};  ///< the index of the caller in `result.functions`.
     std::size_t slot{0};
+    bool cross{false};  ///< the callee is a cross-TU declaration.
   };
   std::vector<Site> sites;
   std::vector<llvm::Function*> callees;
+
+  // The cross-TU callees that stayed direct, and the reason they stayed:
+  // the symbol -> the reason. The first reason wins: a symbol is either
+  // routable or not, and the reason of a refusal is a property of the
+  // callee.
+  std::map<std::string, std::string> direct;
+  // The routable declarations whose call could not be routed: the symbol ->
+  // the reason.
+  std::map<std::string, std::string> blocked;
 
   for (const RecordedFunction* recorded : alive) {
     llvm::Function* function = module.getFunction(recorded->symbol);
@@ -283,27 +378,78 @@ auto transform_module(llvm::Module& module, const Config& config,
         if (call == nullptr) {
           continue;
         }
-        const auto reason = skip_reason(*call);
+        llvm::Function* callee = call->getCalledFunction();
+        // A declaration is a function with no body in this module: an import
+        // or a cross-TU callee. The pass cannot tell the two apart by
+        // looking at the module, so the policy's `cross_module` list is what
+        // says which ones may be routed.
+        const bool declaration =
+            callee != nullptr && callee->isDeclaration() && !callee->isIntrinsic();
+        const bool cross = declaration && routable.count(callee->getName().str()) != 0;
+        const auto reason = cross ? skip_reason_routed(*call) : skip_reason(*call);
         if (reason.has_value()) {
           transform.skipped.push_back(*reason);
           transform.skipped_callees.push_back(callee_name(*call));
+          if (declaration) {
+            direct.emplace(callee->getName().str(), to_string(*reason));
+            if (cross) {
+              blocked.emplace(callee->getName().str(), to_string(*reason));
+            }
+          }
           continue;
         }
-        auto* direct = llvm::dyn_cast<llvm::CallInst>(call);
-        if (direct == nullptr) {
+        if (!llvm::isa<llvm::CallInst>(call) && !cross) {
+          // Only a plain `call` is rewritten, unless the callee is a
+          // declaration the policy named: an `invoke` to it keeps its
+          // landing pad and its unwind edge, and only the callee becomes a
+          // value.
           continue;
         }
-        llvm::Function* callee = direct->getCalledFunction();
         if (callee == nullptr) {
           continue;
         }
         if (std::find(callees.begin(), callees.end(), callee) == callees.end()) {
           callees.push_back(callee);
         }
-        sites.push_back(Site{direct, callee, function_index, 0});
+        sites.push_back(Site{call, callee, function_index, 0, cross});
       }
     }
     result.functions.push_back(std::move(transform));
+  }
+
+  // The state of every `cross_module` entry of the policy in this module.
+  //
+  // An entry that named no declaration here is "unmatched": it may well
+  // match in another translation unit, and the build as a whole decides.
+  // An entry whose declaration was seen but not routed is "blocked": the
+  // requirement of a `cross_module` entry is that the symbol is routed
+  // *everywhere* it is called.
+  if (config.policy.has_value()) {
+    for (const std::string& pattern : config.policy->cross_module) {
+      std::vector<const RecordedCross*> matches;
+      for (const RecordedCross& match : selection.cross) {
+        if (match.pattern == pattern) {
+          matches.push_back(&match);
+        }
+      }
+      if (matches.empty()) {
+        result.cross.entries.push_back(CrossEntry{pattern, "", CrossState::unmatched, ""});
+        continue;
+      }
+      for (const RecordedCross* match : matches) {
+        CrossState state = CrossState::matched;
+        std::string reason;
+        const auto refused = blocked.find(match->symbol);
+        if (refused != blocked.end()) {
+          state = CrossState::blocked;
+          reason = refused->second;
+        }
+        result.cross.entries.push_back(CrossEntry{pattern, match->symbol, state, reason});
+      }
+    }
+  }
+  for (const auto& [symbol, reason] : direct) {
+    result.cross.direct.push_back(DirectCallee{symbol, reason});
   }
 
   if (sites.empty()) {
@@ -329,6 +475,12 @@ auto transform_module(llvm::Module& module, const Config& config,
   std::vector<llvm::Constant*> table_entries;
   table_entries.reserve(callees.size());
   for (llvm::Function* callee : callees) {
+    // The entry is the *symbol*, not a copy of its address: a callee that
+    // is defined in another translation unit is a declaration here, and the
+    // object writer emits an ADDR64 relocation against the external symbol.
+    // The linker resolves it and the mapper applies the DIR64 fixup, so the
+    // table holds a relocatable pointer and the image base is never baked
+    // into anything.
     table_entries.push_back(callee);
   }
 
@@ -433,6 +585,9 @@ auto transform_module(llvm::Module& module, const Config& config,
   // The per-function counters.
   for (const Site& site : sites) {
     ++result.functions[site.function].rewritten;
+    if (site.cross) {
+      ++result.functions[site.function].cross;
+    }
   }
 
   result.table_size = callees.size();

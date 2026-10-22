@@ -68,6 +68,46 @@ enum class CallSkipReason : std::uint8_t {
 /// drifts, and the two copies report different reasons for one call.
 [[nodiscard]] auto skip_reason(const llvm::CallBase& call) -> std::optional<CallSkipReason>;
 
+/// Why a call to a **routable** declaration is not rewritten, if it is not.
+///
+/// The `external_callee` rule does not hold for a declaration the policy's
+/// `cross_module` list names: the caller routes it through its own table as
+/// a relocatable pointer to the external symbol. Every other rule still
+/// applies, and the rules are the ones of `skip_reason` -- a second copy of
+/// them would drift.
+[[nodiscard]] auto skip_reason_routed(const llvm::CallBase& call) -> std::optional<CallSkipReason>;
+
+/// The state of a `cross_module` entry in one module.
+enum class CrossState : std::uint8_t {
+  matched,    ///< the entry named a declaration and every call to it was routed.
+  unmatched,  ///< the entry named no declaration in this module.
+  blocked,    ///< a call to the declaration it named could not be routed.
+};
+
+[[nodiscard]] auto to_string(CrossState state) noexcept -> const char*;
+
+/// One `cross_module` entry, and what it did in one module.
+struct CrossEntry {
+  std::string pattern;  ///< the glob of the entry.
+  std::string symbol;   ///< the mangled symbol of the declaration it named
+                        ///< ("" when the entry matched nothing).
+  CrossState state{CrossState::unmatched};
+  std::string reason;  ///< the skip reason of the blocked call ("" otherwise).
+};
+
+/// A cross-TU callee that stayed direct, and the reason it stayed.
+struct DirectCallee {
+  std::string symbol;
+  std::string reason;
+};
+
+/// The cross-module routing of one module: the state of every
+/// `cross_module` entry, and the cross-TU callees that stayed direct.
+struct CrossModuleState {
+  std::vector<CrossEntry> entries;
+  std::vector<DirectCallee> direct;
+};
+
 /// One selected function, as the early phase recorded it.
 struct RecordedFunction {
   std::string symbol;
@@ -87,10 +127,23 @@ struct RecordedEntry {
   ProtectionLevel level{ProtectionLevel::call};
 };
 
+/// A `cross_module` entry that named a declaration in the module.
+struct RecordedCross {
+  std::string pattern;    ///< the glob of the entry.
+  std::string symbol;     ///< the mangled symbol of the declaration.
+  std::string qualified;  ///< the demangled qualified name of the declaration.
+};
+
 /// What the early phase recorded for the late phase.
 struct RecordedSelection {
   std::vector<RecordedFunction> functions;
   std::vector<RecordedEntry> entries;
+  /// The `cross_module` entries that named a declaration in this module.
+  ///
+  /// The early phase matches the list against the declarations of the
+  /// module; the late phase routes the calls to them. The two phases hand
+  /// over through the module's metadata, and this is the hand-over.
+  std::vector<RecordedCross> cross;
 };
 
 /// What the transform did to one selected function.
@@ -98,6 +151,7 @@ struct FunctionTransform {
   std::string symbol;
   std::string qualified;
   std::size_t rewritten{0};
+  std::size_t cross{0};                      ///< the rewrites that were cross-TU (routed).
   std::vector<CallSkipReason> skipped;       ///< one per skipped call.
   std::vector<std::string> skipped_callees;  ///< the callee of each skipped call.
 };
@@ -122,6 +176,8 @@ struct TransformResult {
   std::uint64_t mix_multiplier{0};
   /// The xor constant of the mixer, as the call site uses it.
   std::uint64_t mix_xor{0};
+  /// The cross-module routing of this module.
+  CrossModuleState cross;
 };
 
 /// Records the selection of the early phase in the module's metadata.

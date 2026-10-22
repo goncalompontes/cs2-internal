@@ -36,7 +36,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 # The coverage format is shared with the payload check: the plugin writes it
 # and the two readers have to agree on it.
@@ -44,12 +44,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from protect_checks import (  # noqa: E402
     Coverage,
+    cross_state_priority,
     default_coverage_dir,
     read_coverage as read_coverage_files,
 )
 
 #: The keys the policy file may carry.
-POLICY_KEYS = ("protect", "deny", "seed", "strings", "strings_deny", "strings_min_length")
+POLICY_KEYS = (
+    "protect",
+    "cross_module",
+    "deny",
+    "seed",
+    "strings",
+    "strings_deny",
+    "strings_min_length",
+)
 
 #: The keys a `protect` entry object may carry.
 ENTRY_KEYS = ("symbol", "module", "level")
@@ -94,19 +103,25 @@ def check_policy_keys(policy: dict[str, Any]) -> None:
         if key not in POLICY_KEYS:
             raise ValueError(
                 f"unknown key in the policy file: '{key}' "
-                "(expected 'protect', 'deny', 'seed', 'strings', 'strings_deny' or "
+                "(expected 'protect', 'cross_module', 'deny', 'seed', 'strings', 'strings_deny' or "
                 "'strings_min_length')"
             )
 
 
 def check_policy_values(policy: dict[str, Any]) -> None:
-    """Reject the shapes the plugin rejects."""
+    """Reject the `deny`, `cross_module`, `strings` and `seed` shapes the plugin rejects."""
     deny = policy.get("deny", [])
     if not isinstance(deny, list):
         raise ValueError("'deny' must be an array")
     for entry in deny:
         if not isinstance(entry, str):
             raise ValueError("a 'deny' entry must be a string")
+    cross = policy.get("cross_module", [])
+    if not isinstance(cross, list):
+        raise ValueError("'cross_module' must be an array")
+    for entry in cross:
+        if not isinstance(entry, str):
+            raise ValueError("a 'cross_module' entry must be a string")
     seed = policy.get("seed")
     if seed is not None and not isinstance(seed, str):
         raise ValueError("'seed' must be a hexadecimal string")
@@ -156,8 +171,19 @@ def policy_patterns(policy: dict[str, Any]) -> list[str]:
     return patterns
 
 
+class PolicyStates(NamedTuple):
+    """What the coverage files of a policy say about its entries."""
+
+    #: The state of every `protect` entry, over every module.
+    entries: dict[str, str]
+    #: The state of every `cross_module` entry, over every module.
+    cross: dict[str, str]
+    #: Whether any coverage file belongs to this policy at all.
+    current: bool
+
+
 def read_coverage(coverage_dir: Path, policy_path: Path,
-                  source_root: Path | None = None) -> tuple[dict[str, str], bool]:
+                  source_root: Path | None = None) -> PolicyStates:
     """The state of every policy entry, over every coverage file of this policy.
 
     The state of an entry is "matched" (it named a function that is
@@ -170,6 +196,10 @@ def read_coverage(coverage_dir: Path, policy_path: Path,
     all: when none does, the coverage is stale (the policy changed after the
     last compile) and the check cannot say anything.
 
+    The `cross_module` entries have their own priority: the symbol has to
+    be routed *everywhere* it is called, so a call that could not be routed
+    outranks a routing.
+
     A coverage file that does not describe *this* build is not evidence about
     it: a file that was edited by hand (its content digest does not match),
     a file of an earlier state of the source (the digest of the source does
@@ -178,10 +208,11 @@ def read_coverage(coverage_dir: Path, policy_path: Path,
     that, a file left behind by another build would fail the build of a good
     one.
     """
-    states: dict[str, str] = {}
+    entries: dict[str, str] = {}
+    cross: dict[str, str] = {}
     current = False
     if not coverage_dir.is_dir():
-        return states, current
+        return PolicyStates(entries, cross, current)
     digest = hashlib.sha256(policy_path.read_bytes()).hexdigest().upper()
     files, skipped, malformed = read_coverage_files(coverage_dir, policy_path, source_root)
     for name, reason in malformed:
@@ -195,9 +226,14 @@ def read_coverage(coverage_dir: Path, policy_path: Path,
             continue
         current = True
         for pattern, state in entry.states().items():
-            if pattern not in states or state_priority(state) > state_priority(states[pattern]):
-                states[pattern] = state
-    return states, current
+            if pattern not in entries or state_priority(state) > state_priority(entries[pattern]):
+                entries[pattern] = state
+        for pattern, state in entry.cross_states().items():
+            if pattern not in cross or (
+                cross_state_priority(state) > cross_state_priority(cross[pattern])
+            ):
+                cross[pattern] = state
+    return PolicyStates(entries, cross, current)
 
 
 def prune_stale_coverage(coverage_dir: Path, policy_path: Path) -> int:
@@ -302,8 +338,8 @@ def main(argv: list[str]) -> int:
         source_root = Path(env) if env else None
 
     digest = hashlib.sha256(policy_file.read_bytes()).hexdigest().upper()
-    states, current = read_coverage(coverage_dir, policy_file, source_root)
-    if not current:
+    states = read_coverage(coverage_dir, policy_file, source_root)
+    if not states.current:
         print(
             f"check_policy: {policy_path}: no coverage of this policy in "
             f"'{coverage_dir}'.\n"
@@ -316,18 +352,18 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    matched = {pattern for pattern, state in states.items() if state == "matched"}
+    matched = {pattern for pattern, state in states.entries.items() if state == "matched"}
     blocked = {
         pattern: state.split(":", 1)[1]
-        for pattern, state in states.items()
+        for pattern, state in states.entries.items()
         if state.startswith("blocked:")
     }
     unimplemented = {
         pattern: state.split(":", 1)[1]
-        for pattern, state in states.items()
+        for pattern, state in states.entries.items()
         if state.startswith("unimplemented:")
     }
-    vanished = {pattern for pattern, state in states.items() if state.startswith("vanished")}
+    vanished = {pattern for pattern, state in states.entries.items() if state.startswith("vanished")}
     failed = False
 
     # A selected function that did not survive to the transform phase: the
@@ -393,11 +429,54 @@ def main(argv: list[str]) -> int:
             print(f"  {pattern}", file=sys.stderr)
         failed = True
 
+    # A `cross_module` entry has to be routed *everywhere* it is called: the
+    # worst state wins, and an entry that is not "matched" protects nothing.
+    # The rule is the one the `protect` entries follow, with the priority
+    # inverted: for a `protect` entry a match in one module is enough, for a
+    # `cross_module` entry every call has to be routed.
+    cross_patterns = raw.get("cross_module", [])
+    cross_blocked = {
+        pattern: state.split(":", 1)[1]
+        for pattern, state in states.cross.items()
+        if state.startswith("blocked:")
+    }
+    cross_unmatched = [
+        pattern for pattern in cross_patterns if states.cross.get(pattern, "unmatched") == "unmatched"
+    ]
+    cross_refused = [
+        pattern
+        for pattern in cross_patterns
+        if pattern in cross_blocked and states.cross.get(pattern) != "matched"
+    ]
+    if cross_refused:
+        noun = "entry" if len(cross_refused) == 1 else "entries"
+        print(
+            f"check_policy: {policy_path}: {len(cross_refused)} cross_module {noun} named a "
+            "declaration whose call could not be routed:",
+            file=sys.stderr,
+        )
+        for pattern in sorted(cross_refused):
+            print(f"  {pattern} ({cross_blocked[pattern]})", file=sys.stderr)
+        failed = True
+    if cross_unmatched:
+        noun = "entry" if len(cross_unmatched) == 1 else "entries"
+        print(
+            f"check_policy: {policy_path}: {len(cross_unmatched)} cross_module {noun} matched no "
+            "declaration:",
+            file=sys.stderr,
+        )
+        for pattern in sorted(cross_unmatched):
+            print(f"  {pattern}", file=sys.stderr)
+        failed = True
+
     if failed:
         return 1
 
     prune_stale_coverage(coverage_dir, policy_file)
     print(f"check_policy: {len(patterns)} policy entries matched")
+    if len(cross_patterns) > 0:
+        matched_cross = len(cross_patterns) - len(cross_refused) - len(cross_unmatched)
+        print(f"check_policy: {matched_cross} cross_module entries routed every call")
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(f"{len(patterns)} entries matched\n", encoding="utf-8")

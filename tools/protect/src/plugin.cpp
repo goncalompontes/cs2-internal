@@ -253,8 +253,8 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     std::vector<cs2::protect::CoverageFunction> functions;
     functions.reserve(result.functions.size());
     for (const cs2::protect::FunctionTransform& transform : result.functions) {
-      functions.push_back(cs2::protect::CoverageFunction{transform.symbol, transform.rewritten,
-                                                         transform.skipped.size()});
+      functions.push_back(cs2::protect::CoverageFunction{
+          transform.symbol, transform.rewritten, transform.skipped.size(), transform.cross});
     }
     cs2::protect::CoverageProtect protect;
     protect.table_size = result.table_size;
@@ -273,8 +273,9 @@ class TransformPass : public llvm::PassInfoMixin<TransformPass> {
     if (strings.salted) {
       salt = "build-seed digest=" + cs2::protect::salt_proof(settings);
     }
-    if (const auto error = cs2::protect::write_coverage(settings, module, entries, functions,
-                                                        protect, vm_coverage, covered, salt)) {
+    if (const auto error =
+            cs2::protect::write_coverage(settings, module, entries, functions, protect, vm_coverage,
+                                         covered, salt, result.cross)) {
       llvm::errs() << "[cs2-protect] " << *error << "\n";
       llvm::report_fatal_error("cs2-protect: the coverage could not be written",
                                /*gen_crash_diag=*/false);

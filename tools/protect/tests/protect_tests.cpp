@@ -151,6 +151,23 @@ void test_qualified_name() {
 
 /// The selection -------------------------------------------------------------
 
+/// A module built from a piece of IR.
+[[nodiscard]] auto build_module_from(llvm::LLVMContext& context, std::string_view ir,
+                                     std::string_view identifier) -> std::unique_ptr<llvm::Module> {
+  llvm::SMDiagnostic error;
+  auto module = llvm::parseAssemblyString(ir, error, context);
+  if (module == nullptr) {
+    std::string message;
+    llvm::raw_string_ostream stream(message);
+    error.print("protect_tests", stream);
+    std::fprintf(stderr, "FAIL: the test module does not parse: %s\n", stream.str().c_str());
+    ++g_failures;
+    return nullptr;
+  }
+  module->setModuleIdentifier(identifier);
+  return module;
+}
+
 /// A module with one function that cannot be protected (alwaysinline) and one
 /// that can.
 [[nodiscard]] auto build_module(llvm::LLVMContext& context, std::string_view identifier)
@@ -166,18 +183,7 @@ entry:
   ret i32 %x
 }
 )";
-  llvm::SMDiagnostic error;
-  auto module = llvm::parseAssemblyString(k_ir, error, context);
-  if (module == nullptr) {
-    std::string message;
-    llvm::raw_string_ostream stream(message);
-    error.print("protect_tests", stream);
-    std::fprintf(stderr, "FAIL: the test module does not parse: %s\n", stream.str().c_str());
-    ++g_failures;
-    return nullptr;
-  }
-  module->setModuleIdentifier(identifier);
-  return module;
+  return build_module_from(context, k_ir, identifier);
 }
 
 void test_selection() {
@@ -586,8 +592,315 @@ void test_level_gate_two_entries() {
   }
 }
 
-/// The virtualizer's analysis -------------------------------------------------
+/// The cross-module routing -------------------------------------------------
 
+/// A module with a caller that calls a **declaration**.
+///
+/// The declaration has no body in this module: at the IR level it is the
+/// same thing as an import, and the policy's `cross_module` list is what
+/// tells the two apart.
+[[nodiscard]] auto build_cross_module(llvm::LLVMContext& context) -> std::unique_ptr<llvm::Module> {
+  static constexpr std::string_view k_ir = R"(
+declare i32 @external_target(i32 %x)
+
+define i32 @caller(i32 %x) {
+entry:
+  %a = call i32 @external_target(i32 %x)
+  %b = add i32 %a, 1
+  ret i32 %b
+}
+)";
+  return build_module_from(context, k_ir, "cross.obj");
+}
+
+/// A module with a caller that calls a **variadic** declaration.
+///
+/// The indirect call cannot reproduce the variadic ABI, so the call stays
+/// direct even though the policy names the declaration.
+[[nodiscard]] auto build_variadic_cross_module(llvm::LLVMContext& context)
+    -> std::unique_ptr<llvm::Module> {
+  static constexpr std::string_view k_ir = R"(
+declare i32 @variadic_target(i32 %x, ...)
+
+define i32 @caller(i32 %x) {
+entry:
+  %a = call i32 (i32, ...) @variadic_target(i32 %x, i32 %x)
+  %b = add i32 %a, 1
+  ret i32 %b
+}
+)";
+  return build_module_from(context, k_ir, "variadic-cross.obj");
+}
+
+/// A module with a caller that calls a **declaration** through an EH edge.
+///
+/// The call is an `invoke`: the call may throw, and the landing pad catches
+/// it. The rewrite replaces the callee and leaves the EH edges alone.
+[[nodiscard]] auto build_invoke_cross_module(llvm::LLVMContext& context)
+    -> std::unique_ptr<llvm::Module> {
+  static constexpr std::string_view k_ir = R"(
+declare i32 @__gxx_personality_v0(...)
+declare i32 @external_target(i32 %x)
+
+define i32 @caller(i32 %x) personality ptr @__gxx_personality_v0 {
+entry:
+  %a = invoke i32 @external_target(i32 %x) to label %cont unwind label %lpad
+
+cont:
+  ret i32 %a
+
+lpad:
+  %e = landingpad { ptr, i32 }
+          cleanup
+  ret i32 0
+}
+)";
+  return build_module_from(context, k_ir, "invoke-cross.obj");
+}
+
+/// The policy reader accepts a `cross_module` list, and rejects a malformed
+/// one as a *reported* error.
+void test_cross_module_policy() {
+  auto parsed = cs2::protect::parse_policy_text(
+      R"({"protect": ["caller"], "cross_module": ["cs2::aim::DamageField::*"]})");
+  check(parsed.has_value(), "a policy with a cross_module list parses");
+  if (parsed.has_value()) {
+    check(parsed->cross_module.size() == 1, "the policy has one cross_module entry");
+    if (!parsed->cross_module.empty()) {
+      check_equal(parsed->cross_module[0], "cs2::aim::DamageField::*",
+                  "the entry keeps its pattern");
+    }
+  }
+
+  // A list that is not a list.
+  auto not_a_list = cs2::protect::parse_policy_text(R"({"cross_module": "cs2::aim::solve"})");
+  check(!not_a_list.has_value(), "a cross_module that is not an array is rejected");
+  if (!not_a_list.has_value()) {
+    check_equal(not_a_list.error().message, "'cross_module' must be an array",
+                "the error names the shape");
+  }
+
+  // An entry that is not a string.
+  auto not_a_string = cs2::protect::parse_policy_text(R"({"cross_module": [42]})");
+  check(!not_a_string.has_value(), "a cross_module entry that is not a string is rejected");
+  if (!not_a_string.has_value()) {
+    check_equal(not_a_string.error().message, "a 'cross_module' entry must be a string",
+                "the error names the entry");
+  }
+}
+
+/// The transform routes a declaration the policy names.
+void test_transform_cross_module() {
+  llvm::LLVMContext context;
+  const auto module = build_cross_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  policy.cross_module.push_back("external_target");
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  // The selection phase matches the list against the declarations of the
+  // module, and the match is handed over to the transform phase.
+  const auto selection = cs2::protect::select_functions(*module, config);
+  check(selection.selected.size() == 1, "the caller is selected");
+  check(selection.cross_matches.size() == 1, "the cross_module entry named the declaration");
+  if (selection.cross_matches.empty()) {
+    return;
+  }
+  check_equal(selection.cross_matches[0].symbol, "external_target",
+              "the match names the declaration");
+
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  check(recorded.cross.size() == 1, "the cross_module match is recorded");
+  check(!recorded.cross.empty() && recorded.cross[0].symbol == "external_target",
+        "the recorded match names the declaration");
+
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 1, "the call to the declaration is rewritten");
+  check(result.functions[0].cross == 1, "the rewrite is counted as a cross-TU one");
+  check(result.functions[0].skipped.empty(), "no call is skipped");
+  check(result.table_size == 1, "the table holds one callee");
+  check(result.descriptor_size == 1, "the descriptor holds one slot");
+
+  // The call is indirect now.
+  llvm::Function* caller = module->getFunction("caller");
+  check(caller != nullptr, "the caller is still there");
+  if (caller == nullptr) {
+    return;
+  }
+  const auto calls = calls_of(*caller);
+  check(calls.size() == 1, "the caller still makes one call");
+  check(calls.size() == 1 && calls[0]->getCalledFunction() == nullptr,
+        "the call to the declaration is indirect");
+
+  // The table holds the *declaration*: the entry is the symbol, and the
+  // object writer turns it into a relocatable pointer to the external
+  // symbol.
+  llvm::GlobalVariable* table = module->getGlobalVariable("cs2.protect.table",
+                                                          /*AllowLocal=*/true);
+  check(table != nullptr, "the table global exists");
+  if (table != nullptr) {
+    const auto elements = elements_of(table->getInitializer());
+    check(elements.size() == 1, "the table holds one entry");
+    check(elements.size() == 1 && elements[0] == module->getFunction("external_target"),
+          "the table does not hold the declaration");
+    // The entry is the symbol itself, not a copy of its address: a copy
+    // would bake the image base into the image.
+    check(elements.size() == 1 && llvm::isa<llvm::Function>(elements[0]),
+          "the table entry is the function, not an address");
+  }
+
+  // The descriptor decodes to the index of the entry.
+  llvm::GlobalVariable* descriptor =
+      module->getGlobalVariable("cs2.protect.desc", /*AllowLocal=*/true);
+  check(descriptor != nullptr, "the descriptor global exists");
+  std::uint64_t cipher = 0;
+  if (descriptor != nullptr) {
+    const auto elements = elements_of(descriptor->getInitializer());
+    check(elements.size() == 1, "the descriptor holds one slot");
+    if (elements.size() == 1) {
+      const auto* value = llvm::dyn_cast<llvm::ConstantInt>(elements[0]);
+      check(value != nullptr, "the descriptor holds an integer");
+      if (value != nullptr) {
+        cipher = value->getZExtValue();
+      }
+    }
+  }
+  const std::uint64_t key = mix64(constant_value(*module, "cs2.protect.key0") ^
+                                  constant_value(*module, "cs2.protect.key1") ^
+                                  constant_value(*module, "cs2.protect.key2"));
+  check((cipher ^ key) == 0, "the decode does not yield the index of the declaration");
+
+  // The state of the entry: it named a declaration and every call to it was
+  // routed.
+  check(result.cross.entries.size() == 1, "the state of the entry is recorded");
+  if (!result.cross.entries.empty()) {
+    check(result.cross.entries[0].state == cs2::protect::CrossState::matched,
+          "the entry is matched");
+    check_equal(result.cross.entries[0].symbol, "external_target",
+                "the state names the declaration");
+  }
+  check(result.cross.direct.empty(), "no cross-TU callee stayed direct");
+}
+
+/// The transform refuses a declaration the policy does not name.
+void test_transform_cross_module_not_named() {
+  llvm::LLVMContext context;
+  const auto module = build_cross_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  check(selection.cross_matches.empty(), "no declaration is named");
+
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+  check(result.functions[0].rewritten == 0, "the call is not rewritten");
+  check(result.functions[0].skipped.size() == 1, "the call is skipped");
+  check(result.functions[0].skipped.size() == 1 &&
+            result.functions[0].skipped[0] == cs2::protect::CallSkipReason::external_callee,
+        "the reason is external_callee");
+  check(result.table_size == 0, "the module keeps no table");
+
+  // The callee stays direct, and the coverage names it: the payload check
+  // compares it with the symbols the payload's own libraries define.
+  check(result.cross.direct.size() == 1, "the direct callee is recorded");
+  if (!result.cross.direct.empty()) {
+    check_equal(result.cross.direct[0].symbol, "external_target",
+                "the direct callee is the declaration");
+    check_equal(result.cross.direct[0].reason, "external_callee",
+                "the direct callee names its reason");
+  }
+}
+
+/// A `cross_module` entry that named a declaration whose call could not be
+/// routed is *blocked*, and the state says why.
+void test_transform_cross_module_blocked() {
+  llvm::LLVMContext context;
+  const auto module = build_variadic_cross_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  policy.cross_module.push_back("variadic_target");
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  check(selection.cross_matches.size() == 1, "the cross_module entry named the declaration");
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+  check(result.functions[0].rewritten == 0, "the call is not rewritten");
+  check(result.cross.entries.size() == 1, "the state of the entry is recorded");
+  if (!result.cross.entries.empty()) {
+    check(result.cross.entries[0].state == cs2::protect::CrossState::blocked,
+          "the entry is blocked");
+    check_equal(result.cross.entries[0].reason, "variadic_callee", "the state names the reason");
+  }
+  check(result.cross.direct.size() == 1, "the direct callee is recorded");
+}
+
+/// A cross-TU callee that is called through an EH edge is routed too: the
+/// landing pad and the unwind edge stay, and only the callee becomes a
+/// value.
+void test_transform_cross_module_invoke() {
+  llvm::LLVMContext context;
+  const auto module = build_invoke_cross_module(context);
+  if (module == nullptr) {
+    return;
+  }
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  policy.cross_module.push_back("external_target");
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  check(selection.cross_matches.size() == 1, "the cross_module entry named the declaration");
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+  check(result.functions[0].rewritten == 1, "the invoke is rewritten");
+  check(result.functions[0].cross == 1, "the rewrite is counted as a cross-TU one");
+  check(result.functions[0].skipped.empty(), "no call is skipped");
+
+  llvm::Function* caller = module->getFunction("caller");
+  check(caller != nullptr, "the caller is still there");
+  if (caller == nullptr) {
+    return;
+  }
+  const auto calls = calls_of(*caller);
+  check(calls.size() == 1, "the caller still makes one call");
+  check(calls.size() == 1 && calls[0]->getCalledFunction() == nullptr, "the invoke is indirect");
+  check(calls.size() == 1 && llvm::isa<llvm::InvokeInst>(calls[0]),
+        "the call is still an invoke: the EH edge is not modelled away");
+  check(caller->getPersonalityFn() != nullptr, "the personality function is still there");
+  std::size_t blocks = 0;
+  for (const llvm::BasicBlock& block : *caller) {
+    (void)block;
+    ++blocks;
+  }
+  check(blocks == 3, "the landing pad is still there");
+}
+
+/// The virtualizer's analysis -------------------------------------------------
 /// The analysis of a function, with a fixed seed.
 ///
 /// The seed is fixed so that the test does not depend on the build: the
@@ -1726,6 +2039,11 @@ auto main() -> int {
   test_level_gate();
   test_level_gate_two_entries();
   test_vanished();
+  test_cross_module_policy();
+  test_transform_cross_module();
+  test_transform_cross_module_not_named();
+  test_transform_cross_module_blocked();
+  test_transform_cross_module_invoke();
   test_vm_virtualizable();
   test_vm_parallel_copy();
   test_vm_flags();
