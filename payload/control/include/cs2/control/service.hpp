@@ -41,7 +41,7 @@ namespace cs2::control {
 // The channel was not versioned, so a stale client and a new payload could
 // disagree silently. It starts at 2: the surface the harness documents as
 // "v1" plus the `settings`, `batch` and `log` commands.
-inline constexpr std::int64_t k_protocol_version = 2;
+inline constexpr std::int64_t k_protocol_version = 3;
 
 // A player's visibility state.
 //
@@ -385,9 +385,30 @@ class Service {
   static unsigned long __stdcall thread_entry(void* self) noexcept;
   void run() noexcept;
 
-  // Handle one NDJSON request, setting `response`. Returns false when the
-  // client asked to quit.
+  // Handle one JSON-RPC 2.0 message, setting `response` (empty for a
+  // notification). Returns false when the client asked to quit or the
+  // handshake failed.
+  [[nodiscard]] bool handle_rpc(const std::string& line, std::string& response) noexcept;
+
+  // Dispatch one legacy command name + its arguments into `out` (the
+  // `{"ok":...,"result":...}` envelope). Shared by the RPC path and `batch`.
+  [[nodiscard]] bool dispatch_command(std::string_view command, const Json& arguments,
+                                      Json& out) noexcept;
+
+  // Handle one legacy `{"id","cmd","args"}` request. Kept for `batch` steps.
   [[nodiscard]] bool handle(const std::string& line, std::string& response) noexcept;
+
+  // The per-session bearer token (written to control.json, required by the
+  // `initialize` method).
+  [[nodiscard]] static auto make_token() noexcept -> std::string;
+  // Write/remove `%LOCALAPPDATA%\cs2-internal\control.json` (the endpoint, the
+  // token and the pid, so a client can find this payload).
+  void write_session_file() noexcept;
+  void remove_session_file() noexcept;
+
+  std::string token_{};
+  std::string session_file_{};
+  bool initialized_ = false;
 
   [[nodiscard]] Json ping_result() noexcept;
   // Milliseconds since the payload was installed (the control service is built

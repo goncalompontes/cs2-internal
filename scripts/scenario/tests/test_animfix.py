@@ -28,7 +28,7 @@ from scenario.control import Control  # noqa: E402
 from scenario.protocol import AnimfixResult, InputStatus  # noqa: E402
 from scenario.scenarios import animfix as animfix_scenario  # noqa: E402
 from scenario.session import Game  # noqa: E402
-from scenario.tests.test_control import FakePipe  # noqa: E402
+from scenario.tests.test_control import FakePipe, answer, sent  # noqa: E402
 from scenario.tests.test_screens import snapshot  # noqa: E402
 
 
@@ -39,20 +39,11 @@ def connected(chunks: list[bytes]) -> tuple[Control, FakePipe]:
     return control, pipe
 
 
-def answer(result: dict[str, Any], request_id: int = 1) -> bytes:
-    return (json.dumps({"id": request_id, "ok": True, "result": result}) + "\n").encode("utf-8")
-
-
-def sent(pipe: FakePipe) -> list[dict[str, Any]]:
-    text = bytes(pipe.written).decode("utf-8")
-    return [json.loads(line) for line in text.splitlines() if line]
-
-
 class TestAnimfixCommand(unittest.TestCase):
     """The ``animfix`` command's wire shape."""
 
     def test_the_command_is_a_boolean_toggle(self) -> None:
-        control, pipe = connected([answer({"animfix": True})])
+        control, pipe = connected([answer(1, {"animfix": True})])
         result = control.animfix(True)
         self.assertTrue(result.get("animfix"))
         request = sent(pipe)[0]
@@ -60,7 +51,7 @@ class TestAnimfixCommand(unittest.TestCase):
         self.assertEqual(request["args"], {"on": True})
 
     def test_the_command_can_be_switched_off(self) -> None:
-        control, pipe = connected([answer({"animfix": False})])
+        control, pipe = connected([answer(1, {"animfix": False})])
         control.animfix(False)
         self.assertEqual(sent(pipe)[0]["args"], {"on": False})
 
@@ -77,7 +68,7 @@ class TestAnimfixCommand(unittest.TestCase):
             "animfix_predicted_aim_yaw": 88.0,
             "animfix_aim_yaw_delta": 3.5,
         }
-        control, _ = connected([answer(block)])
+        control, _ = connected([answer(1, block)])
         result: AnimfixResult = control.animfix(True)
         self.assertEqual(result["animfix_captures"], 12)
         self.assertEqual(result["animfix_applies"], 48)

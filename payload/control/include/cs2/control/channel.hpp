@@ -1,73 +1,75 @@
 #pragma once
 
-// Win32 named-pipe server carrying newline-delimited JSON (ADR-0020). The
-// payload owns the server end; the scenario runner connects as a client. The
-// payload runs in the game's (session 1) process while the runner may be in
-// session 0, which is why the transport is a same-user named pipe rather than a
-// socket or shared memory.
+// The control channel's transport: a local stream socket carrying JSON-RPC 2.0
+// messages.
+//
+// The payload listens on an **AF_UNIX** socket under its data directory
+// (`%LOCALAPPDATA%\cs2-internal\control.sock` on native Windows) and falls back
+// to a loopback TCP port if the platform refuses AF_UNIX. Frames are
+// `Content-Length: N\r\n\r\n` followed by N bytes of UTF-8 JSON -- the framing
+// LSP clients already know, and the one that makes a partial read harmless.
+//
+// The transport knows nothing about the RPC: it moves frames. The token
+// handshake and the method dispatch live in `Service`.
+//
+// Windows-only sockets are hidden behind `std::uintptr_t` so this header stays
+// free of <winsock2.h> (the platform-independent core must not include it --
+// docs/style-guide.md section 3).
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 
-#include "cs2/core/handle.hpp"
-
 namespace cs2::control {
-
-// The closer for the pipe handle. The handle is stored opaquely and the
-// closer is supplied by the implementation, so this header stays free of
-// <windows.h> (the platform-independent core must not include it -- see
-// docs/style-guide.md §3).
-struct PipeHandlePolicy {
-  // The closer is the one in channel.cpp, and it is always there: this
-  // policy can always work.
-  [[nodiscard]] bool usable() const noexcept {
-    return true;
-  }
-
-  // A pipe that was never opened is a null handle; `CreateNamedPipeA` reports
-  // failure with INVALID_HANDLE_VALUE, which `Channel::open` rejects before
-  // the handle is stored.
-  [[nodiscard]] bool is_valid(void* handle) const noexcept {
-    return handle != nullptr;
-  }
-  void close(void* handle) const noexcept;
-};
 
 class Channel {
  public:
-  static constexpr const char* k_default_pipe = "\\\\.\\pipe\\cs2-internal-control";
+  // The socket's file name, under the payload's data directory.
+  static constexpr const char* k_default_socket = "control.sock";
+  // The largest frame the server accepts (a `heatmap` answer is the biggest
+  // legitimate one; 8 MiB leaves room and stops a runaway client).
+  static constexpr std::size_t k_max_frame = 8U * 1024U * 1024U;
+  // `INVALID_SOCKET` without including <winsock2.h>.
+  static constexpr std::uintptr_t k_invalid = static_cast<std::uintptr_t>(~0ULL);
 
   Channel() = default;
   ~Channel();
   Channel(const Channel&) = delete;
   Channel& operator=(const Channel&) = delete;
 
-  // Create the pipe server end. Returns false when it cannot be created (e.g.
-  // the name is already taken by a live instance).
-  [[nodiscard]] bool open(std::string_view name) noexcept;
+  // Bind and listen. `path` is the AF_UNIX path; an empty path asks for the
+  // loopback TCP fallback. Returns false when neither can be created.
+  [[nodiscard]] bool listen(std::string_view path) noexcept;
   void close() noexcept;
-  [[nodiscard]] bool valid() const noexcept {
-    return handle_.valid();
-  }
 
-  // Block until a client connects. Returns false when the pipe is closed or the
-  // wait failed.
+  // Block until a client connects. A second client waits (the payload serves
+  // one at a time). Returns false when the listener was closed.
   [[nodiscard]] bool accept() noexcept;
-  // Disconnect the current client so the next one can connect.
   void disconnect() noexcept;
 
-  // Read one newline-terminated line into `out` (the terminator is stripped).
-  // Returns false when the client disconnected or the read failed.
-  [[nodiscard]] bool read_line(std::string& out) noexcept;
+  // Read one whole frame into `out`. Returns false on disconnect, on a
+  // malformed or oversized header, or when the listener was closed.
+  [[nodiscard]] bool read_message(std::string& out) noexcept;
 
-  // Write `bytes` followed by a newline. Returns false on failure.
-  [[nodiscard]] bool write_line(std::string_view bytes) noexcept;
+  // Write one whole frame. Returns false on a broken connection.
+  [[nodiscard]] bool write_message(std::string_view json) noexcept;
+
+  // Where the server listens: for a Unix socket the path, for TCP the port.
+  [[nodiscard]] bool is_unix() const noexcept { return unix_; }
+  [[nodiscard]] unsigned short port() const noexcept { return port_; }
+  [[nodiscard]] const std::string& endpoint() const noexcept { return endpoint_; }
 
  private:
-  // The pipe's server end. It is owned by the wrapper, so it is released on
-  // every path -- including the ones that return early.
-  core::ScopedHandle<void*, PipeHandlePolicy> handle_{};
-  std::string pending_;  // bytes read but not yet terminated by a newline
+  [[nodiscard]] bool listen_unix(std::string_view path) noexcept;
+  [[nodiscard]] bool listen_tcp() noexcept;
+
+  std::uintptr_t listener_ = k_invalid;
+  std::uintptr_t client_ = k_invalid;
+  bool unix_ = false;
+  bool started_winsock_ = false;
+  unsigned short port_ = 0;
+  std::string endpoint_;
+  std::string pending_;
 };
 
 }  // namespace cs2::control

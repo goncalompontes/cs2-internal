@@ -44,7 +44,7 @@ import os
 import threading
 from typing import Any, Callable, TypeVar, cast
 
-from ..control import DEFAULT_PIPE, Control, ControlError, ControlTimeout
+from ..control import DEFAULT_SOCKET, Control, ControlError, ControlTimeout
 from ..session import Game
 
 __all__ = [
@@ -86,7 +86,7 @@ CALL_TIMEOUT_ENV = "CS2_CONTROL_CALL_TIMEOUT"
 #: The pipe the server talks to.  ``CS2_CONTROL_PIPE`` overrides it (the
 #: control channel honours the same variable), which is what lets a test point
 #: the server at a pipe that does not exist.
-DEFAULT_PIPE_NAME = DEFAULT_PIPE
+DEFAULT_PIPE_NAME = DEFAULT_SOCKET
 
 #: The error texts that mean "the pipe dropped" rather than "the payload
 #: rejected the request".  A rejected request must **not** trigger a
@@ -146,8 +146,9 @@ class Session:
                  connect_timeout: float | None = None,
                  call_timeout: float | None = None) -> None:
         self.pipe_name = (pipe_name
+                          or os.environ.get("CS2_CONTROL_SOCKET")
                           or os.environ.get("CS2_CONTROL_PIPE")
-                          or DEFAULT_PIPE_NAME)
+                          or "")
         self.connect_timeout = (DEFAULT_CONNECT_TIMEOUT if connect_timeout is None
                                 else connect_timeout)
         if connect_timeout is None:
@@ -177,7 +178,7 @@ class Session:
 
     def _connect(self) -> Control:
         """Open the pipe, or explain that the game is not there."""
-        control = Control(self.pipe_name)
+        control = Control(self.pipe_name or None)
         try:
             control.connect(timeout=self.connect_timeout)
         except ControlError as error:

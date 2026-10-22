@@ -27,6 +27,7 @@ import json
 import os
 import pathlib
 import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -886,31 +887,25 @@ class ServerOverPipeTest(unittest.TestCase):
 
 
 # --- a payload that never answers -----------------------------------------
-# The failure the deadline exists for: the pipe is there, the request
-# arrives, and the answer never comes.  The fake payload is a **real**
-# Win32 named pipe (the client's whole surface is the pipe), so the test
-# covers the blocking read and the release of the channel — not a mock of it.
-PIPE_ACCESS_DUPLEX = 0x00000003
-PIPE_TYPE_BYTE = 0x00000000
-PIPE_READMODE_BYTE = 0x00000000
-PIPE_WAIT = 0x00000000
-PIPE_UNLIMITED_INSTANCES = 255
-ERROR_PIPE_CONNECTED = 535
-INVALID_HANDLE_VALUE = -1
-
-
+# The failure the deadline exists for: the socket is there, the handshake
+# succeeds, the request arrives, and the answer never comes. The fake payload
+# is a **real** AF_UNIX socket, so the test covers the blocking read and the
+# release of the channel -- not a mock of it.
 class SilentPayload:
-    """A named pipe that accepts a client and never answers it.
-
-    Every client gets a fresh instance (the pipe is created again after a
-    client hangs up), so a client that gave the channel up can reconnect —
-    which is exactly what the deadline has to make possible.
-    """
+    """An AF_UNIX socket that accepts a client and never answers a request."""
 
     def __init__(self) -> None:
-        self.name = (rf"\\.\pipe\cs2-internal-control-silent-{os.getpid()}"
-                     f"-{threading.get_ident()}")
+        import socket
+        import tempfile
+
+        self.directory = tempfile.mkdtemp(prefix="cs2-silent-")
+        self.path = os.path.join(self.directory, "silent.sock")
+        self.token = "silent-token"
         self._stop = threading.Event()
+        self._socket = socket.socket(getattr(socket, "AF_UNIX"), socket.SOCK_STREAM)
+        self._socket.bind(self.path)
+        self._socket.listen(4)
+        self._socket.settimeout(0.2)
         self._thread = threading.Thread(target=self._serve, name="silent-payload",
                                         daemon=True)
 
@@ -920,55 +915,68 @@ class SilentPayload:
 
     def __exit__(self, *_exc: object) -> None:
         self._stop.set()
+        try:
+            self._socket.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=2.0)
+        import shutil
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    def _read(self, connection: Any) -> dict[str, Any] | None:
+        """Read one Content-Length frame, or None when the client hung up."""
+        buffer = b""
+        while b"\r\n\r\n" not in buffer:
+            try:
+                chunk = connection.recv(4096)
+            except (OSError, TimeoutError):
+                if self._stop.is_set():
+                    return None
+                continue
+            if not chunk:
+                return None
+            buffer += chunk
+        header, _, body = buffer.partition(b"\r\n\r\n")
+        length = 0
+        for line in header.decode("ascii", "replace").split("\r\n"):
+            name, _, value = line.partition(":")
+            if name.strip().lower() == "content-length":
+                length = int(value.strip())
+        while len(body) < length:
+            chunk = connection.recv(length - len(body))
+            if not chunk:
+                return None
+            body += chunk
+        try:
+            message = json.loads(body[:length])
+        except json.JSONDecodeError:
+            return None
+        return message if isinstance(message, dict) else None
 
     def _serve(self) -> None:
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateNamedPipeW.argtypes = [
-            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
-            wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID]
-        kernel32.CreateNamedPipeW.restype = wintypes.HANDLE
-        kernel32.ConnectNamedPipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
-        kernel32.ConnectNamedPipe.restype = wintypes.BOOL
-        kernel32.ReadFile.argtypes = [wintypes.HANDLE, wintypes.LPVOID,
-                                      wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
-                                      wintypes.LPVOID]
-        kernel32.ReadFile.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.DisconnectNamedPipe.argtypes = [wintypes.HANDLE]
-
         while not self._stop.is_set():
-            handle = kernel32.CreateNamedPipeW(
-                self.name, PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, None)
-            if handle == INVALID_HANDLE_VALUE:
-                return
-            # The **same** instance serves every client, exactly like the
-            # payload's channel (`Channel::accept` / `Channel::disconnect`):
-            # a client that hangs up is disconnected and the instance waits
-            # for the next one.
-            while not self._stop.is_set():
-                connected = kernel32.ConnectNamedPipe(handle, None)
-                if (not connected
-                        and ctypes.get_last_error() != ERROR_PIPE_CONNECTED):
-                    kernel32.CloseHandle(handle)
-                    return
-                # Read the request (so the client's write completes) and
-                # **never answer**: this is the payload that wedges its client.
+            try:
+                connection, _ = self._socket.accept()
+            except (OSError, TimeoutError):
+                continue
+            with connection:
+                connection.settimeout(0.2)
+                message = self._read(connection)
+                if message is None:
+                    continue
+                if message.get("method") == "initialize":
+                    result = {"jsonrpc": "2.0", "id": message.get("id"),
+                              "result": {"protocol": 3, "transport": "unix",
+                                         "endpoint": self.path, "pid": os.getpid()}}
+                    body = json.dumps(result).encode("utf-8")
+                    connection.sendall(
+                        f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+                # Every later request is read and **never** answered.
                 while not self._stop.is_set():
-                    buffer = ctypes.create_string_buffer(4096)
-                    read = wintypes.DWORD(0)
-                    ok = kernel32.ReadFile(handle, buffer, 4096,
-                                           ctypes.byref(read), None)
-                    if not ok or read.value == 0:
-                        break  # the client hung up
-                kernel32.DisconnectNamedPipe(handle)
+                    if self._read(connection) is None:
+                        break
 
-
-@unittest.skipUnless(os.name == "nt", "the named pipe is a Windows thing")
+@unittest.skipUnless(hasattr(socket, "AF_UNIX"), "AF_UNIX is required")
 class SilentPayloadTest(unittest.TestCase):
     """A payload that never answers must not wedge the server.
 
@@ -981,7 +989,8 @@ class SilentPayloadTest(unittest.TestCase):
     def test_the_call_times_out_and_the_server_keeps_serving(self) -> None:
         with SilentPayload() as payload:
             environment = {
-                "CS2_CONTROL_PIPE": payload.name,
+                "CS2_CONTROL_SOCKET": payload.path,
+                "CS2_CONTROL_TOKEN": payload.token,
                 "CS2_CONTROL_CONNECT_TIMEOUT": "5",
                 "CS2_CONTROL_REQUEST_TIMEOUT": "2",
             }
@@ -1005,7 +1014,8 @@ class SilentPayloadTest(unittest.TestCase):
         """The channel was released, so the next call may connect again."""
         with SilentPayload() as payload:
             environment = {
-                "CS2_CONTROL_PIPE": payload.name,
+                "CS2_CONTROL_SOCKET": payload.path,
+                "CS2_CONTROL_TOKEN": payload.token,
                 "CS2_CONTROL_CONNECT_TIMEOUT": "5",
                 "CS2_CONTROL_REQUEST_TIMEOUT": "2",
             }

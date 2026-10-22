@@ -1,14 +1,19 @@
 """Client for the payload's control channel (ADR-0020).
 
-The payload inside ``cs2.exe`` (Windows session 1) owns the named-pipe *server*;
-the scenario runner is the *client*. Requests and responses are newline-delimited
-JSON, one object per line::
+The payload inside ``cs2.exe`` (Windows session 1) owns a local **JSON-RPC 2.0**
+server on an AF_UNIX socket (a loopback TCP port is the fallback). The scenario
+runner is the client. Messages are framed exactly like LSP::
 
-    {"id": 1, "cmd": "exec", "args": {"line": "sv_cheats 1"}}
-    {"id": 1, "ok": true, "result": {"queued": true}}
+    Content-Length: 72\r\n\r\n
+    {"jsonrpc": "2.0", "id": 1, "method": "exec",
+     "params": {"line": "sv_cheats 1"}}
 
-Commands: ``ping``, ``state``, ``exec``, ``events``, ``wait_for``, ``input``,
-``press``, ``release``, ``bhop``, ``quit`` (see ``docs/control-harness.md``).
+    {"jsonrpc": "2.0", "id": 1, "result": {"queued": true}}
+
+The payload writes a session file (`%LOCALAPPDATA%\\cs2-internal\\control.json`)
+with the endpoint and a per-session bearer token; :meth:`Control.connect`
+reads it and sends ``initialize`` before any other call. The token is never
+logged.
 
 The wire shapes live in :mod:`scenario.protocol`; this module is the typed
 client for them. Every helper answers with the exact type of the payload's
@@ -17,13 +22,10 @@ three frames away. The one thing static types cannot cover — the payload being
 a *separately built* binary — is covered by the runtime validator in the same
 module, which :meth:`Control.state` and :meth:`Control.ping` run.
 
-Every request runs under a **deadline** (:data:`DEFAULT_REQUEST_TIMEOUT`): the
-pipe's read is blocking and the payload answers a command *inline* on its one
-service thread, so a payload that never answers would otherwise block the
-caller — and every other caller behind it — forever.  A request that runs out
-of time raises :class:`ControlTimeout` and **releases the channel** (the
-payload's pipe takes one client at a time, so a stuck handle would keep the
-next client out).
+Every request runs under a **deadline** (:data:`DEFAULT_REQUEST_TIMEOUT`): a
+payload that never answers must not block the caller forever. A request that
+runs out of time raises :class:`ControlTimeout` and closes the socket; the next
+call reconnects.
 """
 
 from __future__ import annotations
@@ -72,6 +74,8 @@ from .protocol import (
 __all__ = [
     "BUTTONS",
     "DEFAULT_PIPE",
+    "DEFAULT_SOCKET",
+    "SESSION_FILE",
     "DEFAULT_REQUEST_TIMEOUT",
     "Control",
     "ControlError",
@@ -87,7 +91,13 @@ def _angle_delta(a: float, b: float) -> float:
     return delta
 
 
-DEFAULT_PIPE = r"\\.\pipe\cs2-internal-control"
+#: The socket's file name under the payload's data directory.
+DEFAULT_SOCKET = "control.sock"
+#: The session file the payload writes next to the socket: the endpoint, the
+#: bearer token and the protocol version.
+SESSION_FILE = "control.json"
+#: Backwards-compatible alias for the old name (callers pass a path here).
+DEFAULT_PIPE = DEFAULT_SOCKET
 
 #: How long one wire request may take before the client gives up on it.
 #:
@@ -109,7 +119,7 @@ REQUEST_TIMEOUT_MARGIN = 10.0
 
 #: How long the release waits for the cancelled reader to unwind before the
 #: pipe is closed anyway (the close is the fallback, not the plan).
-RELEASE_JOIN_TIMEOUT = 2.0
+
 
 # Input is driven through the engine's own console commands (via `exec`), not
 # synthetic OS input: the runner may be in session 0 while the game is in
@@ -236,38 +246,14 @@ def _timeout_from_env(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
-def _cancel_read(pipe: Any, reader: threading.Thread) -> bool:
-    """Cancel the blocking read ``reader`` is stuck in.
-
-    On Windows the read is a ``ReadFile`` on the pipe's handle, and
-    ``CancelIoEx`` aborts every pending I/O on that handle: the reader
-    unwinds with an error instead of waiting for an answer that will never
-    come.  It is a no-op elsewhere — the pipe is closed anyway, which is what
-    a POSIX pipe offers.
-    """
-    if pipe is None or os.name != "nt":
-        return False
-    try:
-        import ctypes
-        import msvcrt
-
-        handle = msvcrt.get_osfhandle(pipe.fileno())
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CancelIoEx.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        kernel32.CancelIoEx.restype = ctypes.c_int
-        # A NULL overlapped pointer cancels the I/O of *every* thread: the
-        # read belongs to the worker, and the call is made from this one.
-        return bool(kernel32.CancelIoEx(ctypes.c_void_p(handle), None))
-    except (AttributeError, OSError, ValueError):  # pragma: no cover - defensive
-        return False
-
-
 class Control:
-    """A connection to the payload's control channel."""
+    """A JSON-RPC 2.0 connection to the payload's control service."""
 
-    def __init__(self, pipe_name: str | None = None, *,
-                 request_timeout: float | None = None) -> None:
-        self.pipe_name = pipe_name or os.environ.get("CS2_CONTROL_PIPE") or DEFAULT_PIPE
+    def __init__(self, socket_path: str | None = None, *,
+                 request_timeout: float | None = None,
+                 token: str | None = None) -> None:
+        #: The socket path the caller asked for (empty: read the session file).
+        self.socket_path = socket_path or os.environ.get("CS2_CONTROL_SOCKET") or ""
         #: The deadline of one wire request (see :data:`DEFAULT_REQUEST_TIMEOUT`).
         self.request_timeout = (DEFAULT_REQUEST_TIMEOUT if request_timeout is None
                                 else request_timeout)
@@ -277,55 +263,93 @@ class Control:
         self._pipe: Any = None
         self._buffer = bytearray()
         self._ids = itertools.count(1)
-        #: The thread that is currently blocked in the pipe's read (``None``
-        #: when no read is in flight).
-        self._reader: threading.Thread | None = None
+        self._token = token or os.environ.get("CS2_CONTROL_TOKEN") or ""
+        self._transport = "unix"
+        self._port = 0
+        self._endpoint = self.socket_path
 
     # --- connection -------------------------------------------------------
     def connect(self, timeout: float = 30.0, interval: float = 0.25) -> "Control":
-        """Open the pipe, retrying until ``timeout`` elapses."""
+        """Open the socket and complete the handshake, retrying until ``timeout``."""
         deadline = time.monotonic() + timeout
         last_error: OSError | None = None
         while True:
             try:
-                self._pipe = open(self.pipe_name, "r+b", buffering=0)
-                self._buffer.clear()
+                self._open()
                 return self
-            except OSError as error:
-                last_error = error
+            except (OSError, ControlError) as error:
+                last_error = error if isinstance(error, OSError) else None
                 if time.monotonic() >= deadline:
                     raise ControlError(
-                        f"cannot connect to {self.pipe_name!r}: {last_error}"
-                    ) from error
+                        f"cannot connect to the control socket: {error}") from error
                 time.sleep(interval)
 
-    def close(self) -> None:
-        """Close the channel (and cancel a read that is still in flight)."""
-        self._release_channel()
+    def _session(self) -> tuple[str, str, int, str]:
+        """Resolve ``(transport, endpoint, port, token)``.
 
-    def _release_channel(self) -> None:
-        """Give the channel up: cancel the pending read and close the pipe.
-
-        The payload's pipe accepts **one** client at a time, so a channel that
-        is stuck has to be *given up*, not merely abandoned: the next call has
-        to be able to reconnect.  The pending read is cancelled first (so the
-        reader unwinds instead of waiting for an answer that will never come)
-        and the pipe is closed afterwards.
+        An explicit path wins; otherwise the payload's session file (written
+        next to the socket) is read. Environment overrides exist for tests and
+        for a payload launched with a custom endpoint.
         """
+        session_path = os.path.join(
+            os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+            "cs2-internal", SESSION_FILE)
+        transport = ""
+        endpoint = self.socket_path
+        port = 0
+        token = self._token
+        try:
+            with open(session_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            transport = str(data.get("transport") or "unix")
+            if not endpoint:
+                endpoint = str(data.get("path") or "")
+            port = int(data.get("port") or 0)
+            if not token:
+                token = str(data.get("token") or "")
+        except (OSError, ValueError):
+            pass
+        if not transport:
+            transport = "tcp" if self.socket_path == "tcp" else "unix"
+        if not endpoint:
+            endpoint = os.path.join(
+                os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
+                "cs2-internal", DEFAULT_SOCKET)
+        return transport, endpoint, port, token
+
+    def _open(self) -> None:
+        import socket
+        transport, endpoint, port, token = self._session()
+        if transport == "tcp":
+            connection = socket.create_connection(("127.0.0.1", port), timeout=5.0)
+        else:
+            if not hasattr(socket, "AF_UNIX"):
+                raise ControlError("this Python has no AF_UNIX support")
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            connection.settimeout(5.0)
+            connection.connect(endpoint)
+        self._pipe = connection
+        self._transport = transport
+        self._endpoint = endpoint
+        self._port = port
+        self._token = token
+        self._buffer.clear()
+        result = self._rpc("initialize", {"token": self._token}, timeout=5.0)
+        if not isinstance(result, dict):
+            raise ControlError("the payload's handshake had no result")
+        protocol = result.get("protocol")
+        if protocol != 3:
+            raise ControlError(
+                f"control protocol mismatch: the payload speaks {protocol}, this client 3")
+
+    def close(self) -> None:
+        """Close the socket."""
         pipe, self._pipe = self._pipe, None
-        reader, self._reader = self._reader, None
-        if reader is not None and reader.is_alive():
-            _cancel_read(pipe, reader)
         if pipe is not None:
             try:
                 pipe.close()
-            except OSError:  # pragma: no cover - a broken pipe on close
+            except OSError:  # pragma: no cover - a broken socket on close
                 pass
-        if reader is not None and reader.is_alive():
-            # The close releases the reader (a Windows pipe read is cancelled
-            # by the handle's close, a fake one by its own event), so this is
-            # only the wait for the unwind.
-            reader.join(timeout=RELEASE_JOIN_TIMEOUT)
         self._buffer.clear()
 
     def __enter__(self) -> "Control":
@@ -335,62 +359,101 @@ class Control:
         self.close()
 
     # --- framing ----------------------------------------------------------
-    def _read_line(self, deadline: float, budget: float) -> bytes:
-        """One frame — or an error when the deadline passes.
+    def _recv(self, size: int, deadline: float, budget: float) -> bytes:
+        """Read from the socket, honouring the request deadline.
 
-        ``deadline`` is the absolute time the answer has to arrive by and
-        ``budget`` the number of seconds it was given (the message names it).
+        A real socket gets its own ``settimeout``. A test double does not, so
+        its read runs on a worker thread and the deadline is the wait -- the
+        same shape the old pipe transport needed, and the reason a silent
+        payload cannot wedge the caller.
         """
-        while True:
-            newline = self._buffer.find(b"\n")
-            if newline != -1:
-                line = bytes(self._buffer[:newline])
-                del self._buffer[: newline + 1]
-                return line
-            chunk = self._read_chunk(deadline, budget)
-            if not chunk:
-                raise ControlError("control channel closed")
-            self._buffer.extend(chunk)
-
-    def _read_chunk(self, deadline: float, budget: float) -> bytes:
-        """Read one chunk from the pipe, giving up at the deadline.
-
-        The pipe's read is **blocking**, so it runs in a worker thread and the
-        caller waits for it with a deadline.  When the deadline passes the
-        pending read is cancelled and the pipe is **released**: the payload's
-        pipe accepts one client at a time, so a handle that is kept would
-        lock the next client out.
-        """
+        import socket
         pipe = self._pipe
         if pipe is None:
             raise ControlError("not connected")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            self._release_channel()
             raise ControlTimeout(self._timeout_message(budget))
+        if hasattr(pipe, "settimeout") and hasattr(pipe, "recv"):
+            try:
+                pipe.settimeout(remaining)
+                return bytes(pipe.recv(size))
+            except socket.timeout as error:
+                raise ControlTimeout(self._timeout_message(budget)) from error
         outcome: dict[str, Any] = {}
         finished = threading.Event()
 
         def read() -> None:
             try:
-                outcome["chunk"] = pipe.read(4096)
+                outcome["chunk"] = pipe.read(size)
             except BaseException as error:  # noqa: BLE001 - handed to the caller
                 outcome["error"] = error
             finally:
                 finished.set()
 
         reader = threading.Thread(target=read, name="cs2-control-read", daemon=True)
-        self._reader = reader
         reader.start()
         if not finished.wait(remaining):
-            self._release_channel()
+            try:
+                pipe.close()
+            except OSError:
+                pass
             raise ControlTimeout(self._timeout_message(budget))
-        self._reader = None
-        error = outcome.get("error")
-        if error is not None:
-            raise ControlError(f"the control channel failed while reading: {error}") from error
-        chunk = outcome.get("chunk")
-        return chunk if isinstance(chunk, bytes) else b""
+        failure = outcome.get("error")
+        if failure is not None:
+            raise ControlError(
+                f"the control channel failed while reading: {failure}") from failure
+        return bytes(outcome.get("chunk") or b"")
+
+    def _read_message(self, deadline: float, budget: float) -> dict[str, Any]:
+        """Read one ``Content-Length`` frame and parse it as JSON."""
+        while True:
+            header_end = self._buffer.find(b"\r\n\r\n")
+            if header_end != -1:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.close()
+                raise ControlTimeout(self._timeout_message(budget))
+            chunk = self._recv(4096, deadline, budget)
+            if not chunk:
+                self.close()
+                raise ControlError("control channel closed")
+            self._buffer.extend(chunk)
+
+        header = bytes(self._buffer[:header_end]).decode("ascii", "replace")
+        self._buffer = self._buffer[header_end + 4:]
+        length = 0
+        for line in header.split("\r\n"):
+            name, _, value = line.partition(":")
+            if name.strip().lower() == "content-length":
+                try:
+                    length = int(value.strip())
+                except ValueError:
+                    length = 0
+        if length <= 0 or length > 8 * 1024 * 1024:
+            self.close()
+            raise ControlError("the payload sent an invalid frame length")
+
+        while len(self._buffer) < length:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.close()
+                raise ControlTimeout(self._timeout_message(budget))
+            chunk = self._recv(8192, deadline, budget)
+            if not chunk:
+                self.close()
+                raise ControlError("control channel closed mid-frame")
+            self._buffer.extend(chunk)
+        body = bytes(self._buffer[:length])
+        self._buffer = self._buffer[length:]
+        try:
+            message = json.loads(body)
+        except json.JSONDecodeError as error:
+            raise ControlError(f"the payload sent invalid JSON: {error}") from error
+        if not isinstance(message, dict):
+            raise ControlError("the payload sent a non-object message")
+        return message
 
     def _timeout_message(self, budget: float) -> str:
         """The message of a request that ran out of time."""
@@ -398,20 +461,47 @@ class Control:
                 "(the control channel was released; the next call reconnects)")
 
     def _write_all(self, payload: bytes) -> None:
-        view = memoryview(payload)
-        while view:
-            try:
-                written = self._pipe.write(view)
-            except OSError as error:
-                # A pipe that was closed under the client's feet (the payload
-                # restarted, the client raced the server's disconnect): that is
-                # a dropped channel, not a crash — and the session reconnects.
-                raise ControlError(
-                    f"control channel closed while writing: {error}") from error
-            if not written:
-                raise ControlError("control channel closed while writing")
-            view = view[written:]
+        pipe = self._pipe
+        if pipe is None:
+            raise ControlError("not connected")
+        try:
+            if hasattr(pipe, "sendall"):
+                pipe.sendall(payload)
+                return
+            view = memoryview(payload)
+            while view:
+                written = pipe.write(view)
+                if not written:
+                    raise ControlError("control channel closed while writing")
+                view = view[written:]
+        except OSError as error:
+            raise ControlError(
+                f"control channel closed while writing: {error}") from error
 
+    def _rpc(self, method: str, params: Mapping[str, Any], *,
+             timeout: float | None = None) -> Any:
+        """One JSON-RPC call; returns its ``result`` or raises ``ControlError``."""
+        if self._pipe is None:
+            raise ControlError("not connected")
+        budget = self.request_timeout if timeout is None else timeout
+        request_id = next(self._ids)
+        message: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
+        if params:
+            message["params"] = params
+        body = json.dumps(message).encode("utf-8")
+        frame = (f"Content-Length: {len(body)}\r\n\r\n").encode("ascii") + body
+        self._write_all(frame)
+        deadline = time.monotonic() + budget
+        while True:
+            response = self._read_message(deadline, budget)
+            if response.get("id") != request_id:
+                continue  # a notification or a stale answer
+            if "error" in response:
+                error = response["error"]
+                if isinstance(error, dict):
+                    raise ControlError(str(error.get("message") or error))
+                raise ControlError(str(error))
+            return response.get("result")
     # --- the wire call ----------------------------------------------------
     # The overloads are the command surface: each command answers with its own
     # type, so the helpers below are precise without a cast. The last overload
@@ -494,36 +584,14 @@ class Control:
 
     def request(self, cmd: str, args: Mapping[str, Any] | None = None, *,
                 timeout: float | None = None) -> Any:
-        """Send one request and return its ``result`` (or raise ControlError).
+        """Send one JSON-RPC request and return its ``result``.
 
         The request runs under a **deadline** (``timeout``, or the client's
-        :attr:`request_timeout`): the pipe's read is blocking and the payload
-        answers inline, so a payload that never answers must not block the
-        caller forever.  A request that runs out of time raises
-        :class:`ControlTimeout` and releases the channel.
+        :attr:`request_timeout`): a payload that never answers must not block
+        the caller forever. A request that runs out of time closes the socket
+        and raises :class:`ControlTimeout`; the next call reconnects.
         """
-        if self._pipe is None:
-            raise ControlError("not connected")
-        budget = self.request_timeout if timeout is None else timeout
-        request_id = next(self._ids)
-        message: dict[str, Any] = {"id": request_id, "cmd": cmd}
-        if args is not None:
-            message["args"] = args
-        self._write_all((json.dumps(message) + "\n").encode("utf-8"))
-        deadline = time.monotonic() + budget
-        while True:
-            line = self._read_line(deadline, budget)
-            if not line:
-                continue
-            try:
-                response = json.loads(line)
-            except json.JSONDecodeError:
-                continue  # ignore non-JSON noise
-            if response.get("id") != request_id:
-                continue  # a stale response for an earlier request
-            if not response.get("ok"):
-                raise ControlError(response.get("error", f"{cmd} failed"))
-            return response.get("result")
+        return self._rpc(cmd, args or {}, timeout=timeout)
 
     # --- commands ---------------------------------------------------------
     def ping(self) -> PingResult:

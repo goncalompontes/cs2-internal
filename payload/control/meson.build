@@ -19,6 +19,9 @@
 # **shared POD contract** between the payload and the Vulkan layer (the
 # settings block the `settings` command reads and writes), not a layering
 # violation.
+ws2_32_dep = cpp.find_library('ws2_32', required : host_machine.system() == 'windows')
+bcrypt_dep = cpp.find_library('bcrypt', required : host_machine.system() == 'windows')
+
 control_inc = include_directories('include')
 overlay_inc = include_directories('../../overlay/include')
 
@@ -39,11 +42,11 @@ control_lib = static_library('cs2_control',
     'src/service.cpp',
   ),
   include_directories : [control_inc, overlay_inc, core_inc],
-  dependencies : [game_dep, aim_dep, diag_dep, tls_dep, sdk_dep, hooks_dep],
+  dependencies : [game_dep, aim_dep, diag_dep, tls_dep, sdk_dep, hooks_dep, ws2_32_dep, bcrypt_dep],
 )
 
 control_dep = declare_dependency(
   link_with : control_lib,
   include_directories : [control_inc, overlay_inc, core_inc],
-  dependencies : [game_dep, aim_dep, diag_dep, tls_dep, sdk_dep, hooks_dep],
+  dependencies : [game_dep, aim_dep, diag_dep, tls_dep, sdk_dep, hooks_dep, ws2_32_dep, bcrypt_dep],
 )

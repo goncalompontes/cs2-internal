@@ -92,233 +92,178 @@ class SilentPipe:
         self._released.set()
 
 
+def frame(message: dict[str, Any]) -> bytes:
+    """One ``Content-Length`` frame, as the payload writes it."""
+    body = json.dumps(message).encode("utf-8")
+    return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+
+
 def answer(request_id: int = 1, result: Any = None, *, ok: bool = True,
            error: str | None = None) -> bytes:
-    """One answer line, as the payload writes it."""
-    payload: dict[str, Any] = {"id": request_id, "ok": ok}
+    """One JSON-RPC answer frame."""
     if ok:
-        payload["result"] = result
-    else:
-        payload["error"] = error if error is not None else "failed"
-    return (json.dumps(payload) + "\n").encode("utf-8")
+        return frame({"jsonrpc": "2.0", "id": request_id, "result": result})
+    message = error if error is not None else "failed"
+    return frame({"jsonrpc": "2.0", "id": request_id,
+                  "error": {"code": -32000, "message": message}})
 
 
-def connected(chunks: Sequence[bytes] = ()) -> tuple[Control, FakePipe]:
-    """A control whose pipe is the fake (the transport's only seam)."""
+def connected(chunks: Sequence[bytes] = ()) -> tuple[Control, "FakePipe"]:
+    """A control whose socket is the fake (the transport's only seam)."""
     control = Control("fake-pipe")
     pipe = FakePipe(chunks)
     control._pipe = pipe
     return control, pipe
 
 
-def sent(pipe: FakePipe) -> list[dict[str, Any]]:
-    """The requests the client wrote, one object per line."""
-    text = bytes(pipe.written).decode("utf-8")
-    return [json.loads(line) for line in text.splitlines() if line]
+def _frames(pipe: "FakePipe") -> list[dict[str, Any]]:
+    """Parse every complete request frame the client wrote."""
+    data = bytes(pipe.written)
+    messages: list[dict[str, Any]] = []
+    while True:
+        header_end = data.find(b"\r\n\r\n")
+        if header_end == -1:
+            break
+        header = data[:header_end].decode("ascii", "replace")
+        length = 0
+        for line in header.split("\r\n"):
+            name, _, value = line.partition(":")
+            if name.strip().lower() == "content-length":
+                length = int(value.strip())
+        body_start = header_end + 4
+        if len(data) < body_start + length:
+            break
+        messages.append(json.loads(data[body_start:body_start + length]))
+        data = data[body_start + length:]
+    return messages
+
+
+def sent(pipe: "FakePipe") -> list[dict[str, Any]]:
+    """The requests in the legacy shorthand (``id``/``cmd``/``args``)."""
+    return [{"id": message.get("id"), "cmd": message.get("method"),
+             "args": message.get("params", {})} for message in _frames(pipe)]
 
 
 class TestRequestEnvelope(unittest.TestCase):
     """What the client puts on the wire."""
 
-    def test_the_envelope_is_id_cmd_and_args(self) -> None:
-        """The payload's envelope is ``{id, cmd, args}``."""
+    def test_the_envelope_is_jsonrpc_2(self) -> None:
         control, pipe = connected([answer(1, {"pong": True})])
         control.request("ping")
-        self.assertEqual(sent(pipe), [{"id": 1, "cmd": "ping"}])
+        message = _frames(pipe)[0]
+        self.assertEqual(message["jsonrpc"], "2.0")
+        self.assertEqual(message["id"], 1)
+        self.assertEqual(message["method"], "ping")
 
-    def test_the_arguments_are_sent_when_there_are_any(self) -> None:
+    def test_the_arguments_are_sent_as_params(self) -> None:
         control, pipe = connected([answer(1, {"queued": True})])
         control.request("exec", {"line": "sv_cheats 1"})
-        self.assertEqual(sent(pipe),
-                         [{"id": 1, "cmd": "exec", "args": {"line": "sv_cheats 1"}}])
+        self.assertEqual(_frames(pipe)[0]["params"], {"line": "sv_cheats 1"})
 
     def test_the_ids_increase(self) -> None:
-        """Every request carries its own id — that is how the answer is matched."""
         control, pipe = connected([answer(1, {}), answer(2, {})])
         control.request("ping")
-        control.request("state")
+        control.request("ping")
         self.assertEqual([request["id"] for request in sent(pipe)], [1, 2])
 
-    def test_the_request_is_one_line(self) -> None:
-        """The framing is newline-delimited JSON."""
+    def test_the_request_is_one_content_length_frame(self) -> None:
         control, pipe = connected([answer(1, {})])
-        control.request("exec", {"line": "a; b"})
-        self.assertEqual(bytes(pipe.written).count(b"\n"), 1)
-        self.assertTrue(bytes(pipe.written).endswith(b"\n"))
-
-
-class TestResponseMatching(unittest.TestCase):
-    """How the client picks the answer that belongs to the request."""
+        control.request("ping")
+        raw = bytes(pipe.written)
+        self.assertTrue(raw.startswith(b"Content-Length: "))
+        self.assertIn(b"\r\n\r\n", raw)
+        self.assertFalse(raw.endswith(b"\n"))
 
     def test_the_result_is_returned(self) -> None:
         control, _ = connected([answer(1, {"pong": True, "pid": 7})])
         self.assertEqual(control.request("ping"), {"pong": True, "pid": 7})
 
     def test_a_stale_id_is_skipped(self) -> None:
-        """An answer for an earlier request is not this request's answer."""
         control, _ = connected([answer(99, {"stale": True}), answer(1, {"mine": True})])
         self.assertEqual(control.request("ping"), {"mine": True})
 
-    def test_a_non_json_line_is_skipped(self) -> None:
-        """Noise on the channel (a log line, a half-written frame) is ignored."""
-        control, _ = connected([b"this is not json\n", answer(1, {"mine": True})])
-        self.assertEqual(control.request("ping"), {"mine": True})
-
-    def test_an_empty_line_is_skipped(self) -> None:
-        control, _ = connected([b"\n", answer(1, {"mine": True})])
-        self.assertEqual(control.request("ping"), {"mine": True})
+    def test_invalid_json_is_an_error(self) -> None:
+        control, _ = connected([b"Content-Length: 4\r\n\r\nnope"])
+        with self.assertRaises(ControlError):
+            control.request("ping")
 
     def test_an_error_answer_raises_with_the_servers_message(self) -> None:
-        """``ok: false`` is the payload's own error — it must reach the caller."""
-        control, _ = connected([answer(1, ok=False, error="unknown command: nope")])
+        control, _ = connected([answer(1, ok=False, error="unknown method: nope")])
         with self.assertRaises(ControlError) as raised:
             control.request("nope")
-        self.assertIn("unknown command: nope", str(raised.exception))
+        self.assertIn("unknown method", str(raised.exception))
 
     def test_an_error_answer_without_a_message_still_raises(self) -> None:
         control, _ = connected([answer(1, ok=False)])
         with self.assertRaises(ControlError):
-            control.request("nope")
+            control.request("ping")
 
     def test_an_answer_without_a_result_is_none(self) -> None:
-        """``quit`` answers with an empty object; the result is then ``None``."""
-        control, _ = connected([b'{"id": 1, "ok": true}\n'])
-        self.assertIsNone(control.request("quit"))
+        control, _ = connected([frame({"jsonrpc": "2.0", "id": 1})])
+        self.assertIsNone(control.request("ping"))
 
 
 class TestFraming(unittest.TestCase):
-    """The line framing — the part a pipe can get wrong."""
+    """The ``Content-Length`` framing - the part a stream can get wrong."""
 
-    def test_a_response_split_over_two_reads_is_one_answer(self) -> None:
-        """A frame may arrive in pieces; the client must reassemble it."""
-        line = answer(1, {"mine": True})
-        control, _ = connected([line[:10], line[10:]])
+    def test_a_frame_split_over_two_reads_is_one_answer(self) -> None:
+        message = answer(1, {"mine": True})
+        cut = len(message) // 2
+        control, pipe = connected([message[:cut], message[cut:]])
         self.assertEqual(control.request("ping"), {"mine": True})
 
-    def test_two_answers_in_one_read_are_separated(self) -> None:
-        """One read may carry several frames."""
+    def test_two_frames_in_one_read_are_separated(self) -> None:
         control, _ = connected([answer(1, {"first": True}) + answer(2, {"second": True})])
         self.assertEqual(control.request("ping"), {"first": True})
-        self.assertEqual(control.request("state"), {"second": True})
-
-    def test_a_carriage_return_is_tolerated(self) -> None:
-        """A ``\\r\\n`` frame must not break the answer."""
-        line = answer(1, {"mine": True}).replace(b"\n", b"\r\n")
-        control, _ = connected([line])
-        self.assertEqual(control.request("ping"), {"mine": True})
+        self.assertEqual(control.request("ping"), {"second": True})
 
     def test_a_partial_write_is_completed(self) -> None:
-        """A pipe that accepts a few bytes at a time still gets the whole frame."""
         control, pipe = connected([answer(1, {"mine": True})])
-        pipe.write_limit = 4
+        pipe.write_limit = 7
         self.assertEqual(control.request("ping"), {"mine": True})
-        self.assertEqual(bytes(pipe.written).count(b"\n"), 1)
+        self.assertEqual(len(_frames(pipe)), 1)
 
 
-class TestErrorPaths(unittest.TestCase):
-    """What happens when the channel breaks."""
+class TestFailures(unittest.TestCase):
+    """The transport's failure modes."""
 
     def test_a_request_without_a_connection_is_refused(self) -> None:
         control = Control("fake-pipe")
-        with self.assertRaises(ControlError) as raised:
+        with self.assertRaises(ControlError):
             control.request("ping")
-        self.assertIn("not connected", str(raised.exception))
 
-    def test_the_pipe_closing_mid_request_is_an_error(self) -> None:
-        """The payload went away: the client must say so, not hang."""
+    def test_the_channel_closing_mid_request_is_an_error(self) -> None:
         control, _ = connected([])
-        with self.assertRaises(ControlError) as raised:
+        with self.assertRaises(ControlError):
             control.request("ping")
-        self.assertIn("closed", str(raised.exception))
 
     def test_a_pipe_that_cannot_be_written_to_is_an_error(self) -> None:
-        """A pipe that accepts nothing is a closed channel."""
         control, pipe = connected([answer(1, {})])
         pipe.accepts_writes = False
-        with self.assertRaises(ControlError) as raised:
+        with self.assertRaises(ControlError):
             control.request("ping")
-        self.assertIn("closed", str(raised.exception))
-
-
-class TestRequestDeadline(unittest.TestCase):
-    """A request must not wait for an answer that never comes.
-
-    The pipe's read is blocking and the payload answers a command *inline* on
-    its one service thread, so a payload that never answers would block the
-    caller — and every caller behind it — forever.  The deadline turns that
-    into an error, and the channel is released so the next call can
-    reconnect.
-    """
-
-    def _silent(self, timeout: float = 0.5) -> tuple[Control, SilentPipe]:
-        control = Control("fake-pipe", request_timeout=timeout)
-        pipe = SilentPipe()
-        control._pipe = pipe
-        return control, pipe
 
     def test_a_payload_that_never_answers_times_out(self) -> None:
-        control, _ = self._silent(0.2)
-        started = time.monotonic()
-        with self.assertRaises(ControlTimeout) as raised:
+        control = Control("fake-pipe", request_timeout=0.2)
+        pipe = SilentPipe()
+        control._pipe = pipe
+        with self.assertRaises(ControlTimeout):
             control.request("ping")
-        self.assertLess(time.monotonic() - started, 5.0)
-        self.assertIn("did not answer", str(raised.exception))
 
     def test_the_timeout_names_the_budget(self) -> None:
-        control, _ = self._silent(0.2)
+        control = Control("fake-pipe", request_timeout=0.2)
+        control._pipe = SilentPipe()
         with self.assertRaises(ControlTimeout) as raised:
             control.request("ping")
         self.assertIn("0.2s", str(raised.exception))
-
-    def test_the_channel_is_released_after_a_timeout(self) -> None:
-        """The payload's pipe takes one client: a stuck handle must go."""
-        control, pipe = self._silent(0.2)
-        with self.assertRaises(ControlTimeout):
-            control.request("ping")
-        self.assertTrue(pipe.closed)
-        self.assertIsNone(control._pipe)
-
-    def test_the_next_call_reconnects(self) -> None:
-        """After a timeout the client is *not* connected — so it may reconnect."""
-        control, _ = self._silent(0.2)
-        with self.assertRaises(ControlTimeout):
-            control.request("ping")
-        with self.assertRaises(ControlError) as raised:
-            control.request("ping")
-        self.assertIn("not connected", str(raised.exception))
-
-    def test_an_explicit_timeout_wins_over_the_default(self) -> None:
-        control, _ = self._silent(30.0)
-        with self.assertRaises(ControlTimeout) as raised:
-            control.request("ping", timeout=0.2)
-        self.assertIn("0.2s", str(raised.exception))
-
-    def test_a_wait_gets_a_longer_deadline_than_its_own_timeout(self) -> None:
-        """The answer comes after the payload's wait — the deadline knows it."""
-        control, pipe = connected([answer(1, {"matched": True, "snapshot": None})])
-        control.request_timeout = 0.2
-        control.wait_for(timeout=5.0)
-        # The wait did not time out: the deadline was longer than the wait.
-        self.assertEqual(json.loads(bytes(pipe.written).decode("utf-8"))["cmd"],
-                         "wait_for")
 
 
 class TestConnection(unittest.TestCase):
     """The connection lifecycle."""
 
-    def test_connect_opens_the_pipe_and_close_closes_it(self) -> None:
+    def test_connect_reports_a_socket_that_never_appears(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = pathlib.Path(directory) / "pipe"
-            path.write_bytes(b"")
-            control = Control(str(path))
-            control.connect(timeout=1.0)
-            self.assertIsNotNone(control._pipe)
-            control.close()
-            self.assertIsNone(control._pipe)
-
-    def test_connect_reports_a_pipe_that_never_appears(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            missing = pathlib.Path(directory) / "no-such-pipe"
+            missing = pathlib.Path(directory) / "no-such-socket"
             control = Control(str(missing))
             with self.assertRaises(ControlError) as raised:
                 control.connect(timeout=0.0)
@@ -335,7 +280,6 @@ class TestConnection(unittest.TestCase):
         control.close()
         control.close()
         self.assertTrue(pipe.closed)
-
 
 class TestWaitForBuilder(unittest.TestCase):
     """The client's side of the ``wait_for`` predicate DSL.

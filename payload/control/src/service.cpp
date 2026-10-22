@@ -30,6 +30,7 @@
 
 #if defined(_WIN32)
 #include <windows.h>
+#include <bcrypt.h>
 #endif
 
 namespace cs2::control {
@@ -317,19 +318,22 @@ void Service::run() noexcept {
   while (running_.load(std::memory_order_relaxed)) {
     cs2::diag::heartbeat();
     if (!channel_.accept()) {
-      break;  // pipe closed
+      break;  // the listener was closed
     }
-    std::string line;
+    // Every connection starts unauthenticated: the client has to call
+    // `initialize` with the session token before anything else.
+    initialized_ = false;
+    std::string message;
     while (running_.load(std::memory_order_relaxed)) {
-      if (!channel_.read_line(line)) {
-        break;  // client disconnected
+      if (!channel_.read_message(message)) {
+        break;  // client disconnected / malformed frame
       }
-      if (line.empty()) {
+      if (message.empty()) {
         continue;
       }
       std::string response;
-      const bool keep_going = handle(line, response);
-      if (!response.empty() && !channel_.write_line(response)) {
+      const bool keep_going = handle_rpc(message, response);
+      if (!response.empty() && !channel_.write_message(response)) {
         break;  // client went away
       }
       if (!keep_going) {
@@ -338,6 +342,7 @@ void Service::run() noexcept {
       }
     }
     channel_.disconnect();
+    initialized_ = false;
     // The control channel disconnected: the trigger's state is reset, so a
     // trigger that was holding the shot releases it (a trigger that pressed and
     // never released would leave the gun firing).
@@ -345,32 +350,10 @@ void Service::run() noexcept {
   }
 }
 
-auto Service::handle(const std::string& line, std::string& response) noexcept -> bool {
-  Json out = Json::object();
-  const std::optional<Json> request = Json::parse(line);
-  if (!request.has_value() || !request->is_object()) {
-    set_error(out, "malformed request: expected a JSON object");
-    response = out.dump();
-    return true;
-  }
-  if (const Json* id = request->find("id"); id != nullptr) {
-    out.set("id", *id);
-  }
-  const Json* cmd = request->find("cmd");
-  if (cmd == nullptr || !cmd->is_string()) {
-    set_error(out, "missing \"cmd\" string");
-    response = out.dump();
-    return true;
-  }
-
-  const std::string_view command = cmd->as_string();
-  const Json* args = request->find("args");
-  const Json empty = Json::object();
-  const Json& arguments = args != nullptr ? *args : empty;
-
-  if (command == "quit") {
+auto Service::dispatch_command(std::string_view command, const Json& arguments,
+                               Json& out) noexcept -> bool {
+  if (command == "quit" || command == "shutdown") {
     set_ok(out, Json::object());
-    response = out.dump();
     return false;
   }
   if (command == "ping") {
@@ -417,17 +400,121 @@ auto Service::handle(const std::string& line, std::string& response) noexcept ->
     do_settings(arguments, out);
   } else if (command == "batch") {
     if (!do_batch(arguments, out)) {
-      // A step closed the channel (a `quit` step).
-      response = out.dump();
-      return false;
+      return false;  // a step closed the channel
     }
   } else if (command == "log") {
     do_log(arguments, out);
   } else {
-    set_error(out, "unknown cmd");
+    set_error(out, "unknown method");
   }
-  response = out.dump();
   return true;
+}
+
+auto Service::handle(const std::string& line, std::string& response) noexcept -> bool {
+  Json out = Json::object();
+  const std::optional<Json> request = Json::parse(line);
+  if (!request.has_value() || !request->is_object()) {
+    set_error(out, "malformed request: expected a JSON object");
+    response = out.dump();
+    return true;
+  }
+  if (const Json* id = request->find("id"); id != nullptr) {
+    out.set("id", *id);
+  }
+  const Json* cmd = request->find("cmd");
+  if (cmd == nullptr || !cmd->is_string()) {
+    set_error(out, "missing \"cmd\" string");
+    response = out.dump();
+    return true;
+  }
+  const Json* args = request->find("args");
+  const Json empty = Json::object();
+  const Json& arguments = args != nullptr ? *args : empty;
+  const bool keep_going = dispatch_command(cmd->as_string(), arguments, out);
+  response = out.dump();
+  return keep_going;
+}
+
+auto Service::handle_rpc(const std::string& line, std::string& response) noexcept -> bool {
+  Json envelope = Json::object();
+  envelope.set("jsonrpc", Json::string("2.0"));
+  Json out = Json::object();
+
+  const std::optional<Json> request = Json::parse(line);
+  if (!request.has_value() || !request->is_object()) {
+    envelope.set("id", Json());
+    Json error = Json::object();
+    error.set("code", Json::integer(-32700));
+    error.set("message", Json::string("parse error"));
+    envelope.set("error", std::move(error));
+    response = envelope.dump();
+    return true;
+  }
+  const Json* id = request->find("id");
+  const bool notification = id == nullptr;
+  if (id != nullptr) {
+    envelope.set("id", *id);
+  }
+  const Json* method = request->find("method");
+  if (method == nullptr || !method->is_string()) {
+    Json error = Json::object();
+    error.set("code", Json::integer(-32600));
+    error.set("message", Json::string("invalid request: missing \"method\""));
+    envelope.set("error", std::move(error));
+    response = notification ? std::string() : envelope.dump();
+    return true;
+  }
+  const std::string_view name = method->as_string();
+  const Json* params = request->find("params");
+  const Json empty = Json::object();
+  const Json& arguments = params != nullptr ? *params : empty;
+
+  if (name == "initialize") {
+    const Json* token = arguments.find("token");
+    const bool matches = token != nullptr && token->is_string() &&
+                         token->as_string() == token_;
+    if (!matches) {
+      Json error = Json::object();
+      error.set("code", Json::integer(-32001));
+      error.set("message", Json::string("authentication failed"));
+      envelope.set("error", std::move(error));
+      response = envelope.dump();
+      return false;  // close the connection
+    }
+    initialized_ = true;
+    Json result = Json::object();
+    result.set("protocol", Json::integer(k_protocol_version));
+    result.set("transport", Json::string(channel_.is_unix() ? "unix" : "tcp"));
+    result.set("endpoint", Json::string(channel_.endpoint()));
+    result.set("pid", Json::integer(static_cast<std::int64_t>(GetCurrentProcessId())));
+    envelope.set("result", std::move(result));
+    response = notification ? std::string() : envelope.dump();
+    return true;
+  }
+
+  if (!initialized_) {
+    Json error = Json::object();
+    error.set("code", Json::integer(-32002));
+    error.set("message", Json::string("not initialized: call initialize with the session token"));
+    envelope.set("error", std::move(error));
+    response = notification ? std::string() : envelope.dump();
+    return true;
+  }
+
+  const bool keep_going = dispatch_command(name, arguments, out);
+  const Json* ok = out.find("ok");
+  if (ok != nullptr && ok->as_bool()) {
+    const Json* result = out.find("result");
+    envelope.set("result", result != nullptr ? *result : Json());
+  } else {
+    const Json* message = out.find("error");
+    Json error = Json::object();
+    error.set("code", Json::integer(-32000));
+    error.set("message", message != nullptr ? *message : Json::string("command failed"));
+    envelope.set("error", std::move(error));
+  }
+  response = notification ? std::string() : envelope.dump();
+  return keep_going;
 }
 
 Service::Service() {
@@ -4768,18 +4855,117 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   set_ok(out, std::move(payload));
 }
 
+namespace {
+
+auto json_escape(std::string_view value) -> std::string {
+  std::string out;
+  out.reserve(value.size() + 8);
+  for (const char c : value) {
+    if (c == '\\' || c == '"') {
+      out.push_back('\\');
+      out.push_back(c);
+    } else if (c == '\n') {
+      out.append("\\n");
+    } else if (c == '\r') {
+      out.append("\\r");
+    } else {
+      out.push_back(c);
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+auto Service::make_token() noexcept -> std::string {
+  unsigned char bytes[16] = {};
+  bool generated = false;
+#if defined(_WIN32)
+  generated = BCryptGenRandom(nullptr, bytes, sizeof(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+#endif
+  if (!generated) {
+    // A non-cryptographic fallback; BCrypt is the primary path on Windows.
+    std::uint64_t seed = static_cast<std::uint64_t>(GetTickCount64());
+    for (unsigned char& byte : bytes) {
+      seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+      byte = static_cast<unsigned char>(seed >> 33);
+    }
+  }
+  static constexpr char k_hex[] = "0123456789abcdef";
+  std::string token;
+  token.reserve(sizeof(bytes) * 2);
+  for (const unsigned char byte : bytes) {
+    token.push_back(k_hex[byte >> 4]);
+    token.push_back(k_hex[byte & 0x0FU]);
+  }
+  return token;
+}
+
+void Service::write_session_file() noexcept {
+#if defined(_WIN32)
+  char path[260] = {};
+  if (!cs2::game::data_file_path("control.json", path, sizeof(path))) {
+    return;
+  }
+  session_file_ = path;
+  const std::string body =
+      "{\"transport\":\"" + std::string(channel_.is_unix() ? "unix" : "tcp") +
+      "\",\"path\":\"" + json_escape(channel_.endpoint()) + "\",\"port\":" +
+      std::to_string(channel_.port()) + ",\"token\":\"" + token_ + "\",\"pid\":" +
+      std::to_string(GetCurrentProcessId()) + ",\"protocol\":" +
+      std::to_string(k_protocol_version) + "}";
+  const HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    return;
+  }
+  DWORD written = 0;
+  (void)WriteFile(file, body.data(), static_cast<DWORD>(body.size()), &written, nullptr);
+  CloseHandle(file);
+#endif
+}
+
+void Service::remove_session_file() noexcept {
+#if defined(_WIN32)
+  if (!session_file_.empty()) {
+    DeleteFileA(session_file_.c_str());
+    session_file_.clear();
+  }
+#endif
+}
 auto Service::start() noexcept -> bool {
   if (running_.load(std::memory_order_relaxed)) {
     return true;
   }
-  const char* name = std::getenv("CS2_CONTROL_PIPE");
-  if (name == nullptr || *name == '\0') {
-    name = Channel::k_default_pipe;
+  // The endpoint: `CS2_CONTROL_SOCKET` wins (a path, or "tcp" for the loopback
+  // fallback), otherwise the payload's data directory.
+  std::string socket_path;
+  bool force_tcp = false;
+  if (const char* configured = std::getenv("CS2_CONTROL_SOCKET");
+      configured != nullptr && *configured != '\0') {
+    if (std::string_view(configured) == "tcp") {
+      force_tcp = true;
+    } else {
+      socket_path = configured;
+    }
+  } else {
+    char buffer[260] = {};
+    if (cs2::game::data_file_path(Channel::k_default_socket, buffer, sizeof(buffer))) {
+      socket_path = buffer;
+    } else {
+      force_tcp = true;
+    }
   }
-  if (!channel_.open(name)) {
-    cs2::game::append_log("[cs2-payload] control: failed to create the named pipe");
+  if (const char* configured = std::getenv("CS2_CONTROL_TOKEN")) {
+    token_ = configured;
+  } else {
+    token_ = make_token();
+  }
+  if (!channel_.listen(force_tcp ? std::string_view{} : std::string_view(socket_path))) {
+    cs2::game::append_log("[cs2-payload] control: could not bind an AF_UNIX socket or TCP");
     return false;
   }
+  write_session_file();
   running_.store(true, std::memory_order_relaxed);
   // Skip LdrpInitializeThread (see cs2::tls::create_thread_no_attach).
   void* thread = cs2::tls::create_thread_no_attach(
@@ -4787,27 +4973,29 @@ auto Service::start() noexcept -> bool {
   if (thread == nullptr) {
     running_.store(false, std::memory_order_relaxed);
     channel_.close();
+    remove_session_file();
     return false;
   }
   thread_ = thread;
-  cs2::game::append_log("[cs2-payload] control: listening on " + std::string(name));
+  cs2::game::append_log("[cs2-payload] control: listening on " + channel_.endpoint() +
+                        " (JSON-RPC 2.0)");
   return true;
 }
 
 void Service::stop() noexcept {
   running_.store(false, std::memory_order_relaxed);
   // The trigger must not leave the gun firing: release the shot before the
-  // service goes away (`docs/ragebot.md` §"The trigger").
+  // service goes away (`docs/ragebot.md` -- "The trigger").
   trigger_.reset(input_);
-  // Closing the pipe unblocks a thread parked in ConnectNamedPipe/ReadFile.
+  // Closing the listener unblocks a thread parked in accept().
   channel_.close();
   if (thread_ != nullptr) {
     WaitForSingleObject(static_cast<HANDLE>(thread_), 2000);
     CloseHandle(static_cast<HANDLE>(thread_));
     thread_ = nullptr;
   }
+  remove_session_file();
 }
-
 #else
 
 auto Service::start() noexcept -> bool {

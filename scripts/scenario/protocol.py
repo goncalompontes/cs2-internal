@@ -1,6 +1,6 @@
 """The wire contract of the payload's control channel (typed).
 
-The payload inside ``cs2.exe`` answers the scenario runner over the named pipe
+The payload inside ``cs2.exe`` answers the scenario runner over a JSON-RPC socket
 with plain JSON, and nothing in that JSON is checked at runtime: a renamed
 field is a ``KeyError`` three frames away, and a mistyped argument is an error
 raised by the *other* side of the pipe. This module is the single home for the

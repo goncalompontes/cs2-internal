@@ -3,7 +3,7 @@ channel, and tear down (ADR-0020).
 
 Launching goes through the ``CS2Launch`` scheduled task, which starts the game in
 the interactive session (session 1) where the GPU lives. The runner itself may be
-in session 0; same-user named pipes cross sessions, so the channel still works.
+in session 0; the payload's AF_UNIX socket is filesystem-local, so the channel still works.
 See ``AGENTS.md`` ("Launching the game on Windows").
 """
 
@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 
-from .control import DEFAULT_PIPE, Control, ControlError
+from .control import Control, ControlError
 from .protocol import (
     AimResult,
     EventsResult,
@@ -391,7 +391,7 @@ def cs2_session(
         manifest = wait_for_module(timeout=game_timeout)
     if inject_payload:
         inject(pid=manifest.get("pid"))
-    control = Control(pipe_name or DEFAULT_PIPE)
+    control = Control(pipe_name)
     control.connect(timeout=connect_timeout)
     try:
         ping = control.ping()
