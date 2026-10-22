@@ -217,8 +217,8 @@ inline constexpr RageFieldName k_rage_field_names[] = {
 // keys describe different objectives and the reader cannot tell which is
 // which.
 [[nodiscard]] constexpr auto rage_effective_owner_name(std::uint32_t menu_fields,
-                                                        int effective_objective,
-                                                        int global_objective) noexcept
+                                                       int effective_objective,
+                                                       int global_objective) noexcept
     -> std::string_view {
   if (effective_objective != global_objective) {
     return "profile";

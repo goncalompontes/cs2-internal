@@ -299,10 +299,9 @@ void test_an_unchanged_block_reports_nothing() {
 // clobbered every frame — the defect the rule exists to remove.
 void test_a_nan_is_not_a_change() {
   const float nan = std::numeric_limits<float>::quiet_NaN();
-  for (const auto& field : {&cs2::control::RageSettings::fov,
-                             &cs2::control::RageSettings::min_damage,
-                             &cs2::control::RageSettings::min_hitchance,
-                             &cs2::control::RageSettings::stop_speed}) {
+  for (const auto& field :
+       {&cs2::control::RageSettings::fov, &cs2::control::RageSettings::min_damage,
+        &cs2::control::RageSettings::min_hitchance, &cs2::control::RageSettings::stop_speed}) {
     cs2::control::RageSettings before = default_snapshot();
     before.*field = nan;
     const cs2::control::RageSettings after = before;
@@ -500,9 +499,9 @@ void test_the_status_names_the_effective_owner() {
   // owner is the channel that owns it.
   expect(cs2::control::rage_effective_owner_name(0, 3, 3) == "control",
          "the control channel owns the objective in force");
-  expect(cs2::control::rage_effective_owner_name(cs2::control::RAGE_FIELD_OBJECTIVE, 1, 1) ==
-             "menu",
-         "the menu owns the objective in force");
+  expect(
+      cs2::control::rage_effective_owner_name(cs2::control::RAGE_FIELD_OBJECTIVE, 1, 1) == "menu",
+      "the menu owns the objective in force");
   // A profile's objective is in force: it comes from the profile file, so no
   // channel owns it.
   expect(cs2::control::rage_effective_owner_name(cs2::control::RAGE_FIELD_OBJECTIVE, 2, 3) ==

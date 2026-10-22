@@ -3418,9 +3418,8 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   // **menu** owns. A field that is not in the list belongs to the control
   // channel.
   const std::uint32_t menu_fields = rage_menu_fields_.load(std::memory_order_relaxed);
-  payload.set("objective_source",
-              Json::string(std::string(rage_effective_owner_name(
-                  menu_fields, effective_objective, global_objective))));
+  payload.set("objective_source", Json::string(std::string(rage_effective_owner_name(
+                                      menu_fields, effective_objective, global_objective))));
   payload.set("objective_global_source",
               Json::string(std::string(rage_owner_name(menu_fields, RAGE_FIELD_OBJECTIVE))));
   // **The objective the menu's tab is showing.** The menu has three options
