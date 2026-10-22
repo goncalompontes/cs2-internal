@@ -430,13 +430,42 @@ The rule, the fields, the recomputed-value question and the status's new keys
 are in `docs/ragebot.md` §15. In short: the sink compares the block's rage
 group against the menu's **last view** and writes only the fields the operator
 changed; the service applies only the fields the write carries; the status
-carries `objective_source` and `menu_fields`.
+carries `objective_source`, `objective_global_source`, `menu_objective` and
+`menu_fields`.
 
 **The wire block and the menu are not touched**, and the block's version is
 not bumped: it is shared between two separately compiled binaries, and a
 version bump is a silent-corruption risk.
 
-### 14.3 The tests
+### 14.3 The limits the fix has (read this before the live run)
+
+Two limits are **inherent** to the rule, and both are documented where the
+operator reads them (`docs/ragebot.md` §15.1):
+
+* **An action that leaves the displayed value unchanged is invisible to the
+  rule.** Dear ImGui's combo writes its index only when the selection
+  differs, so clicking the entry the menu already shows writes nothing into
+  the block — the mask is empty and the control channel's value stays in
+  force. With the Monte-Carlo objective in force the menu's `Objective` combo
+  still reads "Hitchance" (it has three options and cannot show the
+  Monte-Carlo one), so **clicking "Hitchance" does not take the objective
+  back**: the operator has to pick a *different* value first ("Damage"), then
+  pick the wanted one. A real fix needs the operator's *action* rather than
+  the value — Dear ImGui's `MarkItemEdited` — and **the menu is out of scope**
+  for this task, so the difference is reported in the status instead
+  (`objective` is what runs, `menu_objective` is what the tab shows).
+* **The first publication applies the whole group**, so a control-channel
+  value set before the menu's first frame is undone by it. The window is
+  **one frame** wide (the game's first `Present` after the injection); the
+  mitigation is to re-assert the objective after the first frame.
+
+**The movement group still has the old shape**: the menu re-applies the
+auto-strafe and the bhop every frame, so a control-side `strafe`/`bhop` set is
+still corrected on the next frame (`docs/control-harness.md` §"Where the
+movement features are controlled"). The ESP and the chams are driven from the
+block itself, so the `settings` route still works for them.
+
+### 14.4 The tests
 
 The host test `control-rage-settings`
 (`payload/control/tests/test_control_rage_settings.cpp`) covers the rule, and
@@ -449,17 +478,20 @@ fail:
 | the sink consults the rule but the write ignores it | "the write carries the fields the operator changed" |
 | the comparison forgets a field | "… is a field the rule covers" |
 | the comparison always reports every field | "an unchanged block reports nothing" |
+| a NaN in the block is reported as a change on every frame | "a NaN is not a change: the field is treated as unchanged" |
 | the objective is reported as changed on every publication | "the pull-back converges: the next publication reports nothing" |
 | the weapon's bytes are compared instead of its name | "a stale byte after the NUL is not a change of the name" |
 | the ownership is inverted | "a set bit means the menu owns the field" |
 | a rage field is added to the wire and the rule does not cover it | "every rage field the wire owns is either compared or excluded on purpose" |
 | the service stores a field without a mask | "the service masks every rage field" |
-| the status stops saying who owns the objective | "the status says which channel owns the objective" |
+| the status stops saying who owns the objective | "the status says which channel owns the objective in force" |
+| the status stops naming the objective the menu's tab shows | "the status says which objective the menu's tab is showing" |
 | the menu's float slider writes the block back | "the menu's float slider does not write the value back" |
 
 **What is verified:** the host tests — `control-rage-settings` (the rule, the
 coverage, the wiring) and the rest of the suite (`meson test`, 60 tests), plus
 the payload, the overlay and the injector builds.
 
-**What is not:** the live run. The operator's steps are in
-`docs/operator-live-check.md` §6.
+**What is not:** the live run. **The operator's steps for this fix are in
+`docs/ragebot.md` §15.6** (not in `docs/operator-live-check.md` §6, which is
+T35's checklist and does not carry the ownership steps).
