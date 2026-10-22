@@ -25,6 +25,12 @@
 // `IN_*` masks and the name -> bit map the payload's button mask uses), so the
 // host test can pin them without the engine.
 //
+// The module also owns the **fire path** (the last section): the ragebot's
+// *edge* (a semi-automatic weapon needs a release between two shots) and its
+// *gate* (can the weapon take the shot at all?). Both are decisions about the
+// command's attack button, so they belong with the button bits — and, being
+// pure, the host test can drive them exhaustively.
+//
 // This header must stay dependency-free: no engine headers, no `<windows.h>`.
 // It is compiled into the host test and into the payload.
 
@@ -686,6 +692,201 @@ private:
   result.theta = optimal_theta(speed, accel_per_tick, cap);
   result.wish_yaw = wish_for(vel_yaw, result.side, result.theta);
   return result;
+}
+
+// --- The fire path -------------------------------------------------------------
+//
+// The ragebot's fire: **the edge** and **the gate**.
+//
+// Two facts the fire path needs, and the payload did not have:
+//
+//   * a **semi-automatic** weapon fires **once** per release->re-press *edge*.
+//     A trigger that is held down is **one** edge, so the ragebot's persistent
+//     press (`IN_ATTACK` on every command) makes a pistol — the R8, the scout —
+//     fire once and never again. The engine must see the attack **released**
+//     between two shots;
+//   * a shot can only be taken when the weapon can take it: the clip must hold
+//     a round, the weapon must not be reloading or deploying, and the weapon's
+//     own fire interval must have elapsed. A press **inside** the interval is
+//     **the shot being wasted** on a semi-automatic weapon.
+//
+// The decision is a **pure function** of the weapon's capability and the
+// ragebot's own state, so the host test can drive it exhaustively without a
+// game (`docs/orchestration/spec-t37-fire-path.md` §4.1).
+
+/// How the weapon fires.
+enum class FireMode : std::uint8_t {
+  unknown,    // the weapon's VData could not be read: treated as semi-automatic
+  semi,       // one shot per press (a pistol, the R8, the scout)
+  full_auto,  // the weapon fires while the trigger is held
+};
+
+/// Why the fire path did not assert the attack.
+enum class FireRefusal : std::uint8_t {
+  none,      // the shot can be taken
+  no_solve,  // the ragebot has no active solve
+  no_ammo,   // the clip is empty
+  reloading, // the weapon is reloading
+  deploying, // the weapon is still being deployed
+  interval,  // the weapon's fire interval has not elapsed
+  edge,      // the deliberate release the edge needs
+};
+
+/// The minimum time the attack stays released after the ragebot's press, in
+/// seconds.
+///
+/// The game runs at **64 ticks per second**, so one command tick is 15.6 ms.
+/// The window spans **two** of them: the release must be visible on at least
+/// one command the engine *simulates*, and a window of a single tick can fall
+/// between two commands (the decision is made once per tick, but the tick
+/// boundary and the command boundary are not the same instant).
+inline constexpr float k_fire_release_window = 2.0F / 64.0F;
+
+/// The weapon's fire capability, as the payload reads it.
+///
+/// Every field is a **fact about the weapon**, not about the ragebot: the
+/// payload reads them from the engine (the weapon's VData and the weapon
+/// instance) and hands them to the decision unchanged.
+struct FireCapability {
+  /// The weapon's fire mode (`m_bIsFullAuto` on the VData).
+  FireMode mode{FireMode::unknown};
+  /// Rounds in the clip (`m_iClip1`).
+  int clip{0};
+  /// The weapon is reloading (`m_bInReload`).
+  bool reloading{false};
+  /// The weapon is still being deployed (`m_nDeployTick`).
+  bool deploying{false};
+  /// The engine's own readiness record (`m_nNextPrimaryAttackTick`): the
+  /// weapon may fire again.
+  bool ready{false};
+  /// Whether that record could be read at all. When it could not, the
+  /// decision falls back to the VData's cycle time.
+  bool ready_known{false};
+  /// The weapon's fire interval in seconds (`m_flCycleTime`); 0 when unknown.
+  float interval{0.0F};
+};
+
+/// The inputs of the fire path's decision.
+struct FireInputs {
+  /// The ragebot wants to fire: a solve is active and the fire is enabled.
+  bool want{false};
+  /// The weapon's capability.
+  FireCapability capability{};
+  /// Seconds since the ragebot last asserted the attack.
+  float elapsed{0.0F};
+  /// The minimum time the attack must stay **released** after a press, so the
+  /// engine sees a release->re-press **edge**. Two command ticks.
+  float release_window{k_fire_release_window};
+};
+
+/// The fire path's decision for one command.
+struct FireDecision {
+  /// The ragebot contributes the attack bit to the command.
+  bool press{false};
+  /// Why it did not (or did).
+  FireRefusal refusal{FireRefusal::none};
+};
+
+/// The weapon's fire mode, as the payload reads it.
+///
+/// `full_auto_known` is false when the weapon's VData could not be read: the
+/// mode is then **unknown**, and the fire path treats an unknown weapon as
+/// **semi-automatic**. That is the conservative direction: the re-press edge
+/// costs at most a tick per shot and is always correct, while a held trigger
+/// on a semi-automatic weapon fires **once** and never again.
+[[nodiscard]] inline constexpr auto classify_fire_mode(bool full_auto_known,
+                                                        bool full_auto) noexcept -> FireMode {
+  if (!full_auto_known) {
+    return FireMode::unknown;
+  }
+  return full_auto ? FireMode::full_auto : FireMode::semi;
+}
+
+/// The fire mode's name, for the status line.
+[[nodiscard]] inline constexpr auto fire_mode_name(FireMode mode) noexcept -> const char* {
+  switch (mode) {
+    case FireMode::full_auto:
+      return "auto";
+    case FireMode::semi:
+      return "semi";
+    case FireMode::unknown:
+      break;
+  }
+  return "unknown";
+}
+
+/// The refusal's name, for the status line.
+[[nodiscard]] inline constexpr auto fire_refusal_name(FireRefusal refusal) noexcept -> const char* {
+  switch (refusal) {
+    case FireRefusal::none:
+      return "ok";
+    case FireRefusal::no_solve:
+      return "no-solve";
+    case FireRefusal::no_ammo:
+      return "no-ammo";
+    case FireRefusal::reloading:
+      return "reloading";
+    case FireRefusal::deploying:
+      return "deploying";
+    case FireRefusal::interval:
+      return "interval";
+    case FireRefusal::edge:
+      break;
+  }
+  return "edge";
+}
+
+/// The fire path's decision for one command.
+///
+/// The conditions are checked in the order the status reports them: the first
+/// one that blocks is the one the operator is told about.
+///
+/// **The unknown fire mode is treated as semi-automatic** (the conservative
+/// direction, see `classify_fire_mode`).
+[[nodiscard]] inline constexpr auto decide_fire(const FireInputs& inputs) noexcept -> FireDecision {
+  if (!inputs.want) {
+    return FireDecision{.press = false, .refusal = FireRefusal::no_solve};
+  }
+  const FireCapability& weapon = inputs.capability;
+  // The clip is empty: the shot cannot be fired. The auto-reload assist holds
+  // `IN_RELOAD` in this case.
+  if (weapon.clip <= 0) {
+    return FireDecision{.press = false, .refusal = FireRefusal::no_ammo};
+  }
+  // The weapon is reloading: the engine ignores the trigger.
+  if (weapon.reloading) {
+    return FireDecision{.press = false, .refusal = FireRefusal::reloading};
+  }
+  // The weapon is still being deployed: same.
+  if (weapon.deploying) {
+    return FireDecision{.press = false, .refusal = FireRefusal::deploying};
+  }
+  // A **full-automatic** weapon fires while the trigger is held: the engine's
+  // own rate governs it, and the edge a semi-automatic weapon needs would only
+  // cost a tick per shot. So the trigger stays down.
+  if (weapon.mode == FireMode::full_auto) {
+    return FireDecision{.press = true, .refusal = FireRefusal::none};
+  }
+  // **Semi-automatic** (and the unknown mode): the shot must be a new edge.
+  //
+  // The release comes first: the attack must be **off** for at least
+  // `release_window` after the last press, or the engine sees one continuous
+  // press and the weapon fires once and never again.
+  if (inputs.elapsed < inputs.release_window) {
+    return FireDecision{.press = false, .refusal = FireRefusal::edge};
+  }
+  // Then the weapon's own rate: a press inside the interval is **the shot
+  // being wasted**. The engine's own record (`m_nNextPrimaryAttackTick`) is
+  // authoritative; the VData's cycle time is the fallback when that record
+  // could not be read.
+  const bool rate_ok =
+      weapon.ready_known
+          ? weapon.ready
+          : (weapon.interval > 0.0F && inputs.elapsed >= weapon.interval);
+  if (!rate_ok) {
+    return FireDecision{.press = false, .refusal = FireRefusal::interval};
+  }
+  return FireDecision{.press = true, .refusal = FireRefusal::none};
 }
 
 }  // namespace cs2::control
