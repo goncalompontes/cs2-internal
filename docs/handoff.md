@@ -564,8 +564,14 @@ the accuracy work (spread/records, trace cross-validation).
   recoveries, the process alive. It was **not** proven before: the handler was
   `noexcept`, and a `noexcept` frame is `nounwind`, so the `longjmp` out of it
   ran the frame's `std::terminate` cleanup and killed the process with
-  0xC0000409 instead of recovering. The guard had never fired, so nothing had
-  been lost to the defect — but the safety net was not there.
+  0xC0000409 instead of recovering.
+  **It had fired.** The payload's own log (`%LOCALAPPDATA%\cs2-internal\cs2-payload.log`,
+  measured 2026-10-22) carries 199 `[crash] handler installed` lines and
+  **12 `[crash] guarded` lines** — and in 11 of the 12 the next crash line is a
+  fresh `[crash] handler installed`, i.e. **the process died and was
+  re-injected**. The first three are the tier0 allocator fault
+  (`tier0+0x1ffe29`, `read addr=0x40`) that the guard exists to catch. So the
+  safety net was not there, and it cost the game at least eleven times.
 - **The game relaunch is flaky** — the map load sometimes crashes on startup; just
   run `scripts/run-scenario.py` again.
 - The game auto-updated mid-session: `client.dll` sha `659940c1…` (was `44af2aa0…`);
