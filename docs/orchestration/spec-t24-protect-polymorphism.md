@@ -239,6 +239,15 @@ adds.
 before and after every one of the six builds and did not change; the base
 relocation count (13,092) is the tell, and it did not move either.
 
+> **Corrected (2026-10-22, by the reviewer).** The **relocation count is not
+> a usable tell**: it moves when the *tree* moves (a merged task adds
+> relocations) just as it moves when the calibration moves, and the two cannot
+> be told apart by the count. **The SHA-256 of `calibration/offsets.json` is
+> the tell** — check it before and after every build, and say in the report
+> that it did not move. The reviewer confirmed the calibration's hash was
+> unchanged across six builds, which is what makes the relocation difference
+> (13,092 → 13,053) a *moved tree* rather than a moved calibration.
+
 ---
 
 ## 2. The scope of this task
