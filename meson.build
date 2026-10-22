@@ -499,6 +499,42 @@ control_sound_test = executable('control_sound_test',
 )
 test('control-sound', control_sound_test)
 
+# The payload's fault guard (`cs2::diag::call_guarded`).
+#
+# The guard is the payload's only safety net for an engine call that faults,
+# and what it does depends on the **compiler**: a `noexcept` vectored handler
+# is `nounwind`, and the `longjmp` out of a `nounwind` frame runs the frame's
+# `std::terminate` cleanup instead of recovering, so the process dies with
+# 0xC0000409. Under MSVC's `cl.exe` the same source recovers, so a host test
+# built with `cl.exe` passes either way and could never have caught the
+# defect -- which is why the defect survived: the host suite was the only
+# suite there was.
+#
+# The behavioural half therefore also lives in the **payload's own build**
+# (clang-cl, the compiler the payload ships with) and runs there
+# (`meson test -C build-payload`). This registration keeps the source check --
+# the tree must hold exactly one recovery mechanism -- in the host suite, and
+# runs the behaviour too wherever the host compiler is clang-cl.
+diag_guard_test = executable('diag_guard_test',
+  files(
+    'payload/diag/tests/test_diag_guard.cpp',
+    'payload/diag/src/crash_handler.cpp',
+    'payload/diag/src/text.cpp',
+    'payload/game/src/log.cpp',
+    'payload/game/src/module.cpp',
+    'payload/game/src/memory.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/diag/include'),
+    include_directories('payload/game/include'),
+    core_inc,
+  ],
+)
+test('diag-guard', diag_guard_test,
+  # The source check reads the payload's own sources.
+  args : [meson.current_source_dir() / 'payload'],
+)
+
 # The feature settings foundation: the wire <-> config conversion and the
 # config store's round trip. The settings block is a POD and the conversion is
 # pure, so the feature sources are built natively here (the payload itself

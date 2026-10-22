@@ -23,6 +23,31 @@ void install_crash_handler() noexcept;
 // a C++ `__try/__except` cannot be registered; the guard uses the vectored
 // handler + `longjmp` instead. Use it only for read-only calls whose partial
 // side effects are acceptable (e.g. probing a fault-prone engine query).
+//
+// **The limits of the guard** (they are the guard's contract, not accidents):
+//
+//   * **One guarded call at a time, per process.** A second concurrent guarded
+//     call is refused (it returns false without calling `fn`), because the
+//     jump target is a single process-wide slot.
+//   * **The faulting thread only.** The handler recovers only when the fault
+//     happens on the thread that entered the guard; a fault on another thread
+//     is logged by the first-chance path and kills the process.
+//   * **The recoverable codes only**: `EXCEPTION_ACCESS_VIOLATION`,
+//     `EXCEPTION_ILLEGAL_INSTRUCTION`, `EXCEPTION_INT_DIVIDE_BY_ZERO`,
+//     `EXCEPTION_PRIV_INSTRUCTION`, `EXCEPTION_STACK_OVERFLOW`,
+//     `STATUS_STACK_BUFFER_OVERRUN` and `STATUS_FATAL_APP_EXIT`. Anything else
+//     is logged and continues the search.
+//   * **The guarded call must not own resources.** The recovery is a `longjmp`,
+//     so the guarded call's frame (and every frame between it and the fault)
+//     is left without running its cleanups. `fn` must therefore be a read-only
+//     probe whose locals need no destruction.
+//   * The handler that owns the jump is **not** `noexcept`; a `noexcept` frame
+//     is `nounwind` and the jump out of it would run its `std::terminate`
+//     cleanup instead of recovering. `payload/diag/src/crash_handler.cpp`
+//     explains it and a `static_assert` keeps it out.
+//
+// The guard is the tree's **only** recovery mechanism: `cs2::diag` owns it and
+// everything that needs a guarded engine call uses it.
 [[nodiscard]] auto call_guarded(void (*fn)(void*), void* arg) noexcept -> bool;
 
 }  // namespace cs2::diag
