@@ -1366,19 +1366,31 @@ the difference between two builds whose rotations are not (§16).
   the image, and the `.text` section is then genuinely different. The tool
   says so instead of pretending the two images are comparable.
 * **The shipped `policy.example.json` does not build a protected payload of
-  the current tree.** Its `cross_module` list names thirteen symbols, and
-  six of them (`cs2::aim::OccluderCell::lower_bound_distance`,
-  `cs2::aim::penetration_damage_at_target`, `cs2::aim::polygon_centroid`,
-  `cs2::aim::polygon_contains`, `cs2::aim::subtract_convex` and
-  `cs2::aim::yaw_scale`) are called by functions the example's `protect`
-  list does **not** select: an entry that named no declaration is a build
-  failure (§11), because an entry that protects nothing is a failure the
-  project exists to avoid. The operator's `policy.local.json` has the six
-  `protect` entries the example's `cross_module` list was written for, but
-  no `cross_module` list at all, and it fails the other way: the
-  cross-TU callees a protected function calls directly are the payload's
-  own code, and that is a failure too (§11). A policy that builds needs
-  **both**: the six `protect` entries and the `cross_module` list. The
+  the current tree, and the operator's `policy.local.json` does not either.**
+  The two lists of a policy that builds have to agree with the payload's call
+  graph, and they have to be **kept** in step with it:
+
+  * the example's `cross_module` list names thirteen symbols, and six of them
+    (`cs2::aim::OccluderCell::lower_bound_distance`,
+    `cs2::aim::penetration_damage_at_target`, `cs2::aim::polygon_centroid`,
+    `cs2::aim::polygon_contains`, `cs2::aim::subtract_convex` and
+    `cs2::aim::yaw_scale`) are called by functions the example's `protect`
+    list does **not** select: an entry that named no declaration is a build
+    failure (§11), because an entry that protects nothing is a failure the
+    project exists to avoid;
+  * the operator's `policy.local.json` has the six `protect` entries the
+    example's `cross_module` list was written for, but no `cross_module` list
+    at all, and it fails the other way: the cross-TU callees a protected
+    function calls directly are the payload's own code, and that is a
+    failure too (§11);
+  * and a symbol that a protected function started to call since the list
+    was written (`cs2::aim::hitbox_valid`, in the tree of 2026-10-22) is
+    not in either list, so the protected function calls it directly and the
+    build fails.
+
+  A policy that builds needs **all three**: the `protect` entries, the
+  `cross_module` list of the symbols the protected functions call across
+  translation units, and neither of them a symbol that is gone. The
   measurement of §16 uses such a policy.
 
 ## 14. The front end of the virtualizer
@@ -2363,12 +2375,12 @@ because the permutation reaches into the STL, but because everything after
 the first permuted unit shifted with it.
 
 What the permutation does **not** buy: a stable layout for the units the
-plugin does not compile. A quarter of the functions — **844 of the 3,351**
+plugin does not compile. A quarter of the functions — **832 of the 3,371**
 the unwind table names — kept their address between the two builds, and
 they are the ones whose offset happened not to change: they are scattered
-over the image (from RVA 0x7030 to 0x1a12e0), not a block that kept its
-place. That is why the mixer's constants matter (§10.2): the *protection's*
-bytes are gone whatever the layout does.
+over the image, not a block that kept its place. That is why the mixer's
+constants matter (§10.2): the *protection's* bytes are gone whatever the
+layout does.
 
 ### The measurement
 
@@ -2380,8 +2392,8 @@ python tools/protect/compare_builds.py --section .text \
     build-payload-t24a/payload.dll build-payload-t24b/payload.dll
 ```
 
-The floor of the criterion is 0.5 % of the section (8,538 bytes of
-1,707,520): a floor below it would be satisfied by the 51 bytes of the
+The floor of the criterion is 0.5 % of the section (8,645 bytes of
+1,729,024): a floor below it would be satisfied by the bytes of the
 rotation alone, which is not what the task is for.
 
 **What was measured** (the payload of this tree, 2026-10-22, two builds
@@ -2392,24 +2404,25 @@ alone does not build, see §13):
 
 | what | measured |
 |---|---|
-| the `.text` of the two builds | **1,425,969 bytes differ — 83.51 % of the section** (the floor is 0.5 %) |
-| the modules the pass permuted | 75, with 3,147 definitions in all |
-| the definitions that moved | 3,079 (97.9 %); **no module with more than one definition moved none** |
-| the encrypted dispatches | **51**, and the pass reports 51 rewrites |
-| the mixer's contribution alone (the layout permutation neutralised) | **51 bytes of `.text`** (the rotation's immediate, one per dispatch site) and 649 bytes of `.rdata` — 700 bytes of the image |
-| the same, with a module whose rotation the backend spells differently | **522,771 bytes of `.text`** (30.62 % of the section) and 2,557 bytes of `.rdata` |
-| the code the plugin does **not** compile | the imgui's code moved by **17,280 bytes**; **844 of the 3,351 unwind entries (25.19 %)** kept their address; the 16.49 % of the `.text` that stays byte-identical is scattered over **42,901 runs**, the longest of them 11,689 bytes |
+| the `.text` of the two builds | **1,446,514 bytes differ — 83.66 % of the section** (the floor is 0.5 %) |
+| the modules the pass permuted | 75, with 3,153 definitions in all |
+| the definitions that moved | 3,084 (97.8 %); **no module with more than one definition moved none** |
+| the encrypted dispatches | **54**, and the pass reports 54 rewrites |
+| the mixer's contribution alone (the layout permutation neutralised) | **54 bytes of `.text`** (the rotation's immediate, one per dispatch site) and 677 bytes of `.rdata` |
+| the same, with a module whose rotation the backend spells differently | **449,234 bytes of `.text`** (25.98 % of the section) and 2,402 bytes of `.rdata` |
+| the code the plugin does **not** compile | a 32-byte chunk of `imgui_draw.cpp.obj` moved by **17,280 bytes**; **832 of the 3,371 unwind entries (24.68 %)** kept their address; the 16.34 % of the `.text` that stays byte-identical is scattered over **43,131 runs** |
 | two builds with the **same** seed | **0 bytes** differ apart from the linker's per-link stamps |
 
 **The mixer's contribution depends on the rotation, and the number above is
 a measurement, not a property.** The backend spells the rotation in six ways
 (§12), and the spellings have **different sizes**: a rotation of 2 to 60 is
-a four-byte `rolq $imm8`, and the rotations of 1, 61, 62 and 63 are
-three-byte instructions. When the two builds spell it differently, the code
-after it shifts, and the difference is an order of magnitude larger: the
-second row is measured with the seeds `0x300000000000001a` (the rotations 1,
-33, 39 and 41) and `0x3000000000000003` (the rotations 4, 35, 40 and 63),
-and the first row with the seeds `0x1111111111111111` and
+a four-byte `rolq $imm8`, a rotation of 61 or 62 is a four-byte
+`shrq $imm8`, and the rotations of 1 and 63 are three-byte instructions
+without an immediate at all. When the two builds spell it differently, the
+code after it shifts, and the difference is an order of magnitude larger:
+the second row is measured with the seeds `0x300000000000001a` (the
+rotations 1, 33, 39 and 41) and `0x3000000000000003` (the rotations 4, 35,
+40 and 63), and the first row with the seeds `0x1111111111111111` and
 `0x2222222222222222` (the rotations 25, 30, 47, 54 and 11, 11, 27, 50 —
 none of them one of the four). **Four of the sixty-three legal rotations**
 are spelled differently, so about one protected build in eight is the
