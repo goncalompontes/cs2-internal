@@ -377,9 +377,11 @@ whole wave of work. One mechanism, one owner, one test — and the tree's
 ## Still open
 
 1. **Compound (4) shapes** — still skipped (`docs/re/occlusion.md` "Still to pin" 3).
-2. **The interval record's full layout** — only the distance `+0x0C` and the
-   enter/exit byte `+0x32` are pinned. Map the remaining `0x38` bytes and surface
-   provenance before treating interval output as a complete damage oracle.
+2. **The interval record's full layout** — the distance `+0x0C` is pinned, and the
+   `+0x32` byte is now pinned **with its polarity** (`0` = enter, `1` = leave; see
+   `docs/re/occlusion.md` §"The interval record's polarity"). The remaining `0x38`
+   bytes and the surface provenance are still unmapped: do not treat interval output
+   as a complete damage oracle.
 3. **Mesh interval semantics** — the aim-side mesh ray path now takes the **nearest**
    crossing as one surface (see above), which matches the engine on the live ray for
    the surfaces it reports. What is still unverified: a cluster the ray crosses more

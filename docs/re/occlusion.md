@@ -503,9 +503,9 @@ whether the answer means anything:
    `engine.interval_count == 0` **and** `ours` non-empty, that is a bug in the
    probe, not a result: report it.
 3. **The ray must actually cross the wall.** `engine.interval_count > 0` and at
-   least one `enter_exit == 1` record is the minimum; if the engine reports
-   nothing, the ray missed the wall (aim elsewhere) and the measurement says
-   nothing about the geometry.
+   least one **entry** record (`enter_exit == 0`, `role == "enter"`; one leave is
+   `1`) is the minimum; if the engine reports nothing, the ray missed the wall (aim
+   elsewhere) and the measurement says nothing about the geometry.
 
 Then the **numbered answer** (§"the measurement" above): which of the six places
 the world geometry is lost.
@@ -547,14 +547,68 @@ the pyramid keeps the ones the ray crosses. The geometry was never the loss.
    them. Fixed: a mesh crossing is **one surface** (`entry == exit`), which is what
    the engine reports for it.
 
-Both are pinned by `aim-occlusion` (`an open mesh wall attenuates the head`). The
-engine's interval records for these surfaces are **single** records — the engine has
-no enter/exit pair for a sheet either.
+Both are pinned by `aim-occlusion` (`an open mesh wall attenuates the head`). A
+**single** open sheet the ray crosses once is a single engine record; a **closed**
+mesh slab (two faces) is an enter/exit pair, and our two surface crossings land on
+exactly those two boundaries — the recorded ray shows both cases (see
+§"The interval record's polarity").
 
 The `engine_only` rows the probe still prints (`10.127 -> 1015.895`) are the
 **player's own body and the map's closed brush volume**, not a lost wall: our answer
 starts at the first hull (1015.9) and the engine's interval starts 10 units from the
 eye because the eye is inside a solid there (`startsolid`).
+
+### The interval record's polarity — pinned (2026-10-23)
+
+The first reading of the probe said the engine's enter/exit byte was "inverted
+relative to ours" and told the operator to compare distances, not verdicts. That was
+**the probe's bug, not the engine's**: `pair_trace_spans` treated `1` as the entry,
+so every pair was shifted by one record. An exit got paired with the *next* solid's
+entry, and the difference reported spans no geometry can explain — `9.6 → 94.8`, and
+a **619-unit "solid"** the bullet could not cross.
+
+The evidence is in the recorded wall ray (`artifacts/repro-occlusion-wall.json`, now
+committed as `payload/control/tests/fixtures/trace-comparison-dust2-wall.json`). On
+that one ray our own answers are the ground truth for the polarity:
+
+| our occluder | the engine's records |
+|---|---|
+| hull `266.09 → 273.30` | `266.02` byte **`0`**, `273.03` byte **`1`** |
+| hull `1136.73 → 1138.95` | `1136.67` byte **`0`**, `1138.88` byte **`1`** |
+| hull `1139.32 → 1145.24` | `1139.25` byte **`0`**, `1145.17` byte **`1`** |
+
+So **`0` is the entry and `1` is the leave**, exactly the order the engine's own
+consumer (`FUN_180886090`) pairs them in. The answer now publishes each record's
+`role` (`"enter"` / `"leave"`) beside the raw byte, and `control-trace-comparison`
+replays the recorded ray with no game: the opposite reading cannot even reproduce
+the span of our own hull.
+
+**The second half of the same reading.** With the pairing fixed, the recorded ray's
+difference is 9 engine spans, and **3 of them are answered by our surfaces**: the
+world body's collision meshes are open sheets, so our answer for a brush volume is
+one zero-thickness crossing per **face**, while the engine reports an enter/exit pair
+for the **volume** between them. A span that our solid does not cover is now also
+matched when our surfaces sit on **both** of its boundaries (a single face in front
+of a wall still does not answer for it), and the count is published as
+`spans_bounded_by_surfaces` — "a wall as sheets" stays distinguishable from "a wall
+as a volume".
+
+What the recorded ray leaves genuinely `engine_only` is small and specific:
+
+* `1.05 → 9.64` — the **local player's own collision body**. The world set excludes
+  players by design; this row is expected on every ray that starts inside one.
+* `205.57 → 517.87` — a **brush volume the pre-fix build had no faces for**. That
+  build returned only the nearest crossing per mesh cluster, which is the
+  "shoot through a wall" defect `86275be` fixed. It is the row the live run after
+  that fix must make disappear.
+* `3058.41 → 4058.93` — the far face of a slab beyond the 3096-unit target; the
+  entry surface is ours, the far boundary is not.
+
+So **most of what `O8c` counted as "whole solids missing" was the pairing and the
+representation**, not geometry the cache lacks. The cache control (`at`) and the
+`EntitiesInBox` counts were sound all along. This is the reading to carry into the
+live run: a mesh slab that shows up as `engine_only` now means a **face** is absent
+(an enumeration loss), not that the volume is.
 
 ### The measurement (the general recipe)
 
@@ -575,7 +629,7 @@ still open. The measurement settles it, and this is how to read the result:
 | `engine.answer_missing` is true (or the verdict is `unknown`) | **the instrument is broken** — the engine's answer was dropped (the call faulted, the container did not hold the buffer the probe handed it, the count was out of range, or the engine **overran** the results buffer and the canary tripped). **Nothing can be concluded**; re-run. A `faulted: true` means the instrument, not the game. |
 | `engine.faulted` is true | the instrument is broken, not the game: the engine call faulted (the guard caught it) **or** the engine wrote past the results buffer (`engine.overrun` says which). **Nothing can be concluded**; re-run. |
 | the engine's intervals are empty **and** ours is empty | the ray misses everything — **not** a geometry loss (aim elsewhere) |
-| `engine_only` (the engine found spans, we found nothing for them) | **3** (the shapes are parsed but dropped: the cluster cap, the compound skip, the BVH's broad phase, the per-query selection) or **5** (projected, but the ray does not hit them) or **6** (the engine sees something we have no shape for at all) — the `difference.engine_only` entries say *which* span, and the ray's `ours` list says what we had |
+| `engine_only` (the engine found spans, we found nothing for them) | **3** (the shapes are parsed but dropped: the cluster cap, the compound skip, the BVH's broad phase, the per-query selection) or **5** (projected, but the ray does not hit them) or **6** (the engine sees something we have no shape for at all) — the `difference.engine_only` entries say *which* span, and the ray's `ours` list says what we had. A span answered by our **two surfaces** is **not** in this list: it is counted in `difference.spans_bounded_by_surfaces` (the same wall in our representation). The local player's own body is always `engine_only` — the world set excludes players on purpose. |
 | `ours_only` (we found solids the engine did not report) | the **over-inclusion** the enumeration is known for (a body-box overlap is a superset) — not a loss |
 | `both` | the two answers differ in both directions — the over-inclusion **and** a loss. The `engine_only` list says whether a loss is in there. |
 | `agrees` | the two sets are the same for this ray: the world geometry is **not** lost here (the loss, if any, is elsewhere — e.g. the ray does not cross the wall) |
