@@ -31,7 +31,10 @@ void install_crash_handler() noexcept;
 //
 //   * **One guarded call at a time, per process.** A second concurrent guarded
 //     call is refused (it returns false without calling `fn`), because the
-//     jump target is a single process-wide slot.
+//     jump target is a single process-wide slot. The arming is a
+//     compare-exchange, so the refusal is **enforced**: two threads can never
+//     both take the slot, and the second one never overwrites the first
+//     thread's jump target.
 //   * **The faulting thread only.** The handler recovers only when the fault
 //     happens on the thread that entered the guard; a fault on another thread
 //     is logged by the first-chance path and kills the process.
@@ -40,18 +43,26 @@ void install_crash_handler() noexcept;
 //     `EXCEPTION_PRIV_INSTRUCTION`, `EXCEPTION_STACK_OVERFLOW`,
 //     `STATUS_STACK_BUFFER_OVERRUN` and `STATUS_FATAL_APP_EXIT`. Anything else
 //     is logged and continues the search.
+//     (`STATUS_STACK_BUFFER_OVERRUN` -- 0xC0000409 -- is the code the **broken**
+//     guard produced, and a fast fail bypasses the vectored handlers, so it
+//     is unreachable in practice. It is listed because the list is the
+//     contract, not a measurement of what the hardware delivers.)
 //   * **The guarded call must not own resources.** The recovery is a `longjmp`,
 //     so the guarded call's frame (and every frame between it and the fault)
 //     is left without running its cleanups. `fn` must therefore be a read-only
 //     probe whose locals need no destruction.
-//   * The handler that owns the jump is **not** `noexcept`; a `noexcept` frame
-//     is `nounwind` and the jump out of it would run its `std::terminate`
-//     cleanup instead of recovering. `payload/diag/src/crash_handler.cpp`
-//     explains it, and `payload/diag/tests/test_diag_guard.cpp` checks it
-//     (behaviourally, built with clang-cl, and textually).
+//   * The handler that owns the jump is **not** `noexcept`. A `noexcept` frame
+//     is not `nounwind`: clang-cl gives it a C++ exception-handler unwind
+//     record whose cleanup action is `std::terminate`, and the `longjmp` out
+//     of that frame runs the action -- so the process dies with 0xC0000409
+//     instead of recovering. `payload/diag/src/crash_handler.cpp` explains it,
+//     and `payload/diag/tests/test_diag_guard.cpp` checks it (behaviourally,
+//     built with clang-cl, and textually).
 //
 // The guard is the tree's **only** recovery mechanism: `cs2::diag` owns it and
-// everything that needs a guarded engine call uses it.
+// everything that needs a guarded engine call uses it. The tree's test fails
+// when a second one appears outside `payload/diag` -- a vectored handler, an
+// unhandled filter, a `setjmp`/`longjmp`, or an SEH `__try`/`__except`.
 [[nodiscard]] auto call_guarded(void (*fn)(void*), void* arg) noexcept -> bool;
 
 }  // namespace cs2::diag
