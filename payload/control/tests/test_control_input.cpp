@@ -36,6 +36,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "cs2/control/strafe_geometry.hpp"
@@ -200,6 +201,8 @@ using cs2::control::FireMode;
 using cs2::control::FireRefusal;
 using cs2::control::FireWrite;
 using cs2::control::FireWriteInputs;
+using cs2::control::FireWritePorts;
+using cs2::control::PlayerPress;
 
 // The HUD's rage line buffer (`payload/features/src/overlay.cpp`): the line
 // has to fit it, in the **worst** case.
@@ -241,8 +244,13 @@ struct FireLoop {
   // The PB's words, as the payload leaves them.
   std::uint64_t pb_held{0};
   std::uint64_t pb_changed{0};
-  // The **player's own** press of the attack button (the engine's own mask).
-  bool player_attack{false};
+  // The **player's own** press of the attack button, as the payload knows it:
+  // what the command cache holds for this command. The default is
+  // **released**: the engine's own mask carries no attack bit, so the player
+  // is not pressing — the case the loop models (the command the payload has
+  // just written carries the **payload's** press, and the reading is what
+  // says whether the player is pressing too).
+  PlayerPress player{PlayerPress::released};
   // The control channel's own press.
   bool control_attack{false};
   // The features' bits (the triggerbot's hold).
@@ -257,7 +265,7 @@ struct FireLoop {
         .control_clear = control_clear,
         .feature_mask = feature_mask,
         .usercmd_backend = true,
-        .player_attack = player_attack,
+        .player = player,
         .control_attack = control_attack,
         .rage_press = rage_press,
         .attack_changed = attack_changed,
@@ -444,6 +452,21 @@ void test_the_disabled_fire_is_not_a_missing_solve() {
   assert(std::string_view(cs2::control::fire_refusal_name(FireRefusal::no_solve)) == "no-solve");
 }
 
+// The **rate** refusal has a name of its own.
+//
+// "unknown" is the fire **mode's** name for a weapon the payload could not
+// read: two different facts must not share a word, or the operator sees
+// "unknown unknown" and cannot tell which one is the fault.
+void test_the_rate_unknown_refusal_has_its_own_name() {
+  assert(std::string_view(cs2::control::fire_refusal_name(FireRefusal::rate_unknown)) ==
+         "rate-unknown");
+  // The fire mode's own "unknown" is a different thing.
+  assert(std::string_view(cs2::control::fire_mode_name(FireMode::unknown)) == "unknown");
+  // And the two are not the same string.
+  assert(std::string_view(cs2::control::fire_refusal_name(FireRefusal::rate_unknown)) !=
+         std::string_view(cs2::control::fire_mode_name(FireMode::unknown)));
+}
+
 // The **edge on the command**: the payload's own press is **replaceable**.
 //
 // This is the whole point of the fire path. On a semi-automatic weapon the
@@ -546,7 +569,7 @@ void test_the_ragebot_never_clears_the_players_own_attack() {
 // player's press, and the semi-automatic weapon would never fire again.
 void test_the_players_press_survives_the_ragebots_withdrawal() {
   FireLoop loop{};
-  loop.player_attack = true;
+  loop.player = PlayerPress::held;
   // The ragebot presses.
   const auto press = loop.tick(true, true);
   assert((press.command_mask & button::k_attack) != 0);
@@ -577,12 +600,23 @@ void test_the_other_contributors_survive_the_withdrawal() {
   const auto pressed = control.tick(false, true);
   assert((pressed.command_mask & button::k_attack) != 0);
 
-  // The control channel's own **release** takes the button away entirely —
-  // that is the operator's release, and it outranks the contributors.
+  // The control channel's own **release** removes **its own** contribution:
+  // the operator's release, and only the operator's. The features' bits are
+  // only ever set, never cleared (the repo's rule) — the triggerbot's hold
+  // and the ragebot's press survive it.
   FireLoop released{};
   released.control_clear = button::k_attack;
-  const auto cleared = released.tick(true, true);
-  assert((cleared.command_mask & button::k_attack) == 0);
+  released.feature_mask = button::k_attack;
+  const auto cleared = released.tick(false, true);
+  assert((cleared.command_mask & button::k_attack) != 0);
+
+  // With nothing else pressing, the operator's release **does** release the
+  // button: the control channel's contribution is gone.
+  FireLoop only_release{};
+  only_release.control_clear = button::k_attack;
+  only_release.control_attack = true;
+  const auto released_alone = only_release.tick(false, true);
+  assert((released_alone.command_mask & button::k_attack) == 0);
 }
 
 // The **command cache**: the engine's own attack bit is read **per command**,
@@ -596,21 +630,114 @@ void test_the_command_cache_reads_the_players_press() {
   FireCommandCache cache{};
   // The engine has just built command 1: the player is holding the trigger.
   const auto first = cache.read(1, true, true);
-  assert(first.player_attack);
+  assert(first == PlayerPress::held);
   // The payload puts its own press on it.
   cache.wrote(1, true);
   // The same command, read again (the slot-25 copy): the mask now carries the
   // payload's press as well, so the reading is **not** refreshed — the cached
   // one is used.
   const auto second = cache.read(1, true, false);
-  assert(second.player_attack);
+  assert(second == PlayerPress::held);
   // A **new** command (the engine builds one every tick): the reading is
   // clean again, and it follows the player's trigger.
   const auto third = cache.read(2, false, true);
-  assert(!third.player_attack);
+  assert(third == PlayerPress::released);
   // And the copy of that command reuses the tick's reading.
   const auto fourth = cache.read(2, false, false);
-  assert(!fourth.player_attack);
+  assert(fourth == PlayerPress::released);
+}
+
+// The **unknown** reading: the payload cannot tell the player's own press
+// from its own.
+//
+// The copy of a command the payload has written to carries the payload's own
+// press, so a **set** bit on such a copy is not a fact about the player: the
+// reading is **unknown**. And an unknown reading must never **remove** the
+// attack bit — the payload never takes away a bit it cannot prove it set.
+void test_the_unknown_reading_never_removes_the_attack_bit() {
+  // The copy of a command the cache has not seen, with the attack bit set:
+  // the bit may be the payload's own press, so the reading is **unknown**.
+  FireCommandCache cache{};
+  const auto copy = cache.read(7, true, false);
+  assert(copy == PlayerPress::unknown);
+
+  // The same command, read as the command the engine has just built: the mask
+  // is the engine's own, so the reading is **known**.
+  const auto fresh = cache.read(8, true, true);
+  assert(fresh == PlayerPress::held);
+
+  // A **clear** bit is a fact on either command: the payload never clears the
+  // engine's own attack bit, so the player is not pressing.
+  assert(cache.read(9, false, false) == PlayerPress::released);
+  assert(cache.read(10, false, true) == PlayerPress::released);
+}
+
+// The **reviewer's probe**: the player's own press must survive a copy whose
+// command number the cache does not know.
+//
+// The payload writes to **two** commands per tick, and the engine's slot order
+// was never observed at runtime (`docs/re/angle-split.md`): the copy can come
+// first. A reading that is not known must leave the command's attack bit **as
+// it is** — the player's press is not the payload's to remove.
+void test_the_players_press_survives_a_copy_the_cache_does_not_know() {
+  // The **copy first**, the player pressing: the copy's command number is
+  // unknown to the cache, so the reading is unknown — and the attack bit must
+  // stay as it is.
+  FireCommandCache cache{};
+  std::uint64_t mask = button::k_attack;  // the engine's own mask: the player presses
+  const PlayerPress reading = cache.read(2, (mask & button::k_attack) != 0, false);
+  assert(reading == PlayerPress::unknown);
+  const FireWriteInputs in{
+      .current_mask = mask,
+      .usercmd_backend = true,
+      .player = reading,
+  };
+  const FireWrite write = cs2::control::compose_fire_write(in);
+  // The player's press is still on the command: the payload did not remove a
+  // bit it could not prove it set.
+  assert((write.command_mask & button::k_attack) != 0);
+  // ... and the payload did not ask the engine to clear it either.
+  assert((write.engine_clear & button::k_attack) == 0);
+  assert((write.engine_set & button::k_attack) != 0);
+
+  // The **fresh** command of the same tick: the reading is known, and the
+  // player's press is there as well.
+  const PlayerPress fresh = cache.read(3, true, true);
+  assert(fresh == PlayerPress::held);
+  const FireWriteInputs fresh_in{
+      .current_mask = mask,
+      .usercmd_backend = true,
+      .player = fresh,
+  };
+  assert((cs2::control::compose_fire_write(fresh_in).command_mask & button::k_attack) != 0);
+}
+
+// The **invariant** itself, over every reading: an unknown reading leaves the
+// command's attack bit **as it is**, and a known one replaces it.
+void test_the_attack_bit_is_replaced_only_on_a_known_reading() {
+  const AttackContributors unknown{
+      .player = PlayerPress::unknown,
+  };
+  const AttackContributors released{
+      .player = PlayerPress::released,
+  };
+  const AttackContributors held{
+      .player = PlayerPress::held,
+  };
+  // The command carries the attack bit (the engine's own, or the payload's):
+  // an unknown reading leaves it, a known "released" clears it, a known
+  // "held" keeps it.
+  assert((cs2::control::compose_attack_bit(button::k_attack, unknown) & button::k_attack) != 0);
+  assert((cs2::control::compose_attack_bit(button::k_attack, released) & button::k_attack) == 0);
+  assert((cs2::control::compose_attack_bit(button::k_attack, held) & button::k_attack) != 0);
+  // The command does **not** carry it: an unknown reading cannot add it.
+  assert((cs2::control::compose_attack_bit(0, unknown) & button::k_attack) == 0);
+  // ... and the other contributors still apply on an unknown reading.
+  const AttackContributors unknown_rage{
+      .player = PlayerPress::unknown,
+      .rage = true,
+  };
+  assert((cs2::control::compose_attack_bit(0, unknown_rage) & button::k_attack) != 0);
 }
 
 // The **engine's shots**: the clip's fall is a shot — but a **reload** and a
@@ -657,11 +784,11 @@ void test_the_status_line_fits_the_hud_buffer() {
   fields.presses = 18446744073709551615ULL;
   fields.edges = 18446744073709551615ULL;
   fields.fire_mode = "unknown";
-  fields.fire_refusal = "clip-unknown";
+  fields.fire_refusal = "rate-unknown";
   fields.stop = " stop";
   fields.occlusion_query = " occ-inc";
   fields.occlusion_candidates = " occ-cap";
-  fields.player_attack = " player";
+  fields.player_attack = " player?";
 
   char line[k_status_buffer] = {};
   const std::size_t written = cs2::control::format_rage_status(fields, line, sizeof(line));
@@ -669,8 +796,16 @@ void test_the_status_line_fits_the_hud_buffer() {
   assert(written < k_status_buffer);
   assert(written == std::strlen(line));
   // And it is the **whole** line, not a prefix of a longer one.
-  assert(std::strstr(line, "clip-unknown") != nullptr);
-  assert(std::strstr(line, "player") != nullptr);
+  assert(std::strstr(line, "rate-unknown") != nullptr);
+  assert(std::strstr(line, "player?") != nullptr);
+
+  // The player's own press has three states, and each has its own marker.
+  assert(std::string_view(cs2::control::player_press_marker(PlayerPress::held)) == " player");
+  assert(std::string_view(cs2::control::player_press_marker(PlayerPress::unknown)) == " player?");
+  assert(std::string_view(cs2::control::player_press_marker(PlayerPress::released)).empty());
+  assert(std::string_view(cs2::control::player_press_name(PlayerPress::held)) == "held");
+  assert(std::string_view(cs2::control::player_press_name(PlayerPress::unknown)) == "unknown");
+  assert(std::string_view(cs2::control::player_press_name(PlayerPress::released)) == "released");
 
   // The realistic case has room to spare.
   cs2::control::RageStatusFields plain{};
@@ -690,15 +825,196 @@ void test_the_status_line_fits_the_hud_buffer() {
   assert(short_written == std::strlen(realistic));
 }
 
+// The **wiring**, driven: the payload's own write, against plain memory.
+//
+// The three channels are written by **one** call
+// (`strafe_geometry.hpp`'s `apply_fire_write`), so the test drives that call
+// and reads the **bytes** back: the command's own mask, the PB's two words
+// and the movement services' held word.
+//
+// A composition that is computed and then **ignored** cannot pass this test
+// (the write is the composition), and neither can a channel that is dropped.
+void test_the_fire_path_writes_the_three_channels() {
+  // --- the press: the attack bit goes onto **all three** channels ---------
+  {
+    std::uint64_t mask = 0;
+    std::uint64_t pb[2] = {0, 0};
+    std::uint32_t has_bits = 0;
+    std::uint64_t engine = 0;
+    FireCommandCache cache{};
+    const FireWritePorts ports{
+        .mask = &mask,
+        .pb = pb,
+        .pb_has_bits = &has_bits,
+        .engine = &engine,
+    };
+    // The engine's own mask says the player is not pressing: a clean read.
+    assert(cache.read(1, false, true) == PlayerPress::released);
+    const FireWriteInputs in{
+        .current_mask = 0,
+        .usercmd_backend = true,
+        .player = PlayerPress::released,
+        .rage_press = true,
+        .attack_changed = true,
+    };
+    const FireWrite write = cs2::control::apply_fire_write(ports, in, cache, 1);
+    // The command's own mask carries the attack bit.
+    assert((mask & button::k_attack) != 0);
+    assert((write.command_mask & button::k_attack) != 0);
+    // The PB's **held** word follows it, and the **changed** word carries the
+    // edge.
+    assert((pb[0] & button::k_attack) != 0);
+    assert((pb[1] & button::k_attack) != 0);
+    // The PB says the two button-state fields are present.
+    assert((has_bits & 0x3U) == 0x3U);
+    // The movement services' held word carries it as well.
+    assert((engine & button::k_attack) != 0);
+    // ... and the cache knows the payload's own press is on that command, so
+    // the next reading of it is **not** clean: the observed bit (the payload's
+    // own press) is not taken for the player's.
+    assert(cache.read(1, true, false) == PlayerPress::released);
+  }
+
+  // --- the withdrawal: the release reaches **all three** channels ---------
+  {
+    // The state the payload leaves behind after its own press: the attack bit
+    // is on the command, on the PB's held word and on the movement services'
+    // word.
+    std::uint64_t mask = button::k_attack;
+    std::uint64_t pb[2] = {button::k_attack, 0};
+    std::uint32_t has_bits = 0;
+    std::uint64_t engine = button::k_attack;
+    FireCommandCache cache{};
+    const FireWritePorts ports{
+        .mask = &mask,
+        .pb = pb,
+        .pb_has_bits = &has_bits,
+        .engine = &engine,
+    };
+    // The fire path withdraws: the player is not pressing (a **known**
+    // reading), and the withdrawal is a change.
+    const FireWriteInputs in{
+        .current_mask = 0,
+        .usercmd_backend = true,
+        .player = PlayerPress::released,
+        .rage_press = false,
+        .attack_changed = true,
+    };
+    const FireWrite write = cs2::control::apply_fire_write(ports, in, cache, 2);
+    // The command's own mask does **not** carry the attack bit any more.
+    assert((mask & button::k_attack) == 0);
+    assert((write.command_mask & button::k_attack) == 0);
+    // The PB's **held** word follows: the release is on that channel too.
+    assert((pb[0] & button::k_attack) == 0);
+    // The **changed** word carries the release: a release is a change too.
+    assert((pb[1] & button::k_attack) != 0);
+    // The movement services' held word is **cleared**: the release is on that
+    // channel too.
+    assert((engine & button::k_attack) == 0);
+    assert((write.engine_clear & button::k_attack) != 0);
+    assert((write.engine_set & button::k_attack) == 0);
+  }
+}
+
+// The code with its comments and its string literals **blanked out** (the
+// same length, so the offsets still line up with the original): a brace in a
+// comment or in a literal is not the function's brace.
+auto blank_comments_and_strings(const std::string& text) -> std::string {
+  std::string out = text;
+  bool in_line_comment = false;
+  bool in_block_comment = false;
+  bool in_string = false;
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    const char c = out[i];
+    const char next = i + 1 < out.size() ? out[i + 1] : '\0';
+    if (in_line_comment) {
+      if (c == '\n') {
+        in_line_comment = false;
+      } else {
+        out[i] = ' ';
+      }
+      continue;
+    }
+    if (in_block_comment) {
+      if (c == '*' && next == '/') {
+        in_block_comment = false;
+        out[i] = ' ';
+        out[i + 1] = ' ';
+        ++i;
+      } else if (c != '\n') {
+        out[i] = ' ';
+      }
+      continue;
+    }
+    if (in_string) {
+      if (c == '\\' && next != '\0') {
+        out[i] = ' ';
+        out[i + 1] = ' ';
+        ++i;
+      } else if (c == '"') {
+        in_string = false;
+      } else if (c != '\n') {
+        out[i] = ' ';
+      }
+      continue;
+    }
+    if (c == '/' && next == '/') {
+      in_line_comment = true;
+      out[i] = ' ';
+      out[i + 1] = ' ';
+      ++i;
+    } else if (c == '/' && next == '*') {
+      in_block_comment = true;
+      out[i] = ' ';
+      out[i + 1] = ' ';
+      ++i;
+    } else if (c == '"') {
+      in_string = true;
+      out[i] = ' ';
+    }
+  }
+  return out;
+}
+
+// The **region** of a function: from its signature to the brace that closes
+// it. The braces are counted in the blanked code, so a brace in a comment or
+// in a literal cannot end the region early.
+auto function_region(const std::string& blanked, const std::string& signature)
+    -> std::pair<std::size_t, std::size_t> {
+  const std::size_t start = blanked.find(signature);
+  if (start == std::string::npos) {
+    return {0, 0};
+  }
+  std::size_t depth = 0;
+  bool open = false;
+  for (std::size_t i = start; i < blanked.size(); ++i) {
+    if (blanked[i] == '{') {
+      ++depth;
+      open = true;
+    } else if (blanked[i] == '}') {
+      --depth;
+      if (open && depth == 0) {
+        return {start, i};
+      }
+    }
+  }
+  return {0, 0};
+}
+
 // The **wiring** in `input.cpp`: the composition is the pure function's, the
 // ragebot's press is the **service's decision**, and the player's own press
 // is the engine's own bit.
 //
-// These are the two breaks the host test has to catch, and they are both in
-// the payload's own file: a ragebot that holds `IN_ATTACK` on every command
-// (the original defect) and a withdrawal that takes the player's own press
-// away (the rule the repo states). The pure functions above pin the
-// **semantics**; this pins the **call sites**.
+// These are the breaks the host test has to catch, and they are all in the
+// payload's own file: a ragebot that holds `IN_ATTACK` on every command
+// (the original defect), a withdrawal that takes the player's own press
+// away (the rule the repo states), a write that is computed and then
+// **ignored**, and a channel that is **dropped**.
+//
+// The check is **anchored**: the statements have to be inside
+// `Input::apply_command` itself — the function the fire path is wired in — so
+// a neighbouring occurrence elsewhere in the file cannot satisfy it, and they
+// have to be **present**: a channel that is not written fails the check.
 void test_the_fire_path_wiring_is_the_pure_write(const std::filesystem::path& root) {
   const std::filesystem::path path = root / "payload" / "control" / "src" / "input.cpp";
   std::ifstream file(path);
@@ -707,17 +1023,36 @@ void test_the_fire_path_wiring_is_the_pure_write(const std::filesystem::path& ro
     return;
   }
   const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  const auto region =
+      function_region(blank_comments_and_strings(text), "void Input::apply_command(");
+  assert(region.first != 0);
+  assert(region.second > region.first);
+  if (region.first == 0 || region.second <= region.first) {
+    return;
+  }
   // The **code**, without the whitespace: the assertion is about what the
   // wiring does, not about how it is laid out.
   std::string code;
-  code.reserve(text.size());
-  for (const char c : text) {
-    if (!std::isspace(static_cast<unsigned char>(c))) {
-      code.push_back(c);
+  code.reserve(region.second - region.first);
+  for (std::size_t i = region.first; i <= region.second; ++i) {
+    if (!std::isspace(static_cast<unsigned char>(text[i]))) {
+      code.push_back(text[i]);
     }
   }
-  // The composition is the pure function's.
-  assert(code.find("compose_fire_write(write_inputs)") != std::string::npos);
+  // The composition **and** the write are **one call**: a call site that
+  // computes the mask and then ignores it cannot exist, because the write is
+  // the composition.
+  assert(code.find("apply_fire_write(ports,write_inputs,fire_commands_,command_number)") !=
+         std::string::npos);
+  // The three channels are **passed**: the command's own mask, the PB's words
+  // and the movement services' word. A channel that is not passed is not
+  // written.
+  assert(code.find(".mask=buttons,") != std::string::npos);
+  assert(code.find(".pb=pb_words,") != std::string::npos);
+  assert(code.find(".engine=engine_button_state(),") != std::string::npos);
+  // The write's result is **not** ignored: the payload does not compute the
+  // mask itself any more (the review's break: `value = current | k_attack`).
+  assert(code.find("current|button::k_attack") == std::string::npos);
   // The payload does **not** compose the mask add-only any more: that is what
   // made the payload's own press unremovable.
   assert(code.find("compose_button_mask(") == std::string::npos);
@@ -728,33 +1063,95 @@ void test_the_fire_path_wiring_is_the_pure_write(const std::filesystem::path& ro
   // The engine's own attack bit comes from the **cache**, so the payload
   // never reads its own press back as the player's.
   assert(code.find("fire_commands_.read(") != std::string::npos);
-  // The player's own press is the engine's own bit — a contributor of its
-  // own, so a withdrawal cannot take it away.
-  assert(code.find(".player_attack=reading.player_attack") != std::string::npos);
-  // The PB's button state is written **unconditionally**: the release has to
-  // reach it even when there is nothing else to write.
-  assert(code.find("pb_words[0]=write.pb_held") != std::string::npos);
-  // ... and the write is guarded by **writability alone**: a guard of the
-  // form "there is something to write" is exactly what skipped the release.
-  assert(code.find("if(pb_words!=nullptr){") != std::string::npos);
+  // The player's own press is what the cache knows — and it can be
+  // **unknown**, which never removes the bit.
+  assert(code.find(".player=player_press,") != std::string::npos);
+  // The PB's words are resolved under the **writability** check alone: a
+  // guard of the form "there is something to write" is exactly what skipped
+  // the release.
+  assert(code.find("writable(buttons_pb,k_buttonstate_values_offset+16)") != std::string::npos);
   assert(code.find("if(pb_words!=nullptr&&") == std::string::npos);
 }
 
 // The repository's root, so the test can read the payload's own source.
 //
-// The `control-input` target is not given the root as an argument (the root
-// `meson.build` is not this task's), so the path is derived from the
-// translation unit's own path: `__FILE__` is the source file as the compiler
-// saw it, and the test runs with the build directory as its working
-// directory.
-auto repository_root() -> std::filesystem::path {
-  const std::filesystem::path here = std::filesystem::path(__FILE__);
-  // .../payload/control/tests/test_control_input.cpp -> the repository's root.
+// The root used to be derived from a **relative** `__FILE__`, so the test only
+// passed when it was run from the build directory. The build tree knows where
+// the sources are: meson's introspection file names the project's source
+// directory, and the build directory is where the test binary lives — so the
+// root does not depend on the working directory the test is run from.
+auto repository_root(const char* argv0) -> std::filesystem::path {
+  // The build directory: the directory the binary lives in, or one of its
+  // parents.
+  const auto build_root = [](const std::filesystem::path& start) -> std::filesystem::path {
+    std::filesystem::path dir = start;
+    for (int depth = 0; depth < 6; ++depth) {
+      if (std::filesystem::exists(dir / "meson-info" / "meson-info.json")) {
+        return dir;
+      }
+      const std::filesystem::path parent = dir.parent_path();
+      if (parent.empty() || parent == dir) {
+        break;
+      }
+      dir = parent;
+    }
+    return {};
+  };
+  // The project's source directory, as meson's introspection file names it.
+  const auto source_of = [](const std::filesystem::path& build) -> std::filesystem::path {
+    std::ifstream file(build / "meson-info" / "meson-info.json");
+    if (!file.good()) {
+      return {};
+    }
+    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    const std::string key = "\"source\": \"";
+    const std::size_t start = text.find(key);
+    if (start == std::string::npos) {
+      return {};
+    }
+    std::string value;
+    for (std::size_t i = start + key.size(); i < text.size(); ++i) {
+      if (text[i] == '\\' && i + 1 < text.size() && text[i + 1] == '\\') {
+        value.push_back('\\');
+        ++i;
+        continue;
+      }
+      if (text[i] == '"') {
+        break;
+      }
+      value.push_back(text[i]);
+    }
+    if (value.empty()) {
+      return {};
+    }
+    return std::filesystem::path(value);
+  };
+  // The binary's own directory: the test is started with the path to it.
+  const std::filesystem::path self = std::filesystem::absolute(std::filesystem::path(argv0));
+  const std::filesystem::path build = build_root(self.parent_path());
+  if (!build.empty()) {
+    const std::filesystem::path root = source_of(build);
+    if (!root.empty()) {
+      return root;
+    }
+  }
+  // The working directory (meson runs the test from the build directory).
+  const std::filesystem::path cwd = build_root(std::filesystem::current_path());
+  if (!cwd.empty()) {
+    const std::filesystem::path root = source_of(cwd);
+    if (!root.empty()) {
+      return root;
+    }
+  }
+  // The last resort: the translation unit's own path, resolved against the
+  // working directory.
+  const std::filesystem::path here = std::filesystem::absolute(std::filesystem::path(__FILE__));
   return here.parent_path().parent_path().parent_path().parent_path();
 }
 }  // namespace
 
-auto main() -> int {
+auto main(int argc, char** argv) -> int {
+  assert(argc >= 1);
   test_a_features_button_reaches_the_command_in_every_backend();
   test_a_control_commands_button_needs_the_usercmd_backend();
   test_the_composed_mask_gates_the_control_path_only();
@@ -772,14 +1169,19 @@ auto main() -> int {
   test_a_full_auto_weapon_keeps_the_trigger_down();
   test_the_gate_blocks_each_condition();
   test_the_disabled_fire_is_not_a_missing_solve();
+  test_the_rate_unknown_refusal_has_its_own_name();
   test_the_payload_can_take_its_own_press_back();
   test_the_ragebot_never_clears_the_players_own_attack();
   test_the_players_press_survives_the_ragebots_withdrawal();
   test_the_other_contributors_survive_the_withdrawal();
   test_the_command_cache_reads_the_players_press();
+  test_the_unknown_reading_never_removes_the_attack_bit();
+  test_the_players_press_survives_a_copy_the_cache_does_not_know();
+  test_the_attack_bit_is_replaced_only_on_a_known_reading();
   test_the_engine_shot_counter_ignores_a_reload_and_a_failed_read();
   test_the_status_line_fits_the_hud_buffer();
-  test_the_fire_path_wiring_is_the_pure_write(repository_root());
+  test_the_fire_path_writes_the_three_channels();
+  test_the_fire_path_wiring_is_the_pure_write(repository_root(argc >= 1 ? argv[0] : ""));
 
   std::puts("control-input: ok");
   return 0;

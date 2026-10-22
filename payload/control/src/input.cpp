@@ -646,19 +646,27 @@ void Input::write_engine_buttons(std::uint64_t set_bits, std::uint64_t clear_bit
   if (set_bits == 0 && clear_bits == 0) {
     return;
   }
-  const std::uintptr_t pawn = local_pawn_.load();
-  if (pawn == 0) {
-    return;
-  }
-  std::uintptr_t services = 0;
-  if (!cs2::game::read(pawn + k_movement_services_offset, services) || services == 0) {
-    return;
-  }
-  auto* state = reinterpret_cast<std::uint64_t*>(services + k_services_button_offset);
-  if (!writable(reinterpret_cast<std::uintptr_t>(state), sizeof(std::uint64_t))) {
+  std::uint64_t* state = engine_button_state();
+  if (state == nullptr) {
     return;
   }
   *state = (*state | set_bits) & ~clear_bits;
+}
+
+auto Input::engine_button_state() noexcept -> std::uint64_t* {
+  const std::uintptr_t pawn = local_pawn_.load();
+  if (pawn == 0) {
+    return nullptr;
+  }
+  std::uintptr_t services = 0;
+  if (!cs2::game::read(pawn + k_movement_services_offset, services) || services == 0) {
+    return nullptr;
+  }
+  auto* state = reinterpret_cast<std::uint64_t*>(services + k_services_button_offset);
+  if (!writable(reinterpret_cast<std::uintptr_t>(state), sizeof(std::uint64_t))) {
+    return nullptr;
+  }
+  return state;
 }
 
 void Input::rage_tick(std::uint8_t* cmd) noexcept {
@@ -2612,11 +2620,11 @@ void Input::apply_command(void* cmd, bool fresh) noexcept {
   // The **player's own** press of the attack button: the engine's own mask,
   // read **before** the payload's write.
   //
-  // A command the payload has **not** written to yet carries the engine's own
-  // mask — that is a **clean** reading. A command the payload **has** written
-  // to carries the payload's own press as well, and once both are set the
-  // player's press and the payload's press cannot be told apart, so the
-  // reading comes from the **cache** instead.
+  // A command the payload has **not** put its own press on carries the
+  // engine's own mask — that is a **clean** reading. A command the payload
+  // **has** pressed carries the payload's own press as well, and once both are
+  // set the player's press and the payload's press cannot be told apart, so
+  // the reading comes from the **cache** instead.
   //
   // The cache is per **command number** (`CUserCmd::nSequenceNumber`): the
   // engine builds a **new** command every tick, so every tick brings a clean
@@ -2626,9 +2634,15 @@ void Input::apply_command(void* cmd, bool fresh) noexcept {
   // is exactly the release the edge needs (`docs/ragebot.md` §"the fire path").
   const auto command_number = *reinterpret_cast<const std::uint32_t*>(bytes + k_cmd_number_offset);
   const bool observed_attack = (current & button::k_attack) != 0;
-  const cs2::control::FireCommandCache::Reading reading =
+  // What the payload knows about the **player's own** press. It can be
+  // **unknown**: the copy of a command the payload has written to carries the
+  // payload's own press, and the payload cannot tell the two apart. An
+  // unknown reading never **removes** the attack bit — the bit is cleared
+  // only on the strength of a reading that is **known** to be the player's own
+  // state (`strafe_geometry.hpp`'s `PlayerPress`).
+  const cs2::control::PlayerPress player_press =
       fire_commands_.read(command_number, observed_attack, fresh);
-  rage_player_attack_.store(reading.player_attack);
+  rage_player_press_.store(static_cast<std::uint8_t>(player_press));
   // The features' buttons: the triggerbot's own hold, plus the ragebot's
   // assists. The ragebot's **attack** is not one of them: it is a
   // **decision** the service publishes on the game's thread
@@ -2665,11 +2679,13 @@ void Input::apply_command(void* cmd, bool fresh) noexcept {
     assists |= button::k_reload;
   }
   // The control channel's own press of the attack button — a contributor of
-  // its own, so the ragebot's withdrawal does not take it away.
+  // its own, so the ragebot's withdrawal does not take it away. The
+  // composition applies the control channel's own **release** (the operator's
+  // release) on top of it: the release removes the control channel's
+  // contribution, and only that one.
   const bool control_attack = cs2::control::button_reaches_command(
                                   cs2::control::ButtonPath::control_command, usercmd_backend) &&
-                              (control_set & button::k_attack) != 0 &&
-                              (control_clear & button::k_attack) == 0;
+                              (control_set & button::k_attack) != 0;
   // The PB's own words: what the engine wrote into the command's
   // `CInButtonStatePB`. They are the payload's **starting point**, and the
   // payload writes the attack bit into them (the release the engine has to
@@ -2691,7 +2707,7 @@ void Input::apply_command(void* cmd, bool fresh) noexcept {
       .control_clear = control_clear,
       .feature_mask = feature_bits | assists,
       .usercmd_backend = usercmd_backend,
-      .player_attack = reading.player_attack,
+      .player = player_press,
       .control_attack = control_attack,
       .rage_press = rage_press,
       .attack_changed = rage_press_changed_.load(std::memory_order_relaxed),
@@ -2699,33 +2715,36 @@ void Input::apply_command(void* cmd, bool fresh) noexcept {
       .pb_held = pb_held,
       .pb_changed = pb_changed,
   };
-  const cs2::control::FireWrite write = cs2::control::compose_fire_write(write_inputs);
-  const std::uint64_t value = write.command_mask;
-  if (value != current) {
-    *buttons = value;
+  // **The three channels**, and the write that reaches them:
+  //
+  //   * the command's own mask (`cmd + 0x60`) — the attack bit is *replaced*,
+  //     so a withdrawal is a release;
+  //   * the PB's `CInButtonStatePB` — the **held** word follows the command's
+  //     mask, and the **changed** word carries the attack edge;
+  //   * the movement services' `CInButtonState` — the **held** word follows
+  //     the command's mask, so a withdrawal clears it.
+  //
+  // The write is **one call** (`strafe_geometry.hpp`'s `apply_fire_write`): the
+  // composition and the write are the same step, so a call site that computes
+  // the mask and then ignores it cannot exist. The host test drives that
+  // function and reads the bytes back.
+  const cs2::control::FireWritePorts ports{
+      .mask = buttons,
+      .pb = pb_words,
+      .pb_has_bits = pb_words != nullptr
+                         ? reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset)
+                         : nullptr,
+      .engine = engine_button_state(),
+  };
+  const cs2::control::FireWrite write =
+      cs2::control::apply_fire_write(ports, write_inputs, fire_commands_, command_number);
+  if (write.command_mask != current) {
     writes_.fetch_add(1);
   }
-  // The command now carries the payload's own press (or does not): the next
-  // reading of this command is **not** clean.
-  fire_commands_.wrote(command_number, (value & button::k_attack) != 0);
-  // The PB's button state: the **held** word follows the command's mask (so the
-  // withdrawal is a release the engine can see) and the **changed** word
-  // carries the attack edge. The write is guarded by **writability alone**.
-  if (pb_words != nullptr) {
-    pb_words[0] = write.pb_held;
-    pb_words[1] = write.pb_changed;
-    *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
-  }
-  // The engine's own held-button word (`CInButtonState` at the movement
-  // services), which some weapon actions read instead of the command's mask.
-  // It follows the command's mask too, so the ragebot's withdrawal **clears**
-  // it — that is the release — and the player's own press (which is in the
-  // mask) sets it again.
-  write_engine_buttons(write.engine_set, write.engine_clear);
   bhop_tick(cmd,
             reinterpret_cast<std::uint8_t*>(
                 *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset + k_pb_base_offset)),
-            value);
+            write.command_mask);
 
   // 2. Analog move. Two things can swallow a command-side write: the engine
   //    re-derives `base->forwardmove` from the raw input (`CCSGOInput + 0x270`,

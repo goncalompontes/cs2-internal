@@ -867,7 +867,9 @@ struct FireDecision {
     case FireRefusal::interval:
       return "interval";
     case FireRefusal::rate_unknown:
-      break;
+      // Its own name: "unknown" is the fire **mode's** name for a weapon it
+      // could not read, and two different facts must not share a word.
+      return "rate-unknown";
   }
   // A refusal this build does not know about: say so, do not guess.
   return "unknown";
@@ -964,6 +966,30 @@ struct FireDecision {
 // So the attack bit is the one bit that is **replaced** rather than merged:
 // it is recomputed from its **contributors** for every command.
 
+/// What the payload knows about the **player's own** press of the attack
+/// button on one command.
+///
+/// The payload **replaces** the command's attack bit on every command, so a
+/// reading it cannot trust must never **remove** the bit. The invariant:
+///
+/// > An **unknown** reading never removes the attack bit. The bit is cleared
+/// > only on the strength of a reading that is **known** to be the player's
+/// > own state.
+///
+/// An unknown reading leaves the command's own attack bit **as it is** — the
+/// payload never takes away a bit it cannot prove it set — and the other
+/// contributors (the control channel, the triggerbot, the fire path) still
+/// apply.
+enum class PlayerPress : std::uint8_t {
+  /// **Unknown**: the payload cannot tell the player's own press from its own
+  /// press on that command. The attack bit is left as it is.
+  unknown,
+  /// The player is **not** pressing the attack button.
+  released,
+  /// The player **is** pressing the attack button.
+  held,
+};
+
 /// The attack button's **contributors** on one command.
 ///
 /// Three parties can assert the attack button besides the ragebot: the
@@ -973,8 +999,8 @@ struct FireDecision {
 /// ragebot's own contribution is the **replaceable** one.
 struct AttackContributors {
   /// The **player's own** press: the engine's own mask, read before the
-  /// payload's write.
-  bool player{false};
+  /// payload's write — and what the payload knows about it.
+  PlayerPress player{PlayerPress::unknown};
   /// The **control channel's** own press of the button.
   bool control{false};
   /// The **triggerbot's** own hold (a feature bit).
@@ -984,9 +1010,21 @@ struct AttackContributors {
 };
 
 /// The command's attack bit, from its contributors.
-[[nodiscard]] inline constexpr auto compose_attack_bit(
-    const AttackContributors& contributors) noexcept -> std::uint64_t {
-  return (contributors.player || contributors.control || contributors.trigger || contributors.rage)
+///
+/// `current_attack` is the command's own attack bit **as it stands** — the
+/// bit the payload has to keep when it cannot prove anything.
+///
+/// **The invariant:** an **unknown** reading of the player's own press never
+/// **removes** the attack bit. The bit is cleared only on the strength of a
+/// reading that is **known** to be the player's own state; an unknown reading
+/// leaves the command's own bit **as it is** (the payload never takes away a
+/// bit it cannot prove it set).
+[[nodiscard]] inline constexpr auto compose_attack_bit(std::uint64_t current_attack,
+                                                       const AttackContributors& contributors) noexcept
+    -> std::uint64_t {
+  const bool player = contributors.player == PlayerPress::held ||
+                      (contributors.player == PlayerPress::unknown && current_attack != 0);
+  return (player || contributors.control || contributors.trigger || contributors.rage)
              ? button::k_attack
              : 0ULL;
 }
@@ -1000,21 +1038,35 @@ struct AttackContributors {
 /// could never remove the payload's own press. The contributors carry the
 /// player's own press and the triggerbot's hold, so neither of them is taken
 /// away.
+///
+/// **The control channel's own release** takes **its own** press away — the
+/// operator's release, and only the operator's: the **player's** own press and
+/// the **features'** bits are only ever set, never cleared (the repo's rule),
+/// so the triggerbot's hold and the ragebot's press survive it. (Before this
+/// rule the control channel's release cancelled the triggerbot's hold as well,
+/// which changed a feature this task does not own.)
 [[nodiscard]] inline constexpr auto compose_command_mask(
     std::uint64_t current_mask, std::uint64_t control_set, std::uint64_t control_clear,
     std::uint64_t feature_mask, bool usercmd_backend,
     const AttackContributors& contributors) noexcept -> std::uint64_t {
   std::uint64_t value =
       compose_button_mask(current_mask, control_set, control_clear, feature_mask, usercmd_backend);
-  // The control channel's own **release** takes the button away entirely —
-  // that is the operator's release, and it outranks the contributors.
-  if (button_reaches_command(ButtonPath::control_command, usercmd_backend) &&
-      (control_clear & button::k_attack) != 0) {
-    return value & ~button::k_attack;
-  }
+  // The operator's release removes the **control channel's** contribution, and
+  // only that one — and only where the control channel reaches the command
+  // at all (the `usercmd` backend).
+  const bool control_reaches = button_reaches_command(ButtonPath::control_command, usercmd_backend);
+  const AttackContributors effective{
+      .player = contributors.player,
+      .control = contributors.control && control_reaches &&
+                 (control_clear & button::k_attack) == 0,
+      .trigger = contributors.trigger,
+      .rage = contributors.rage,
+  };
   // The attack bit is **replaced**: the payload's own previous press is not
-  // among the contributors, so a withdrawal is a real release.
-  return (value & ~button::k_attack) | compose_attack_bit(contributors);
+  // among the contributors, so a withdrawal is a real release — and the
+  // player's own press survives it, because it is a contributor of its own.
+  return (value & ~button::k_attack) |
+         compose_attack_bit(current_mask & button::k_attack, effective);
 }
 
 /// The ragebot's own contribution to the attack button.
@@ -1042,49 +1094,44 @@ struct AttackContributors {
 /// Without the cache the payload would read **its own** press back as the
 /// player's, and a withdrawal would then never clear the bit — which is
 /// exactly the release the edge needs.
+///
+/// **A reading is only as good as the mask it came from.** The payload never
+/// clears the engine's own attack bit (that is the invariant of
+/// `compose_attack_bit`), so a **clear** bit is a **fact**: the player is not
+/// pressing. A **set** bit is a fact only on a command the payload has not
+/// put its own press on — on any other command the bit may be the payload's
+/// own, and the reading is **unknown** (and an unknown reading never removes
+/// the bit).
 class FireCommandCache {
  public:
-  /// The engine's own attack bit for one command.
-  struct Reading {
-    /// The **player's own** press of the attack button.
-    bool player_attack{false};
-  };
-
-  /// The engine's own attack bit for a command.
+  /// The engine's own attack bit for one command: what the payload knows
+  /// about the **player's own** press.
   ///
   /// `observed_attack` is the command's attack bit **as it stands**.
   ///
   /// `fresh` is true for the command the engine has **just built** (the slot-5
-  /// command): its mask is the engine's own, so it is a **clean** reading. The
+  /// command): its mask is the engine's own, so its reading is **known**. The
   /// slot-25 **copy** may already carry the payload's own press (the engine
-  /// copies the command it has just built), so it never contributes a fresh
-  /// reading — it reuses the last one.
-  ///
-  /// A command the payload has **not** written the attack bit to yet also
-  /// carries the engine's own mask, so it is a clean reading as well — and it
-  /// is refreshed, so the reading follows the player's own trigger.
+  /// copies the command it has just built), so a **set** bit on a copy the
+  /// cache has not seen is **unknown** — the bit may be the payload's own.
   [[nodiscard]] auto read(std::uint32_t number, bool observed_attack, bool fresh) noexcept
-      -> Reading {
+      -> PlayerPress {
     Entry* entry = find(number);
     if (entry == nullptr) {
       entry = &slots_[next_];
       next_ = (next_ + 1) % k_slots;
       entry->number = number;
       entry->valid = true;
-      entry->player_attack = fresh ? observed_attack : last_;
-      entry->attack_written = false;
-      if (fresh) {
-        last_ = observed_attack;
-      }
-      return Reading{.player_attack = entry->player_attack};
+      entry->written = false;
+      entry->player = classify(observed_attack, fresh);
+      return entry->player;
     }
-    if (!entry->attack_written) {
+    if (!entry->written) {
       // The payload has not put its own press on this command, so the mask is
       // still the engine's own: the reading is clean and it is refreshed.
-      entry->player_attack = observed_attack;
-      last_ = observed_attack;
+      entry->player = classify(observed_attack, true);
     }
-    return Reading{.player_attack = entry->player_attack};
+    return entry->player;
   }
 
   /// Remember that the payload put its own press on a command (`attack`), so
@@ -1094,26 +1141,40 @@ class FireCommandCache {
     if (entry == nullptr) {
       return;
     }
-    entry->attack_written = attack;
+    entry->written = attack;
   }
 
  private:
+  /// The reading for a command the cache has not seen yet.
+  ///
+  /// A **clear** bit is a fact: the payload never clears the engine's own
+  /// attack bit, so the player is not pressing. A **set** bit is the player's
+  /// own press on the command the engine has just built — and on a **copy** it
+  /// may be the payload's own press (the engine copies the command the
+  /// payload has just written to), so it is **unknown** there.
+  [[nodiscard]] static constexpr auto classify(bool observed_attack, bool fresh) noexcept
+      -> PlayerPress {
+    if (!observed_attack) {
+      return PlayerPress::released;
+    }
+    return fresh ? PlayerPress::held : PlayerPress::unknown;
+  }
+
   struct Entry {
     std::uint32_t number{0};
     bool valid{false};
-    /// The engine's own attack bit (the player's own press).
-    bool player_attack{false};
-    /// The payload's own press is on this command.
-    bool attack_written{false};
+    /// What the payload knows about the **player's own** press on this
+    /// command.
+    PlayerPress player{PlayerPress::unknown};
+    /// The payload's own press is on this command: its mask is **not** a
+    /// sample of the engine's own state any more.
+    bool written{false};
   };
   // Four slots: the payload sees at most two commands per tick, and a command
   // number is only reused after the engine's ring buffer wraps.
   static constexpr std::size_t k_slots = 4;
   Entry slots_[k_slots]{};
   std::size_t next_{0};
-  // The last clean reading — the fallback for a copy of a command the payload
-  // has already written to.
-  bool last_{false};
 
   [[nodiscard]] auto find(std::uint32_t number) noexcept -> Entry* {
     for (auto& entry : slots_) {
@@ -1137,10 +1198,11 @@ struct FireWriteInputs {
   std::uint64_t feature_mask{0};
   /// The control channel reaches the command (the `usercmd` backend).
   bool usercmd_backend{false};
-  /// The **player's own** press of the attack button. The payload reads it
-  /// from the engine's own mask, **before** its own write — a command the
-  /// payload already wrote to carries the payload's press, not the player's.
-  bool player_attack{false};
+  /// The **player's own** press of the attack button, as the payload knows
+  /// it. The payload reads it from the engine's own mask, **before** its own
+  /// write — a command the payload already wrote to carries the payload's
+  /// press, not the player's, so the reading can be **unknown**.
+  PlayerPress player{PlayerPress::unknown};
   /// The **control channel's** own press of the attack button.
   bool control_attack{false};
   /// The fire path's decision: does the ragebot contribute the attack bit?
@@ -1168,6 +1230,10 @@ struct FireWrite {
   std::uint64_t engine_set{0};
   /// ... and the bits to **clear**.
   std::uint64_t engine_clear{0};
+  /// The payload's **own** press of the attack button (the control channel's
+  /// press, the triggerbot's hold or the fire path's decision). While it is
+  /// on, the command's mask is **not** a sample of the engine's own state.
+  bool payload_press{false};
 };
 
 /// The fire path's **write** on one command.
@@ -1188,7 +1254,7 @@ struct FireWrite {
 [[nodiscard]] inline constexpr auto compose_fire_write(const FireWriteInputs& in) noexcept
     -> FireWrite {
   const AttackContributors contributors{
-      .player = in.player_attack,
+      .player = in.player,
       .control = in.control_attack,
       .trigger = (in.feature_mask & button::k_attack) != 0,
       .rage = in.rage_press,
@@ -1225,7 +1291,60 @@ struct FireWrite {
       .pb_changed = pb_changed,
       .engine_set = attack | in.assists,
       .engine_clear = ~attack & button::k_attack,
+      // The payload's **own** press: the control channel's press, the
+      // triggerbot's hold or the fire path's decision. While one of them is
+      // on, the command's mask is not a sample of the engine's own state.
+      .payload_press = contributors.control || contributors.trigger || contributors.rage,
   };
+}
+
+/// Where the fire path's write goes.
+///
+/// The three channels, and the words each of them is:
+struct FireWritePorts {
+  /// The command's legacy button mask (`cmd + 0x60`).
+  std::uint64_t* mask{nullptr};
+  /// The PB's two words: the **held** word (`buttonstate1`) and the
+  /// **changed** word (`buttonstate2`) — null when the PB is not writable.
+  std::uint64_t* pb{nullptr};
+  /// The PB's has-bits word — null when the PB is not writable.
+  std::uint32_t* pb_has_bits{nullptr};
+  /// The movement services' **held** word (`CInButtonState`, word 0) — null
+  /// when it is not writable.
+  std::uint64_t* engine{nullptr};
+};
+
+/// The PB's has-bits word: the two button-state fields (the **held** word and
+/// the **changed** word) are present.
+inline constexpr std::uint32_t k_pb_buttonstate_bits = 0x3U;
+
+/// The fire path's **write**, applied to one command.
+///
+/// The three channels are written **here**, so the host test drives the
+/// payload's own write and reads the **bytes** back. A call site that
+/// composes the mask and then ignores it cannot exist: the composition **is**
+/// the write (`docs/orchestration/spec-t37-fire-path.md` §4.1).
+///
+/// The cache is told what the payload put on the command, so the next reading
+/// of that command is **not** clean.
+inline auto apply_fire_write(const FireWritePorts& ports, const FireWriteInputs& in,
+                             FireCommandCache& cache, std::uint32_t number) noexcept -> FireWrite {
+  const FireWrite write = compose_fire_write(in);
+  if (ports.mask != nullptr) {
+    *ports.mask = write.command_mask;
+  }
+  if (ports.pb != nullptr) {
+    ports.pb[0] = write.pb_held;
+    ports.pb[1] = write.pb_changed;
+  }
+  if (ports.pb_has_bits != nullptr) {
+    *ports.pb_has_bits |= k_pb_buttonstate_bits;
+  }
+  if (ports.engine != nullptr) {
+    *ports.engine = (*ports.engine | write.engine_set) & ~write.engine_clear;
+  }
+  cache.wrote(number, write.payload_press);
+  return write;
 }
 
 // --- The engine's shots ---------------------------------------------------------
@@ -1272,6 +1391,37 @@ struct ClipSample {
 // The line carries the fire path's verdict and its three counters. The
 // diagnostics that do not belong on it — the aim **writes** and the
 // **backtracks** — are in the `rage` command's JSON instead.
+
+/// The **player's own** press of the trigger, by name: "held", "released" or
+/// "unknown" (the payload cannot tell the player's own press from its own).
+[[nodiscard]] inline constexpr auto player_press_name(PlayerPress press) noexcept -> const char* {
+  switch (press) {
+    case PlayerPress::held:
+      return "held";
+    case PlayerPress::unknown:
+      return "unknown";
+    case PlayerPress::released:
+      break;
+  }
+  return "released";
+}
+
+/// The status line's marker for the **player's own** press of the trigger.
+///
+/// " player" when the player is holding it, " player?" when the payload
+/// **cannot tell** (its own press may be on the command it is reading), and
+/// nothing when the player is not pressing.
+[[nodiscard]] inline constexpr auto player_press_marker(PlayerPress press) noexcept -> const char* {
+  switch (press) {
+    case PlayerPress::held:
+      return " player";
+    case PlayerPress::unknown:
+      return " player?";
+    case PlayerPress::released:
+      break;
+  }
+  return "";
+}
 
 /// The rage status line's fields.
 struct RageStatusFields {

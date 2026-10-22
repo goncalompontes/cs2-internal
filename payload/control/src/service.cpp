@@ -2782,7 +2782,7 @@ auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
           rage_occlusion_query_complete_.load(std::memory_order_relaxed) ? "" : " occ-inc",
       .occlusion_candidates =
           rage_occlusion_candidates_complete_.load(std::memory_order_relaxed) ? "" : " occ-cap",
-      .player_attack = input_.rage_player_attack() ? " player" : "",
+      .player_attack = player_press_marker(input_.rage_player_press()),
   };
   // The line's length: the format is the pure function's, and the host test
   // measures the **worst** case against the HUD's 192-byte buffer
@@ -3492,6 +3492,12 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   // The **player** is holding the attack button: the engine then sees one
   // continuous press, so the edge is the player's to make, not the ragebot's.
   payload.set("player_attack", Json::boolean(input_.rage_player_attack()));
+  // What the payload **knows** about it: "held", "released" or "unknown" (the
+  // payload cannot tell the player's own press from its own on a command it
+  // has already written to — and an unknown reading never removes the attack
+  // bit, `docs/ragebot.md` §"the fire path").
+  payload.set("player_press", Json::string(std::string(player_press_name(
+                                       input_.rage_player_press()))));
   payload.set("occluders", Json::number(static_cast<double>(rage_occluders_.load())));
   payload.set("occlusion_query_complete",
               Json::boolean(rage_occlusion_query_complete_.load(std::memory_order_relaxed)));
