@@ -328,8 +328,8 @@ auto test_the_cache_never_pairs_two_writes() -> void {
   //
   // The old protocol has neither: it never refuses a writer (there is no
   // claim) and it never gives up (there is no reader's retry), so the drive
-  // runs to the bound and the two checks below fail — on every run, not
-  // on one run in four.
+  // runs to the bound and the check below fails — on every run, not on one
+  // run in four.
   (void)wait_until(
       [&]() {
         const std::uint64_t total = rounds_total(rounds);
