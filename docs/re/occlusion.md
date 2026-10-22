@@ -550,8 +550,16 @@ without re-running the game.
   `meson.build` or a new `payload/control/include/cs2/control/trace_guard.hpp`,
   and the branch's earlier commits touched both: the `meson.build` edit is two
   additive `executable()` + `test()` blocks (the host tests have to be registered
-  somewhere), and the guard header is the probe's own fault guard. The deviation
+  somewhere), and the guard header was the probe's own fault guard. The deviation
   is stated in the fix commits rather than left implicit.
+  **The guard header is gone.** The probe's engine call now runs under
+  `cs2::diag::call_guarded` — the tree's **one** recovery mechanism, owned by
+  `cs2::diag` — so `payload/control/include/cs2/control/trace_guard.hpp`, the
+  probe's own host test `control-trace-probe-guard` and the two root
+  `meson.build` blocks that registered it are all deleted. The tree's `diag-guard`
+  test covers the behaviour, and it fails if a second recovery mechanism ever
+  appears. The root `meson.build` still carries **one** additive block for the
+  probe (the `control-trace-probe` host test).
 * **A deletion in the shared temp directory.** The branch's earlier report
   mentioned deleting **~3 GB** from the shared temp directory
   (`%LOCALAPPDATA%\Temp\opencode`). The deletion is not in the branch, so it

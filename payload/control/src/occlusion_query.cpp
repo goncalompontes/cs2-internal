@@ -11,7 +11,6 @@
 #include <utility>
 
 #include "cs2/aim/bvh.hpp"
-#include "cs2/control/trace_guard.hpp"
 #include "cs2/diag/crash_handler.hpp"
 #include "cs2/game/memory.hpp"
 #include "cs2/game/module.hpp"
@@ -1357,10 +1356,15 @@ void invoke_trace(void* context) {
 }
 
 // The guarded call: a wrong ABI must be caught and reported, never a crash (the
-// payload has no registered exception tables). The probe's own guard is used, not
-// `cs2::diag::call_guarded`: the diag module's vectored handler is `noexcept`, and
-// under clang-cl that makes the recovery impossible (`cs2/control/trace_guard.hpp`
-// has the measurement). Returns the interval count (0 on a fault or an empty
+// payload has no registered exception tables).
+//
+// **The tree's one guard**: `cs2::diag::call_guarded` — the same guard the rest of
+// the payload's engine calls use (`cs2::diag` owns the tree's only recovery
+// mechanism; `payload/diag/tests/test_diag_guard.cpp` fails when a second one
+// appears). The probe used to carry its own copy of the guard, because the shared
+// one could not recover under clang-cl; that defect is fixed
+// (`payload/diag/src/crash_handler.cpp`: the handler is no longer `noexcept`), so
+// the copy is gone. Returns the interval count (0 on a fault or an empty
 // answer).
 auto run_trace_query(TraceLineIntervalsFn entry, void* iface, void* filter, const Vec3& start,
                      const Vec3& delta, TraceResultVector& vector, bool* ok) -> std::int32_t {
@@ -1373,7 +1377,7 @@ auto run_trace_query(TraceLineIntervalsFn entry, void* iface, void* filter, cons
   call.mask =
       reinterpret_cast<const void*>(reinterpret_cast<std::uintptr_t>(filter) + k_filter_mask);
   call.max_fraction = -1.0F;
-  *ok = trace_call_guarded(&invoke_trace, &call);
+  *ok = cs2::diag::call_guarded(&invoke_trace, &call);
   return *ok ? vector.count : 0;
 }
 

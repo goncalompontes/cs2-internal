@@ -336,15 +336,18 @@ carried its own copy of the guard because it could not use the shared one —
 and the shared one was the broken one.
 
 **Which way the reconciliation goes — `cs2::diag` keeps the one mechanism.**
-`cs2::diag` owns it; the trace probe's own guard goes away. The probe will
-call `cs2::diag::call_guarded(&invoke_trace, &call)` where it calls
-`trace_call_guarded(&invoke_trace, &call)` today — the two signatures are
-identical, so the call site does not change — and
+`cs2::diag` owns it; the trace probe's own guard is **gone**. The probe calls
+`cs2::diag::call_guarded(&invoke_trace, &call)` where it used to call
+`trace_call_guarded(&invoke_trace, &call)` — the two signatures are identical, so
+the call site did not otherwise change — and
 `payload/control/include/cs2/control/trace_guard.hpp` is **deleted**, with
 `payload/control/tests/test_control_trace_probe_guard.cpp` and the two root
-`meson.build` blocks that register it. (The steps are listed in
-`docs/handoff-wave3.md` §5; the reconciliation is a fix round on T39's
-branch, after this one has merged.)
+`meson.build` blocks that registered it. (The steps are listed in
+`docs/handoff-wave3.md` §5; the reconciliation was a fix round on T39's
+branch, after this one had merged.) The tree's `diag-guard` test is the one
+that covers the behaviour now, and it covers it better: it makes **ten**
+deliberate faults in a row and it is built with clang-cl, the compiler the
+payload ships with.
 
 **Why that way and not the other.** Two vectored handlers with **independent**
 `jmp_buf`s and **independent** `active` flags is exactly the fragility this
@@ -509,13 +512,19 @@ output** without re-running the game.
 > `0xa19e90`) together with the name string `TraceLineIntervals` (now at
 > `client + 0x1c32448`).
 
-**A finding about the shared fault guard (2026-10-22).** `cs2::diag::call_guarded`
-— the guard every engine call in the payload uses — **cannot recover on a
-clang-cl build**. Its vectored handler is a `noexcept` function, and clang-cl marks
-a `noexcept` function `nounwind`, so MSVC's `longjmp` refuses to unwind through it
-and raises `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409) instead of returning. The
-same code built with MSVC's `cl.exe` recovers, and so does the same code with the
+**A finding about the shared fault guard (2026-10-22) — and the fix.**
+`cs2::diag::call_guarded` — the guard every engine call in the payload uses —
+**could not recover on a clang-cl build**. Its vectored handler was a `noexcept`
+function, and clang-cl marks a `noexcept` function `nounwind`, so MSVC's
+`longjmp` refuses to unwind through it and raises
+`STATUS_STACK_BUFFER_OVERRUN` (0xC0000409) instead of returning. The same code
+built with MSVC's `cl.exe` recovers, and so does the same code with the
 handler's `noexcept` dropped — both measured standalone on this machine.
+
+**The fix has landed** (`payload/diag/src/crash_handler.cpp`: the handler is no
+longer `noexcept`, and the arming is a compare-exchange on an atomic slot, so
+two threads can never both take the slot). The tree's `diag-guard` test proves
+it: ten deliberate faults in a row, all recovered, built with clang-cl.
 
 > **The log evidence, re-measured (2026-10-22).** The payload's own log
 > (`%LOCALAPPDATA%\cs2-internal\cs2-payload.log`, 70.6 MB, 548 370 lines) holds
@@ -525,8 +534,8 @@ handler's `noexcept` dropped — both measured standalone on this machine.
 > re-injected, every time") was **wrong on both counts**:
 >
 > * there are **twelve** guarded lines, not nine — four in the 88 k-line region
->   (lines 88135, 88387, 88409, 90369) and eight in the 533 k-line region (533404,
->   533478, 533601, 533680, 533728, 533890, 533950, 534203);
+>   (lines 88136, 88388, 88410, 90370) and eight in the 533 k-line region
+>   (533405, 533479, 533602, 533681, 533729, 533891, 533951, 534204);
 > * **only the first four** are followed by a fresh `[crash] handler installed` and
 >   the payload's start-up banner — those are the process dying and being
 >   re-injected. The other **eight** are followed by the payload's own continued
@@ -537,16 +546,37 @@ handler's `noexcept` dropped — both measured standalone on this machine.
 >   info); std::longjmp(g_guard_jmp, 1);`), so a `guarded` line means the handler
 >   was **entered** — it is written in the success case too. A failed recovery
 >   leaves **no** line at all.
+>
+> **Four died, eight survived — and the two groups do not look alike.** The four
+> deaths (88136, 88388, 88410, 90370) each sit immediately before a fresh
+> `[crash] handler installed`; three of them fault at `tier0+0x1ffe29 read
+> addr=0x40` (the tier0 allocator) and one at `read addr=0x0`. The eight
+> recoveries (533405, 533479, 533602, 533681, 533729, 533891, 533951, 534204) are
+> injections #190–#199 — the ten most recent in the log — and each one sits
+> immediately after a fresh `[crash] handler installed` and faults at a **null
+> pointer** with frames in **`ntdll`**. That is a **different signature** from the
+> four deaths: the difference between "the guard killed the game" and "the guard
+> recovered".
+>
+> **The eight are not evidence that the fix ran live.** T42's fix commit is
+> `06:01:52` on 2026-10-22 and injections #190–#199 **predate** it; the
+> integration tree never carried the fix before it merged. So the eight came from
+> the **broken** handler, and the honest statement is this: the broken guard
+> recovered eight times and killed the payload four times — which is **not** what
+> the standalone reproduction predicts (there, the `noexcept` handler fast-fails
+> with 0xC0000409 every time). That discrepancy is an **open item**, recorded on
+> T42's branch; it is not resolved by this document.
 
-So the **diagnosis** stands (the shared guard cannot recover under clang-cl —
+So the **diagnosis** stands (the shared guard could not recover under clang-cl —
 reproduced standalone: a `noexcept` vectored handler fast-fails with 0xC0000409,
-the same program without the `noexcept` prints "recovered" and exits 0), but the
-**evidence as stated was wrong**. The record is corrected here so the next task
-does not cite it.
+the same program without the `noexcept` prints "recovered" and exits 0), the
+**evidence as stated was wrong**, and the **fix has landed**. The record is
+corrected here so the next task does not cite it.
 
-The repo-wide fix is **one word** — drop the `noexcept` from
-`LONG CALLBACK vectored_handler(...)` in `payload/diag/src/crash_handler.cpp`.
-Until that lands, the probe's engine call runs under **its own** guard
-(`payload/control/include/cs2/control/trace_guard.hpp`, the same vectored handler
-+ `setjmp`/`longjmp`, with a handler the unwinder will cross), and the host test
-`control-trace-probe-guard` proves that guard recovers from a deliberate fault.
+The probe's engine call therefore runs under the tree's **one** guard,
+`cs2::diag::call_guarded` — the same guard the rest of the payload's engine
+calls use. The probe's own copy of the guard
+(`payload/control/include/cs2/control/trace_guard.hpp`, the same vectored
+handler + `setjmp`/`longjmp`, with a handler the unwinder would cross) is
+**deleted**, along with its own host test `control-trace-probe-guard`: the
+tree's `diag-guard` test covers the behaviour, and it covers it better.

@@ -678,11 +678,16 @@ void test_service_uses_the_rules(const char* root) {
   expect(probe.find("occlusion_world_cache_ready()") != std::string::npos,
          "the probe does not parse the world body inside the input hook");
 
-  // The guarded call: the engine call is behind the probe's own guard.
+  // The guarded call: the engine call is behind the tree's **one** guard. The probe
+  // used to carry its own copy of it; `cs2::diag` owns the tree's only recovery
+  // mechanism now, and the tree's `diag-guard` test fails when a second one
+  // appears.
   const std::string guarded = region_of(query, "auto run_trace_query(", "}  // namespace");
   expect(!guarded.empty(), "the guarded query is found in the occlusion query");
-  expect(guarded.find("trace_call_guarded(") != std::string::npos,
-         "the engine's trace call is fault-guarded");
+  expect(guarded.find("cs2::diag::call_guarded(") != std::string::npos,
+         "the engine's trace call is fault-guarded by the tree's one guard");
+  expect(guarded.find("trace_call_guarded(") == std::string::npos,
+         "the probe does not carry its own guard");
 
   // The publication: the answer carries the probe's own health.
   const std::string publication = region_of(service, "void Service::do_trace_probe", nullptr);
