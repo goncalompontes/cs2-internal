@@ -73,37 +73,6 @@ class Overlay {
     snapshot_context_ = context;
   }
 
-  // A provider for the ragebot's one-line status, added to the HUD when it
-  // returns true (so the operator can see the key/aim state while testing).
-  using RageStatusProvider = bool (*)(void* context, char* out, std::size_t size);
-  void set_rage_status_provider(RageStatusProvider provider, void* context) noexcept {
-    rage_status_provider_ = provider;
-    rage_status_context_ = context;
-  }
-
-  // A provider for the **movement features'** one-line status (the auto-strafe
-  // and the bhop), added to the HUD when it returns true. It carries the two
-  // numbers that answer "does the movement accelerate?": the gain of the last
-  // airtime and whether the engine applied the strafe's basis rotation (the
-  // sub-tick view-angle gate — `docs/re/strafing.md` §"The gate").
-  using MovementStatusProvider = bool (*)(void* context, char* out, std::size_t size);
-  void set_movement_status_provider(MovementStatusProvider provider,
-                                   void* context) noexcept {
-    movement_status_provider_ = provider;
-    movement_status_context_ = context;
-  }
-
-  // A provider for the **chams'** one-line status: whether the scene system's
-  // draw hook is installed, how many draws were seen, how many were drawn
-  // with the chams' material, how many were skipped — and, when the hook is
-  // not installed, the reason it is not. It is added to the HUD when it
-  // returns true (the chams are on).
-  using ChamsStatusProvider = bool (*)(void* context, char* out, std::size_t size);
-  void set_chams_status_provider(ChamsStatusProvider provider, void* context) noexcept {
-    chams_status_provider_ = provider;
-    chams_status_context_ = context;
-  }
-
   // A provider for a pawn's **real studio hitboxes** (world capsules), so the
   // overlay can draw them. Returns the number written (<= `max`).
   //
@@ -130,15 +99,7 @@ class Overlay {
     rage_target_context_ = context;
   }
 
-  // A provider for the bhop prediction's current position; when it returns one,
-  // the overlay draws a box there so the engine simulation is visible.
-  using PredictedOriginProvider = bool (*)(void* context, float out[3]);
-  void set_predicted_origin_provider(PredictedOriginProvider provider, void* context) noexcept {
-    predicted_origin_provider_ = provider;
-    predicted_origin_context_ = context;
-  }
-
- private:
+private:
   std::optional<game::StateReader> reader_;
   render::OverlayModel model_;
   // The state machine's answer for the last frame (the ESP is not built when
@@ -155,18 +116,10 @@ class Overlay {
   void* local_pawn_context_ = nullptr;
   SnapshotSink snapshot_sink_ = nullptr;
   void* snapshot_context_ = nullptr;
-  RageStatusProvider rage_status_provider_ = nullptr;
-  void* rage_status_context_ = nullptr;
-  MovementStatusProvider movement_status_provider_ = nullptr;
-  void* movement_status_context_ = nullptr;
-  ChamsStatusProvider chams_status_provider_ = nullptr;
-  void* chams_status_context_ = nullptr;
   HitboxProvider hitbox_provider_ = nullptr;
   void* hitbox_context_ = nullptr;
   RageTargetProvider rage_target_provider_ = nullptr;
   void* rage_target_context_ = nullptr;
-  PredictedOriginProvider predicted_origin_provider_ = nullptr;
-  void* predicted_origin_context_ = nullptr;
 };
 
 }  // namespace cs2::features

@@ -578,11 +578,6 @@ class TestThePublishedKeys(unittest.TestCase):
         published = _published(self.rage, "payload")
         self.assertEqual(set(protocol.RageResult.__annotations__), published)
 
-    def test_the_instrumentation_block_carries_exactly_the_payloads_keys(self) -> None:
-        """The ``perf`` sub-object is its own shape."""
-        published = _published(self.rage, "perf")
-        self.assertEqual(set(protocol.RagePerfDict.__annotations__), published)
-
     def test_the_aim_answer_carries_exactly_the_payloads_keys(self) -> None:
         """``AimResult`` is the ``aim`` command's answer, key for key."""
         published = _published(self.aim, "payload")

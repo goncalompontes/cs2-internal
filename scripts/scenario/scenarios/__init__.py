@@ -11,7 +11,7 @@ from typing import Any, Callable
 from . import (anti_aim, animfix, autostrafe, bhop, bot_match, game_events, join_bot_match,
                move_and_aim, move_to, movement_probe, screens, status, strafe_probe,
                subtick_aim, subtick_move, subtick_shot, usercmd_move, aim_probe, aim_shot,
-               rage, heatmap)
+               rage)
 
 #: The shape of a built-in scenario: ``run(game, **kwargs) -> dict``.
 #:
@@ -43,7 +43,6 @@ SCENARIOS: dict[str, Scenario] = {
     "aim-probe": aim_probe.run,
     "aim-shot": aim_shot.run,
     "rage": rage.run,
-    "heatmap": heatmap.run,
 }
 
 __all__ = ["SCENARIOS", "Scenario"]

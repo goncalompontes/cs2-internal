@@ -446,34 +446,6 @@ void on_snapshot(void* context, const cs2::game::Snapshot& snapshot) noexcept {
   runtime->chams.update(snapshot);
 }
 
-// The overlay HUD asks for the ragebot's one-line status while it is enabled.
-auto on_rage_status(void* context, char* out, std::size_t size) noexcept -> bool {
-  return static_cast<Runtime*>(context)->control.rage_status(out, size);
-}
-
-// The overlay HUD asks for the movement features' one-line status (the
-// auto-strafe's gain and the sub-tick view-angle gate verdict).
-auto on_movement_status(void* context, char* out, std::size_t size) noexcept -> bool {
-  return static_cast<Runtime*>(context)->control.movement_status(out, size);
-}
-
-// The overlay HUD asks for the **chams'** one-line status: whether the scene
-// system's draw hook is installed, the draws it saw, the draws it drew with
-// the chams' material, the draws it skipped, and — when the hook is not
-// installed — the reason it is not.
-//
-// The line is only produced while the chams are on: with the feature off
-// nothing is patched, and there is nothing to report.
-auto on_chams_status(void* context, char* out, std::size_t size) noexcept -> bool {
-  auto* runtime = static_cast<Runtime*>(context);
-  if (out == nullptr || size == 0 || !runtime->chams.enabled()) {
-    return false;
-  }
-  // The line is written straight into the caller's buffer: this runs on the
-  // game's render thread, once per frame, and it must not allocate there.
-  return runtime->chams.status_line(out, size);
-}
-
 // The overlay's hitbox visualiser asks the payload for a pawn's real studio
 // hitbox capsules (`docs/re/aim.md`).
 auto on_hitboxes(void* context, std::uintptr_t pawn, cs2::game::HitboxCapsule* out,
@@ -484,11 +456,6 @@ auto on_hitboxes(void* context, std::uintptr_t pawn, cs2::game::HitboxCapsule* o
 // The overlay highlights the ragebot's current target.
 auto on_rage_target(void* context) noexcept -> int {
   return static_cast<Runtime*>(context)->control.rage_target_index();
-}
-
-// The overlay asks for the bhop prediction's position to draw the demo box.
-auto on_predicted_origin(void* context, float out[3]) noexcept -> bool {
-  return static_cast<Runtime*>(context)->control.predicted_origin(out);
 }
 
 // The ESP's sound provider: the control module's sound events, mapped onto
@@ -596,17 +563,9 @@ DWORD WINAPI install_thread(void*) {
     cs2::payload::runtime().overlay.set_local_pawn_sink(&on_local_pawn,
                                                         &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_snapshot_sink(&on_snapshot, &cs2::payload::runtime());
-    cs2::payload::runtime().overlay.set_rage_status_provider(&on_rage_status,
-                                                             &cs2::payload::runtime());
-    cs2::payload::runtime().overlay.set_movement_status_provider(&on_movement_status,
-                                                                 &cs2::payload::runtime());
-    cs2::payload::runtime().overlay.set_chams_status_provider(&on_chams_status,
-                                                               &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_hitbox_provider(&on_hitboxes, &cs2::payload::runtime());
     cs2::payload::runtime().overlay.set_rage_target_provider(&on_rage_target,
                                                              &cs2::payload::runtime());
-    cs2::payload::runtime().overlay.set_predicted_origin_provider(&on_predicted_origin,
-                                                                  &cs2::payload::runtime());
   }
   // The ESP's sound and visibility providers: the data lives in the control
   // module, which the features module cannot depend on, so the features

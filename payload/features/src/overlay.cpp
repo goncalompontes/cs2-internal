@@ -468,55 +468,9 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
   if (!game_active_) {
     return model_;
   }
-  model_.hud.sections.push_back(local_section(snapshot));
-  model_.hud.sections.push_back(players_section(snapshot));
-  if (rage_status_provider_ != nullptr) {
-    // The status line's buffer. **192 bytes**, not 128: the line carries the
-    // objective's name, the Monte-Carlo's marker (its measured probability or
-    // its refusal) and the two occlusion markers, and a 128-byte buffer cut
-    // the last of them off. The buffer is on the **stack** — the render thread
-    // must not allocate.
-    char status[192] = {};
-    if (rage_status_provider_(rage_status_context_, status, sizeof(status))) {
-      render::HudSection section;
-      section.title = "rage";
-      section.lines.push_back(render::HudLine{.label = "state", .value = status});
-      model_.hud.sections.push_back(std::move(section));
-    }
-  }
-  // The movement features (the auto-strafe and the bhop): the gain of the last
-  // airtime and whether the engine applied the strafe's basis rotation. The
-  // second is the **gate** — a server that ignores the sub-tick view angles
-  // makes the silent encoding inert, and the operator has to see it
-  // (`docs/re/strafing.md` §"The gate").
-  if (movement_status_provider_ != nullptr) {
-    char status[160] = {};
-    if (movement_status_provider_(movement_status_context_, status, sizeof(status))) {
-      render::HudSection section;
-      section.title = "movement";
-      section.lines.push_back(render::HudLine{.label = "state", .value = status});
-      model_.hud.sections.push_back(std::move(section));
-    }
-  }
-  // The 3D chams: whether the scene system's draw hook is installed, the
-  // draws it saw, the draws it drew with the chams' material, the draws it
-  // skipped — and, when the hook is not installed, the reason (no offset, no
-  // module, a prologue mismatch, a refused patch).
-  char chams_status[192] = {};
-  const bool chams_known = chams_status_provider_ != nullptr &&
-                           chams_status_provider_(chams_status_context_, chams_status,
-                                                  sizeof(chams_status));
-  if (chams_known) {
-    render::HudSection section;
-    section.title = "chams";
-    section.lines.push_back(render::HudLine{.label = "state", .value = chams_status});
-    model_.hud.sections.push_back(std::move(section));
-  }
-
   // ESP (screen-space draw list).
   const game::Matrix4x4 view = reader_->view_matrix(0);
-  EspStats esp_stats;
-  esp_.build(snapshot, view, screen_width, screen_height, model_.draw, &esp_stats);
+  esp_.build(snapshot, view, screen_width, screen_height, model_.draw);
 
   // The real studio hitboxes of each live enemy (and of the ragebot's current
   // target) as screen-space capsules (`docs/re/aim.md`). Opt-in from the menu.
@@ -558,53 +512,6 @@ auto Overlay::update(float screen_width, float screen_height) -> const render::O
     }
   }
 
-  // The bhop prediction's current position, drawn as a box — a live demonstration
-  // that the engine simulation is running (docs/re/prediction.md).
-  if (predicted_origin_provider_ != nullptr) {
-    float predicted[3] = {0.0F, 0.0F, 0.0F};
-    if (predicted_origin_provider_(predicted_origin_context_, predicted)) {
-      const game::Vec3 centre{.x = predicted[0], .y = predicted[1], .z = predicted[2] + 36.0F};
-      const auto screen = view.project(centre, screen_width, screen_height);
-      if (screen.has_value()) {
-        constexpr render::Color k_predicted{.r = 0, .g = 255, .b = 255, .a = 235};
-        model_.draw.outline(screen->x - 18.0F, screen->y - 38.0F, screen->x + 18.0F,
-                            screen->y + 38.0F, k_predicted, 2.0F);
-        model_.draw.text(screen->x, screen->y - 52.0F, k_predicted, "PRED", true, true);
-      }
-    }
-  }
-
-  // Periodic compact state dump, so the data is verifiable without the overlay.
-  if (now == 0 || now - last_log_ms_ >= 2000) {
-    last_log_ms_ = now;
-    std::string summary = "[state] local=";
-    if (snapshot.local.has_value()) {
-      const game::PlayerSnapshot& p = *snapshot.local;
-      summary += p.name.empty() ? "(unknown)" : p.name;
-      summary += " team=" + team_name(p.team);
-      summary += " hp=" + format_long(p.health) + "/" + format_long(p.max_health);
-      summary += " armor=" + format_long(p.armor);
-      summary += " weapon=" + (p.weapon.empty() ? std::string("?") : p.weapon);
-      summary += " ammo=" + format_long(p.clip) + "/" + format_long(p.reserve);
-      summary += " pos=" + format_vec3(p.origin);
-      summary += " eye=" + format_vec3(p.eye_origin);
-      summary += " vel=" + format_vec3(p.velocity);
-      summary += " ang=" + format_angle(p.eye_angles);
-    } else {
-      summary += "(none)";
-    }
-    summary += " players=" + format_long(static_cast<long long>(snapshot.players.size()));
-    summary += " wh=" + format_long(static_cast<long long>(screen_width)) + "x" +
-               format_long(static_cast<long long>(screen_height));
-    summary += " esp=" + format_long(static_cast<long long>(model_.draw.commands.size()));
-    summary += " drawn=" + format_long(esp_stats.drawn);
-    // The chams: the hook's state and its counters, so the feature is
-    // verifiable without the overlay.
-    if (chams_known) {
-      summary += " chams=" + std::string(chams_status);
-    }
-    game::append_log(summary);
-  }
   return model_;
 }
 

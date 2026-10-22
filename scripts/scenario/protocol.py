@@ -81,7 +81,6 @@ __all__ = [
     "PressResult",
     "ProtocolError",
     "RageMode",
-    "RagePerfDict",
     "RageResult",
     "ReleaseResult",
     "RulesSnapshotDict",
@@ -763,31 +762,6 @@ class AimResult(TypedDict):
     mc_fallback: bool
 
 
-class RagePerfDict(TypedDict, total=False):
-    """The ragebot's instrumentation (``Service::do_rage``'s ``perf``)."""
-
-    frames: int
-    snapshot_frames: int
-    total_us: float
-    last_us: float
-    max_us: float
-    sample_us: float
-    query_us: float
-    build_us: float
-    project_us: float
-    solve_us: float
-    backtrack_us: float
-    solve_project_us: float
-    solve_occlude_us: float
-    solve_argmax_us: float
-    solve_calls: int
-    candidates: int
-    hitboxes: int
-    occluders: int
-    poses: int
-    cells: int
-
-
 class RageResult(TypedDict, total=False):
     """The hold-key ragebot's state (``Service::do_rage``).
 
@@ -903,7 +877,6 @@ class RageResult(TypedDict, total=False):
     per_weapon: bool
     weapon: str
     profiles: int
-    perf: RagePerfDict
 
 
 class BasisDict(TypedDict):

@@ -129,50 +129,12 @@ constexpr std::uint64_t k_sound_max_age_ms = 1000;
 // few times a second — never per frame.
 constexpr std::uint64_t k_visibility_interval_ms = 250;
 
-// The trace probe (`docs/re/bullet-trace.md`): the ray's length when the caller
-// gives none and the weapon's range cannot be read (the engine's own trace
-// length is the weapon's `m_flRange`), and how long the control thread waits
-// for the game thread's answer.
-//
-// The fallback is 8192 units — the engine's own maximum trace length — so a probe
-// without a readable weapon still asks the engine the whole segment. The wait is
-// two seconds: the game thread answers within a tick, and the control thread
-// serves the pipe (a probe that cannot be served must not block it for long).
-constexpr float k_trace_probe_default_depth = 8192.0F;
-constexpr std::uint64_t k_trace_probe_timeout_ms = 2000;
-// `CCSWeaponBaseVData::m_flRange` (`docs/re/bullet-trace.md` — the shot's trace
-// length).
-constexpr std::uintptr_t k_vdata_range = 0x830;
-
-// Microsecond wall clock for the ragebot instrumentation (`docs/ragebot-perf.md`).
+// Microsecond wall clock (the fire path uses it for its press interval).
 auto now_us() noexcept -> std::uint64_t {
   return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
                                         std::chrono::steady_clock::now().time_since_epoch())
                                         .count());
 }
-
-// Adds the scope's elapsed microseconds to `total` and keeps the running maximum in
-// `max_value` (a lock-free CAS). Used to time one rage-path frame across all its
-// early returns.
-struct FrameScope {
-  std::atomic<std::uint64_t>* total = nullptr;
-  std::atomic<std::uint64_t>* last = nullptr;
-  std::atomic<std::uint64_t>* max_value = nullptr;
-  std::uint64_t start = 0;
-
-  FrameScope(std::atomic<std::uint64_t>& total_ref, std::atomic<std::uint64_t>& last_ref,
-             std::atomic<std::uint64_t>& max_ref) noexcept
-      : total(&total_ref), last(&last_ref), max_value(&max_ref), start(now_us()) {}
-  ~FrameScope() {
-    const std::uint64_t elapsed = now_us() - start;
-    total->fetch_add(elapsed, std::memory_order_relaxed);
-    last->store(elapsed, std::memory_order_relaxed);
-    std::uint64_t previous = max_value->load(std::memory_order_relaxed);
-    while (elapsed > previous &&
-           !max_value->compare_exchange_weak(previous, elapsed, std::memory_order_relaxed)) {
-    }
-  }
-};
 
 }  // namespace
 
@@ -390,10 +352,7 @@ auto Service::dispatch_command(std::string_view command, const Json& arguments,
     do_rage(arguments, out);
   } else if (command == "trigger") {
     do_trigger(arguments, out);
-  } else if (command == "heatmap") {
-    do_heatmap(arguments, out);
-  } else if (command == "trace_probe") {
-    do_trace_probe(arguments, out);
+
   } else if (command == "predict") {
     do_predict(arguments, out);
   } else if (command == "settings") {
@@ -2081,64 +2040,6 @@ void Service::on_game_thread() noexcept {
     occlusion_stats_ = query.stats;
   }
 
-  // The trace probe: the engine's own answer for a ray. The call runs **here**
-  // (a game thread): an engine call that reaches tier0's allocator faults on the
-  // payload's own thread (`docs/handoff.md`). The control thread armed the
-  // request and waits for the answer.
-  //
-  // The probe's work is bounded (8 rays, a fixed interval buffer, a capped number
-  // of projections — `occlusion_query.hpp`) and it runs **once per command**, not
-  // per tick. It does not parse the world body: the probe **refuses** to answer
-  // while the world's cache is cold (`occlusion_world_cache_ready`), because
-  // parsing 10k brush shapes inside the input hook is the one thing that could
-  // stall the game — and because our own answer would be empty anyway. The
-  // refusal is published (`engine.refused` / `engine.refusal_reason`), so the
-  // operator can warm the cache (the heatmap, or the ragebot's own enumeration)
-  // and run it again.
-  if (trace_probe_armed_.exchange(false, std::memory_order_acq_rel)) {
-    std::vector<TraceRay> rays;
-    TraceAbi abi = TraceAbi::correct;
-    {
-      const std::scoped_lock lock(trace_probe_mutex_);
-      rays = trace_probe_rays_;
-      abi = trace_probe_abi_;
-    }
-    // The players are targets, not occluders: the probe excludes them itself, so
-    // its answer never depends on the solver having run first in this tick. The
-    // enumeration drops a player two ways — its handle index and its entity
-    // pointer — so both lists are built here.
-    std::uint16_t handles[k_max_occlusion_exclude] = {};
-    std::uintptr_t entities[k_max_occlusion_exclude] = {};
-    int exclude_count = 0;
-    {
-      game::Snapshot snapshot;
-      bool have_snapshot = false;
-      {
-        const std::scoped_lock lock(snapshot_mutex_);
-        snapshot = last_snapshot_;
-        have_snapshot = have_snapshot_.load(std::memory_order_relaxed);
-      }
-      if (have_snapshot) {
-        for (const game::PlayerSnapshot& player : snapshot.players) {
-          if (exclude_count >= k_max_occlusion_exclude || player.pawn == 0 || player.index < 0) {
-            continue;
-          }
-          handles[exclude_count] = static_cast<std::uint16_t>(player.index & 0x7fff);
-          entities[exclude_count] = player.pawn;
-          ++exclude_count;
-        }
-      }
-    }
-    const TraceExclude exclude{.handles = handles,
-                               .handle_count = exclude_count,
-                               .entities = entities,
-                               .entity_count = exclude_count};
-    TraceProbeRun probe = probe_trace(rays, true, abi, exclude);
-    const std::scoped_lock lock(trace_probe_mutex_);
-    trace_probe_run_ = std::move(probe);
-    trace_probe_done_ = true;
-  }
-
   // The ESP's visibility: the per-player states, derived from the solids the
   // enumeration just produced. The render thread only ever reads the cache.
   if (visibility_enabled_.load(std::memory_order_relaxed) &&
@@ -2237,25 +2138,20 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
       ++sound_player_count_;
     }
   }
-  perf_.snapshot_frames.fetch_add(1, std::memory_order_relaxed);
   const bool rage_requested = rage_enabled_.load() || rage_force_.load();
   // Lag-record sampling is the heatmap's history and the backtrack poses. With backtrack
   // disabled (the default) and no heatmap asking for it, skip the walk entirely: it was
   // ~0.6 ms/tick on the render thread for records nothing consumed.
-  const bool want_records = heatmap_sampling_.load() || occlusion_live_.load() ||
+  const bool want_records = occlusion_live_.load() ||
                             (rage_requested && rage_backtrack_.load());
   if (want_records) {
-    const std::uint64_t t = now_us();
     sample_records(snapshot);
-    perf_.sample_us.fetch_add(now_us() - t, std::memory_order_relaxed);
   }
   // The occlusion enumeration must run on a game thread (tier0 TLS) — this only builds
   // the query box and requests it; `on_game_thread` runs the engine query.
   if (occlusion_live_.load() || rage_requested) {
     occlusion_invoke_.store(true);
-    const std::uint64_t t = now_us();
     cache_occlusion_targets(snapshot);
-    perf_.query_us.fetch_add(now_us() - t, std::memory_order_relaxed);
   }
   // The ESP's visibility: the world-occlusion enumeration behind it is the
   // ragebot's (measured at ~1 ms, and worse at dense spots), so it is
@@ -2285,8 +2181,6 @@ auto Service::read_monte_carlo() const noexcept -> MonteCarloState {
 
 void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // Ragebot instrumentation (`docs/ragebot-perf.md`): time the whole solve and each stage.
-  perf_.frames.fetch_add(1, std::memory_order_relaxed);
-  const FrameScope frame_scope(perf_.total_us, perf_.last_total_us, perf_.max_total_us);
   // The Monte-Carlo verdict is **cleared first**: every early return below
   // (no target, not engaged, no hitbox, ...) must not leave the previous
   // tick's verdict on the status, or the operator reads a stale number under
@@ -2476,9 +2370,6 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
         multi->hitboxes.insert(multi->hitboxes.end(), in->hitboxes.begin(), in->hitboxes.end());
       }
     }
-    perf_.build_us.fetch_add(now_us() - t, std::memory_order_relaxed);
-    perf_.candidates.store(static_cast<std::uint32_t>(candidates.size()),
-                           std::memory_order_relaxed);
   }
   if (!multi.has_value() || multi->hitboxes.empty()) {
     input_.clear_rage_aim_keep_aux();
@@ -2540,7 +2431,6 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
         solve_input->occlusion.push_back(std::move(*cell));
       }
     }
-    perf_.project_us.fetch_add(now_us() - t_project, std::memory_order_relaxed);
   }
   // Temporary occlusion work bound (`PenetrationParams::max_occluders`). If this
   // truncates a hitbox's candidates, `solve` fails closed; it never commits the partial
@@ -2628,15 +2518,8 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   aim::SolveStats solve_stats;
   const std::uint64_t t_solve = now_us();
   const aim::SolveResult multi_result = aim::solve(*solve_input, &solve_stats);
-  perf_.solve_us.fetch_add(now_us() - t_solve, std::memory_order_relaxed);
   // Aggregate the solve breakdown here (not after the backtrack) so a gated/early-return
   // frame still attributes its cost.
-  perf_.solve_calls.fetch_add(solve_stats.solves, std::memory_order_relaxed);
-  perf_.solve_project_us.fetch_add(solve_stats.project_us, std::memory_order_relaxed);
-  perf_.solve_occlude_us.fetch_add(solve_stats.occlude_us, std::memory_order_relaxed);
-  perf_.solve_argmax_us.fetch_add(solve_stats.argmax_us, std::memory_order_relaxed);
-  perf_.hitboxes.store(solve_stats.hitboxes, std::memory_order_relaxed);
-  perf_.cells.store(solve_stats.cells, std::memory_order_relaxed);
   rage_occlusion_candidates_complete_.store(multi_result.occlusion_candidates_complete,
                                             std::memory_order_relaxed);
   if (!multi_result.valid) {
@@ -2673,16 +2556,8 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // objective search), so a slow position was multiplied by the pose count. When the last
   // tick already blew the budget, this tick scores the live pose only — the aim is still
   // correct, just without the lag-comp candidate that tick (`docs/ragebot-perf.md` §3.9).
-  constexpr std::uint64_t k_backtrack_budget_us = 12000;
-  const bool allow_backtrack =
-      rage_backtrack_.load() &&
-      perf_.last_total_us.load(std::memory_order_relaxed) <= k_backtrack_budget_us;
-  // The operator sees the backtrack counter stop incrementing and needs to
-  // know **why**: the frame had already blown the guard.
-  rage_backtrack_over_budget_.store(
-      rage_backtrack_.load() &&
-          perf_.last_total_us.load(std::memory_order_relaxed) > k_backtrack_budget_us,
-      std::memory_order_relaxed);
+  const bool allow_backtrack = rage_backtrack_.load();
+
   if (allow_backtrack) {
     const std::scoped_lock lock(records_mutex_);
     const std::int32_t newest =
@@ -2727,11 +2602,6 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     const std::uint64_t t_backtrack = now_us();
     const aim::BacktrackResult backtrack =
         aim::solve_backtrack(*solve_input, poses, &backtrack_stats);
-    perf_.backtrack_us.fetch_add(now_us() - t_backtrack, std::memory_order_relaxed);
-    perf_.solve_calls.fetch_add(backtrack_stats.solves, std::memory_order_relaxed);
-    perf_.solve_project_us.fetch_add(backtrack_stats.project_us, std::memory_order_relaxed);
-    perf_.solve_occlude_us.fetch_add(backtrack_stats.occlude_us, std::memory_order_relaxed);
-    perf_.solve_argmax_us.fetch_add(backtrack_stats.argmax_us, std::memory_order_relaxed);
     rage_occlusion_candidates_complete_.store(backtrack.occlusion_candidates_complete,
                                               std::memory_order_relaxed);
     if (!backtrack.valid) {
@@ -2748,9 +2618,6 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     // (`docs/ragebot-perf.md` §3.9).
     result = multi_result;
   }
-  perf_.occluders.store(static_cast<std::uint32_t>(solve_input->occlusion.size()),
-                        std::memory_order_relaxed);
-  perf_.poses.store(static_cast<std::uint32_t>(poses.size()), std::memory_order_relaxed);
 
   // The Monte-Carlo objective's verdict, published for the status. The solve
   // runs on the game thread and the status is read on the control **and** the
@@ -2813,38 +2680,7 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   }
   rage_solves_.fetch_add(1);
 
-  // Periodic instrumentation line (`docs/ragebot-perf.md`): the average and worst
-  // whole-frame cost and the stage split, so a live session leaves a performance
-  // trace in the payload log (the `rage` command reports the same numbers).
-  const std::uint64_t perf_frames = perf_.frames.load(std::memory_order_relaxed);
-  if (perf_frames != 0 && perf_frames % 256 == 0) {
-    const auto avg = [perf_frames](const std::atomic<std::uint64_t>& acc) -> unsigned long long {
-      return static_cast<unsigned long long>(acc.load(std::memory_order_relaxed) / perf_frames);
-    };
-    const std::uint64_t perf_snapshots = perf_.snapshot_frames.load(std::memory_order_relaxed);
-    const auto avg_snap =
-        [perf_snapshots](const std::atomic<std::uint64_t>& acc) -> unsigned long long {
-      return (perf_snapshots != 0 ? acc.load(std::memory_order_relaxed) / perf_snapshots : 0);
-    };
-    char line[400];
-    std::snprintf(
-        line, sizeof(line),
-        "[rage-perf] frames=%llu total avg=%llu max=%lluus | solve=%llu (proj=%llu occ=%llu "
-        "argmax=%llu) back=%llu build=%llu proj=%llu query=%llu sample=%llu us | calls=%llu "
-        "cand=%u "
-        "hb=%u occ=%u poses=%u cells=%u",
-        static_cast<unsigned long long>(perf_frames), avg(perf_.total_us),
-        static_cast<unsigned long long>(perf_.max_total_us.load(std::memory_order_relaxed)),
-        avg(perf_.solve_us), avg(perf_.solve_project_us), avg(perf_.solve_occlude_us),
-        avg(perf_.solve_argmax_us), avg(perf_.backtrack_us), avg(perf_.build_us),
-        avg(perf_.project_us), avg_snap(perf_.query_us), avg_snap(perf_.sample_us),
-        static_cast<unsigned long long>(perf_.solve_calls.load(std::memory_order_relaxed)),
-        perf_.candidates.load(std::memory_order_relaxed),
-        perf_.hitboxes.load(std::memory_order_relaxed),
-        perf_.occluders.load(std::memory_order_relaxed),
-        perf_.poses.load(std::memory_order_relaxed), perf_.cells.load(std::memory_order_relaxed));
-    cs2::game::append_log(line);
-  }
+
 }
 
 void Service::read_weapon_fire_state(const game::PlayerSnapshot& local,
@@ -3015,132 +2851,6 @@ auto Service::read_hitboxes(std::uintptr_t pawn, game::HitboxCapsule* out, int m
     ++count;
   }
   return count;
-}
-
-auto Service::rage_status(char* out, std::size_t size) const noexcept -> bool {
-  if ((!rage_enabled_.load() && !rage_force_.load()) || out == nullptr || size == 0) {
-    return false;
-  }
-  const int target = input_.rage_target();
-  // The objective **by name**: the operator has to be able to tell the
-  // Monte-Carlo objective from the others at a glance, and the numbers mean
-  // different things under each (`docs/ragebot.md` section 13.7).
-  //
-  // **The name is copied into a stack buffer**: this line is written on the
-  // render thread (the overlay's per-frame sink), and a heap allocation there
-  // is the defect the chams' status line was written to avoid.
-  char objective[16] = {};
-  {
-    const std::string_view name = objective_name_for(rage_objective_.load());
-    // **Not `std::min`**: `<windows.h>` defines `min` and `max` as macros, so
-    // `std::min` does not survive it.
-    const std::size_t limit = sizeof(objective) - 1;
-    const std::size_t length = name.size() < limit ? name.size() : limit;
-    std::memcpy(objective, name.data(), length);
-    objective[length] = '\0';
-  }
-  // **The Monte-Carlo's marker** (`docs/ragebot.md` §13.7): the measured
-  // probability, or the **refusal**.
-  //
-  // §2.4: a fallback to another objective must **never** be silent, and the
-  // HUD is where the operator actually looks — the control channel's JSON is
-  // where the operator *reads*. So the refusal reaches the line too.
-  //
-  // **Stack buffer, no heap**: this line is built on the render thread.
-  char mc[16] = {};
-  {
-    const MonteCarloState state = read_monte_carlo();
-    if (state.valid) {
-      const int percent = static_cast<int>(state.probability * 100.0F + 0.5F);
-      std::snprintf(mc, sizeof(mc), " mc%d%%", percent);
-    } else if (state.refusal >= 0) {
-      std::snprintf(mc, sizeof(mc), " mc-refused");
-    }
-  }
-  // The line's tail carries the two occlusion markers, and they are the first
-  // things the 128-byte buffer truncates — so the record and the occluder
-  // count (both in the `rage` command's JSON status) are left out to make
-  // room for the Monte-Carlo's marker.
-  //
-  // The **fire path**'s facts are on the line too (`docs/ragebot.md`
-  // §"the fire path"): the weapon's fire mode as the payload reads it ("auto",
-  // "semi", "unknown"), whether the fire path can shoot right now and — when
-  // it cannot — **which condition blocked it**, and the counters (the
-  // **engine's** shots, the ragebot's presses and the release->re-press
-  // edges).
-  //
-  // The line's **format** lives in `strafe_geometry.hpp` (`format_rage_status`)
-  // so the host test can drive every field to its longest and measure the
-  // result against the HUD's 192-byte buffer. The diagnostics that do not fit
-  // there — the aim **writes** and the **backtracks** — are in the `rage`
-  // command's JSON, and the `fire` toggle is not on the line at all: the
-  // refusal says "fire-off" when the fire path is disabled.
-  const RageStatusFields fields{
-      .aim = input_.rage_active() ? "AIM" : "hold",
-      .target = target,
-      .hitbox = input_.rage_hitbox(),
-      .objective = objective,
-      .monte_carlo = mc,
-      .shots = rage_shots_.load(std::memory_order_relaxed),
-      .presses = rage_presses_.load(std::memory_order_relaxed),
-      .edges = rage_edges_.load(std::memory_order_relaxed),
-      .fire_mode =
-          fire_mode_name(static_cast<FireMode>(rage_fire_mode_.load(std::memory_order_relaxed))),
-      .fire_refusal = fire_refusal_name(
-          static_cast<FireRefusal>(rage_refusal_.load(std::memory_order_relaxed))),
-      .stop = input_.rage_stop() ? " stop" : "",
-      .occlusion_query =
-          rage_occlusion_query_complete_.load(std::memory_order_relaxed) ? "" : " occ-inc",
-      .occlusion_candidates =
-          rage_occlusion_candidates_complete_.load(std::memory_order_relaxed) ? "" : " occ-cap",
-      .player_attack = player_press_marker(input_.rage_player_press()),
-  };
-  // The line's length: the format is the pure function's, and the host test
-  // measures the **worst** case against the HUD's 192-byte buffer
-  // (`docs/ragebot.md` §"the fire path").
-  const std::size_t written = format_rage_status(fields, out, size);
-  // The line is produced even when it does not fit: the caller draws what
-  // fits, and the format is sized so that it always does.
-  return written > 0;
-}
-
-// --- The ESP's out-of-module data providers --------------------------------
-
-auto Service::movement_status(char* out, std::size_t size) const noexcept -> bool {
-  if (out == nullptr || size == 0) {
-    return false;
-  }
-  const bool strafe = input_.strafe();
-  const bool bhop = input_.bhop();
-  if (!strafe && !bhop) {
-    return false;
-  }
-  // The two numbers that answer "does the movement accelerate?": the **gain**
-  // of the last airtime (u/s; the working encoding gains ~+85) and whether the
-  // engine applied the basis rotation. The second is the **gate**: a server
-  // that ignores the sub-tick view angles makes the silent encoding inert, and
-  // the operator has to see that instead of guessing
-  // (`docs/re/strafing.md` §"The gate").
-  const int subticks = input_.strafe_subticks();
-  // The steering verdict, with the three states it really has: the engine
-  // applied the rotation ("yes"), it ignored it ("no (ignored)"), or nothing
-  // has been judged yet ("?" — the player has not been airborne). The verdict
-  // is the **ratio** of the counters, not the last judged tick: one noisy tick
-  // (a wall, a landing) flips the last verdict, and the counters do not. The
-  // counters cover the **current airtime** — a later phase (a fall down a
-  // wall) must not poison the verdict of the airtime that worked.
-  const std::uint64_t followed = input_.strafe_steered_ticks();
-  const std::uint64_t ignored = input_.strafe_ignored();
-  const std::uint64_t judged = followed + ignored;
-  const char* steering = judged == 0 ? "?" : (ignored * 2 > judged ? "no" : "yes");
-  const char* ignored_note = (judged != 0 && ignored * 2 > judged) ? " (ignored)" : "";
-  std::snprintf(out, size,
-                "strafe %s (%d slice%s, gain %+.0f u/s, steering %s%s, turn "
-                "%+.1f deg) bhop %s (presses %llu)",
-                strafe ? "on" : "off", subticks, subticks == 1 ? "" : "s", input_.strafe_gain(),
-                steering, ignored_note, input_.strafe_turn(), bhop ? "on" : "off",
-                static_cast<unsigned long long>(input_.bhop_presses()));
-  return true;
 }
 
 void Service::ensure_sound_subscription() noexcept {
@@ -3975,46 +3685,6 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
     payload.set("weapon", Json::string(std::string(rage_weapon_)));
     payload.set("profiles", Json::number(static_cast<double>(rage_profiles_.count)));
   }
-  // The instrumentation (`docs/ragebot-perf.md`): averages since process start
-  // (`*_us`), the last frame's cost, the worst frame, and the last frame's counts. A
-  // high `backtrack_us` with `poses` ≫ 1 points at the per-pose solve; a high
-  // `argmax`/`solve_us` with large `cells` points at the field's objective search.
-  {
-    const std::uint64_t frames = perf_.frames.load(std::memory_order_relaxed);
-    const std::uint64_t snapshots = perf_.snapshot_frames.load(std::memory_order_relaxed);
-    const auto avg_us = [frames](const std::atomic<std::uint64_t>& acc) -> double {
-      return frames != 0 ? static_cast<double>(acc.load(std::memory_order_relaxed)) /
-                               static_cast<double>(frames)
-                         : 0.0;
-    };
-    const auto avg_snapshot = [snapshots](const std::atomic<std::uint64_t>& acc) -> double {
-      return snapshots != 0 ? static_cast<double>(acc.load(std::memory_order_relaxed)) /
-                                  static_cast<double>(snapshots)
-                            : 0.0;
-    };
-    Json perf = Json::object();
-    perf.set("frames", Json::number(static_cast<double>(frames)));
-    perf.set("snapshot_frames", Json::number(static_cast<double>(snapshots)));
-    perf.set("total_us", Json::number(avg_us(perf_.total_us)));
-    perf.set("last_us", Json::number(static_cast<double>(perf_.last_total_us.load())));
-    perf.set("max_us", Json::number(static_cast<double>(perf_.max_total_us.load())));
-    perf.set("sample_us", Json::number(avg_snapshot(perf_.sample_us)));
-    perf.set("query_us", Json::number(avg_snapshot(perf_.query_us)));
-    perf.set("build_us", Json::number(avg_us(perf_.build_us)));
-    perf.set("project_us", Json::number(avg_us(perf_.project_us)));
-    perf.set("solve_us", Json::number(avg_us(perf_.solve_us)));
-    perf.set("backtrack_us", Json::number(avg_us(perf_.backtrack_us)));
-    perf.set("solve_project_us", Json::number(avg_us(perf_.solve_project_us)));
-    perf.set("solve_occlude_us", Json::number(avg_us(perf_.solve_occlude_us)));
-    perf.set("solve_argmax_us", Json::number(avg_us(perf_.solve_argmax_us)));
-    perf.set("solve_calls", Json::number(static_cast<double>(perf_.solve_calls.load())));
-    perf.set("candidates", Json::number(static_cast<double>(perf_.candidates.load())));
-    perf.set("hitboxes", Json::number(static_cast<double>(perf_.hitboxes.load())));
-    perf.set("occluders", Json::number(static_cast<double>(perf_.occluders.load())));
-    perf.set("poses", Json::number(static_cast<double>(perf_.poses.load())));
-    perf.set("cells", Json::number(static_cast<double>(perf_.cells.load())));
-    payload.set("perf", std::move(perf));
-  }
   set_ok(out, std::move(payload));
 }
 
@@ -4103,801 +3773,6 @@ void Service::do_trigger(const Json& args, Json& out) noexcept {
   // The press goes through the command backend, so the backend decides whether
   // it reaches the command at all (`docs/control-harness.md` §"Input backends").
   payload.set("backend", Json::string(Input::backend_name(input_.backend())));
-  set_ok(out, std::move(payload));
-}
-
-void Service::do_heatmap(const Json& args, Json& out) noexcept {
-  refresh_reader(true);
-  if (!reader_.has_value()) {
-    set_error(out, "heatmap unavailable: client.dll / entity system not ready");
-    return;
-  }
-  game::Snapshot snapshot = reader_->snapshot();
-  refresh_reader(snapshot.valid);
-  if (!snapshot.valid || !snapshot.local.has_value()) {
-    set_error(out, "heatmap unavailable: no local player");
-    return;
-  }
-  const game::PlayerSnapshot& local = *snapshot.local;
-
-  const auto number = [&](const char* key, float fallback) -> float {
-    const Json* value = args.find(key);
-    return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
-                                                  : fallback;
-  };
-  const auto integer = [&](const char* key, int fallback) -> int {
-    const Json* value = args.find(key);
-    return value != nullptr && value->is_number() ? static_cast<int>(value->as_number()) : fallback;
-  };
-  const auto flag = [&](const char* key) -> std::optional<bool> {
-    const Json* value = args.find(key);
-    if (value == nullptr || !value->is_bool()) {
-      return std::nullopt;
-    }
-    return value->as_bool();
-  };
-
-  if (const std::optional<bool> sample = flag("sample"); sample.has_value()) {
-    heatmap_sampling_.store(*sample);
-  }
-  if (const std::optional<bool> clear = flag("clear"); clear.has_value() && *clear) {
-    const std::scoped_lock lock(records_mutex_);
-    records_.clear();
-  }
-
-  aim::WeaponProfile weapon;
-  weapon.damage = number("damage", 100.0F);
-  weapon.range_modifier = number("range_modifier", 0.98F);
-  weapon.penetration = number("penetration", 1.0F);
-  weapon.headshot_multiplier = number("headshot", 4.0F);
-  const bool explicit_weapon =
-      args.find("damage") != nullptr || args.find("range_modifier") != nullptr ||
-      args.find("penetration") != nullptr || args.find("headshot") != nullptr;
-  if (!explicit_weapon) {
-    (void)aim::read_weapon_profile(local.weapon_vdata, weapon);
-  }
-
-  // The chart is the **absolute world yaw/pitch** of the eye→direction (docs/ragebot.md):
-  // a function of the world geometry only and never the camera, so the projected
-  // hitbox/occluder cells (and their values) do not move when the player looks around.
-  const game::Vec3 eye = local.eye_origin;
-  const aim::Basis basis = aim::Basis::world();
-
-  constexpr float k_deg_to_rad = 0.01745329251994329577F;
-  constexpr float k_pi = 3.14159265358979323846F;
-  // The **view window** (a render concern, not the computation): centred on the camera
-  // direction, `fov` degrees wide. The values are absolute; only the shown window moves
-  // with the camera. The camera direction in chart coords is (yaw, -pitch) — Source
-  // pitch is positive downwards.
-  const float fov = number("fov", 90.0F);
-  const float half_span = fov > 0.0F ? fov * 0.5F * k_deg_to_rad : k_pi;
-  const float extent = half_span < k_pi ? half_span : k_pi;
-  aim::Vec2 view{.x = local.eye_angles.yaw * k_deg_to_rad,
-                 .y = -local.eye_angles.pitch * k_deg_to_rad};
-  // The optional `target`: the view window is centred on the direction from
-  // the eye to that entity instead of on the camera. The **chart** itself
-  // stays the absolute world yaw/pitch field (the basis is unchanged), so the
-  // cell values do not move — only the window the chart is clipped to, and
-  // rendered through, does.
-  int view_target = -1;
-  if (const Json* value = args.find("target"); value != nullptr && value->is_number()) {
-    view_target = static_cast<int>(value->as_number());
-    const game::PlayerSnapshot* target = nullptr;
-    for (const game::PlayerSnapshot& player : snapshot.players) {
-      if (player.index == view_target) {
-        target = &player;
-        break;
-      }
-    }
-    if (target == nullptr) {
-      set_error(out, "heatmap: unknown target entity " + std::to_string(view_target));
-      return;
-    }
-    // The window is centred on the target's **body**, not on its eyes: the
-    // chart's cells are the hitboxes (the body), so a window centred on the
-    // eye is offset by the view height (~1.6 m) from what it should frame.
-    const game::Vec3 centre{(target->origin.x + target->eye_origin.x) * 0.5F,
-                            (target->origin.y + target->eye_origin.y) * 0.5F,
-                            (target->origin.z + target->eye_origin.z) * 0.5F};
-    const game::Vec3 delta = centre - eye;
-    const float length = std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
-    if (length <= 0.0F) {
-      set_error(out, "heatmap: target " + std::to_string(view_target) + " is at the eye");
-      return;
-    }
-    // The chart's coordinates: u = atan2(y, x), v = asin(z / |d|).
-    view.x = std::atan2(delta.y, delta.x);
-    view.y = std::asin(std::clamp(delta.z / length, -1.0F, 1.0F));
-  }
-  const int history = std::clamp(integer("history", 6), 0, 64);
-  const bool include_all = flag("all").value_or(false);
-  // The lag-comp window (`docs/re/lagcomp.md`): the rewind floor is measured from
-  // the local `m_nTickBase`; records at or below it are outside the window.
-  if (const Json* value = args.find("max_unlag"); value != nullptr && value->is_number()) {
-    lag_max_unlag_.store(static_cast<float>(value->as_number()));
-  }
-  if (const Json* value = args.find("interp"); value != nullptr && value->is_number()) {
-    lag_interp_.store(static_cast<float>(value->as_number()));
-  }
-  const float max_unlag = lag_max_unlag_.load();
-  const float interp = lag_interp_.load();
-  const std::int32_t tick_base = local.tick_base;
-  const std::int32_t floor_tick = aim::rewind_tick(tick_base, max_unlag, interp);
-
-  // Every live enemy's current pose (read outside the lock — the memory walk is
-  // slow and must not stall the render thread's sampling).
-  std::vector<aim::TargetPose> poses;
-  std::vector<const game::PlayerSnapshot*> targets;
-  for (const game::PlayerSnapshot& player : snapshot.players) {
-    if (player.is_local || !player.alive || player.pawn == 0) {
-      continue;
-    }
-    if (player.team != 2 && player.team != 3) {
-      continue;
-    }
-    if (!include_all && player.team == local.team) {
-      continue;  // enemies only unless `all`
-    }
-    std::vector<aim::Hitbox> hitboxes = aim::read_solver_hitboxes(player.pawn, weapon);
-    if (hitboxes.empty()) {
-      continue;
-    }
-    aim::TargetPose pose;
-    pose.target = player.index;
-    pose.record = -1;
-    pose.hitboxes = std::move(hitboxes);
-    poses.push_back(std::move(pose));
-    targets.push_back(&player);
-  }
-
-  // The sampled lag records, newest first, up to `history` per enemy. The store
-  // is already trimmed to the window; skip anything at or below the floor as a
-  // guard, and age the records against the current tick base.
-  std::vector<std::size_t> record_counts(targets.size(), 0);
-  {
-    const std::scoped_lock lock(records_mutex_);
-    const std::int32_t newest = tick_base > 0 ? tick_base : records_.newest_tick();
-    for (std::size_t i = 0; i < targets.size(); ++i) {
-      const std::vector<aim::Record>& ring = records_.records(targets[i]->pawn);
-      int taken = 0;
-      for (auto it = ring.rbegin(); it != ring.rend() && taken < history; ++it) {
-        if (tick_base > 0 && it->tick <= floor_tick) {
-          continue;  // outside the lag-comp window
-        }
-        aim::TargetPose pose;
-        pose.target = targets[i]->index;
-        pose.record = it->tick;
-        pose.age = static_cast<float>(newest - it->tick);
-        pose.hitboxes = it->hitboxes;
-        poses.push_back(std::move(pose));
-        ++taken;
-      }
-      record_counts[i] = static_cast<std::size_t>(taken);
-    }
-  }
-
-  aim::HeatmapOptions options;
-  options.weapon = weapon;
-
-  // The penetration model (docs/re/penetration.md): `pen` = "simple" keeps the
-  // first-pass approximation, "engine" applies the engine's real per-surface loss.
-  const bool engine_pen = [&]() -> bool {
-    const Json* value = args.find("pen");
-    return value != nullptr && value->is_string() && value->as_string() == "engine";
-  }();
-  options.penetration = engine_pen ? aim::PenetrationModel::engine : aim::PenetrationModel::simple;
-  options.penetration_params.weapon_penetration = weapon.penetration;
-  options.penetration_params.max_penetrations = std::clamp(integer("max_pen", 4), 0, 16);
-  // The per-surface modifiers (docs/re/penetration.md). The payload now reads each
-  // shape's real surface from the game (`occlusion_query.cpp`); these args override
-  // it when passed, for a sweep or a fallback when the surface read fails.
-  const bool have_pen_mod = args.find("pen_mod") != nullptr;
-  const bool have_dmg_mod = args.find("dmg_mod") != nullptr;
-  const bool have_material = args.find("material") != nullptr;
-  const bool have_grate = args.find("grate") != nullptr;
-  const float pen_mod = number("pen_mod", 1.0F);
-  const float dmg_mod = number("dmg_mod", 1.0F);
-  const int material = integer("material", -1);
-  const bool grate = flag("grate").value_or(false);
-
-  // Occlusion (docs/re/occlusion.md): enumerate the world solids between the eye
-  // and each target, project them into the chart, and let `build_heatmap` split the
-  // hitbox silhouettes and attenuate. No rays. Fault-guarded engine call.
-  OcclusionQueryStats walls_stats;
-  const bool walls = flag("walls").value_or(false);
-  const bool walls_call = flag("walls_call").value_or(false);
-  // Diagnostic (`docs/ragebot-perf.md` §2.1): `enum=box` forces the older single-AABB
-  // enumeration, so the pyramid's occluder set can be diffed against it at one instant.
-  if (const Json* mode = args.find("enum"); mode != nullptr && mode->is_string()) {
-    const std::string_view name = mode->as_string();
-    occlusion_enum_mode_.store(name == "box" ? 1 : (name == "both" ? 2 : 0));
-  }
-  occlusion_live_.store(walls);
-  occlusion_invoke_.store(walls_call);
-  std::vector<aim::Polygon>
-      occluder_polygons;  // projected silhouettes, parallel to options.occlusion
-  if (walls) {
-    input_.refresh();  // install the CreateMove hook (the game-thread query site)
-    // The solids were enumerated on the game thread; project the cached hulls.
-    const std::scoped_lock lock(occlusion_mutex_);
-    walls_stats = occlusion_stats_;
-    for (const OcclusionHull& hull : occlusion_hulls_) {
-      std::optional<aim::OccluderCell> cell;
-      if (hull.kind == aim::SolidKind::sphere) {
-        cell = aim::project_sphere_occluder(eye, basis, hull.a, hull.radius, hull.surface_modifier);
-      } else if (hull.kind == aim::SolidKind::capsule) {
-        cell = aim::project_capsule_occluder(eye, basis, hull.a, hull.b, hull.radius,
-                                             hull.surface_modifier);
-      } else if (hull.kind == aim::SolidKind::mesh) {
-        // A collision mesh (the map's large/merged wall surfaces) is a triangle
-        // soup; project its vertices as the silhouette and keep the triangles for
-        // the exact ray test (`docs/re/bullet-trace.md`).
-        cell = aim::project_mesh_occluder(eye, basis, hull.vertices, hull.triangles,
-                                          hull.surface_modifier, hull.mesh_bvh);
-      } else {
-        cell = aim::project_occluder(eye, basis, hull.vertices, hull.planes, hull.surface_modifier);
-      }
-      if (cell) {
-        // Clip to the view window (centred on the camera direction): near geometry
-        // projects far outside it, and the render is a camera-centred view of the
-        // absolute chart.
-        cell->polygon = aim::clip_to_view(cell->polygon, view, extent);
-        if (cell->polygon.empty()) {
-          continue;  // entirely outside the view — it cannot occlude a chart cell
-        }
-        // Keep the projected silhouette; the JSON reports only the solids that end up
-        // between the eye and a target (`map.used_occluders`, below), not every solid
-        // the enumeration box caught.
-        occluder_polygons.push_back(cell->polygon);
-        // The per-surface penetration properties (docs/re/penetration.md): the shape's
-        // real `CGameSurfaceProperties` read by `occlusion_query.cpp`, or the
-        // `pen_mod`/`dmg_mod`/`material`/`grate` args when passed.
-        if (have_pen_mod) {
-          cell->surface_modifier = pen_mod;
-        }
-        cell->damage_modifier = have_dmg_mod ? dmg_mod : hull.damage_modifier;
-        cell->material = have_material ? material : hull.material;
-        cell->grate = have_grate ? grate : hull.grate;
-        // Every enumerated solid is offered to the heat map; `build_heatmap` keeps
-        // only those the shot to a given hitbox actually reaches *before* the hitbox
-        // (`OccluderCell::ray_span`) — that per-cell depth test is what makes
-        // "between the eye and the hitbox" exact, with no bounding-box heuristic.
-        options.occlusion.push_back(std::move(*cell));
-      }
-    }
-  }
-
-  const aim::Heatmap map = aim::build_heatmap(eye, basis, extent, poses, options, view);
-
-  // Report only the solids that are actually **between the eye and a target** — the
-  // ones `build_heatmap` kept as candidates — so the render (and the JSON) do not show
-  // solids behind or beside the enemies that the enumeration box merely enclosed.
-  Json occluder_polys = Json::array();
-  for (const aim::OccluderCell* used : map.used_occluders) {
-    const auto index = static_cast<std::size_t>(used - options.occlusion.data());
-    if (index >= occluder_polygons.size()) {
-      continue;
-    }
-    Json poly = Json::array();
-    for (const aim::Vec2& p : occluder_polygons[index].points) {
-      Json point = Json::array();
-      point.push_back(Json::number(static_cast<double>(p.x)));
-      point.push_back(Json::number(static_cast<double>(p.y)));
-      poly.push_back(std::move(point));
-    }
-    occluder_polys.push_back(std::move(poly));
-  }
-
-  const auto vec3_json = [](const game::Vec3& v) -> Json {
-    Json item = Json::object();
-    item.set("x", Json::number(static_cast<double>(v.x)));
-    item.set("y", Json::number(static_cast<double>(v.y)));
-    item.set("z", Json::number(static_cast<double>(v.z)));
-    return item;
-  };
-
-  Json payload = Json::object();
-  payload.set("valid", Json::boolean(true));
-  payload.set("eye", vec3_json(eye));
-  Json basis_json = Json::object();
-  basis_json.set("forward", vec3_json(basis.forward));
-  basis_json.set("right", vec3_json(basis.right));
-  basis_json.set("up", vec3_json(basis.up));
-  payload.set("basis", std::move(basis_json));
-  payload.set("fov", Json::number(static_cast<double>(fov)));
-  payload.set("extent", Json::number(static_cast<double>(extent)));
-  // The camera direction in absolute chart coords (radians) — the render is centred on
-  // it; the chart data itself is absolute (docs/ragebot.md).
-  payload.set("view_yaw", Json::number(static_cast<double>(view.x)));
-  payload.set("view_pitch", Json::number(static_cast<double>(view.y)));
-  // The entity the view window is centred on (-1 = the camera).
-  payload.set("view_target", Json::integer(view_target));
-  Json weapon_json = Json::object();
-  weapon_json.set("damage", Json::number(static_cast<double>(weapon.damage)));
-  weapon_json.set("headshot", Json::number(static_cast<double>(weapon.headshot_multiplier)));
-  weapon_json.set("range_modifier", Json::number(static_cast<double>(weapon.range_modifier)));
-  weapon_json.set("penetration", Json::number(static_cast<double>(weapon.penetration)));
-  payload.set("weapon", std::move(weapon_json));
-  payload.set("sampling", Json::boolean(heatmap_sampling_.load()));
-  payload.set("history", Json::integer(static_cast<std::int64_t>(history)));
-  payload.set("capacity", Json::integer(static_cast<std::int64_t>(k_heatmap_capacity)));
-  // The lag-comp window the records were trimmed to (`docs/re/lagcomp.md`).
-  payload.set("tick_base", Json::integer(tick_base));
-  payload.set("rewind_tick", Json::integer(floor_tick));
-  payload.set("max_unlag", Json::number(static_cast<double>(max_unlag)));
-  payload.set("interp", Json::number(static_cast<double>(interp)));
-  payload.set("window_ticks", Json::integer(tick_base - floor_tick));
-
-  // Occlusion enumeration report (docs/re/occlusion.md): whether the engine query
-  // ran, how many solids came back, and how many made it into the chart.
-  const auto hex = [](std::uintptr_t value) -> std::string {
-    char buffer[24];
-    std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(value));
-    return std::string(buffer);
-  };
-
-  Json walls_json = Json::object();
-  walls_json.set("enabled", Json::boolean(walls));
-  walls_json.set("called", Json::boolean(walls_call));
-  walls_json.set("ok", Json::boolean(walls_stats.ok));
-  walls_json.set("faulted", Json::boolean(walls_stats.faulted));
-  walls_json.set("query_complete", Json::boolean(walls_stats.complete));
-  Json query_issues = Json::array();
-  constexpr struct {
-    OcclusionQueryIssue issue;
-    const char* name;
-  } k_query_issue_names[] = {
-      {.issue = OcclusionQueryIssue::not_invoked, .name = "not-invoked"},
-      {.issue = OcclusionQueryIssue::query_unavailable, .name = "query-unavailable"},
-      {.issue = OcclusionQueryIssue::query_fault, .name = "query-fault"},
-      {.issue = OcclusionQueryIssue::record_capacity, .name = "record-capacity"},
-      {.issue = OcclusionQueryIssue::record_scan_limit, .name = "record-scan-limit"},
-      {.issue = OcclusionQueryIssue::body_capacity, .name = "body-capacity"},
-      {.issue = OcclusionQueryIssue::parser_failure, .name = "parser-failure"},
-      {.issue = OcclusionQueryIssue::parser_limit, .name = "parser-limit"},
-      {.issue = OcclusionQueryIssue::mesh_cluster_limit, .name = "mesh-cluster-limit"},
-      {.issue = OcclusionQueryIssue::unsupported_compound, .name = "unsupported-compound"},
-      {.issue = OcclusionQueryIssue::occluder_capacity, .name = "occluder-capacity"},
-      {.issue = OcclusionQueryIssue::target_capacity, .name = "target-capacity"},
-      {.issue = OcclusionQueryIssue::surface_metadata, .name = "surface-metadata"},
-  };
-  for (const auto& entry : k_query_issue_names) {
-    const auto bit = static_cast<std::uint32_t>(entry.issue);
-    if ((walls_stats.incomplete_reasons & bit) != 0) {
-      query_issues.push_back(Json::string(entry.name));
-    }
-  }
-  walls_json.set("incomplete_reasons", std::move(query_issues));
-  walls_json.set("records", Json::integer(walls_stats.records));
-  walls_json.set("bodies", Json::integer(walls_stats.bodies));
-  walls_json.set("shapes", Json::integer(walls_stats.shapes));
-  walls_json.set("hulls", Json::integer(walls_stats.hulls));
-  Json type_counts = Json::array();
-  for (const int type_count : walls_stats.type_counts) {
-    type_counts.push_back(Json::integer(type_count));
-  }
-  walls_json.set("type_counts", std::move(type_counts));
-  walls_json.set("iface", Json::string(hex(walls_stats.iface)));
-  walls_json.set("world", Json::string(hex(walls_stats.world)));
-  walls_json.set("filter", Json::string(hex(walls_stats.filter)));
-  walls_json.set("filter_vtable", Json::string(hex(walls_stats.filter_vtable)));
-  // The custom bullet filter (docs/re/bullet-trace.md): the mask actually handed to the
-  // world query is `filter+8`, so report it (the engine static default carries ~0).
-  walls_json.set("filter_custom", Json::boolean(walls_stats.filter_custom));
-  walls_json.set("filter_mask", Json::integer(walls_stats.filter_mask));
-  walls_json.set("filter_group", Json::integer(walls_stats.filter_group));
-  walls_json.set("filter_flags", Json::integer(walls_stats.filter_flags));
-  walls_json.set("mesh_clusters", Json::integer(walls_stats.mesh_clusters));
-  // The enum self-check (`enum=both`): the AABB hull count, the pyramid hull count and
-  // how many pyramid hulls the AABB missed. `enum_outside_box` must be 0 (the pyramid is
-  // a subset of the box volume).
-  walls_json.set("enum_box_kept", Json::integer(walls_stats.enum_box_kept));
-  walls_json.set("enum_pyramid_kept", Json::integer(walls_stats.enum_pyramid_kept));
-  walls_json.set("enum_outside_box", Json::integer(walls_stats.enum_outside_box));
-  walls_json.set("enum_box_only_between", Json::integer(walls_stats.enum_box_only_between));
-  walls_json.set("enum_targets", Json::integer(walls_stats.enum_targets));
-  walls_json.set("enum_target_max_distance",
-                 Json::number(static_cast<double>(walls_stats.enum_target_max_distance)));
-  walls_json.set("occluders", Json::integer(static_cast<std::int64_t>(options.occlusion.size())));
-  // The penetration model this chart was valued with (docs/re/penetration.md).
-  walls_json.set("penetration_model", Json::string(engine_pen ? "engine" : "simple"));
-  // This flag is only the downstream per-hitbox candidate-cap status; it does not mean
-  // the engine query/parser returned the whole scene (see query_complete above).
-  walls_json.set("occlusion_candidates_complete", Json::boolean(map.occlusion_candidates_complete));
-  walls_json.set("max_penetrations", Json::integer(options.penetration_params.max_penetrations));
-  walls_json.set("pen_mod", Json::number(static_cast<double>(pen_mod)));
-  walls_json.set("dmg_mod", Json::number(static_cast<double>(dmg_mod)));
-  // The per-shape surface read (docs/re/penetration.md): the resolved
-  // SurfacePropertiesList array and the first shape's surface, so a live run can
-  // confirm the read.
-  walls_json.set("surface_array", Json::string(hex(walls_stats.surface_array)));
-  walls_json.set("surface_index", Json::integer(walls_stats.surface_index));
-  walls_json.set("surface_distance",
-                 Json::number(static_cast<double>(walls_stats.surface_distance)));
-  walls_json.set("surface_material", Json::integer(walls_stats.surface_material));
-  walls_json.set("surface_hits", Json::integer(walls_stats.surface_hits));
-  // RE probe (docs/re/occlusion.md): the record's `+0x50` material token, raw and
-  // reinterpreted as a float, so a live run can settle whether it is a float modifier
-  // or a pointer (a sane 0.2-1.0 float vs a denormal/pointer).
-  walls_json.set("material_token", Json::string(hex(walls_stats.material_token)));
-  {
-    const auto low = static_cast<std::uint32_t>(walls_stats.material_token);
-    float as_float = 0.0F;
-    std::memcpy(&as_float, &low, sizeof(as_float));
-    walls_json.set("material_float", Json::number(static_cast<double>(as_float)));
-  }
-  walls_json.set("material_records", Json::integer(walls_stats.material_records));
-  // Compound probe (docs/re/vphysics2.md): the first type-4 shape's group counts.
-  Json compound_json = Json::object();
-  compound_json.set("address", Json::string(hex(walls_stats.compound)));
-  compound_json.set("instances", Json::integer(walls_stats.compound_instances));
-  compound_json.set("meshes", Json::integer(walls_stats.compound_meshes));
-  compound_json.set("hulls", Json::integer(walls_stats.compound_hulls));
-  compound_json.set("g100", Json::integer(walls_stats.compound_g100));
-  compound_json.set("g110", Json::integer(walls_stats.compound_g110));
-  compound_json.set("g120", Json::integer(walls_stats.compound_g120));
-  walls_json.set("compound", std::move(compound_json));
-  // Player-exclusion + world-cache diagnostics.
-  walls_json.set("excluded_records", Json::integer(walls_stats.excluded_records));
-  walls_json.set("world_cache_body", Json::string(hex(walls_stats.world_cache_body)));
-  walls_json.set("world_cache_hulls", Json::integer(walls_stats.world_cache_hulls));
-  walls_json.set("world_box_kept", Json::integer(walls_stats.world_box_kept));
-  walls_json.set("world_box_rejected", Json::integer(walls_stats.world_box_rejected));
-  walls_json.set("hulls_no_planes", Json::integer(walls_stats.hulls_no_planes));
-  Json handles = Json::array();
-  for (int i = 0; i < walls_stats.record_handle_count; ++i) {
-    char buffer[16] = {};
-    std::snprintf(buffer, sizeof(buffer), "0x%x", walls_stats.record_handles[i]);
-    handles.push_back(Json::string(buffer));
-  }
-  walls_json.set("record_handles", std::move(handles));
-  walls_json.set("occluder_polygons", std::move(occluder_polys));
-  payload.set("walls", std::move(walls_json));
-
-  Json targets_json = Json::array();
-  for (std::size_t i = 0; i < targets.size(); ++i) {
-    const game::PlayerSnapshot& player = *targets[i];
-    Json item = Json::object();
-    item.set("index", Json::integer(player.index));
-    item.set("name", Json::string(player.name));
-    item.set("team", Json::integer(player.team));
-    item.set("health", Json::integer(player.health));
-    item.set("distance", Json::number(static_cast<double>(player.distance)));
-    item.set("origin", vec3_json(player.origin));
-    item.set("records", Json::integer(static_cast<std::int64_t>(record_counts[i])));
-    targets_json.push_back(std::move(item));
-  }
-  payload.set("targets", std::move(targets_json));
-
-  Json cells = Json::array();
-  for (const aim::HeatCell& cell : map.cells) {
-    Json item = Json::object();
-    Json poly = Json::array();
-    for (const aim::Vec2& p : cell.polygon.points) {
-      Json point = Json::array();
-      point.push_back(Json::number(static_cast<double>(p.x)));
-      point.push_back(Json::number(static_cast<double>(p.y)));
-      poly.push_back(std::move(point));
-    }
-    item.set("poly", std::move(poly));
-    item.set("value", Json::number(static_cast<double>(cell.value)));
-    item.set("base_value", Json::number(static_cast<double>(cell.base_value)));
-    item.set("target", Json::integer(cell.target));
-    item.set("hitgroup", Json::integer(cell.hitgroup));
-    item.set("record", Json::integer(cell.record));
-    item.set("age", Json::number(static_cast<double>(cell.age)));
-    cells.push_back(std::move(item));
-  }
-  payload.set("cell_count", Json::integer(static_cast<std::int64_t>(map.cells.size())));
-  payload.set("cells", std::move(cells));
-  set_ok(out, std::move(payload));
-}
-
-// The trace probe (`docs/re/bullet-trace.md`): the engine's own answer for a ray,
-// our occluder set's answer for the same ray, and the difference.
-//
-// The engine call (`TraceLineIntervals`) runs on the **game thread**: the control
-// thread arms the request here and the CreateMove hook's sink runs it, because an
-// engine call that reaches tier0's allocator faults on the payload's own thread
-// (`docs/handoff.md`).
-void Service::do_trace_probe(const Json& args, Json& out) noexcept {
-  refresh_reader(true);
-  if (!reader_.has_value()) {
-    set_error(out, "trace_probe unavailable: client.dll / entity system not ready");
-    return;
-  }
-  game::Snapshot snapshot = reader_->snapshot();
-  refresh_reader(snapshot.valid);
-  if (!snapshot.valid || !snapshot.local.has_value()) {
-    set_error(out, "trace_probe unavailable: no local player");
-    return;
-  }
-  const game::PlayerSnapshot& local = *snapshot.local;
-
-  const auto number = [&](const char* key, float fallback) -> float {
-    const Json* value = args.find(key);
-    return value != nullptr && value->is_number() ? static_cast<float>(value->as_number())
-                                                  : fallback;
-  };
-  const auto integer = [&](const char* key, int fallback) -> int {
-    const Json* value = args.find(key);
-    return value != nullptr && value->is_number() ? static_cast<int>(value->as_number()) : fallback;
-  };
-
-  // Which rays to probe: the current view ray is the only source today.
-  if (const Json* value = args.find("rays");
-      value != nullptr && value->is_string() && value->as_string() != "view") {
-    set_error(out, "trace_probe: unknown rays source '" + std::string(value->as_string()) +
-                       "' (only 'view' is available)");
-    return;
-  }
-
-  // The ray's origin: the local player's eye unless the caller gave one.
-  game::Vec3 eye = local.eye_origin;
-  if (const Json* value = args.find("eye");
-      value != nullptr && value->is_array() && value->items().size() == 3) {
-    const std::vector<Json>& items = value->items();
-    eye = game::Vec3{.x = static_cast<float>(items[0].as_number()),
-                     .y = static_cast<float>(items[1].as_number()),
-                     .z = static_cast<float>(items[2].as_number())};
-  }
-
-  // The view direction, in degrees (the Source convention: the pitch is positive
-  // downwards). The default is the local player's own eye angles.
-  float yaw = local.eye_angles.yaw;
-  float pitch = local.eye_angles.pitch;
-  if (const Json* value = args.find("yaw"); value != nullptr && value->is_number()) {
-    yaw = static_cast<float>(value->as_number());
-  }
-  if (const Json* value = args.find("pitch"); value != nullptr && value->is_number()) {
-    pitch = static_cast<float>(value->as_number());
-  }
-  const float spread = number("spread", 0.0F);
-  const int count = integer("count", 1);
-  if (!trace_fan_size_ok(count)) {
-    set_error(out, "trace_probe: count must be between 1 and " + std::to_string(TRACE_MAX_RAYS));
-    return;
-  }
-  if (spread < 0.0F || spread > 45.0F) {
-    set_error(out, "trace_probe: spread must be between 0 and 45 degrees");
-    return;
-  }
-  // The ray's length: the engine's own trace length (the weapon's `m_flRange`,
-  // `docs/re/bullet-trace.md`) unless the caller gave one.
-  float depth = number("depth", 0.0F);
-  if (depth <= 0.0F) {
-    depth = k_trace_probe_default_depth;
-    float range = 0.0F;
-    if (local.weapon_vdata != 0 && cs2::game::read(local.weapon_vdata + k_vdata_range, range) &&
-        range > 0.0F) {
-      depth = range;
-    }
-  }
-
-  // How the engine is called: the pinned call form, or one of the deliberately
-  // wrong ones (the proof that the probe can fail — a wrong argument order or a
-  // wrong filter must give a visibly wrong answer or a caught fault, never a crash).
-  TraceAbi abi = TraceAbi::correct;
-  if (const Json* value = args.find("abi"); value != nullptr && value->is_string()) {
-    const std::string_view name = value->as_string();
-    if (name == "correct") {
-      abi = TraceAbi::correct;
-    } else if (name == "swapped") {
-      abi = TraceAbi::swapped;
-    } else if (name == "static_filter") {
-      abi = TraceAbi::static_filter;
-    } else {
-      set_error(out, "trace_probe: unknown abi '" + std::string(name) + "'");
-      return;
-    }
-  }
-
-  // The fan: ray 0 is the view ray itself, the rest are the golden-angle spiral
-  // around it (a documented, deterministic order — two runs compare).
-  const aim::Basis basis = aim::Basis::world();
-  const std::vector<TraceRay> rays = build_trace_fan(eye, basis, yaw, pitch, spread, count, depth);
-
-  // Arm the request; the game thread runs the engine call and publishes the answer.
-  {
-    const std::scoped_lock lock(trace_probe_mutex_);
-    trace_probe_rays_ = rays;
-    trace_probe_abi_ = abi;
-    trace_probe_done_ = false;
-    trace_probe_run_ = TraceProbeRun{};
-  }
-  trace_probe_armed_.store(true, std::memory_order_release);
-  input_.refresh();  // install the CreateMove hook (the game-thread query site)
-
-  const std::uint64_t ticks_before = game_thread_ticks_.load(std::memory_order_relaxed);
-  const std::uint64_t deadline = now_ms() + k_trace_probe_timeout_ms;
-  bool done = false;
-  while (!done && now_ms() < deadline) {
-    {
-      const std::scoped_lock lock(trace_probe_mutex_);
-      done = trace_probe_done_;
-    }
-    if (!done) {
-      Sleep(2);
-    }
-  }
-  const std::uint64_t ticks_after = game_thread_ticks_.load(std::memory_order_relaxed);
-
-  TraceProbeRun run;
-  {
-    const std::scoped_lock lock(trace_probe_mutex_);
-    run = trace_probe_run_;
-  }
-  // Why the answer is missing, when it is: the game thread answered ("answered"),
-  // it is running but did not answer in time ("busy"), or it is not running at all
-  // ("stalled" — the CreateMove hook is not installed).
-  const char* game_thread = "answered";
-  if (!done) {
-    game_thread = ticks_after != ticks_before ? "busy" : "stalled";
-  }
-
-  const auto vec3_json = [](const game::Vec3& v) -> Json {
-    Json item = Json::object();
-    item.set("x", Json::number(static_cast<double>(v.x)));
-    item.set("y", Json::number(static_cast<double>(v.y)));
-    item.set("z", Json::number(static_cast<double>(v.z)));
-    return item;
-  };
-  const auto hex = [](std::uintptr_t value) -> std::string {
-    char buffer[24];
-    std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(value));
-    return std::string(buffer);
-  };
-  const auto hex_bytes = [](const std::uint8_t* bytes, std::size_t count) -> std::string {
-    constexpr char k_digits[] = "0123456789abcdef";
-    std::string text;
-    text.resize(count * 2);
-    for (std::size_t i = 0; i < count; ++i) {
-      text[i * 2] = k_digits[(bytes[i] >> 4U) & 0x0FU];
-      text[(i * 2) + 1] = k_digits[bytes[i] & 0x0FU];
-    }
-    return text;
-  };
-
-  Json payload = Json::object();
-  payload.set("eye", vec3_json(eye));
-  payload.set("yaw", Json::number(static_cast<double>(yaw)));
-  payload.set("pitch", Json::number(static_cast<double>(pitch)));
-  payload.set("spread", Json::number(static_cast<double>(spread)));
-  payload.set("count", Json::integer(count));
-  payload.set("depth", Json::number(static_cast<double>(depth)));
-  payload.set("max_rays", Json::integer(TRACE_MAX_RAYS));
-  payload.set("max_intervals", Json::integer(TRACE_MAX_INTERVALS));
-  payload.set("abi", Json::string(to_string(run.abi)));
-  // The probe's own health: whether the engine call succeeded, and loudly whether it
-  // faulted (the guard caught it — a probe that faults is a *result*, not a crash) or
-  // whether the engine wrote past the results buffer (the canary tripped — the
-  // answer cannot be vouched for, so it is refused).
-  Json engine = Json::object();
-  engine.set("ok", Json::boolean(run.ok));
-  engine.set("faulted", Json::boolean(run.faulted));
-  engine.set("overrun", Json::boolean(run.overrun));
-  engine.set("rays_ok", Json::integer(run.rays_ok));
-  engine.set("rays_faulted", Json::integer(run.rays_faulted));
-  engine.set("rays_overrun", Json::integer(run.rays_overrun));
-  engine.set("iface", Json::string(hex(run.iface)));
-  engine.set("filter", Json::string(hex(run.filter)));
-  engine.set("filter_mask", Json::integer(run.filter_mask));
-  engine.set("filter_group", Json::integer(run.filter_group));
-  engine.set("filter_flags", Json::integer(run.filter_flags));
-  engine.set("occluders", Json::integer(run.occluders));
-  engine.set("occluder_hits", Json::integer(run.occluder_hits));
-  // The probe's own bounds: how many solids it projects at most, whether the set was
-  // truncated, and whether the static world body was already parsed. When it was
-  // not, the probe **refused** to answer (it does not pay the world's parse — 10k
-  // brush shapes — inside the input hook), and it says so. The target box's pad
-  // decides which solids the enumeration keeps, so it is published too.
-  engine.set("occluder_cap", Json::integer(run.occluder_cap));
-  engine.set("occluders_truncated", Json::boolean(run.occluders_truncated));
-  engine.set("world_cached", Json::boolean(run.world_cached));
-  // The refusal: `world_cache_cold` when the world's static body was not parsed
-  // yet (warm the cache and run the probe again), empty when there was none.
-  engine.set("refused", Json::boolean(run.refusal != TraceRefusal::none));
-  engine.set("refusal_reason", Json::string(to_string(run.refusal)));
-  engine.set("target_pad", Json::number(static_cast<double>(TRACE_TARGET_PAD)));
-  payload.set("engine", std::move(engine));
-  payload.set("ran", Json::boolean(done));
-  payload.set("timeout", Json::boolean(!done));
-  payload.set("game_thread", Json::string(game_thread));
-
-  Json rays_json = Json::array();
-  // The record index the answer carries, or -1 when the span names a record the
-  // answer does not publish (the reader's own bound, in one place).
-  const auto record_index = [](int index, std::size_t published) -> int {
-    return index >= 0 && static_cast<std::size_t>(index) < published ? index : -1;
-  };
-  for (const TraceRayResult& ray : run.rays) {
-    Json item = Json::object();
-    item.set("start", vec3_json(ray.ray.start));
-    item.set("direction", vec3_json(ray.ray.direction));
-    item.set("end", vec3_json(ray.ray.end));
-    item.set("depth", Json::number(static_cast<double>(ray.ray.depth)));
-
-    // A. The engine's answer: the intervals, their distance and their raw bytes.
-    Json engine_json = Json::object();
-    engine_json.set("ok", Json::boolean(ray.engine_ok));
-    engine_json.set("faulted", Json::boolean(ray.engine_faulted));
-    // The engine wrote **past** the results buffer (the canary tripped): the
-    // records are not ours to read, so the answer is refused like a dropped one.
-    engine_json.set("overrun", Json::boolean(ray.engine_overrun));
-    engine_json.set("interval_count", Json::integer(ray.interval_count));
-    engine_json.set("intervals_overflow", Json::boolean(ray.intervals_overflow));
-    // The engine's answer could not be read (the call faulted, the container did not
-    // hold the buffer the probe handed it, or the count was out of range). It is
-    // reported **loudly**: the verdict is then "unknown", never "agrees".
-    engine_json.set("answer_missing", Json::boolean(ray.engine_answer_missing));
-    // The interval record's surface is **unmapped** (only two of its fields are
-    // pinned). The flag says it once for the whole ray; the per-record value says
-    // it again, so a record read on its own still carries it.
-    engine_json.set("surface_mapped", Json::boolean(false));
-    Json intervals = Json::array();
-    for (const TraceInterval& interval : ray.intervals) {
-      Json record = Json::object();
-      record.set("fraction", Json::number(static_cast<double>(interval.fraction)));
-      record.set("distance", Json::number(static_cast<double>(interval.distance)));
-      record.set("enter_exit", Json::integer(interval.enter_exit));
-      // The record's surface is **unmapped** (only two of its fields are pinned) —
-      // the raw bytes are published so a later RE pass can map the rest from the
-      // probe's own output.
-      record.set("surface", Json::string("unmapped"));
-      record.set("raw", Json::string(hex_bytes(interval.raw, TRACE_INTERVAL_SIZE)));
-      intervals.push_back(std::move(record));
-    }
-    engine_json.set("intervals", std::move(intervals));
-    item.set("engine", std::move(engine_json));
-
-    // B. Our answer: the occluders the ray enters, with their kind.
-    Json ours = Json::array();
-    for (const TraceOccluderHit& hit : ray.ours) {
-      Json record = Json::object();
-      record.set("index", Json::integer(hit.index));
-      record.set("kind", Json::string(solid_kind_name(hit.kind)));
-      record.set("cluster", Json::integer(hit.cluster));
-      record.set("entry", Json::number(static_cast<double>(hit.entry)));
-      record.set("exit", Json::number(static_cast<double>(hit.exit)));
-      ours.push_back(std::move(record));
-    }
-    item.set("ours", std::move(ours));
-
-    // C. The difference: what the engine found that our set has nothing for, and
-    // what our set has that the engine did not report.
-    Json difference = Json::object();
-    difference.set("verdict", Json::string(to_string(ray.diff.verdict)));
-    // Whether the engine's answer could be read at all. When it is false the
-    // verdict is "unknown": the difference was **not** computed over an empty
-    // engine list.
-    difference.set("engine_answer_usable", Json::boolean(ray.diff.engine_answer_usable));
-    Json engine_only = Json::array();
-    for (const TraceSpan& span : ray.diff.engine_only) {
-      Json record = Json::object();
-      record.set("entry", Json::number(static_cast<double>(span.entry)));
-      record.set("exit", Json::number(static_cast<double>(span.exit)));
-      record.set("enter_record",
-                 Json::integer(record_index(span.enter_record, ray.intervals.size())));
-      record.set("exit_record",
-                 Json::integer(record_index(span.exit_record, ray.intervals.size())));
-      engine_only.push_back(std::move(record));
-    }
-    difference.set("engine_only", std::move(engine_only));
-    Json ours_only = Json::array();
-    for (const TraceOccluderHit& hit : ray.diff.ours_only) {
-      Json record = Json::object();
-      record.set("index", Json::integer(hit.index));
-      record.set("kind", Json::string(solid_kind_name(hit.kind)));
-      record.set("cluster", Json::integer(hit.cluster));
-      record.set("entry", Json::number(static_cast<double>(hit.entry)));
-      record.set("exit", Json::number(static_cast<double>(hit.exit)));
-      ours_only.push_back(std::move(record));
-    }
-    difference.set("ours_only", std::move(ours_only));
-    item.set("difference", std::move(difference));
-    rays_json.push_back(std::move(item));
-  }
-  payload.set("rays", std::move(rays_json));
   set_ok(out, std::move(payload));
 }
 

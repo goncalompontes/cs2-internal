@@ -18,7 +18,6 @@
 #include <string>
 #include <string_view>
 
-#include "cs2/aim/heatmap.hpp"
 #include "cs2/aim/records.hpp"
 #include "cs2/control/channel.hpp"
 #include "cs2/control/console.hpp"
@@ -309,21 +308,6 @@ class Service {
   // aim, which `Input::apply()` writes per tick as the silent sub-tick view angles.
   void on_snapshot(const game::Snapshot& snapshot) noexcept;
 
-  // The ragebot's one-line status for the HUD (false when there is nothing to
-  // show, e.g. the feature is off).
-  auto rage_status(char* out, std::size_t size) const noexcept -> bool;
-
-  // The movement features' one-line status for the HUD (false when neither the
-  // auto-strafe nor the bhop is on).
-  //
-  // It carries the two numbers that answer "does the movement accelerate?":
-  // the **gain** of the last airtime (u/s) and whether the engine applied the
-  // strafe's basis rotation. The second is the gate: a server that ignores the
-  // sub-tick view angles (`sv_subtick_movement_view_angles 0`) makes the
-  // silent encoding inert, and the operator has to see that rather than guess
-  // (`docs/re/strafing.md` §"The gate").
-  auto movement_status(char* out, std::size_t size) const noexcept -> bool;
-
   // The ragebot's current target entity index (-1 = none), so the overlay can
   // highlight it.
   [[nodiscard]] int rage_target_index() const noexcept {
@@ -455,20 +439,6 @@ class Service {
   // `pitch_tolerance`, `delay_ms`, `key`, `fire`, `mode`). With no arguments it
   // returns the current state.
   void do_trigger(const Json& args, Json& out) noexcept;
-  // The multi-target damage heatmap (`docs/ragebot.md`, ADR-0022): project every
-  // enemy's hitboxes — and their sampled lag records — into one shared angular
-  // chart, valued by damage, and return the cells for the Python renderer.
-  void do_heatmap(const Json& args, Json& out) noexcept;
-  // The trace probe (`docs/re/bullet-trace.md`): ask the engine **its own** question
-  // (`TraceLineIntervals`, the call the real bullet makes) for a ray, and publish
-  // both answers side by side plus the difference — what the engine's trace hit,
-  // what our occluder set says about the same ray, and where the two disagree.
-  //
-  // The engine call runs on the **game thread** (the CreateMove hook's sink): an
-  // engine call that reaches tier0's allocator faults on the payload's own thread
-  // (`docs/handoff.md`). So the control thread arms the request and waits for the
-  // game thread's answer.
-  void do_trace_probe(const Json& args, Json& out) noexcept;
   // Append one record per live enemy to the store (called from the render thread
   // each frame, before the ragebot's own early-out).
   void sample_records(const game::Snapshot& snapshot) noexcept;
@@ -744,42 +714,12 @@ class Service {
   std::atomic<bool> rage_occlusion_query_complete_{false};
   std::atomic<std::uint32_t> rage_occlusion_query_issues_{
       static_cast<std::uint32_t>(OcclusionQueryIssue::not_invoked)};
-  // Ragebot instrumentation (`docs/ragebot-perf.md`). `on_snapshot` accumulates
-  // per-stage wall time (µs) and the last frame's counts; the `rage` command reads
-  // and resets them so each poll reports the interval. This is how the solve's cost
-  // is attributed on the live build without a profiler.
-  struct RagePerf {
-    std::atomic<std::uint64_t> frames{0};           // rage-path invocations in the interval
-    std::atomic<std::uint64_t> snapshot_frames{0};  // on_snapshot (render-thread) calls
-    std::atomic<std::uint64_t> sample_us{0};
-    std::atomic<std::uint64_t> query_us{0};      // the world occlusion enumeration
-    std::atomic<std::uint64_t> build_us{0};      // build_input over the candidates
-    std::atomic<std::uint64_t> project_us{0};    // occluder silhouette projection
-    std::atomic<std::uint64_t> solve_us{0};      // aim::solve (multi-target field)
-    std::atomic<std::uint64_t> backtrack_us{0};  // aim::solve_backtrack (all poses)
-    // Breakdown of the solve(s) (`SolveStats`): hitbox projection, occlusion split and
-    // the objective search. Tells us whether the cost is geometry or the erf-based mass.
-    std::atomic<std::uint64_t> solve_project_us{0};
-    std::atomic<std::uint64_t> solve_occlude_us{0};
-    std::atomic<std::uint64_t> solve_argmax_us{0};
-    std::atomic<std::uint64_t> total_us{0};       // whole rage path
-    std::atomic<std::uint64_t> last_total_us{0};  // the last frame's whole-rage time
-    std::atomic<std::uint64_t> max_total_us{0};   // worst single frame
-    std::atomic<std::uint64_t> solve_calls{0};    // aim::solve calls (multi + backtrack)
-    std::atomic<std::uint32_t> candidates{0};     // enemies in the FOV
-    std::atomic<std::uint32_t> hitboxes{0};       // solver hitbox silhouettes
-    std::atomic<std::uint32_t> occluders{0};      // projected world solids
-    std::atomic<std::uint32_t> poses{0};          // backtrack poses (live + records)
-    std::atomic<std::uint32_t> cells{0};          // field cells after occlusion
-  };
-  RagePerf perf_;
-  std::uint64_t rage_perf_log_frames_ = 0;
+
   // The multi-target heatmap (`docs/ragebot.md`, ADR-0022). The render thread
   // samples each live enemy's hitboxes per frame into `records_`; the control
   // thread reads a copy to build the heatmap. Sampling is on by default (so the
   // records are always warm); the `heatmap` command's `sample` flag can toggle it.
   static constexpr std::uintptr_t k_heatmap_capacity = 32;
-  std::atomic<bool> heatmap_sampling_{true};
   std::atomic<std::int32_t> record_tick_{0};
   std::mutex records_mutex_;
   aim::RecordStore records_{k_heatmap_capacity};
@@ -819,16 +759,6 @@ class Service {
   bool occlusion_inputs_complete_ = true;
   std::vector<OcclusionHull> occlusion_hulls_;
   OcclusionQueryStats occlusion_stats_;
-  // The trace probe's handshake between the control thread (which arms the request
-  // and publishes the answer) and the game thread (which runs the engine call).
-  // The armed flag is atomic so the game thread's hot path does not take the lock
-  // on every tick; the payload itself travels under the mutex.
-  std::mutex trace_probe_mutex_;
-  std::atomic<bool> trace_probe_armed_{false};
-  std::vector<TraceRay> trace_probe_rays_;
-  TraceAbi trace_probe_abi_ = TraceAbi::correct;
-  bool trace_probe_done_ = false;
-  TraceProbeRun trace_probe_run_{};
   // The game thread's heartbeat: how many times the CreateMove hook's sink has run.
   // The control thread samples it around the probe's wait, so a caller can tell
   // "the game thread is busy" from "the game thread is not running at all" — the
