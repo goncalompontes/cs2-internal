@@ -11,8 +11,9 @@
 ;   * @variadic_target is variadic, so the pass leaves the call alone;
 ;   * @sret_target has an `sret` parameter, so the pass routes the call
 ;     through a **thunk**: the thunk carries the `sret` attribute of the
-;     call and the hidden pointer, which it takes out of the first cell of
-;     the scratch;
+;     call and the hidden pointer, which it takes out of the cell of the
+;     scratch that the `sret` attribute names -- the first one here, the
+;     callee being a free function;
 ;   * @external_sret_target is a declaration with an `sret` parameter: the
 ;     policy's `cross_module` list names it, so the pass routes it through
 ;     a thunk as well, and the table holds the external symbol;

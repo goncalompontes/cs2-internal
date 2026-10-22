@@ -666,8 +666,9 @@ void test_transform_sret_other_target() {
 /// The transform routes a callee that takes an `sret` parameter.
 ///
 /// The call goes through a **thunk**: the thunk carries the `sret` attribute
-/// of the call and the hidden pointer, which it takes out of the first cell
-/// of the scratch.
+/// of the call and the hidden pointer, which it takes out of the cell of the
+/// scratch that the `sret` attribute names -- the first one here, the callee
+/// being a free function.
 void test_transform_sret() {
   llvm::LLVMContext context;
   const auto module = build_transform_module(context);
@@ -721,12 +722,13 @@ void test_transform_sret() {
     check(call->getCalledFunction() == nullptr, "the call of the thunk is indirect");
     check(call->getParamAttr(0, llvm::Attribute::StructRet).isValid(),
           "the call of the thunk carries the sret attribute");
-    // The hidden pointer: the first cell of the scratch, unchanged.
+    // The hidden pointer: the cell of the scratch that the `sret` attribute
+    // names -- the first one here -- unchanged.
     const auto* load = llvm::dyn_cast<llvm::LoadInst>(call->getArgOperand(0));
     check(load != nullptr, "the hidden pointer is loaded out of the scratch");
     if (load != nullptr) {
       check(load->getPointerOperand() == thunk->getArg(0),
-            "the hidden pointer is the first cell of the scratch");
+            "the hidden pointer is the cell of the scratch that the sret attribute names");
     }
   }
 

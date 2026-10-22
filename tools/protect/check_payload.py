@@ -846,11 +846,25 @@ def advice_for(reason: str) -> str:
       circle;
     * a callee with a `sret` parameter stays direct only when the module's
       target is not the one the narrowing was measured on.
+    * a callee the policy names may still stay direct for a reason the
+      plugin reported under the **old** name `indirect_parameter`: that was
+      the name of the rule that refused a `byval` / `sret` / `inalloca` /
+      `preallocated` parameter. A coverage file written by a plugin of
+      before this task still carries it, and the advice has to say what it
+      means.
     """
     if reason in UNROUTABLE_REASONS:
         return (
             f"The routing cannot bypass `{reason}` ({UNROUTABLE_REASONS[reason]}): the edge "
             "stays direct, and no `cross_module` entry will route it."
+        )
+    if reason == "indirect_parameter":
+        return (
+            "The callee has a `byval` / `sret` / `inalloca` / `preallocated` parameter: the "
+            "indirect signature cannot carry it. This is the name the plugin used before the "
+            "`sret` edges were routed: the `sret` case goes through a thunk now, and the other "
+            "three stay refused. The `cross_module` list already names the callee, and adding it "
+            "again will not help."
         )
     if reason == "sret_parameter":
         return (

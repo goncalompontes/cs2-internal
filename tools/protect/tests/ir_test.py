@@ -19,7 +19,8 @@ not as a crash, so the test asserts on the shape of the rewritten IR:
     recomputes the key from the three constants of the image and the mixer);
   * a callee with an `sret` parameter is routed through a **thunk**, and the
     thunk carries the `sret` attribute of the call and the hidden pointer out
-    of the first cell of the scratch;
+    of the cell of the scratch that the `sret` attribute names (in this
+    fixture, the first one: the callees are free functions);
   * the calls that must be skipped -- a variadic callee, a `musttail` call --
     are untouched.
 
@@ -344,8 +345,9 @@ def check_thunks(ir: str) -> None:
 
     The thunk is the adapter of a struct-returning call: it takes the
     scratch, loads the arguments out of it and calls the callee **with the
-    `sret` attribute**. The hidden pointer is the first cell of the scratch,
-    and the thunk passes it unchanged.
+    `sret` attribute**. The hidden pointer is the cell of the scratch that
+    the `sret` attribute names -- the first one in this fixture, where the
+    callees are free functions -- and the thunk passes it unchanged.
     """
     thunks = thunks_of(ir)
     check(len(thunks) == 2, f"the pass emitted {len(thunks)} thunks and not two")
@@ -358,15 +360,16 @@ def check_thunks(ir: str) -> None:
             call is not None,
             f"the call of the thunk '{thunk}' does not carry the sret attribute",
         )
-        # The hidden pointer: the **first** cell of the scratch, unchanged.
-        # The cell is the scratch itself (offset zero), and the thunk's
+        # The hidden pointer: the cell of the scratch that the `sret`
+        # attribute names. In this fixture it is the **first** one: the
+        # cell is the scratch itself (offset zero), and the thunk's
         # parameter is `%0`.
         if call is not None:
             argument = re.escape(call.group(1))
             check(
                 re.search(rf"{argument} = load ptr, ptr %0,", body) is not None,
-                f"the thunk '{thunk}' does not take the hidden pointer out of the first cell "
-                "of the scratch",
+                f"the thunk '{thunk}' does not take the hidden pointer out of the cell of the "
+                "scratch that the sret attribute names",
             )
         # The thunk returns zero: the callee returns nothing.
         check(

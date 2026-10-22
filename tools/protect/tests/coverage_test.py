@@ -549,6 +549,23 @@ def check_the_payload_rules(root: Path) -> None:
     else:
         raise TestFailure("a variadic callee did not fail the check")
 
+    # The **old** name of the refusal -- the one a coverage file written by
+    # the plugin of before the `sret` edges carries -- is still read, and the
+    # advice says what it means. The generic advice ("add it to the
+    # `cross_module` list") is wrong for it: the list already names the
+    # callee.
+    try:
+        check_direct_callees(
+            with_direct("0xA.cov", "?own@aim@cs2@@YAXXZ", "indirect_parameter"), payload)
+    except Failure as error:
+        message = str(error)
+        check("indirect_parameter" in message,
+              f"the advice does not name the reason of the refusal: {message}")
+        check("add it to the list" not in message,
+              f"the advice sends the operator in a circle: {message}")
+    else:
+        raise TestFailure("a callee with the old reason name did not fail the check")
+
     # The decision is per (module, symbol): a symbol that one module
     # reports with one reason and another module with another one is a
     # failure, whatever the order the coverage files are read in.
