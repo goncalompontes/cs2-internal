@@ -42,12 +42,19 @@ struct WeaponProfile {
   // +0x71E). The engine compares the weapon **id**; this is the VData's "this is
   // the revolver" flag, and the payload's read of that id. False when unknown.
   bool is_revolver = false;
-  // The engine's **attack type** (`C_CSWeaponBase::m_weaponMode`, weapon + 0x1A00):
-  // 0 the primary attack, 1 the secondary. `ATTACK_TYPE_UNKNOWN` when the payload
-  // cannot know it — and the conservative reading of that is "not the secondary
-  // attack", so the revolver's `1 - r^2` is not applied
-  // (`docs/re/aim.md` §"The attack type").
-  int attack_type = ATTACK_TYPE_UNKNOWN;
+  // The engine's **attack type** (`C_CSWeaponBase::m_weaponMode`, weapon + 0x1A00)
+  // **as the payload read it**: 0 the primary attack, 1 the secondary.
+  // `ATTACK_TYPE_UNKNOWN` when the read failed.
+  //
+  // **This is evidence, not knowledge.** The field is sticky — the engine's
+  // secondary path sets it to 1 and nothing clears it there, and only one of the
+  // four `CSBaseGunFire` call sites clears it at all — so a payload that reads
+  // it before the engine fires reads the engine's **previous** decision, and
+  // three of the four call sites do not pass it to the engine's cone sampler at
+  // all. It therefore **never** reaches the transform: the core keys the
+  // revolver's `1 - r^2` on the **pending** shot's attack type, which the
+  // payload cannot know (`cs2/aim/spread.hpp`, `SpreadRules`).
+  int observed_attack_type = ATTACK_TYPE_UNKNOWN;
   // The engine's **per-shot recoil counter** (`C_CSWeaponBase::m_flRecoilIndex`,
   // weapon + 0x1A28): 0, 1, 2, … after every shot. `RECOIL_INDEX_UNKNOWN` when
   // the payload cannot read it — and the conservative reading of that is **no

@@ -105,7 +105,7 @@ auto main() -> int {
                                 .pattern = cs2::aim::SpreadPattern::revolver,
                                 .rules = cs2::aim::SpreadRules{
                                     .is_revolver = true,
-                                    .attack_type = cs2::aim::ATTACK_TYPE_SECONDARY}};
+                                    .pending_attack_type = cs2::aim::ATTACK_TYPE_SECONDARY}};
     const auto seed = cs2::aim::md5_pseudo_random(4242U);
     const auto engine = cs2::aim::pellet_offsets(seed, revolver.spread, revolver.inaccuracy,
                                                  revolver.pellets, revolver.pattern,
@@ -126,7 +126,7 @@ auto main() -> int {
     // The **same** weapon with the primary attack type: the transform is off, and
     // the two assemblies agree on that too.
     SpreadKernel primary = revolver;
-    primary.rules.attack_type = cs2::aim::ATTACK_TYPE_PRIMARY;
+    primary.rules.pending_attack_type = cs2::aim::ATTACK_TYPE_PRIMARY;
     const auto primary_engine = cs2::aim::pellet_offsets(seed, primary.spread, primary.inaccuracy,
                                                           primary.pellets, primary.pattern,
                                                           primary.rules);
@@ -941,14 +941,26 @@ auto main() -> int {
     weapon.spread = 0.02F;
     weapon.inaccuracy = 0.01F;
     weapon.is_revolver = true;
-    weapon.attack_type = cs2::aim::ATTACK_TYPE_SECONDARY;
+    weapon.observed_attack_type = cs2::aim::ATTACK_TYPE_SECONDARY;
     weapon.recoil_index = 1;
     const auto kernel = cs2::aim::spread_kernel(weapon, 1, cs2::aim::SpreadPattern::revolver);
     expect(kernel.has_value(), "the kernel is built");
     expect(kernel->rules.is_revolver, "the kernel carries the VData's revolver flag");
-    expect(kernel->rules.attack_type == cs2::aim::ATTACK_TYPE_SECONDARY,
-           "the kernel carries the engine's attack type");
     expect(kernel->rules.recoil_index == 1, "the kernel carries the recoil counter");
+
+    // **The observed attack type is evidence, and it never reaches the
+    // transform.** The field (`m_weaponMode`) is sticky: a payload that reads
+    // it before the engine fires reads the engine's **previous** decision, so
+    // keying the revolver's `1 - r^2` on it would transform a shot the engine
+    // fires with the **standard** cone. The pending shot's attack type is
+    // therefore **unknown**, and the transform is off.
+    expect(kernel->rules.observed_attack_type == cs2::aim::ATTACK_TYPE_SECONDARY,
+           "the kernel carries the observed attack type as evidence");
+    expect(kernel->rules.pending_attack_type == cs2::aim::ATTACK_TYPE_UNKNOWN,
+           "the stale attack type never reaches the transform");
+    expect(cs2::aim::radius_transform(cs2::aim::SpreadPattern::revolver, kernel->rules) ==
+               cs2::aim::RadiusTransform::none,
+           "the kernel applies no revolver transform");
 
     // A profile that knows nothing applies no transform: the conservative
     // reading of an unknown attack type or recoil counter.
@@ -958,8 +970,10 @@ auto main() -> int {
         cs2::aim::spread_kernel(plain, 1, cs2::aim::SpreadPattern::revolver);
     expect(plain_kernel.has_value(), "the plain kernel is built");
     expect(!plain_kernel->rules.is_revolver, "an unknown weapon is not the revolver");
-    expect(plain_kernel->rules.attack_type == cs2::aim::ATTACK_TYPE_UNKNOWN,
-           "an unknown weapon has an unknown attack type");
+    expect(plain_kernel->rules.observed_attack_type == cs2::aim::ATTACK_TYPE_UNKNOWN,
+           "an unknown weapon has an unknown observed attack type");
+    expect(plain_kernel->rules.pending_attack_type == cs2::aim::ATTACK_TYPE_UNKNOWN,
+           "an unknown weapon has an unknown pending attack type");
     expect(plain_kernel->rules.recoil_index == cs2::aim::RECOIL_INDEX_UNKNOWN,
            "an unknown weapon has an unknown recoil counter");
   }

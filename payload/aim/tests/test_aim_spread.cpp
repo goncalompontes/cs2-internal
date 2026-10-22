@@ -174,11 +174,15 @@ auto main() -> int {
 
   // The revolver's `1 - r^2` needs the weapon id **and** the attack type == 1.
   // The engine applies it to **both** radii.
+  //
+  // **The attack type the transform reads is the *pending* one** — the attack
+  // type of the shot about to be taken. The payload cannot know it (the field is
+  // sticky), so it is `ATTACK_TYPE_UNKNOWN` and the transform is never applied.
   {
-    const SpreadRules secondary{.is_revolver = true, .attack_type = ATTACK_TYPE_SECONDARY};
-    const SpreadRules primary{.is_revolver = true, .attack_type = ATTACK_TYPE_PRIMARY};
-    const SpreadRules unknown{.is_revolver = true, .attack_type = ATTACK_TYPE_UNKNOWN};
-    const SpreadRules deagle{.is_revolver = false, .attack_type = ATTACK_TYPE_SECONDARY};
+    const SpreadRules secondary{.is_revolver = true, .pending_attack_type = ATTACK_TYPE_SECONDARY};
+    const SpreadRules primary{.is_revolver = true, .pending_attack_type = ATTACK_TYPE_PRIMARY};
+    const SpreadRules unknown{.is_revolver = true, .pending_attack_type = ATTACK_TYPE_UNKNOWN};
+    const SpreadRules deagle{.is_revolver = false, .pending_attack_type = ATTACK_TYPE_SECONDARY};
     UniformRandomStream t(5);
     const float r1 = t.random_float(0.0F, 1.0F);
     const float a1 = t.random_float(0.0F, k_two_pi);
@@ -219,6 +223,20 @@ auto main() -> int {
         pellet_offsets(5, 0.1F, 0.05F, 1, SpreadPattern::revolver, deagle);
     expect(near(deagle_shot[0].x, plain) && near(deagle_shot[0].y, plain_y),
            "a weapon that is not the revolver applies no transform");
+
+    // **The observed attack type is evidence and never drives the transform.**
+    // A stale read of `m_weaponMode` (the field holds the engine's *previous*
+    // decision) must not put `1 - r^2` on the shot the engine is about to fire
+    // with the standard cone.
+    {
+      const SpreadRules stale{.is_revolver = true,
+                              .observed_attack_type = ATTACK_TYPE_SECONDARY,
+                              .pending_attack_type = ATTACK_TYPE_UNKNOWN};
+      const auto stale_shot =
+          pellet_offsets(5, 0.1F, 0.05F, 1, SpreadPattern::revolver, stale);
+      expect(near(stale_shot[0].x, plain) && near(stale_shot[0].y, plain_y),
+             "the observed attack type does not drive the transform");
+    }
   }
 
   // The negev's `1 - r^(2^k)`: `k = 3 - the recoil index`, for the first three
@@ -291,6 +309,46 @@ auto main() -> int {
       const float radius8 = t.random_float(0.0F, 0.125F);
       expect((*table)[8].angle == angle8 && (*table)[8].radius == radius8,
              "the radius band cycles back to the first band");
+    }
+  }
+
+  // The band bounds are computed in **single** precision, like the engine's
+  // (`(float)k * (1.0f / (float)N)`). In double the reciprocal and the product
+  // round differently: over N = 1…64 the two computations disagree on 937 of
+  // the 4 288 bounds by **one ulp**, and the drawn radius moves with them.
+  //
+  // The seven-bullet table is the pin: its third entry's band (2/7 … 3/7) is one
+  // of the bounds that differ, and the draw on it differs too — so the entry is
+  // the **single** one.
+  {
+    constexpr int k_count = 7;
+    const auto table7 = shotgun_pattern_table(1, k_count);
+    expect(table7.has_value(), "the seven-bullet table is built");
+    if (table7.has_value()) {
+      const float inverse = 1.0F / static_cast<float>(k_count);
+      UniformRandomStream t(1);
+      for (int entry = 0; entry < 2; ++entry) {
+        (void)t.random_float(0.0F, k_two_pi);
+        (void)t.random_float(static_cast<float>(entry) * inverse,
+                             static_cast<float>(entry + 1) * inverse);
+      }
+      (void)t.random_float(0.0F, k_two_pi);
+      const float single = t.random_float(2.0F * inverse, 3.0F * inverse);
+      expect((*table7)[2].radius == single,
+             "the band bounds are the engine's single-precision ones");
+      // **What the double bounds would have given**: the assertion above fails
+      // if the bounds go back to double.
+      const double inverse_double = 1.0 / static_cast<double>(k_count);
+      UniformRandomStream u(1);
+      for (int entry = 0; entry < 2; ++entry) {
+        (void)u.random_float(0.0F, k_two_pi);
+        (void)u.random_float(static_cast<float>(static_cast<double>(entry) * inverse_double),
+                             static_cast<float>(static_cast<double>(entry + 1) * inverse_double));
+      }
+      (void)u.random_float(0.0F, k_two_pi);
+      const float doubled = u.random_float(static_cast<float>(2.0 * inverse_double),
+                                           static_cast<float>(3.0 * inverse_double));
+      expect(doubled != single, "the double bounds give another radius");
     }
   }
 

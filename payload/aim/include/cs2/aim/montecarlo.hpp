@@ -75,6 +75,11 @@ struct SpreadKernel {
   // drawn **once** for the shot and again per pellet only when the convar is on,
   // and the transforms depend on the attack type and the recoil counter, which
   // are per-shot state the engine keeps on the weapon.
+  //
+  // **The revolver's transform is keyed on the *pending* shot's attack type**,
+  // which the payload cannot know (`cs2/aim/spread.hpp`, `SpreadRules`), so it
+  // is never applied: the observed value the payload read travels with the
+  // kernel as **evidence** and nothing else.
   SpreadRules rules{};
 };
 
@@ -104,13 +109,22 @@ inline constexpr int HITGROUP_GENERIC = 10;
 
 // Whether the engine's pellet pattern for `weapon` is modelled by the kernel.
 //
-// **The shotgun is refused** — not because its pattern table is unknown (the
-// table's values are reproducible, `cs2/aim/spread.hpp`), but because the
-// **convar** that selects it is not readable by the payload: the engine draws
-// the fixed table only when `weapon_accuracy_shotgun_spread_patterns` is on and
-// the random cone otherwise, and the payload cannot tell which one the server
-// enabled. A shotgun scored with the wrong cone is a wrong number, so the
-// refusal stands.
+// **The shotgun is refused — a policy choice, not a modelling limit.** The
+// engine's pattern table **is** reproducible (the values come from the VData
+// with the repo's own `UniformRandomStream`, `cs2/aim/spread.hpp`), so the
+// refusal is **not** "the table is unknown". It is this:
+//
+//   * the table is only used when the convar
+//     `weapon_accuracy_shotgun_spread_patterns` is **on**, and it is **off by
+//     default** — so the payload *could* model the **default** (the random
+//     cone) and be right unless a server enables the convar;
+//   * the payload **cannot read the convar**: it is a `ConVar` the payload has
+//     no address for, and reading it would need a **dumper signature** the repo
+//     does not have (ADR-0012) — which this task is not allowed to add.
+//
+// The refusal therefore states a **policy**: "a wrong number is worse than no
+// number". The payload cannot tell which cone the server enabled, so it refuses
+// rather than guess — even though the *default* is modellable.
 //
 // **The machineguns are refused** because the payload cannot tell the negev from
 // the M249: both are weapon type 6 and the VData carries no flag for the negev

@@ -155,15 +155,20 @@ auto shotgun_pattern_table(int spread_seed, int num_bullets) noexcept
   if (count > PATTERN_TABLE_ENTRIES) {
     count = PATTERN_TABLE_ENTRIES;
   }
-  const double inverse = 1.0 / static_cast<double>(count);
+  // **The band bounds are computed in single precision, like the engine's**
+  // (`(float)k * (1.0f / (float)N)`, `client.dll` `0x1807cb2b4`/`0x1807cb2ee`).
+  // In double the reciprocal and the product round differently: over N = 1…64
+  // the two computations disagree on 937 of the 4 288 bounds by **one ulp**
+  // (5.96e-8), which moves the drawn radius by one ulp on the bands it touches.
+  const float inverse = 1.0F / static_cast<float>(count);
   std::array<ShotgunPatternEntry, PATTERN_TABLE_ENTRIES> table{};
   UniformRandomStream stream(spread_seed);
   int k = 0;
   for (int index = 0; index < PATTERN_TABLE_ENTRIES; ++index) {
     // The engine's draw order: the **angle** first, then the radius.
     const float angle = stream.random_float(0.0F, TWO_PI);
-    const float low = static_cast<float>(static_cast<double>(k) * inverse);
-    const float high = static_cast<float>(static_cast<double>(k + 1) * inverse);
+    const float low = static_cast<float>(k) * inverse;
+    const float high = static_cast<float>(k + 1) * inverse;
     const float radius = stream.random_float(low, high);
     table[static_cast<std::size_t>(index)] =
         ShotgunPatternEntry{.angle = angle, .radius = radius};

@@ -81,11 +81,13 @@ constexpr std::uintptr_t k_vdata_is_revolver = 0x71E;
 constexpr std::uintptr_t k_vdata_num_bullets = 0x730;
 constexpr std::uintptr_t k_vdata_spread_seed = 0x7D8;
 // `C_CSWeaponBase::m_weaponMode` (int32, weapon + 0x1A00): the engine's attack
-// type (0 primary, 1 secondary). It is a **sticky** flag — one path sets it, the
-// fire path consumes and clears it — so a payload that reads it before the engine
-// fires reads the engine's **previous** decision, and three of the four
-// `CSBaseGunFire` call sites do not pass it at all
-// (`docs/re/aim.md` §"The attack type").
+// type (0 primary, 1 secondary). It is a **sticky** flag — the secondary path
+// sets it to 1 and nothing clears it there, and only one of the four
+// `CSBaseGunFire` call sites clears it after the fire — so a payload that reads
+// it before the engine fires reads the engine's **previous** decision, and
+// three of the four call sites do not pass it to the cone sampler at all
+// (`docs/re/aim.md` §"The attack type"). It is read as **evidence** and never
+// drives the transform.
 constexpr std::uintptr_t k_weapon_mode = 0x1A00;
 // `C_CSWeaponBase::m_flRecoilIndex` (float32, weapon + 0x1A28): the per-shot
 // recoil counter the negev's rule is keyed on. It counts 0, 1, 2, … after every
@@ -258,29 +260,35 @@ auto build_input(const game::Snapshot& snapshot, const WeaponProfile& weapon, in
     // The engine's **attack type** and its **per-shot recoil counter** live on the
     // weapon *entity*, not on its VData.
     //
-    // **The attack type is evidence, not knowledge.** The field is sticky: the
-    // engine's secondary path sets it to 1 and the fire path consumes and clears
-    // it, so a payload that reads it *before* the engine fires sees the engine's
-    // **previous** decision — and three of the four `CSBaseGunFire` call sites do
-    // not pass the field at all (they pass a literal `1`, a literal `0`, or
-    // `ammo_in_clip & 1`). The payload therefore cannot know the engine's attack
-    // type for the shot it is about to take.
+    // **The attack type is evidence, not knowledge — and it never drives the
+    // transform.** The field (`m_weaponMode`) is sticky: the engine's secondary
+    // path **sets** it to 1 (`0x1808249ef`) and nothing clears it there, only
+    // one of the four `CSBaseGunFire` call sites clears it after the fire
+    // (`0x180822881`), and two never touch it. A payload that reads it *before*
+    // the engine fires therefore reads the engine's **previous** decision — and
+    // three of the four call sites do not pass the field to the cone sampler at
+    // all (they pass a literal `1`, a literal `0`, or `ammo_in_clip & 1`).
     //
-    // It reports what the field says, and the **core** applies the revolver's
-    // `1 - r^2` only when the field says the *secondary* attack. Because the
-    // fire path clears the field, the payload reads 0 (primary) for the shots it
-    // takes, so the transform is off in practice — the conservative reading of
-    // "not the secondary attack" — and the cone is the standard one
-    // (`docs/re/aim.md` §"The attack type").
+    // The read is kept and **published** as evidence
+    // (`WeaponProfile::observed_attack_type`), but it is deliberately **not** the
+    // transform's input: there is no signal that proves the *pending* shot is the
+    // secondary one, so the payload treats the weapon as **NOT** in secondary
+    // mode — the revolver's `1 - r^2` is **not** applied and the cone is the
+    // standard one (`docs/re/aim.md` §"The attack type").
     if (std::int32_t mode = 0; game::read(local.weapon_entity + k_weapon_mode, mode)) {
-      input.weapon.attack_type =
+      input.weapon.observed_attack_type =
           (mode == ATTACK_TYPE_SECONDARY) ? ATTACK_TYPE_SECONDARY : ATTACK_TYPE_PRIMARY;
     }
     // The **recoil counter**: the engine increments it by one after every shot and
     // resets it when the weapon stops firing. An unreadable counter leaves the
     // negev's transform off (`RECOIL_INDEX_UNKNOWN`).
+    //
+    // **The range is clamped**: the engine only ever compares the counter against
+    // 3, and `static_cast<int>` of a float outside `int`'s range is undefined —
+    // the payload is manually mapped and must not rely on undefined behaviour.
     if (float recoil = 0.0F;
-        game::read(local.weapon_entity + k_weapon_recoil_index, recoil) && recoil >= 0.0F) {
+        game::read(local.weapon_entity + k_weapon_recoil_index, recoil) && recoil >= 0.0F &&
+        recoil < 4.0F) {
       input.weapon.recoil_index = static_cast<int>(recoil);
     }
   }

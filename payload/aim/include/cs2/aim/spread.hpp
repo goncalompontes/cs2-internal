@@ -21,10 +21,13 @@
 // in the same order, as before.
 //
 // **Unvalidated against the live engine.** The RNG is the standard Source
-// `CUniformRandomStream` (Park–Miller + Bays–Durham shuffle) and `md5_pseudo_random`
-// follows the documented `MD5_PseudoRandom(sequence)`, but the exact input
-// construction and the per-weapon spread/inaccuracy magnitudes
-// (`FUN_18080b880`) still need a live cross-check (`docs/re/aim.md` §9).
+// `CUniformRandomStream` (Park–Miller + Bays–Durham shuffle) — checked
+// instruction by instruction against tier0's `GenerateRandomNumber_Locked`
+// (`tier0.dll` `0x15e1b0`), so the **integer** stream is bit-identical — and
+// `md5_pseudo_random` follows the documented `MD5_PseudoRandom(sequence)`, but
+// the exact input construction and the per-weapon spread/inaccuracy magnitudes
+// (`FUN_18080b880`) still need a live cross-check (`docs/re/aim.md`, §"The
+// attack type" and §"Inaccuracy").
 
 #include <array>
 #include <cstdint>
@@ -62,12 +65,21 @@ class UniformRandomStream {
 // `CSWeaponMode`: 0 is the primary attack, 1 the secondary. The engine's revolver
 // rule needs the secondary one (`docs/re/aim.md` §"The attack type").
 //
-// **`ATTACK_TYPE_UNKNOWN` is not "primary".** The field is sticky — one path sets it
-// to 1, another consumes and clears it — so a payload that reads it *before* the
-// engine fires reads the engine's **previous** decision, and three of the four
-// `CSBaseGunFire` call sites do not pass the field at all. The unknown value is
-// therefore its own state, and the conservative reading of it is "not the secondary
-// attack": the revolver's `1 - r^2` is then **not** applied.
+// **The payload has two of these, and they are not the same thing.**
+//
+// * the **observed** value is **evidence**: what the field holds when the
+//   payload reads it. The field is sticky — one path sets it to 1, another
+//   consumes and clears it — so a payload that reads it *before* the engine
+//   fires reads the engine's **previous** decision, and three of the four
+//   `CSBaseGunFire` call sites do not pass the field at all;
+// * the **pending** value is **knowledge**: the attack type of the shot the
+//   payload is about to take. **The payload cannot know it** — there is no
+//   signal that proves the *pending* shot is the secondary one — so it is
+//   always `ATTACK_TYPE_UNKNOWN`.
+//
+// **`ATTACK_TYPE_UNKNOWN` is not "primary".** It is its own state, and the
+// conservative reading of it is "not the secondary attack": the revolver's
+// `1 - r^2` is then **not** applied and the cone is the standard one.
 inline constexpr int ATTACK_TYPE_UNKNOWN = -1;
 inline constexpr int ATTACK_TYPE_PRIMARY = 0;
 inline constexpr int ATTACK_TYPE_SECONDARY = 1;
@@ -101,9 +113,26 @@ struct SpreadRules {
   // VData + 0x71E). The engine compares the weapon **id**; this is the VData's
   // "this is the revolver" flag, and it is the payload's read of that id.
   bool is_revolver = false;
-  // The engine's attack type (`m_weaponMode`): 0 primary, 1 secondary,
-  // `ATTACK_TYPE_UNKNOWN` when the payload cannot know it.
-  int attack_type = ATTACK_TYPE_UNKNOWN;
+  // The engine's attack type **as the payload read it**: **evidence**, never
+  // knowledge. The field (`m_weaponMode`) holds the engine's **previous**
+  // decision when the payload reads it before the engine fires, so this value
+  // says nothing about the shot the payload is about to take.
+  //
+  // **It must never drive the transform.** The transform reads
+  // `pending_attack_type`, not this one.
+  int observed_attack_type = ATTACK_TYPE_UNKNOWN;
+  // The attack type of the **pending** shot — the only value the revolver's
+  // rule may key on.
+  //
+  // **The payload cannot know it, so it is always `ATTACK_TYPE_UNKNOWN`.** The
+  // field is sticky (one path sets it to 1 and never clears it; only one of the
+  // four `CSBaseGunFire` call sites clears it at all), and three of the four
+  // call sites do not pass it to the engine's cone sampler. There is no signal
+  // that proves the *pending* shot is the secondary one, so the conservative
+  // reading — "not the secondary attack" — is the only one available: the
+  // revolver's `1 - r^2` is **not** applied and the cone is the standard one
+  // (`docs/re/aim.md` §"The attack type").
+  int pending_attack_type = ATTACK_TYPE_UNKNOWN;
   // The engine's per-shot recoil counter (`m_flRecoilIndex`): 0, 1, 2, …,
   // `RECOIL_INDEX_UNKNOWN` when the payload cannot read it.
   int recoil_index = RECOIL_INDEX_UNKNOWN;
@@ -131,6 +160,14 @@ enum class RadiusTransform : std::uint8_t {
 // is **not** the engine's discriminator, so the name alone cannot put the
 // transform on: `is_revolver` and the attack type are both required.
 //
+// **The attack type it reads is `pending_attack_type`, never
+// `observed_attack_type`.** The observed value is the engine's **previous**
+// decision (the field is sticky), so it is evidence and not knowledge; keying
+// the transform on it would put `1 - r^2` on a shot the engine fires with the
+// **standard** cone. The payload has no signal that proves the *pending* shot is
+// the secondary one, so `pending_attack_type` is always `ATTACK_TYPE_UNKNOWN`
+// and the transform is **never** applied by the payload (`SpreadRules`).
+//
 // **The negev's rule**: the weapon id **and** the recoil counter below three. The
 // id has no VData flag, so the *class* is the payload's only discriminator for it
 // — and the class comes from the caller, which knows the weapon's name.
@@ -141,7 +178,7 @@ enum class RadiusTransform : std::uint8_t {
 [[nodiscard]] constexpr auto radius_transform(SpreadPattern pattern,
                                                const SpreadRules& rules) noexcept
     -> RadiusTransform {
-  if (rules.is_revolver && rules.attack_type == ATTACK_TYPE_SECONDARY) {
+  if (rules.is_revolver && rules.pending_attack_type == ATTACK_TYPE_SECONDARY) {
     return RadiusTransform::revolver;
   }
   if (pattern == SpreadPattern::negev && rules.recoil_index >= 0 &&
@@ -179,8 +216,11 @@ inline constexpr int PATTERN_TABLE_ENTRIES = 64;
 // **Nullopt when the weapon fires fewer than two bullets**: the engine then marks
 // the block invalid and falls back to the random cone.
 //
-// The table is drawn **in order**, so the entry at index `j` is only reachable
-// after `j + 1` draws — the table is built whole, exactly as the engine builds it.
+// **The table is drawn whole, in order.** The builder is a property of the
+// *builder*, not a constraint on the reader: the engine fills all 64 entries
+// once per weapon, so the entry at index `j` is the `j`-th pair the stream
+// produced — a reader may ask for any index it likes, and the value is the same
+// one the engine would have found there.
 [[nodiscard]] auto shotgun_pattern_table(int spread_seed, int num_bullets) noexcept
     -> std::optional<std::array<ShotgunPatternEntry, PATTERN_TABLE_ENTRIES>>;
 

@@ -63,14 +63,17 @@ struct SpreadPair {
                                const std::optional<std::array<ShotgunPatternEntry,
                                                              PATTERN_TABLE_ENTRIES>>& table)
     -> Vec2 {
+  // **The transform is decided once per shot**, not once per pellet: it is the
+  // engine's per-shot rule, and the draw is on the hot path.
+  const RadiusTransform transform = radius_transform(pattern, rules);
   float r1 = carried.radius;
   float a1 = carried.angle;
   if (pellet == 0 || rules.shotgun_patterns) {
     r1 = stream.random_float(0.0F, 1.0F);
     a1 = stream.random_float(0.0F, TWO_PI);
-    if (radius_transform(pattern, rules) == RadiusTransform::revolver) {
+    if (transform == RadiusTransform::revolver) {
       r1 = 1.0F - r1 * r1;
-    } else if (radius_transform(pattern, rules) == RadiusTransform::negev) {
+    } else if (transform == RadiusTransform::negev) {
       const int exponent = negev_exponent(rules.recoil_index);
       for (int step = 0; step < exponent; ++step) {
         r1 = r1 * r1;
@@ -99,9 +102,9 @@ struct SpreadPair {
     r2 = stream.random_float(0.0F, 1.0F);
     a2 = stream.random_float(0.0F, TWO_PI);
   }
-  if (radius_transform(pattern, rules) == RadiusTransform::revolver) {
+  if (transform == RadiusTransform::revolver) {
     r2 = 1.0F - r2 * r2;
-  } else if (radius_transform(pattern, rules) == RadiusTransform::negev) {
+  } else if (transform == RadiusTransform::negev) {
     const int exponent = negev_exponent(rules.recoil_index);
     for (int step = 0; step < exponent; ++step) {
       r2 = r2 * r2;
@@ -335,7 +338,22 @@ auto spread_kernel(const WeaponProfile& weapon, int pellets, SpreadPattern patte
                       .pellets = pellets,
                       .pattern = pattern,
                       .rules = SpreadRules{.is_revolver = weapon.is_revolver,
-                                           .attack_type = weapon.attack_type,
+                                           // The **observed** attack type is
+                                           // evidence and it travels with the
+                                           // kernel so the operator can see what
+                                           // the field said.
+                                           .observed_attack_type = weapon.observed_attack_type,
+                                           // **The pending shot's attack type is
+                                           // NOT the observed one.** The field
+                                           // (`m_weaponMode`) is sticky, so the
+                                           // observed value is the engine's
+                                           // **previous** decision; the payload
+                                           // cannot prove the pending shot is the
+                                           // secondary one, so the pending value
+                                           // stays **unknown** and the revolver's
+                                           // `1 - r^2` is never applied
+                                           // (`cs2/aim/spread.hpp`, `SpreadRules`).
+                                           .pending_attack_type = ATTACK_TYPE_UNKNOWN,
                                            .recoil_index = weapon.recoil_index,
                                            .shotgun_patterns = weapon.shotgun_patterns,
                                            .num_bullets = weapon.num_bullets,

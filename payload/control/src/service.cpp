@@ -2219,10 +2219,16 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
     // bound what the operator may choose).
     solve_input->monte_carlo_samples = rage_mc_samples_.load();
     // The weapon's **pellet pattern**: the core has no default for it, and a
-    // default would silently drop the revolver's `1 - r^2`. The designer name is
-    // the only thing that tells a revolver from a rifle (both are weapon type
-    // 3), so the rule is keyed on it (`cs2/control/rage_objective.hpp`).
-    solve_input->monte_carlo_pattern = spread_pattern_for(local.weapon);
+    // default would silently drop a transform the engine applies. The rule is
+    // the engine's own discriminator — the VData's `m_bIsRevolver` — and not
+    // the designer name (`cs2/control/rage_objective.hpp`).
+    //
+    // **The pattern in force** is what the core actually applies: the engine's
+    // revolver rule needs the *pending* shot's attack type, which the payload
+    // cannot know, so the transform is off and the cone is the standard one.
+    // The status names this value, so it cannot claim a transform the core
+    // does not apply.
+    solve_input->monte_carlo_pattern = applied_spread_pattern(solve_input->weapon);
     // The weapon fires **one** pellet: the multi-pellet weapons are exactly the
     // ones the core refuses (`pattern_supported`), and the core's per-pellet
     // attribution is only reachable with more than one.
@@ -2918,11 +2924,11 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
           .sequence = stated_sequence > 0 ? static_cast<std::uint32_t>(stated_sequence) : tick,
           .tick = stated_tick > 0 ? static_cast<std::uint32_t>(stated_tick) : tick,
           .source = static_cast<aim::SeedSource>(seed_source)};
-      // The weapon's pattern: the core has no default for it, and the designer
-      // name is the only thing that tells a revolver from a rifle.
-      input->monte_carlo_pattern =
-          spread_pattern_for(snapshot.local.has_value() ? std::string_view{snapshot.local->weapon}
-                                                        : std::string_view{});
+      // The weapon's pattern: the core has no default for it, and the rule is
+      // the engine's own discriminator — the VData's `m_bIsRevolver` — and not
+      // the designer name. **The pattern in force** is what the core actually
+      // applies (`cs2/control/rage_objective.hpp`).
+      input->monte_carlo_pattern = applied_spread_pattern(input->weapon);
       // The target's own health: the rule's first key is judged against it.
       //
       // **The index comes from the hitboxes**, which the reader stamped with
