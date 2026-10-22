@@ -184,6 +184,17 @@ jobs:
       # test is registered and runs here: `payload/diag/meson.build` registers
       # it whenever the build machine can run the binaries
       # (`meson.can_run_host_binaries()`).
+      # The manual map cannot service a TLS directory: a `/MT` build (or any
+      # function-local `static`, which emits the CRT's TSS guard) faults the
+      # entry thread with 0xC0000005. The image must have an empty TLS
+      # directory. See docs/operator-live-check.md.
+      - name: the payload has no TLS directory
+        run: |
+          $report = & llvm-readobj --coff-tls-directory build-payload\payload.dll
+          $report | Out-String | Write-Host
+          if ($report -match 'StartAddressOfRawData|AddressOfIndex') {
+            throw "payload.dll has a TLS directory: a function-local static or a /MT build"
+          }
       - name: the payload tests
         run: meson test -C build-payload
 

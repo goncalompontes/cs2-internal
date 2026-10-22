@@ -88,7 +88,8 @@ struct VDataOffsets {
 };
 
 auto vdata_offsets() -> const VDataOffsets& {
-  static const VDataOffsets offsets{
+  // A plain local: no TLS guard in the mapped image (see service.cpp).
+  const VDataOffsets offsets{
       .weapon_type = vdata_field("m_WeaponType", 0x520),
       .full_auto = vdata_field("m_bIsFullAuto", 0x72d),
       .cycle_time = vdata_field("m_flCycleTime", 0x738),

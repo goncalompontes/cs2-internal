@@ -162,7 +162,7 @@ set CXX=clang-cl
 
 # 4. The three Windows targets.
 #    The payload is configured with the cross file: it pins the *static* CRT
-#    (b_vscrt = mt), which the manually mapped DLL needs (docs/architecture.md).
+#    (b_vscrt = md, the cross file pins it), which the manual map needs.
 meson setup build-payload  payload --cross-file toolchain/windows-msvc.ini
 meson compile -C build-payload
 meson setup build-injector injector

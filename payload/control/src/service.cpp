@@ -82,7 +82,11 @@ struct WeaponFireOffsets {
 };
 
 auto weapon_fire_offsets() -> const WeaponFireOffsets& {
-  static const WeaponFireOffsets offsets{
+  // A plain local: a function-local static would need the CRT's TLS guard
+  // (`_tls_index`), which gives a manually mapped image a TLS directory the
+  // injector cannot service. The struct is six integers; building it per call
+  // is cheaper than the guard would be.
+  const WeaponFireOffsets offsets{
       .clip1 = schema_field("C_BasePlayerWeapon", "m_iClip1", 0x1928),
       .in_reload = schema_field("C_CSWeaponBase", "m_bInReload", 0x1a3c),
       .deploy_tick = schema_field("C_CSWeaponBase", "m_nDeployTick", 0x1a40),

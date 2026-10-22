@@ -43,24 +43,26 @@ cmd /c "call `"$vc`" >nul 2>&1 && set CC=clang-cl && set CXX=clang-cl && meson c
 > grows: if a count here does not match what the commands print, **the page is
 > stale, not the tree** — fix the page.
 
-> **The payload is injected with the STATIC CRT (`/MT`).** A build that
-> defaults to the dynamic CRT (`b_vscrt=from_buildtype` with a release-ish
-> buildtype gives `/MD`) makes `payload.dll` import `MSVCP140.dll`,
-> `VCRUNTIME140.dll` and the `api-ms-win-crt-*` DLLs — the injector would
-> then have to resolve them **inside the game process**. The configuration
-> that is actually injected is `/MT`, so build it that way and **check**:
+> **The payload is injected with the DYNAMIC CRT (`/MD`).** Measured live
+> 2026-10-22: a `/MT` build carries a TLS directory (the static CRT's
+> `_tls_index` / TSS guards) and the manual map's entry thread faults with
+> `0xC0000005` before `DllMain` returns. A `/MD` build has **no** TLS
+> directory and boots. The injector runs with `--load-missing` so it can
+> resolve `MSVCP140.dll`, `VCRUNTIME140.dll` and the `api-ms-win-crt-*`
+> DLLs inside the game process. Build it that way and **check the TLS
+> directory is empty**:
 >
 > ```powershell
-> meson configure build-payload -Db_vscrt=mt
+> meson configure build-payload -Db_vscrt=md
 > cmd /c "call `"$vc`" >nul 2>&1 && set CC=clang-cl && set CXX=clang-cl && meson compile -C build-payload"
 >
-> # the imports must be exactly these three
+> # the TLS directory must be empty (no _tls_index / TSS guard)
 > & 'F:\llvm-sdk\clang+llvm-22.1.8-x86_64-pc-windows-msvc\bin\llvm-readobj.exe' `
->      --coff-imports build-payload\payload.dll | Select-String 'Name:'
+>      --coff-tls-directory build-payload\payload.dll
 > ```
 >
-> `KERNEL32.dll`, `USER32.dll` and `D3DCOMPILER_47.dll` — anything else means
-> the build is not the injected configuration.
+> **No function-local `static`** may be added to the payload: each one
+> re-introduces the TLS guard.
 
 **The calibration dump.** The payload's engine offsets come from
 `calibration/offsets.json`. The **offsets** can be refreshed **without the
