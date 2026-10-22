@@ -119,9 +119,13 @@ Gotchas (unchanged):
 
 - Never inject twice (two pipe servers → random client).
 - The overlay DLL cannot relink while CS2 is running; kill CS2 → relink → relaunch.
-- The menu (shared settings block) is the owner of the rage settings: the payload
-  re-pushes the block every frame, so `rage`-command changes to menu-owned fields are
-  reverted. For automated tests use `force` (command-only) and/or write the shm block
+- The menu (shared settings block) owns the rage settings **only for the fields
+  the operator changes**: the payload re-pushes the block every frame, but it
+  applies only the rage fields the operator actually moved (`docs/ragebot.md`
+  §15), so a `rage`-command change to those fields **sticks** until the
+  operator moves the same field in the menu. `force` (command-only) is the
+  switch that bypasses the trigger-key check, not an ownership mechanism; for
+  automated tests write the shm block
   (`artifacts/menu_probe.py` has the offsets, regenerate with
   `artifacts/wire_offsets.cpp` after any `wire::Settings` change).
 - Diagnostic scripts live in `artifacts/` (gitignored): `floor_probe.py`,
