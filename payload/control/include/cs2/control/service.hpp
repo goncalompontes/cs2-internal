@@ -28,6 +28,7 @@
 #include "cs2/control/occlusion_query.hpp"
 #include "cs2/control/rage_config.hpp"
 #include "cs2/control/rage_objective.hpp"
+#include "cs2/control/rage_settings.hpp"
 #include "cs2/control/settings_access.hpp"
 #include "cs2/control/trigger.hpp"
 #include "cs2/game/state_reader.hpp"
@@ -273,11 +274,21 @@ class Service {
   // (0 = none), held to trigger the solve. `autostop`/`autoscope` are modes
   // (0 = off, 1 = always while solving, 2 = only while firing); `autoreload` and
   // `only_visible` are flags.
+  //
+  // **`fields` and `source` are the ownership rule** (`cs2/control/
+  // rage_settings.hpp`). The menu publishes its **whole** block every frame, so
+  // a write that carried every field would overwrite the control channel's
+  // values on every frame — and the control channel is the only way to reach
+  // the Monte-Carlo objective, which the menu cannot select. So a write carries
+  // **only the fields its writer changed**: the fields it does not carry keep
+  // their value **and** their owner, and the status says which channel owns
+  // each field.
   void set_rage_features(bool on, int key, bool fire, int objective, int hitbox, float fov,
                          float min_damage, float min_hitchance, int autostop, int autoscope,
                          bool autoreload, bool only_visible, int mode, bool per_weapon,
                          const char* weapon, int config_op, std::uint32_t config_token, bool recoil,
-                         float stop_speed, bool backtrack) noexcept;
+                         float stop_speed, bool backtrack, std::uint32_t fields,
+                         RageSource source) noexcept;
 
   // Configure the triggerbot (`docs/ragebot.md` §"The trigger"): the `trigger`
   // control command and the payload's environment (`CS2_PAYLOAD_TRIGGER`) set the
@@ -583,7 +594,18 @@ class Service {
   std::mutex rage_config_mutex_;
   char rage_weapon_[24] = {};
   RageConfigStore rage_profiles_{};
-  void apply_rage_config_op(int op, const char* weapon) noexcept;
+  void apply_rage_config_op(int op, const char* weapon, RageSource source) noexcept;
+  // The ragebot's fields the **menu** owns: a set bit is the menu's, a clear bit
+  // is the control channel's.
+  //
+  // **Why it is tracked.** The menu publishes its whole block every frame, so
+  // "whose value is in force?" is a question the status has to answer: the
+  // control channel is the only way to reach the Monte-Carlo objective, so the
+  // operator has to be able to see that it *stuck* (the menu cannot show the
+  // objective at all).
+  std::atomic<std::uint32_t> rage_menu_fields_{0};
+  // Note the ownership of the fields a write carried.
+  void note_rage_owner(std::uint32_t fields, RageSource source) noexcept;
   // The tuning actually used by the solve: the per-weapon profile when `per_weapon` is
   // on and the active weapon has one, else the global settings.
   struct RageTuning {

@@ -213,6 +213,26 @@ auto parse_buttons(const Json& value, std::uint64_t& mask, std::string& bad) -> 
   return false;
 }
 
+// The rage fields the **menu** owns, as a comma-separated list (the status).
+//
+// The operator has to be able to see **which channel owns each field**, so the
+// list is the whole answer: a field that is not in it belongs to the control
+// channel. The list is built on the control thread (the status's own thread),
+// so the string may allocate.
+auto rage_menu_field_list(std::uint32_t fields) -> std::string {
+  std::string out;
+  for (const RageFieldName& field : k_rage_field_names) {
+    if ((fields & field.bit) == 0) {
+      continue;
+    }
+    if (!out.empty()) {
+      out.push_back(',');
+    }
+    out.append(field.name);
+  }
+  return out;
+}
+
 }  // namespace
 
 unsigned long __stdcall Service::thread_entry(void* self) noexcept {
@@ -1278,38 +1298,93 @@ void Service::set_strafe_features(int mode, bool ignore_keys, float wishspeed,
   input_.set_strafe_config(wishspeed, subticks);
 }
 
+void Service::note_rage_owner(std::uint32_t fields, RageSource source) noexcept {
+  // The writer owns the fields it wrote: the menu's bits are set for the menu's
+  // write and cleared for the control channel's.
+  if (source == RageSource::menu) {
+    rage_menu_fields_.fetch_or(fields, std::memory_order_relaxed);
+  } else {
+    rage_menu_fields_.fetch_and(~fields, std::memory_order_relaxed);
+  }
+}
+
 void Service::set_rage_features(bool on, int key, bool fire, int objective, int hitbox, float fov,
                                 float min_damage, float min_hitchance, int autostop, int autoscope,
                                 bool autoreload, bool only_visible, int mode, bool per_weapon,
                                 const char* weapon, int config_op, std::uint32_t config_token,
-                                bool recoil, float stop_speed, bool backtrack) noexcept {
-  rage_enabled_.store(on);
-  rage_key_.store(key);
-  rage_fire_.store(fire);
-  rage_objective_.store(objective);
-  rage_hitbox_.store(hitbox);
-  rage_fov_.store(fov);
-  rage_min_damage_.store(min_damage);
-  rage_min_hitchance_.store(min_hitchance);
-  rage_autostop_.store(autostop);
-  rage_autoscope_.store(autoscope);
-  rage_autoreload_.store(autoreload);
-  rage_only_visible_.store(only_visible);
-  rage_mode_.store(mode);
-  rage_per_weapon_.store(per_weapon);
-  rage_recoil_.store(recoil);
-  rage_stop_speed_.store(stop_speed);
-  rage_backtrack_.store(backtrack);
-  {
+                                bool recoil, float stop_speed, bool backtrack, std::uint32_t fields,
+                                RageSource source) noexcept {
+  // **Only the fields this write carries.** The others keep their value — the
+  // control channel's — and their owner. The menu publishes its whole block
+  // every frame, so a write that carried every field would overwrite the
+  // control channel's values within a second, and the control channel is the
+  // only way to reach the Monte-Carlo objective (`docs/ragebot.md` §14.1).
+  if ((fields & RAGE_FIELD_ENABLED) != 0) {
+    rage_enabled_.store(on);
+  }
+  if ((fields & RAGE_FIELD_KEY) != 0) {
+    rage_key_.store(key);
+  }
+  if ((fields & RAGE_FIELD_FIRE) != 0) {
+    rage_fire_.store(fire);
+  }
+  if ((fields & RAGE_FIELD_OBJECTIVE) != 0) {
+    rage_objective_.store(objective);
+  }
+  if ((fields & RAGE_FIELD_HITBOX) != 0) {
+    rage_hitbox_.store(hitbox);
+  }
+  if ((fields & RAGE_FIELD_FOV) != 0) {
+    rage_fov_.store(fov);
+  }
+  if ((fields & RAGE_FIELD_MIN_DAMAGE) != 0) {
+    rage_min_damage_.store(min_damage);
+  }
+  if ((fields & RAGE_FIELD_MIN_HITCHANCE) != 0) {
+    rage_min_hitchance_.store(min_hitchance);
+  }
+  if ((fields & RAGE_FIELD_AUTOSTOP) != 0) {
+    rage_autostop_.store(autostop);
+  }
+  if ((fields & RAGE_FIELD_AUTOSCOPE) != 0) {
+    rage_autoscope_.store(autoscope);
+  }
+  if ((fields & RAGE_FIELD_AUTORELOAD) != 0) {
+    rage_autoreload_.store(autoreload);
+  }
+  if ((fields & RAGE_FIELD_ONLY_VISIBLE) != 0) {
+    rage_only_visible_.store(only_visible);
+  }
+  if ((fields & RAGE_FIELD_MODE) != 0) {
+    rage_mode_.store(mode);
+  }
+  if ((fields & RAGE_FIELD_PER_WEAPON) != 0) {
+    rage_per_weapon_.store(per_weapon);
+  }
+  if ((fields & RAGE_FIELD_RECOIL) != 0) {
+    rage_recoil_.store(recoil);
+  }
+  if ((fields & RAGE_FIELD_STOP_SPEED) != 0) {
+    rage_stop_speed_.store(stop_speed);
+  }
+  if ((fields & RAGE_FIELD_BACKTRACK) != 0) {
+    rage_backtrack_.store(backtrack);
+  }
+  if ((fields & RAGE_FIELD_WEAPON) != 0) {
     const std::scoped_lock lock(rage_config_mutex_);
     if (weapon != nullptr) {
       rage_weapon_key(weapon, rage_weapon_, sizeof(rage_weapon_));
     }
   }
+  // The ownership: the fields this write carried belong to its writer now.
+  note_rage_owner(fields, source);
   // One click = one op: the menu increments the token.
+  //
+  // **The op is a request, not a setting**, so it is not masked: it is
+  // delivered on every write, and the token makes it fire exactly once.
   if (config_op != 0 && config_token != rage_config_token_.load()) {
     rage_config_token_.store(config_token);
-    apply_rage_config_op(config_op, weapon);
+    apply_rage_config_op(config_op, weapon, source);
   }
 }
 
@@ -1320,7 +1395,7 @@ void Service::set_trigger_features(const TriggerConfig& config) noexcept {
   trigger_.configure(config);
 }
 
-void Service::apply_rage_config_op(int op, const char* weapon) noexcept {
+void Service::apply_rage_config_op(int op, const char* weapon, RageSource source) noexcept {
   char key[24] = {};
   bool persist = false;
   {
@@ -1364,6 +1439,13 @@ void Service::apply_rage_config_op(int op, const char* weapon) noexcept {
         rage_autoreload_.store(profile->autoreload != 0);
         rage_only_visible_.store(profile->only_visible != 0);
         rage_fire_.store(profile->fire != 0);
+        // The profile's values are in force now, so they belong to whoever
+        // asked for the load: the menu's button or the control command.
+        note_rage_owner(RAGE_FIELD_OBJECTIVE | RAGE_FIELD_HITBOX | RAGE_FIELD_MODE |
+                            RAGE_FIELD_KEY | RAGE_FIELD_FOV | RAGE_FIELD_MIN_DAMAGE |
+                            RAGE_FIELD_MIN_HITCHANCE | RAGE_FIELD_AUTOSTOP | RAGE_FIELD_AUTOSCOPE |
+                            RAGE_FIELD_AUTORELOAD | RAGE_FIELD_ONLY_VISIBLE | RAGE_FIELD_FIRE,
+                        source);
         break;
       }
       case 4:  // load file
@@ -3078,17 +3160,25 @@ void Service::do_aim(const Json& args, Json& out) noexcept {
 }
 
 void Service::do_rage(const Json& args, Json& out) noexcept {
+  // The fields this command changed. The write below carries them, and they
+  // become the **control channel's**: the menu's bits are cleared for them, so
+  // the status can say who owns the objective in force. The fields the command
+  // did not name keep their value **and** their owner.
+  std::uint32_t changed = 0;
   bool on = rage_enabled_.load();
   if (const Json* value = args.find("on"); value != nullptr && value->is_bool()) {
     on = value->as_bool();
+    changed |= RAGE_FIELD_ENABLED;
   }
   int key = rage_key_.load();
   if (const Json* value = args.find("key"); value != nullptr && value->is_number()) {
     key = static_cast<int>(value->as_number());
+    changed |= RAGE_FIELD_KEY;
   }
   bool fire = rage_fire_.load();
   if (const Json* value = args.find("fire"); value != nullptr && value->is_bool()) {
     fire = value->as_bool();
+    changed |= RAGE_FIELD_FIRE;
   }
   if (const Json* value = args.find("force"); value != nullptr && value->is_bool()) {
     rage_force_.store(value->as_bool());
@@ -3105,11 +3195,14 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   if (const Json* value = args.find("sigma"); value != nullptr && value->is_number()) {
     rage_sigma_.store(static_cast<float>(value->as_number()));
   }
+  int objective = rage_objective_.load();
   if (const Json* value = args.find("objective"); value != nullptr && value->is_string()) {
     // The name -> value mapping is a **pure rule**
     // (`cs2/control/rage_objective.hpp`). An unknown name selects the documented
     // safe default -- the hitchance -- exactly as it did before.
-    rage_objective_.store(objective_value_for(value->as_string()));
+    objective = objective_value_for(value->as_string());
+    rage_objective_.store(objective);
+    changed |= RAGE_FIELD_OBJECTIVE;
   }
   if (const Json* value = args.find("seed"); value != nullptr && value->is_string()) {
     // The seed policy: which of the two accounts of the engine's seed is in
@@ -3133,57 +3226,99 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
       rage_mc_samples_.store(samples, std::memory_order_relaxed);
     }
   }
+  float fov = rage_fov_.load();
   if (const Json* value = args.find("fov"); value != nullptr && value->is_number()) {
-    rage_fov_.store(static_cast<float>(value->as_number()));
+    fov = static_cast<float>(value->as_number());
+    rage_fov_.store(fov);
+    changed |= RAGE_FIELD_FOV;
   }
+  float min_damage = rage_min_damage_.load();
   if (const Json* value = args.find("min_damage"); value != nullptr && value->is_number()) {
-    rage_min_damage_.store(static_cast<float>(value->as_number()));
+    min_damage = static_cast<float>(value->as_number());
+    rage_min_damage_.store(min_damage);
+    changed |= RAGE_FIELD_MIN_DAMAGE;
   }
+  float min_hitchance = rage_min_hitchance_.load();
   if (const Json* value = args.find("min_hitchance"); value != nullptr && value->is_number()) {
-    rage_min_hitchance_.store(static_cast<float>(value->as_number()));
+    min_hitchance = static_cast<float>(value->as_number());
+    rage_min_hitchance_.store(min_hitchance);
+    changed |= RAGE_FIELD_MIN_HITCHANCE;
   }
+  int hitbox = rage_hitbox_.load();
   if (const Json* value = args.find("hitbox"); value != nullptr && value->is_number()) {
-    rage_hitbox_.store(static_cast<int>(value->as_number()));
+    hitbox = static_cast<int>(value->as_number());
+    rage_hitbox_.store(hitbox);
+    changed |= RAGE_FIELD_HITBOX;
   }
+  int autostop = rage_autostop_.load();
   if (const Json* value = args.find("autostop"); value != nullptr && value->is_number()) {
-    rage_autostop_.store(static_cast<int>(value->as_number()));
+    autostop = static_cast<int>(value->as_number());
+    rage_autostop_.store(autostop);
+    changed |= RAGE_FIELD_AUTOSTOP;
   }
+  int autoscope = rage_autoscope_.load();
   if (const Json* value = args.find("autoscope"); value != nullptr && value->is_number()) {
-    rage_autoscope_.store(static_cast<int>(value->as_number()));
+    autoscope = static_cast<int>(value->as_number());
+    rage_autoscope_.store(autoscope);
+    changed |= RAGE_FIELD_AUTOSCOPE;
   }
+  bool autoreload = rage_autoreload_.load();
   if (const Json* value = args.find("autoreload"); value != nullptr && value->is_bool()) {
-    rage_autoreload_.store(value->as_bool());
+    autoreload = value->as_bool();
+    rage_autoreload_.store(autoreload);
+    changed |= RAGE_FIELD_AUTORELOAD;
   }
+  bool only_visible = rage_only_visible_.load();
   if (const Json* value = args.find("only_visible"); value != nullptr && value->is_bool()) {
-    rage_only_visible_.store(value->as_bool());
+    only_visible = value->as_bool();
+    rage_only_visible_.store(only_visible);
+    changed |= RAGE_FIELD_ONLY_VISIBLE;
   }
+  bool recoil = rage_recoil_.load();
   if (const Json* value = args.find("recoil"); value != nullptr && value->is_bool()) {
-    rage_recoil_.store(value->as_bool());
+    recoil = value->as_bool();
+    rage_recoil_.store(recoil);
+    changed |= RAGE_FIELD_RECOIL;
   }
+  bool backtrack = rage_backtrack_.load();
   if (const Json* value = args.find("backtrack"); value != nullptr && value->is_bool()) {
-    rage_backtrack_.store(value->as_bool());
+    backtrack = value->as_bool();
+    rage_backtrack_.store(backtrack);
+    changed |= RAGE_FIELD_BACKTRACK;
   }
+  float stop_speed = rage_stop_speed_.load();
   if (const Json* value = args.find("stop_speed"); value != nullptr && value->is_number()) {
-    rage_stop_speed_.store(static_cast<float>(value->as_number()));
+    stop_speed = static_cast<float>(value->as_number());
+    rage_stop_speed_.store(stop_speed);
+    changed |= RAGE_FIELD_STOP_SPEED;
   }
   // The trigger: `mode` 0 hold / 1 always / 2 toggle, or the names `hold`/`always`/
   // `toggle`. `key` may be a number (virtual-key code) in the same call.
+  int mode = rage_mode_.load();
   if (const Json* value = args.find("mode"); value != nullptr) {
     if (value->is_number()) {
-      rage_mode_.store(static_cast<int>(value->as_number()));
+      mode = static_cast<int>(value->as_number());
+      rage_mode_.store(mode);
+      changed |= RAGE_FIELD_MODE;
     } else if (value->is_string()) {
       const std::string_view name = value->as_string();
-      rage_mode_.store(name == "always" ? 1 : (name == "toggle" ? 2 : 0));
+      mode = name == "always" ? 1 : (name == "toggle" ? 2 : 0);
+      rage_mode_.store(mode);
+      changed |= RAGE_FIELD_MODE;
     }
   }
+  bool per_weapon = rage_per_weapon_.load();
   if (const Json* value = args.find("per_weapon"); value != nullptr && value->is_bool()) {
-    rage_per_weapon_.store(value->as_bool());
+    per_weapon = value->as_bool();
+    rage_per_weapon_.store(per_weapon);
+    changed |= RAGE_FIELD_PER_WEAPON;
   }
   char weapon[24] = {};
   {
     const std::scoped_lock lock(rage_config_mutex_);
     if (const Json* value = args.find("weapon"); value != nullptr && value->is_string()) {
       rage_weapon_key(std::string(value->as_string()).c_str(), rage_weapon_, sizeof(rage_weapon_));
+      changed |= RAGE_FIELD_WEAPON;
     }
     std::snprintf(weapon, sizeof(weapon), "%s", rage_weapon_);
   }
@@ -3192,27 +3327,28 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
     return value != nullptr && value->is_bool() && value->as_bool();
   };
   if (config_flag("profile_save")) {
-    apply_rage_config_op(1, weapon);
+    apply_rage_config_op(1, weapon, RageSource::control);
   }
   if (config_flag("profile_load")) {
-    apply_rage_config_op(2, weapon);
+    apply_rage_config_op(2, weapon, RageSource::control);
   }
   if (config_flag("save")) {
-    apply_rage_config_op(3, weapon);
+    apply_rage_config_op(3, weapon, RageSource::control);
   }
   if (config_flag("load")) {
-    apply_rage_config_op(4, weapon);
+    apply_rage_config_op(4, weapon, RageSource::control);
   }
   if (config_flag("profile_delete")) {
-    apply_rage_config_op(5, weapon);
+    apply_rage_config_op(5, weapon, RageSource::control);
   }
   input_.refresh();
-  set_rage_features(on, key, fire, rage_objective_.load(), rage_hitbox_.load(), rage_fov_.load(),
-                    rage_min_damage_.load(), rage_min_hitchance_.load(), rage_autostop_.load(),
-                    rage_autoscope_.load(), rage_autoreload_.load(), rage_only_visible_.load(),
-                    rage_mode_.load(), rage_per_weapon_.load(), weapon, 0,
-                    rage_config_token_.load(), rage_recoil_.load(), rage_stop_speed_.load(),
-                    rage_backtrack_.load());
+  // The write carries **only the fields this command changed**, and the
+  // command's own values: the fields it did not name keep the value (and the
+  // owner) they have.
+  set_rage_features(on, key, fire, objective, hitbox, fov, min_damage, min_hitchance, autostop,
+                    autoscope, autoreload, only_visible, mode, per_weapon, weapon, 0,
+                    rage_config_token_.load(), recoil, stop_speed, backtrack, changed,
+                    RageSource::control);
 
   Json payload = Json::object();
   payload.set("enabled", Json::boolean(on));
@@ -3253,6 +3389,20 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
   payload.set("objective", Json::string(std::string(objective_name_for(effective_objective))));
   payload.set("objective_value", Json::number(static_cast<double>(effective_objective)));
   payload.set("objective_global", Json::string(std::string(objective_name_for(global_objective))));
+  // **Which channel owns the objective in force.** The menu and the control
+  // channel both write the ragebot's settings, and the control channel is the
+  // **only** way to reach the Monte-Carlo objective — the menu has no such
+  // option — so the operator has to be able to tell "the control channel set
+  // it and it stuck" from "the menu set it and it stuck". The ownership is the
+  // global objective's (the per-weapon profile's objective comes from the
+  // profile file, not from a channel).
+  //
+  // `menu_fields` is the whole answer: the rage fields the **menu** owns. A
+  // field that is not in the list belongs to the control channel.
+  const std::uint32_t menu_fields = rage_menu_fields_.load(std::memory_order_relaxed);
+  payload.set("objective_source",
+              Json::string(std::string(rage_owner_name(menu_fields, RAGE_FIELD_OBJECTIVE))));
+  payload.set("menu_fields", Json::string(rage_menu_field_list(menu_fields)));
   // The Monte-Carlo objective's own state: the sample count, the seed policy in
   // force, the numbers the last solve produced, and the reason it refused if it
   // did. **A fallback to another objective is never silent**: `mc_refusal` names

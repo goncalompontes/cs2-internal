@@ -107,6 +107,18 @@ struct Runtime {
   features::ConfigOpState config_op;
   // The live settings block the control channel reads and writes.
   LiveSettings live_settings;
+  // The menu's **last view** of the ragebot's settings: the copy the settings
+  // sink compares against, so a rage field the operator did not change is not
+  // re-applied — and the control channel's value for it survives (the control
+  // channel is the only way to reach the Monte-Carlo objective, which the menu
+  // cannot select; `docs/ragebot.md` §14.1).
+  //
+  // The copy is updated **after** the apply, so the next publication compares
+  // against what was actually applied.
+  cs2::control::RageSettings rage_menu_view{};
+  // Whether a publication has been applied yet: the **first** one applies the
+  // whole group (there is no earlier view to compare against).
+  bool rage_menu_view_valid = false;
   // Whether the shared segment (the Vulkan layer) owns the settings block, or
   // the in-process menu does. The render mode decides it, and the render mode
   // can still fall back from the in-process renderer to the layer.
@@ -316,13 +328,33 @@ void on_movement_settings(void* context, const cs2::overlay::wire::Settings& set
   runtime->control.set_strafe_features(
       static_cast<int>(config.movement.strafe_mode), config.movement.strafe_ignore_keys,
       config.movement.strafe_wishspeed, config.movement.strafe_subticks);
+  // The ragebot's settings: **only the fields the operator changed** are
+  // applied.
+  //
+  // The menu publishes its **whole** block every frame, so applying the whole
+  // group would overwrite the control channel's values on every frame — and
+  // the control channel is the **only** way to reach the Monte-Carlo
+  // objective, which the menu cannot select (`docs/ragebot.md` §14.1). The
+  // decision is a **pure rule** (`cs2/control/rage_settings.hpp`), so it is
+  // host-tested; the copy it runs against is the menu's last view, and it is
+  // updated **after** the apply.
+  const cs2::control::RageSettings rage_now = cs2::control::rage_settings_from_wire(live);
+  const std::uint32_t rage_changed =
+      runtime->rage_menu_view_valid
+          ? cs2::control::rage_changed_fields(rage_now, runtime->rage_menu_view)
+          : cs2::control::RAGE_FIELD_ALL;
   runtime->control.set_rage_features(
       config.rage.enabled, config.rage.key, config.rage.fire, config.rage.objective,
       config.rage.hitbox, config.rage.fov, config.rage.min_damage, config.rage.min_hitchance,
       config.rage.autostop, config.rage.autoscope, config.rage.autoreload != 0,
       config.rage.only_visible != 0, config.rage.mode, config.rage.per_weapon != 0,
       config.rage.weapon.data(), config.rage.config_op, config.rage.config_token,
-      config.rage.recoil != 0, config.rage.stop_speed, config.rage.backtrack != 0);
+      config.rage.recoil != 0, config.rage.stop_speed, config.rage.backtrack != 0, rage_changed,
+      cs2::control::RageSource::menu);
+  // The copy the next publication compares against is the one that was just
+  // applied.
+  runtime->rage_menu_view = rage_now;
+  runtime->rage_menu_view_valid = true;
 
   // Publish where the settings file lives so the menu can show it (a read-only
   // display field). The path is only written when it actually changes, so the
@@ -586,7 +618,8 @@ DWORD WINAPI install_thread(void*) {
     cs2::payload::runtime().control.set_rage_features(
         rage.enabled, rage.key, rage.fire, 1 /*hitchance*/, 0 /*auto*/, 0.0F, 0.0F, 0.0F, 0, 0,
         false, false, 0 /*hold*/, false, "", 0, 0, true /*recoil*/, 0.0F,
-        false /*backtrack: off by default*/);
+        false /*backtrack: off by default*/, cs2::control::RAGE_FIELD_ALL,
+        cs2::control::RageSource::control);
     cs2::payload::runtime().publisher.set_rage_defaults(rage.enabled, rage.key, rage.fire);
     cs2::payload::runtime().menu.set_rage_defaults(rage.enabled, rage.key, rage.fire);
     // The triggerbot (`docs/ragebot.md` §"The trigger"): the environment's
