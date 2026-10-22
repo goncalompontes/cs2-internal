@@ -264,9 +264,14 @@ auto build_input(const game::Snapshot& snapshot, const WeaponProfile& weapon, in
     // **previous** decision — and three of the four `CSBaseGunFire` call sites do
     // not pass the field at all (they pass a literal `1`, a literal `0`, or
     // `ammo_in_clip & 1`). The payload therefore cannot know the engine's attack
-    // type for the shot it is about to take; the conservative reading of what it
-    // reads is "not the secondary attack", so the revolver's `1 - r^2` is not
-    // applied (`docs/re/aim.md` §"The attack type").
+    // type for the shot it is about to take.
+    //
+    // It reports what the field says, and the **core** applies the revolver's
+    // `1 - r^2` only when the field says the *secondary* attack. Because the
+    // fire path clears the field, the payload reads 0 (primary) for the shots it
+    // takes, so the transform is off in practice — the conservative reading of
+    // "not the secondary attack" — and the cone is the standard one
+    // (`docs/re/aim.md` §"The attack type").
     if (std::int32_t mode = 0; game::read(local.weapon_entity + k_weapon_mode, mode)) {
       input.weapon.attack_type =
           (mode == ATTACK_TYPE_SECONDARY) ? ATTACK_TYPE_SECONDARY : ATTACK_TYPE_PRIMARY;
