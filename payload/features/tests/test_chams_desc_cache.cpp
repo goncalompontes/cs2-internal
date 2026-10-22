@@ -122,9 +122,18 @@ inline constexpr std::chrono::milliseconds OBSERVE_DEADLINE{5000};
 // bound that keeps the drive finite when the path does not exist at all
 // (the old protocol has no give-up path, so the drive runs to the bound and
 // the test fails).
-inline constexpr std::uint64_t GIVE_UP_DRIVE = 64;
+inline constexpr std::uint64_t GIVE_UP_DRIVE = 16;
 
-// How many times the generation is bumped under the contention.
+// How many times the probe may go round the loop **after** the stress is
+// done, still looking for the paths the test asserts.
+//
+// The bound keeps the drive finite when the paths do not exist at all (the
+// old protocol has neither a claim nor a give-up path, so the drive runs to
+// the bound and the test fails). It is generous: the paths are taken in the
+// first thousands of lookups.
+inline constexpr std::uint64_t PROBE_DRIVE = 4;
+
+// The least number of times the generation is bumped under the contention.
 //
 // The bump is paced on the probe's reads, so this is the number of times the
 // probe gets to read the cache between two bumps.
@@ -242,11 +251,14 @@ class OldDescCache {
 // One thread of the probe: it looks the desc up, and when the cache does not
 // know it, it resolves it and publishes it.
 //
-// It runs until `stop`, and the test stops it when the stress is done and
-// the paths the test asserts have been taken.
+// It runs until `stop` (or until it has made `max_rounds` rounds), and the
+// test stops it when the stress is done and the paths the test asserts have
+// been taken.
 auto probe_shipped(cs2::features::DescCache& cache, Probe& probe, std::uint64_t desc,
-                   const std::atomic<bool>& stop, std::atomic<std::uint64_t>& rounds) -> void {
-  while (!stop.load(std::memory_order_relaxed)) {
+                   const std::atomic<bool>& stop, std::atomic<std::uint64_t>& rounds,
+                   std::uint64_t max_rounds) -> void {
+  while (rounds.load(std::memory_order_relaxed) < max_rounds &&
+         !stop.load(std::memory_order_relaxed)) {
     const auto hit = cache.lookup(desc);
     rounds.fetch_add(1, std::memory_order_relaxed);
     if (!hit.has_value()) {
@@ -295,14 +307,16 @@ auto test_the_cache_never_pairs_two_writes() -> void {
   std::atomic<bool> stop{false};
   std::array<std::atomic<std::uint64_t>, THREADS> rounds{};
 
+  const std::uint64_t floor = static_cast<std::uint64_t>(ROUNDS) * THREADS;
+  const std::uint64_t cap = floor * PROBE_DRIVE;
   std::vector<std::thread> threads;
   for (int index = 0; index < THREADS; ++index) {
     // Two threads on each desc: the two descs share one slot, so the two
     // writers are in the same slot at the same time.
     const std::uint64_t desc = (index % 2 == 0) ? DESC_A : DESC_B;
     std::atomic<std::uint64_t>& count = rounds[static_cast<std::size_t>(index)];
-    threads.emplace_back([&cache, &probe, &stop, &count, desc]() {
-      probe_shipped(cache, probe, desc, stop, count);
+    threads.emplace_back([&cache, &probe, &stop, &count, desc, cap]() {
+      probe_shipped(cache, probe, desc, stop, count, cap);
     });
   }
 
@@ -314,12 +328,13 @@ auto test_the_cache_never_pairs_two_writes() -> void {
   //
   // The old protocol has neither: it never refuses a writer (there is no
   // claim) and it never gives up (there is no reader's retry), so the drive
-  // runs to the deadline and the two checks below fail — on every run, not
+  // runs to the bound and the two checks below fail — on every run, not
   // on one run in four.
-  const std::uint64_t floor = static_cast<std::uint64_t>(ROUNDS) * THREADS;
   (void)wait_until(
       [&]() {
-        return rounds_total(rounds) >= floor && probe.refused.load() > 0 && probe.hits.load() > 0;
+        const std::uint64_t total = rounds_total(rounds);
+        return (total >= floor && probe.refused.load() > 0 && probe.hits.load() > 0) ||
+               total >= cap;
       },
       OBSERVE_DEADLINE);
   stop.store(true, std::memory_order_relaxed);
@@ -421,20 +436,23 @@ auto test_the_generation_bump_under_a_concurrent_publisher() -> void {
   std::atomic<int> ready{0};
   std::array<std::atomic<std::uint64_t>, THREADS> rounds{};
 
+  const std::uint64_t floor = static_cast<std::uint64_t>(ROUNDS) * THREADS;
+  const std::uint64_t cap = floor * PROBE_DRIVE;
   std::vector<std::thread> threads;
   for (int index = 0; index < THREADS; ++index) {
     const std::uint64_t desc = (index % 2 == 0) ? DESC_A : DESC_B;
     std::atomic<std::uint64_t>& count = rounds[static_cast<std::size_t>(index)];
-    threads.emplace_back([&cache, &probe, &stop, &ready, &count, desc]() {
+    threads.emplace_back([&cache, &probe, &stop, &ready, &count, desc, cap]() {
       // The publisher says it is running, so the main thread's first bump is
-      // guaranteed to straddle the publishers and not to miss them.
+      // guaranteed to happen while the publishers are running, and not
+      // before they started.
       ready.fetch_add(1, std::memory_order_release);
-      probe_shipped(cache, probe, desc, stop, count);
+      probe_shipped(cache, probe, desc, stop, count, cap);
     });
   }
 
   // The publishers are running: the bump below is a fact, and it is a fact
-  // about a bump the publishers straddled.
+  // about a bump that happened while the publishers were running.
   (void)wait_until([&]() { return ready.load(std::memory_order_acquire) == THREADS; },
                    OBSERVE_DEADLINE);
   cache.advance();
@@ -443,10 +461,19 @@ auto test_the_generation_bump_under_a_concurrent_publisher() -> void {
   // The rest of the bumps are paced on the probe's reads: the main thread
   // waits for the probe to read the cache before it invalidates it again.
   // That is what makes "the probe read the cache" a fact as well.
-  const std::uint64_t floor = static_cast<std::uint64_t>(ROUNDS) * THREADS;
   std::uint64_t seen_hits = 0;
   while (rounds_total(rounds) < floor || advances < MIN_ADVANCES) {
-    if (!wait_until([&]() { return probe.hits.load() > seen_hits; }, OBSERVE_DEADLINE)) {
+    // The publishers have made their cap's worth of rounds: the drive is
+    // over, and the checks below say what was not observed.
+    if (rounds_total(rounds) >= cap) {
+      break;
+    }
+    // Wait for the probe to read the cache again: the bump is paced on it.
+    if (!wait_until([&]() { return probe.hits.load() > seen_hits || rounds_total(rounds) >= cap; },
+                    OBSERVE_DEADLINE)) {
+      break;
+    }
+    if (rounds_total(rounds) >= cap) {
       break;
     }
     seen_hits = probe.hits.load();
