@@ -41,6 +41,7 @@
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include "cipher.hpp"
 #include "config.hpp"
@@ -620,6 +621,470 @@ void test_transform() {
                                         constant_value(*module, "cs2.protect.key1") ^
                                         constant_value(*module, "cs2.protect.key2"));
   check((cipher ^ key) == 0, "the decode does not yield the index of the target");
+}
+
+/// The transform refuses a callee with an `sret` parameter on a target the
+/// narrowing was not measured on.
+///
+/// The rule is **target bound**: the evidence is the measurement of one
+/// backend on one target, and a rule that is not measured is not used. The
+/// refusal names the attribute.
+void test_transform_sret_other_target() {
+  llvm::LLVMContext context;
+  const auto module = build_transform_module(context);
+  if (module == nullptr) {
+    return;
+  }
+  // The module of the test has no target triple at all: the rule is closed
+  // there, and it is closed on every target but the one that was measured.
+  module->setTargetTriple(llvm::Triple("x86_64-unknown-linux-gnu"));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 1, "only the call to the target is rewritten");
+  check(result.functions[0].skipped.size() == 3, "three calls are skipped");
+  bool named = false;
+  for (const cs2::protect::CallSkipReason reason : result.functions[0].skipped) {
+    if (reason == cs2::protect::CallSkipReason::sret_parameter) {
+      named = true;
+    }
+  }
+  check(named, "the refusal names the sret parameter");
+  check_equal(cs2::protect::to_string(cs2::protect::CallSkipReason::sret_parameter),
+              "sret_parameter", "the reason of the refusal names the attribute");
+}
+
+/// The transform routes a callee that takes an `sret` parameter.
+///
+/// The call goes through a **thunk**: the thunk carries the `sret` attribute
+/// of the call and the hidden pointer, which it takes out of the cell of the
+/// scratch that the `sret` attribute names -- the first one here, the callee
+/// being a free function.
+void test_transform_sret() {
+  llvm::LLVMContext context;
+  const auto module = build_transform_module(context);
+  if (module == nullptr) {
+    return;
+  }
+  // The target the narrowing was measured on. The triple of a build carries
+  // the version of the toolchain, and the rule has to be open there too.
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+  check(cs2::protect::sret_routable(*module), "the sret parameter is routable on this target");
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc19.51.36252"));
+  check(cs2::protect::sret_routable(*module),
+        "the sret parameter is routable on the triple of a build");
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 2, "the target and the sret callee are rewritten");
+  check(result.functions[0].skipped.size() == 2, "the variadic and the musttail calls are skipped");
+  check(result.table_size == 2, "the table holds the two callees");
+  check(result.descriptor_size == 2, "the descriptor holds two slots");
+
+  // The thunk: the uniform signature, the hidden pointer out of the first
+  // cell of the scratch, and the call with the `sret` attribute.
+  llvm::Function* thunk = nullptr;
+  for (llvm::Function& function : *module) {
+    if (function.getName().starts_with("cs2.protect.thunk.")) {
+      thunk = &function;
+    }
+  }
+  check(thunk != nullptr, "the thunk of the sret call is emitted");
+  if (thunk == nullptr) {
+    return;
+  }
+  check(thunk->getReturnType()->isIntegerTy(64), "the thunk returns a 64-bit value");
+  check(thunk->arg_size() == 1, "the thunk takes one argument: the scratch");
+
+  const auto thunk_calls = calls_of(*thunk);
+  check(thunk_calls.size() == 1, "the thunk makes one call");
+  if (thunk_calls.size() == 1) {
+    const llvm::CallBase* call = thunk_calls[0];
+    check(call->getCalledFunction() == nullptr, "the call of the thunk is indirect");
+    check(call->getParamAttr(0, llvm::Attribute::StructRet).isValid(),
+          "the call of the thunk carries the sret attribute");
+    // The hidden pointer: the cell of the scratch that the `sret` attribute
+    // names -- the first one here -- unchanged.
+    const auto* load = llvm::dyn_cast<llvm::LoadInst>(call->getArgOperand(0));
+    check(load != nullptr, "the hidden pointer is loaded out of the scratch");
+    if (load != nullptr) {
+      check(load->getPointerOperand() == thunk->getArg(0),
+            "the hidden pointer is the cell of the scratch that the sret attribute names");
+    }
+  }
+
+  // The callee returns nothing: the thunk returns 0.
+  bool returns_zero = false;
+  for (const llvm::BasicBlock& block : *thunk) {
+    const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator());
+    if (ret == nullptr || ret->getReturnValue() == nullptr) {
+      continue;
+    }
+    const auto* value = llvm::dyn_cast<llvm::ConstantInt>(ret->getReturnValue());
+    if (value != nullptr && value->isZero()) {
+      returns_zero = true;
+    }
+  }
+  check(returns_zero, "the thunk returns zero");
+
+  // The caller: the sret call goes through the thunk, and the scratch is in
+  // the caller's frame.
+  llvm::Function* caller = module->getFunction("caller");
+  check(caller != nullptr, "the caller is still there");
+  if (caller == nullptr) {
+    return;
+  }
+  const auto calls = calls_of(*caller);
+  check(calls.size() == 4, "the caller still makes four calls");
+  check(calls.size() > 2 && calls[2]->getCalledFunction() == thunk,
+        "the sret call goes through the thunk");
+  bool scratch_in_caller = false;
+  for (llvm::BasicBlock& block : *caller) {
+    for (llvm::Instruction& instruction : block) {
+      const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(&instruction);
+      if (alloca != nullptr && alloca->getAllocatedType()->isStructTy()) {
+        scratch_in_caller = true;
+      }
+    }
+  }
+  check(scratch_in_caller, "the scratch is in the caller's frame");
+
+  // The table holds the callee of the sret call: the thunk reaches it
+  // through the caller's own table.
+  llvm::GlobalVariable* table = module->getGlobalVariable("cs2.protect.table",
+                                                          /*AllowLocal=*/true);
+  check(table != nullptr, "the table global exists");
+  if (table != nullptr) {
+    const auto elements = elements_of(table->getInitializer());
+    check(elements.size() == 2, "the table holds two entries");
+    bool holds_sret = false;
+    for (const llvm::Constant* element : elements) {
+      if (element == module->getFunction("sret_target")) {
+        holds_sret = true;
+      }
+    }
+    check(holds_sret, "the table does not hold the sret callee");
+  }
+}
+
+/// The transform routes a callee whose hidden pointer is **not** the first
+/// parameter.
+///
+/// A member function takes the `this` pointer first, and the hidden pointer
+/// after it: the attribute is what says which parameter it is.
+void test_transform_sret_member() {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto module = llvm::parseAssemblyString(
+      "define void @member_target(ptr %this, ptr sret({ i64, i64, i64 }) %out) {\n"
+      "entry:\n"
+      "  store { i64, i64, i64 } zeroinitializer, ptr %out\n"
+      "  ret void\n"
+      "}\n"
+      "define void @caller(ptr %out) {\n"
+      "entry:\n"
+      "  call void @member_target(ptr null, ptr sret({ i64, i64, i64 }) %out)\n"
+      "  ret void\n"
+      "}\n",
+      error, context);
+  if (module == nullptr) {
+    std::fprintf(stderr, "FAIL: the member module does not parse\n");
+    ++g_failures;
+    return;
+  }
+  module->setModuleIdentifier("member.obj");
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 1, "the call is rewritten");
+  check(result.functions[0].skipped.empty(), "no call is skipped");
+
+  // The thunk: the hidden pointer is the **second** parameter, and the
+  // scratch holds it in the second cell.
+  llvm::Function* thunk = nullptr;
+  for (llvm::Function& function : *module) {
+    if (function.getName().starts_with("cs2.protect.thunk.")) {
+      thunk = &function;
+    }
+  }
+  check(thunk != nullptr, "the thunk of the sret call is emitted");
+  if (thunk == nullptr) {
+    return;
+  }
+  const auto calls = calls_of(*thunk);
+  check(calls.size() == 1, "the thunk makes one call");
+  if (calls.size() != 1) {
+    return;
+  }
+  const llvm::CallBase* call = calls[0];
+  check(call->getCalledFunction() == nullptr, "the call of the thunk is indirect");
+  check(call->getParamAttr(1, llvm::Attribute::StructRet).isValid(),
+        "the call of the thunk carries the sret attribute on the second parameter");
+  check(!call->getParamAttr(0, llvm::Attribute::StructRet).isValid(),
+        "the call of the thunk carries the sret attribute on the first parameter");
+  // The hidden pointer: the second cell of the scratch.
+  const auto* load = llvm::dyn_cast<llvm::LoadInst>(call->getArgOperand(1));
+  check(load != nullptr, "the hidden pointer is loaded out of the scratch");
+  if (load != nullptr) {
+    const auto* address = llvm::dyn_cast<llvm::GEPOperator>(load->getPointerOperand());
+    check(address != nullptr, "the hidden pointer is not the first cell of the scratch");
+    if (address != nullptr) {
+      check(
+          address->getNumIndices() == 2 &&
+              address->getOperand(2) == llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 1),
+          "the hidden pointer is not the second cell of the scratch");
+    }
+  }
+}
+
+/// A module with a struct-returning call **inside a catch handler**.
+///
+/// The handler is a funclet in the MSVC EH model: it is a separate
+/// machine-level function, and every call in it carries a `"funclet"(token
+/// ...)` operand bundle. The bundle is what tells LLVM's Windows-EH codegen
+/// that the call lives in a funclet.
+[[nodiscard]] auto build_functlet_module(llvm::LLVMContext& context)
+    -> std::unique_ptr<llvm::Module> {
+  static constexpr std::string_view k_ir = R"(
+declare i32 @__gxx_personality_v0(...)
+declare void @may_throw()
+declare void @external_sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x)
+
+define i32 @caller(i32 %x) personality ptr @__gxx_personality_v0 {
+entry:
+  %out = alloca { i64, i64, i64 }, align 8
+  invoke void @may_throw() to label %cont unwind label %catch.dispatch
+
+catch.dispatch:
+  %cs = catchswitch within none [label %handler] unwind to caller
+
+handler:
+  %cp = catchpad within %cs [ptr null, i32 64, ptr null]
+  call void @external_sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x) [ "funclet"(token %cp) ]
+  catchret from %cp to label %cont
+
+cont:
+  ret i32 0
+}
+)";
+  return build_module_from(context, k_ir, "funclet.obj");
+}
+
+/// The replacement call keeps the **operand bundles** of the call it
+/// replaces.
+///
+/// A catch handler is a funclet, and the calls in it carry a `"funclet"`
+/// bundle. Without the bundle the Windows-EH codegen mis-lowers the funclet:
+/// it drops the body after the prologue, never emits the parent's
+/// continuation, and the image traps. The **ordinary** path does not need
+/// this -- it mutates the call it rewrites, so the call keeps its bundles --
+/// but the thunk path builds a *new* call, and only the thunk path can lose
+/// them.
+void test_transform_sret_functlet() {
+  llvm::LLVMContext context;
+  const auto module = build_functlet_module(context);
+  if (module == nullptr) {
+    return;
+  }
+  // The target the narrowing was measured on: the rule is closed on every
+  // other one, and the call would not be rewritten at all.
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  policy.cross_module.push_back("external_sret_target");
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  check(selection.selected.size() == 1, "the caller is selected");
+  check(selection.cross_matches.size() == 1, "the cross_module entry named the declaration");
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 1, "the call in the funclet is rewritten");
+  check(result.functions[0].skipped.size() == 1, "the invoke of the import is skipped");
+
+  llvm::Function* caller = module->getFunction("caller");
+  check(caller != nullptr, "the caller is still there");
+  if (caller == nullptr) {
+    return;
+  }
+
+  // The catchpad of the handler: it is the token of the bundle.
+  llvm::Value* catchpad = nullptr;
+  for (llvm::BasicBlock& block : *caller) {
+    for (llvm::Instruction& instruction : block) {
+      if (auto* pad = llvm::dyn_cast<llvm::CatchPadInst>(&instruction)) {
+        catchpad = pad;
+      }
+    }
+  }
+  check(catchpad != nullptr, "the catchpad of the handler is still there");
+
+  // The call in the handler goes through the thunk, and the replacement call
+  // keeps the bundle of the call it replaces.
+  bool saw_thunk = false;
+  for (const llvm::CallBase* call : calls_of(*caller)) {
+    const llvm::Function* callee = call->getCalledFunction();
+    if (callee == nullptr || !callee->getName().starts_with("cs2.protect.thunk.")) {
+      continue;
+    }
+    saw_thunk = true;
+    const auto bundle = call->getOperandBundle("funclet");
+    check(bundle.has_value(),
+          "the replacement call lost the funclet bundle of the call it replaces: the backend "
+          "drops the body of the funclet and the image traps");
+    if (bundle.has_value()) {
+      check(bundle->isFuncletOperandBundle(), "the bundle of the replacement call is the funclet");
+      check(bundle->Inputs.size() == 1, "the funclet bundle carries one operand: the token");
+      check(catchpad != nullptr && bundle->Inputs[0].get() == catchpad,
+            "the token of the bundle is the catchpad of the handler");
+    }
+  }
+  check(saw_thunk, "the call in the funclet does not go through the thunk");
+}
+
+/// The transform still refuses the parameters an indirect call cannot carry.
+///
+/// The refusal **names** the attribute: a refusal that says "byval" is
+/// actionable, a refusal that says "indirect_parameter" is not.
+void test_transform_parameters() {
+  struct Case {
+    const char* ir;
+    cs2::protect::CallSkipReason reason;
+    const char* name;
+  };
+  const std::vector<Case> cases = {
+      {"declare void @callee(ptr byval({ i64, i64 }) %out)\n"
+       "define void @caller(ptr %out) {\n"
+       "entry:\n"
+       "  call void @callee(ptr byval({ i64, i64 }) %out)\n"
+       "  ret void\n"
+       "}\n",
+       cs2::protect::CallSkipReason::byval_parameter, "byval_parameter"},
+      {"declare void @callee(ptr inalloca({ i64, i64 }) %out)\n"
+       "define void @caller(ptr %out) {\n"
+       "entry:\n"
+       "  call void @callee(ptr inalloca({ i64, i64 }) %out)\n"
+       "  ret void\n"
+       "}\n",
+       cs2::protect::CallSkipReason::inalloca_parameter, "inalloca_parameter"},
+      {"declare void @callee(ptr preallocated({ i64, i64 }) %out)\n"
+       "define void @caller(ptr %out) {\n"
+       "entry:\n"
+       "  call void @callee(ptr preallocated({ i64, i64 }) %out)\n"
+       "  ret void\n"
+       "}\n",
+       cs2::protect::CallSkipReason::preallocated_parameter, "preallocated_parameter"},
+  };
+
+  for (const Case& item : cases) {
+    llvm::LLVMContext context;
+    llvm::SMDiagnostic error;
+    auto module = llvm::parseAssemblyString(item.ir, error, context);
+    if (module == nullptr) {
+      std::fprintf(stderr, "FAIL: the module of the case does not parse\n");
+      ++g_failures;
+      continue;
+    }
+    module->setModuleIdentifier("parameters.obj");
+    module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+    cs2::protect::Policy policy;
+    policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+    cs2::protect::Config config;
+    config.policy = policy;
+
+    const auto selection = cs2::protect::select_functions(*module, config);
+    cs2::protect::record_selection(*module, selection);
+    const auto recorded = cs2::protect::read_selection(*module);
+    const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+    check(result.functions.size() == 1, "the transform reports one function");
+    check(result.functions[0].rewritten == 0, "the call is not rewritten");
+    check(result.functions[0].skipped.size() == 1, "the call is skipped");
+    if (result.functions[0].skipped.size() == 1) {
+      check(result.functions[0].skipped[0] == item.reason,
+            "the refusal does not name the attribute");
+      check_equal(cs2::protect::to_string(item.reason), item.name,
+                  "the reason of the refusal names the attribute");
+    }
+  }
+}
+
+/// The transform refuses a callee that takes an `sret` parameter **and**
+/// returns a value: that is not a thing in the x64 ABI.
+void test_transform_sret_result() {
+  llvm::LLVMContext context;
+  llvm::Module module("sret-result.obj", context);
+  module.setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+  auto* result_type = llvm::StructType::get(
+      context, {llvm::Type::getInt64Ty(context), llvm::Type::getInt64Ty(context)});
+  auto* callee = llvm::Function::Create(
+      llvm::FunctionType::get(llvm::Type::getInt32Ty(context),
+                              {llvm::PointerType::getUnqual(context)}, false),
+      llvm::GlobalValue::ExternalLinkage, "callee", &module);
+  callee->addParamAttr(0, llvm::Attribute::getWithStructRetType(context, result_type));
+  auto* caller = llvm::Function::Create(
+      llvm::FunctionType::get(llvm::Type::getVoidTy(context),
+                              {llvm::PointerType::getUnqual(context)}, false),
+      llvm::GlobalValue::ExternalLinkage, "caller", &module);
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", caller);
+  llvm::IRBuilder<> builder(entry);
+  llvm::CallInst* call = builder.CreateCall(callee, {caller->getArg(0)});
+  call->addParamAttr(0, llvm::Attribute::getWithStructRetType(context, result_type));
+  builder.CreateRet(llvm::ConstantInt::get(llvm::Type::getVoidTy(context), 0));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(module, config);
+  cs2::protect::record_selection(module, selection);
+  const auto recorded = cs2::protect::read_selection(module);
+  const auto result = cs2::protect::transform_module(module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 0, "the call is not rewritten");
+  check(result.functions[0].skipped.size() == 1, "the call is skipped");
+  if (result.functions[0].skipped.size() == 1) {
+    check(result.functions[0].skipped[0] == cs2::protect::CallSkipReason::sret_result,
+          "the refusal is not the one of a callee that returns a value");
+  }
 }
 
 /// The layout -----------------------------------------------------------------
@@ -2245,6 +2710,12 @@ auto main() -> int {
   test_selection();
   test_coverage();
   test_transform();
+  test_transform_sret_other_target();
+  test_transform_sret();
+  test_transform_sret_member();
+  test_transform_sret_functlet();
+  test_transform_parameters();
+  test_transform_sret_result();
   test_layout_permutation();
   test_level_gate();
   test_level_gate_two_entries();

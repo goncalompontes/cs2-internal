@@ -16,6 +16,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/TargetParser/Triple.h"
 
 namespace cs2::protect {
 
@@ -80,6 +81,21 @@ void permute(std::vector<llvm::Function*>& callees, std::uint64_t seed) {
   return text->getString().str();
 }
 
+/// The parameter that carries the `sret` attribute, if the callee has one.
+///
+/// The hidden pointer is **not** necessarily the first parameter: a member
+/// function takes the `this` pointer first, and the hidden pointer after it.
+/// The attribute is what says which parameter it is, and the call site
+/// carries the same attribute, so the two agree.
+[[nodiscard]] auto sret_parameter(const llvm::Function& callee) -> const llvm::Argument* {
+  for (const llvm::Argument& argument : callee.args()) {
+    if (argument.hasStructRetAttr()) {
+      return &argument;
+    }
+  }
+  return nullptr;
+}
+
 /// Why a call is not rewritten, if it is not.
 ///
 /// The order of the rules is the order of the specification's table: the
@@ -90,17 +106,44 @@ void permute(std::vector<llvm::Function*>& callees, std::uint64_t seed) {
 /// declaration the policy's `cross_module` list names, because the caller
 /// routes it through its own table as a relocatable pointer to the external
 /// symbol.
-[[nodiscard]] auto skip_reason_impl(const llvm::CallBase& call, bool routable)
+///
+/// The `sret_routable` flag is the one rule that depends on the *target*:
+/// the `sret` parameter of a callee is routable only where the narrowing was
+/// measured (see `k_sret_target`).
+[[nodiscard]] auto skip_reason_impl(const llvm::CallBase& call, bool routable, bool sret_routable)
     -> std::optional<CallSkipReason> {
   const llvm::Function* callee = call.getCalledFunction();
   if (callee != nullptr && callee->isVarArg()) {
     return CallSkipReason::variadic_callee;
   }
   if (callee != nullptr) {
+    // The parameters that make an indirect call impossible. The `sret`
+    // parameter is **not** one of them: the backend accepts an indirect
+    // `sret` call on the target the narrowing was measured on, with the
+    // same register placement as the direct call. The other three stay
+    // refused, and the refusal names the attribute: a refusal that says
+    // "byval" is actionable, a refusal that says "indirect_parameter" is
+    // not.
     for (const llvm::Argument& argument : callee->args()) {
-      if (argument.hasByValAttr() || argument.hasStructRetAttr() || argument.hasInAllocaAttr() ||
-          argument.hasPreallocatedAttr()) {
-        return CallSkipReason::indirect_parameter;
+      if (argument.hasByValAttr()) {
+        return CallSkipReason::byval_parameter;
+      }
+      if (argument.hasInAllocaAttr()) {
+        return CallSkipReason::inalloca_parameter;
+      }
+      if (argument.hasPreallocatedAttr()) {
+        return CallSkipReason::preallocated_parameter;
+      }
+    }
+    const llvm::Argument* hidden = sret_parameter(*callee);
+    if (hidden != nullptr) {
+      if (!sret_routable) {
+        return CallSkipReason::sret_parameter;
+      }
+      if (!callee->getReturnType()->isVoidTy()) {
+        // A callee that returns a value *and* takes an `sret` is not a
+        // thing in the x64 ABI: the result is in the caller's temporary.
+        return CallSkipReason::sret_result;
       }
     }
   }
@@ -148,22 +191,295 @@ void permute(std::vector<llvm::Function*>& callees, std::uint64_t seed) {
   return std::nullopt;
 }
 
-}  // namespace
+/// The globals the decode reads.
+///
+/// The decode is the same everywhere it is emitted -- at a call site and in
+/// the thunk of an `sret` call site -- so the globals it reads are passed
+/// around as one value instead of as eight parameters.
+struct Dispatch {
+  llvm::Type* pointer_type{nullptr};
+  llvm::ArrayType* descriptor_type{nullptr};
+  llvm::GlobalVariable* descriptor{nullptr};
+  llvm::GlobalVariable* table{nullptr};
+  llvm::GlobalVariable* key[k_key_parts]{};
+  llvm::GlobalVariable* multiplier{nullptr};
+  llvm::GlobalVariable* xor_constant{nullptr};
+  unsigned rotate{0};
+};
 
-auto skip_reason(const llvm::CallBase& call) -> std::optional<CallSkipReason> {
-  return skip_reason_impl(call, false);
+/// The decode of one dispatch: the callee the descriptor names.
+///
+/// The decode is inline arithmetic: a call to a shared helper would add a
+/// stack frame to every call site.
+///
+/// The loads of the key and of the descriptor are *volatile*, and that is
+/// not a detail: the whole dispatch is a compile-time constant (the key is
+/// a compile-time key, the descriptor is a compile-time blob), so the
+/// compiler folds it away -- the index becomes a constant, the load from the
+/// table folds to the callee's address, and the indirect call becomes a
+/// direct one again. That is not theoretical: without the barrier the
+/// optimiser reverts the rewrite in most of the payload's modules, and the
+/// protection is void. A volatile load is the cheapest barrier that keeps
+/// the image read-only (a writable table would be patched at run time).
+///
+/// The two constants of the mixer are read the same way, for a different
+/// reason: a volatile load is never folded into an immediate, so the value
+/// that the call site uses is the value in the image and not a value the
+/// backend may have mis-materialised.
+[[nodiscard]] auto emit_dispatch(llvm::IRBuilder<>& builder, std::size_t slot,
+                                 const Dispatch& dispatch) -> llvm::Value* {
+  llvm::Type* i64_type = builder.getInt64Ty();
+
+  llvm::Value* mixed = builder.CreateLoad(i64_type, dispatch.key[0], /*isVolatile=*/true);
+  mixed =
+      builder.CreateXor(mixed, builder.CreateLoad(i64_type, dispatch.key[1], /*isVolatile=*/true));
+  mixed =
+      builder.CreateXor(mixed, builder.CreateLoad(i64_type, dispatch.key[2], /*isVolatile=*/true));
+  llvm::Value* factor = builder.CreateLoad(i64_type, dispatch.multiplier, /*isVolatile=*/true);
+  mixed = builder.CreateMul(mixed, factor);
+  llvm::Value* constant = builder.CreateLoad(i64_type, dispatch.xor_constant, /*isVolatile=*/true);
+  mixed = builder.CreateXor(mixed, constant);
+  llvm::Value* low = builder.CreateShl(mixed, dispatch.rotate);
+  llvm::Value* high = builder.CreateLShr(mixed, 64U - dispatch.rotate);
+  mixed = builder.CreateOr(low, high);
+
+  llvm::Value* slot_address = builder.CreateInBoundsGEP(
+      dispatch.descriptor_type, dispatch.descriptor,
+      {llvm::ConstantInt::get(i64_type, 0), llvm::ConstantInt::get(i64_type, slot)});
+  llvm::Value* cipher = builder.CreateLoad(i64_type, slot_address, /*isVolatile=*/true);
+  llvm::Value* index = builder.CreateXor(cipher, mixed);
+
+  // The GEP into the table is *not* `inbounds`: the index is a value the
+  // image computes at run time, and the pass has no right to promise that
+  // it is inside the table. An out-of-range index would then be poison by
+  // the letter of the reference, and the call through it would be
+  // undefined behaviour; without the promise it is a wrong address, which
+  // is a bug the payload check can see.
+  llvm::Value* entry_address = builder.CreateGEP(dispatch.pointer_type, dispatch.table, index);
+  return builder.CreateLoad(dispatch.pointer_type, entry_address);
 }
 
-auto skip_reason_routed(const llvm::CallBase& call) -> std::optional<CallSkipReason> {
-  return skip_reason_impl(call, true);
+/// The name of the thunk of a call site.
+[[nodiscard]] auto thunk_name(std::size_t slot) -> std::string {
+  return "cs2.protect.thunk." + std::to_string(slot);
+}
+
+/// The scratch of a call site: the arguments of the call, in the call's order.
+///
+/// In LLVM IR the hidden pointer of an `sret` call is an explicit argument of
+/// the call, so the scratch already holds it in the right place, and the
+/// thunk passes it unchanged. It is **not** always the first cell: a member
+/// function takes the `this` pointer first, and the hidden pointer after it.
+/// The `sret` attribute is what says which parameter it is, and the call site
+/// carries the same attribute, so the two agree.
+[[nodiscard]] auto scratch_type(llvm::LLVMContext& context, const llvm::CallBase& call)
+    -> llvm::StructType* {
+  std::vector<llvm::Type*> elements;
+  elements.reserve(call.arg_size());
+  for (const llvm::Use& argument : call.args()) {
+    elements.push_back(argument->getType());
+  }
+  return llvm::StructType::get(context, elements);
+}
+
+/// The pointer to one cell of the scratch.
+///
+/// The cell at the index zero is the scratch itself: the other cells are at
+/// their offset in it. Which cell holds the hidden pointer is the one the
+/// `sret` attribute names -- the first one for a free function, the second
+/// for a member function, whose `this` pointer comes first.
+[[nodiscard]] auto scratch_cell(llvm::IRBuilder<>& builder, llvm::StructType* scratch,
+                                llvm::Value* base, std::size_t index) -> llvm::Value* {
+  if (index == 0) {
+    return base;
+  }
+  llvm::Type* i32_type = builder.getInt32Ty();
+  return builder.CreateGEP(
+      scratch, base,
+      {llvm::ConstantInt::get(i32_type, 0), llvm::ConstantInt::get(i32_type, index)});
+}
+
+/// The attributes the call to the thunk keeps.
+///
+/// The thunk is not the callee: it reads the scratch and the table, so the
+/// `memory(...)` and the `speculatable` of the callee are not true of it,
+/// and the parameter attributes do not describe the thunk's parameter at all.
+///
+/// The one attribute that has to survive is `nounwind`: the call site is in
+/// the caller's EH region, and a call that may throw there would need the EH
+/// pads that the early passes have already emitted.
+[[nodiscard]] auto thunk_attributes(llvm::LLVMContext& context, const llvm::CallBase& call)
+    -> llvm::AttributeList {
+  llvm::AttributeList attributes;
+  if (call.hasFnAttr(llvm::Attribute::NoUnwind)) {
+    attributes = attributes.addFnAttribute(context, llvm::Attribute::NoUnwind);
+  }
+  return attributes;
+}
+
+/// Emits the thunk of an `sret` call site, and rewrites the call to it.
+///
+/// The thunk adapts the struct-returning call to the **uniform signature**
+/// (`u64 thunk(ptr scratch)`): the scratch holds the arguments of the call in
+/// the call's order, the hidden pointer is the cell the `sret` attribute
+/// names, and the thunk loads the arguments out of the scratch and calls the
+/// callee **with the `sret` attribute**.
+///
+/// The callee is reached through the caller's own table, so the edge stays
+/// hidden: a thunk that called the callee by name would leave the edge in the
+/// image, which is the thing this pass exists to remove.
+///
+/// The **temporary is the caller's**: the hidden pointer is a pointer into the
+/// caller's frame (the scratch lives there), and the callee writes through
+/// it. The interpreter's frame is not involved.
+void emit_sret_thunk(llvm::Module& module, llvm::Function* caller, llvm::CallBase* call,
+                     std::size_t slot, const Dispatch& dispatch) {
+  llvm::LLVMContext& context = module.getContext();
+  llvm::Type* i64_type = llvm::Type::getInt64Ty(context);
+  llvm::Type* pointer_type = dispatch.pointer_type;
+
+  // The scratch: the arguments of the call, in the call's order.
+  llvm::StructType* scratch = scratch_type(context, *call);
+
+  // The scratch lives in the caller's frame.
+  llvm::IRBuilder<> at_call(call);
+  llvm::AllocaInst* cells = at_call.CreateAlloca(scratch, nullptr, "cs2.protect.scratch");
+  // The alloca goes to the entry block of the caller: an alloca in the body
+  // of a loop would grow the stack on every iteration.
+  cells->moveBefore(caller->getEntryBlock().getFirstInsertionPt());
+
+  // The stores: the arguments of the call, in the call's order. The hidden
+  // pointer is one of them -- the one the `sret` attribute names -- and it
+  // is stored **unchanged**.
+  for (std::size_t index = 0; index < call->arg_size(); ++index) {
+    llvm::Value* cell = scratch_cell(at_call, scratch, cells, index);
+    at_call.CreateStore(call->getArgOperand(index), cell);
+  }
+
+  // The thunk: the uniform signature.
+  llvm::Function* thunk =
+      llvm::Function::Create(llvm::FunctionType::get(i64_type, {pointer_type}, /*isVarArg=*/false),
+                             llvm::GlobalValue::InternalLinkage, thunk_name(slot), module);
+  // The thunk is not inlined away: it is the adapter of the call, and an
+  // inlined thunk would put the callee's name back into the caller.
+  thunk->addFnAttr(llvm::Attribute::NoInline);
+  // The thunk does not throw when the callee does not: the call to the
+  // callee is the only thing in it that can.
+  if (call->hasFnAttr(llvm::Attribute::NoUnwind)) {
+    thunk->addFnAttr(llvm::Attribute::NoUnwind);
+  }
+  // The personality of the caller: the thunk sits in the middle of an EH
+  // edge, and a frame that can throw needs the unwind information of the
+  // personality that reads it.
+  if (caller->hasPersonalityFn()) {
+    thunk->setPersonalityFn(caller->getPersonalityFn());
+  }
+
+  llvm::BasicBlock* entry = llvm::BasicBlock::Create(context, "entry", thunk);
+  llvm::IRBuilder<> builder(entry);
+  llvm::Value* scratch_pointer = thunk->getArg(0);
+
+  // The arguments, out of the scratch.
+  std::vector<llvm::Value*> arguments;
+  arguments.reserve(call->arg_size());
+  for (std::size_t index = 0; index < call->arg_size(); ++index) {
+    llvm::Value* cell = scratch_cell(builder, scratch, scratch_pointer, index);
+    arguments.push_back(builder.CreateLoad(scratch->getElementType(index), cell));
+  }
+
+  // The callee: the dispatch, in the thunk.
+  llvm::Value* callee = emit_dispatch(builder, slot, dispatch);
+
+  // The call: the same function type, the same attributes and the same
+  // calling convention as the call the thunk replaces -- the `sret`
+  // attribute of the hidden pointer included.
+  llvm::CallInst* thunk_call = builder.CreateCall(call->getFunctionType(), callee, arguments);
+  thunk_call->setAttributes(call->getAttributes());
+  thunk_call->setCallingConv(call->getCallingConv());
+
+  // The callee returns nothing: the result is in the caller's temporary. The
+  // thunk returns 0.
+  builder.CreateRet(llvm::ConstantInt::get(i64_type, 0));
+
+  // The call site: the thunk, with the scratch.
+  //
+  // The replacement call keeps the **operand bundles** of the call it
+  // replaces. In the MSVC EH model a catch handler is a funclet, and every
+  // call in it carries a `"funclet"(token ...)` bundle: the bundle is what
+  // tells LLVM's Windows-EH codegen that the call lives in a funclet.
+  // Without it the codegen mis-lowers the funclet -- it drops the body
+  // after the prologue, never emits the parent's `$ehgcr` continuation,
+  // and the image traps.
+  //
+  // The **ordinary** path does not need this: it mutates the call it
+  // rewrites (`site.call->setCalledOperand(callee)`), so the call keeps
+  // its bundles. Only the thunk path builds a *new* call, and only the
+  // thunk path can lose them.
+  if (auto* invoke = llvm::dyn_cast<llvm::InvokeInst>(call)) {
+    llvm::SmallVector<llvm::OperandBundleDef> bundles;
+    invoke->getOperandBundlesAsDefs(bundles);
+    auto* replacement = llvm::InvokeInst::Create(thunk->getFunctionType(), thunk,
+                                                 invoke->getNormalDest(), invoke->getUnwindDest(),
+                                                 {cells}, bundles, "", invoke->getIterator());
+    replacement->setAttributes(thunk_attributes(context, *invoke));
+    replacement->setCallingConv(invoke->getCallingConv());
+    replacement->setDebugLoc(invoke->getDebugLoc());
+    invoke->replaceAllUsesWith(replacement);
+    invoke->eraseFromParent();
+    return;
+  }
+  llvm::SmallVector<llvm::OperandBundleDef> bundles;
+  call->getOperandBundlesAsDefs(bundles);
+  auto* replacement = llvm::CallInst::Create(thunk->getFunctionType(), thunk, {cells}, bundles, "",
+                                             call->getIterator());
+  replacement->setAttributes(thunk_attributes(context, *call));
+  replacement->setCallingConv(call->getCallingConv());
+  replacement->setDebugLoc(call->getDebugLoc());
+  call->replaceAllUsesWith(replacement);
+  call->eraseFromParent();
+}
+
+}  // namespace
+
+auto sret_routable(const llvm::Module& module) -> bool {
+  // The triple of the module is the target the code is compiled for. The
+  // narrowing was measured on one of them, and the rule stays closed on
+  // every other one.
+  //
+  // The comparison is on the components and not on the string: a build's
+  // triple carries the version of the toolchain
+  // ("x86_64-pc-windows-msvc19.51.36252"), and the string is not the
+  // target the measurement was made on.
+  const llvm::Triple triple(module.getTargetTriple().str());
+  if (!triple.isX86_64() || !triple.isOSWindows() || !triple.isWindowsMSVCEnvironment()) {
+    return false;
+  }
+  return triple.getTriple().starts_with(k_sret_target);
+}
+
+auto skip_reason(const llvm::CallBase& call, bool sret_routable) -> std::optional<CallSkipReason> {
+  return skip_reason_impl(call, false, sret_routable);
+}
+
+auto skip_reason_routed(const llvm::CallBase& call, bool sret_routable)
+    -> std::optional<CallSkipReason> {
+  return skip_reason_impl(call, true, sret_routable);
 }
 
 [[nodiscard]] auto to_string(CallSkipReason reason) noexcept -> const char* {
   switch (reason) {
     case CallSkipReason::variadic_callee:
       return "variadic_callee";
-    case CallSkipReason::indirect_parameter:
-      return "indirect_parameter";
+    case CallSkipReason::byval_parameter:
+      return "byval_parameter";
+    case CallSkipReason::inalloca_parameter:
+      return "inalloca_parameter";
+    case CallSkipReason::preallocated_parameter:
+      return "preallocated_parameter";
+    case CallSkipReason::sret_parameter:
+      return "sret_parameter";
+    case CallSkipReason::sret_result:
+      return "sret_result";
     case CallSkipReason::musttail:
       return "musttail";
     case CallSkipReason::external_callee:
@@ -347,12 +663,19 @@ auto transform_module(llvm::Module& module, const Config& config,
   struct Site {
     llvm::CallBase* call{nullptr};
     llvm::Function* callee{nullptr};
-    std::size_t function{0};  ///< the index of the caller in `result.functions`.
+    llvm::Function* caller{nullptr};  ///< the function the call is in.
+    std::size_t function{0};          ///< the index of the caller in `result.functions`.
     std::size_t slot{0};
     bool cross{false};  ///< the callee is a cross-TU declaration.
+    bool sret{false};   ///< the callee takes an `sret` parameter: the call goes
+                        ///< through a thunk.
   };
   std::vector<Site> sites;
   std::vector<llvm::Function*> callees;
+
+  // The `sret` parameter of a callee is routable on the target the
+  // narrowing was measured on, and nowhere else.
+  const bool sret_ok = sret_routable(module);
 
   // The cross-TU callees that stayed direct, and the reason they stayed:
   // the symbol -> the reason. The first reason wins: a symbol is either
@@ -386,7 +709,8 @@ auto transform_module(llvm::Module& module, const Config& config,
         const bool declaration =
             callee != nullptr && callee->isDeclaration() && !callee->isIntrinsic();
         const bool cross = declaration && routable.count(callee->getName().str()) != 0;
-        const auto reason = cross ? skip_reason_routed(*call) : skip_reason(*call);
+        const auto reason =
+            cross ? skip_reason_routed(*call, sret_ok) : skip_reason(*call, sret_ok);
         if (reason.has_value()) {
           transform.skipped.push_back(*reason);
           transform.skipped_callees.push_back(callee_name(*call));
@@ -411,7 +735,11 @@ auto transform_module(llvm::Module& module, const Config& config,
         if (std::find(callees.begin(), callees.end(), callee) == callees.end()) {
           callees.push_back(callee);
         }
-        sites.push_back(Site{call, callee, function_index, 0, cross});
+        // A callee that takes an `sret` parameter is called through a
+        // thunk: the thunk adapts the call to the uniform signature and
+        // carries the `sret` attribute of the call it replaces.
+        const bool sret = sret_parameter(*callee) != nullptr;
+        sites.push_back(Site{call, callee, function, function_index, 0, cross, sret});
       }
     }
     result.functions.push_back(std::move(transform));
@@ -536,51 +864,31 @@ auto transform_module(llvm::Module& module, const Config& config,
   // The rewrite. The decode is inline arithmetic: a call to a shared helper
   // would add a stack frame to every call site.
   //
-  // The loads of the key and of the descriptor are *volatile*, and that is
-  // not a detail: the whole dispatch is a compile-time constant (the key is
-  // a compile-time key, the descriptor is a compile-time blob), so the
-  // compiler folds it away -- the index becomes a constant, the load from the
-  // table folds to the callee's address, and the indirect call becomes a
-  // direct one again. That is not theoretical: without the barrier the
-  // optimiser reverts the rewrite in most of the payload's modules, and the
-  // protection is void. A volatile load is the cheapest barrier that keeps
-  // the image read-only (a writable table would be patched at run time).
-  //
-  // The two constants of the mixer are read the same way, for a different
-  // reason: a volatile load is never folded into an immediate, so the value
-  // that the call site uses is the value in the image and not a value the
-  // backend may have mis-materialised.
+  // A call to a callee that takes an `sret` parameter goes through a
+  // **thunk** instead: the thunk carries the `sret` attribute of the call and
+  // the hidden pointer, and the decode lives in it. The edge is the same
+  // edge -- the callee is reached through the caller's own table -- and the
+  // call site keeps its landing pad and its unwind edge.
+  Dispatch dispatch;
+  dispatch.pointer_type = pointer_type;
+  dispatch.descriptor_type = descriptor_type;
+  dispatch.descriptor = descriptor;
+  dispatch.table = table;
+  dispatch.multiplier = multiplier;
+  dispatch.xor_constant = xor_constant;
+  dispatch.rotate = mixer.rotate;
+  for (std::size_t i = 0; i < k_key_parts; ++i) {
+    dispatch.key[i] = key_globals[i];
+  }
+
   for (std::size_t slot = 0; slot < sites.size(); ++slot) {
     Site& site = sites[slot];
+    if (site.sret) {
+      emit_sret_thunk(module, site.caller, site.call, slot, dispatch);
+      continue;
+    }
     llvm::IRBuilder<> builder(site.call);
-
-    llvm::Value* mixed = builder.CreateLoad(i64_type, key_globals[0], /*isVolatile=*/true);
-    mixed =
-        builder.CreateXor(mixed, builder.CreateLoad(i64_type, key_globals[1], /*isVolatile=*/true));
-    mixed =
-        builder.CreateXor(mixed, builder.CreateLoad(i64_type, key_globals[2], /*isVolatile=*/true));
-    llvm::Value* factor = builder.CreateLoad(i64_type, multiplier, /*isVolatile=*/true);
-    mixed = builder.CreateMul(mixed, factor);
-    llvm::Value* constant = builder.CreateLoad(i64_type, xor_constant, /*isVolatile=*/true);
-    mixed = builder.CreateXor(mixed, constant);
-    llvm::Value* low = builder.CreateShl(mixed, mixer.rotate);
-    llvm::Value* high = builder.CreateLShr(mixed, 64U - mixer.rotate);
-    mixed = builder.CreateOr(low, high);
-
-    llvm::Value* slot_address = builder.CreateInBoundsGEP(
-        descriptor_type, descriptor,
-        {llvm::ConstantInt::get(i64_type, 0), llvm::ConstantInt::get(i64_type, slot)});
-    llvm::Value* cipher = builder.CreateLoad(i64_type, slot_address, /*isVolatile=*/true);
-    llvm::Value* index = builder.CreateXor(cipher, mixed);
-
-    // The GEP into the table is *not* `inbounds`: the index is a value the
-    // image computes at run time, and the pass has no right to promise that
-    // it is inside the table. An out-of-range index would then be poison by
-    // the letter of the reference, and the call through it would be
-    // undefined behaviour; without the promise it is a wrong address, which
-    // is a bug the payload check can see.
-    llvm::Value* entry_address = builder.CreateGEP(pointer_type, table, index);
-    llvm::Value* callee = builder.CreateLoad(pointer_type, entry_address);
+    llvm::Value* callee = emit_dispatch(builder, slot, dispatch);
 
     // The call keeps its function type, its attributes and its calling
     // convention: only the callee becomes a value.

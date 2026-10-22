@@ -9,10 +9,10 @@ and it protects the functions a policy names.
   selected function into **indirect dispatches through an encrypted
   descriptor**, so that the static call graph is no longer readable from the
   binary — for the callees that are **defined in the same module**
-  (§10.6 says how much that is worth in the current payload: 37 of
-  the 332 call sites of the selected functions, and they are predominantly
+  (§10.6 says how much that is worth in the current payload: 40 of
+  the 369 call sites of the selected functions, and they are predominantly
   destructor calls) and for the **cross-translation-unit** callees the
-  policy's `cross_module` list names (§10.7: 14 more, for 51 in all).
+  policy's `cross_module` list names (§10.7: 33 more, for 73 in all).
 
 The `virtualized` level (moving a body into an interpreter) is **reserved
 for T20**: a policy that asks for it fails the build, because a build that
@@ -444,15 +444,16 @@ The selection phase prints one line per selected function to stderr:
 The transform phase prints what it did:
 
 ```
-[cs2-protect] solver.cpp: transform ?solve@aim@cs2@@YA?AUSolveResult@12@… (cs2::aim::solve) rewritten=14 skipped=81 indirect_parameter=9 external_callee=26 intrinsic_callee=44 invoke=2 cross_module=7
+[cs2-protect] solver.cpp: transform ?solve@aim@cs2@@YA?AUSolveResult@12@… (cs2::aim::solve) rewritten=31 skipped=101 external_callee=30 intrinsic_callee=67 invoke=4 cross_module=23
 [cs2-protect] solver.cpp: transform table=14 descriptor=18 mixmul=0x1f8b3c5d7e9a2b4c mixxor=0x8e3d5f7a9b1c3d5e rotate=27
 [cs2-protect] solver.cpp: layout functions=69 moved=66 seed=0xf2ba62bd9b1ff889
 ```
 
 * `rewritten` — the calls that became indirect dispatches.
 * `skipped` — the calls that were left alone, **per reason**:
-  `variadic_callee`, `indirect_parameter`, `musttail`, `external_callee`,
-  `optnone_callee`, `invoke`, `indirect_callee`.
+  `variadic_callee`, `byval_parameter`, `inalloca_parameter`,
+  `preallocated_parameter`, `sret_parameter`, `sret_result`, `musttail`,
+  `external_callee`, `optnone_callee`, `invoke`, `indirect_callee`.
 * `cross_module` — the rewrites that were **cross-TU**: the calls the
   policy's `cross_module` list routed through the module's own table.
 * `table` and `descriptor` — the size of the two globals the module gained.
@@ -859,7 +860,11 @@ reported (with its reason):
 | skip | why |
 |---|---|
 | `variadic_callee` | the indirect call cannot reproduce the variadic ABI |
-| `indirect_parameter` | the callee has a `byval` / `sret` / `inalloca` / `preallocated` parameter: Windows x64 rejects these in an indirect signature |
+| `byval_parameter` | the callee has a `byval` parameter: the caller copies the argument onto the callee's stack, and the uniform signature cannot express the copy |
+| `inalloca_parameter` | the callee has an `inalloca` parameter: the callee's frame is allocated by the caller, and the size and the layout are part of the call |
+| `preallocated_parameter` | the callee has a `preallocated` parameter: like `inalloca`, the frame is the caller's |
+| `sret_parameter` | the callee has an `sret` parameter and the module's target is not `x86_64-pc-windows-msvc`: the narrowing was measured on that target only |
+| `sret_result` | the callee has an `sret` parameter **and** returns a value: that is not a thing in the x64 ABI — **only on the measured target**: everywhere else the same call is refused with `sret_parameter`, which comes first |
 | `musttail` | a tail call cannot become an indirect call without breaking the contract |
 | `external_callee` | the callee has no code in this module: it is an import, an intrinsic or an `available_externally` function (the last one would resolve to address zero in the table) — **unless the policy's `cross_module` list names it** (§10.7) |
 | `intrinsic_callee` | the callee is a compiler intrinsic: the backend expands it, there is nothing to call |
@@ -901,19 +906,34 @@ In the current payload, with the policy of `tools/protect/policy.local.json`:
 
 | selected function | rewritten | of them cross-TU | skipped |
 |---|---|---|---|
-| `cs2::aim::solve` | 14 | 7 | 81 (9 with an `sret` parameter, 2 `invoke`, 26 cross-module, 44 intrinsics) |
-| `cs2::aim::occlude_polygon` | 27 | 6 | 140 |
-| `cs2::aim::solve_backtrack` | 4 | 0 | 15 |
-| `cs2::aim::project_capsule` | 3 | 0 | 45 |
+| `cs2::aim::solve` | 31 | 23 | 101 (4 `invoke`, 30 cross-module, 67 intrinsics) |
+| `cs2::aim::occlude_polygon` | 30 | 9 | 137 (19 `invoke`, 24 cross-module, 94 intrinsics) |
+| `cs2::aim::solve_backtrack` | 4 | 0 | 15 (2 `invoke`, 13 intrinsics) |
+| `cs2::aim::project_capsule` | 5 | 0 | 43 (6 `invoke`, 9 cross-module, 28 intrinsics) |
 | `cs2::aim::DamageField::hit_probability` | 3 | 1 | 0 |
 | `cs2::aim::penetration_survival` | 0 | 0 | 0 |
-| **total** | **51** | **14** | **281** |
+| **total** | **73** | **33** | **296** |
 
-So **51 of the 332 call sites** of the selected functions became indirect
-dispatches, **14** of them the cross-TU edges that carry the aim call
-graph. The cross-TU edges that are **still direct** are the ones the
-`sret` rule refuses (11 functions, 12 call sites): the rule is not narrowed
-by this task, and the payload check names them (§11).
+So **73 of the 369 call sites** of the selected functions became indirect
+dispatches, **33** of them the cross-TU edges that carry the aim call
+graph. **No cross-TU edge of a protected function is still direct**: the
+rule that refused a callee with an `sret` parameter is narrowed (§10.4), the
+struct-returning calls go through a thunk (§10.7), and the payload check
+fails for a cross-TU callee that stayed direct (§11).
+
+**The pair, with the same policy.** The base of this task — T23a, the
+commit before the `sret` edges — rewrites **54** of the call sites with
+**this** `cross_module` list; this tree rewrites **73**. The **+19** are
+the thunks: the calls to the cross-TU callees that return an aggregate,
+which the base refused with `sret_parameter` and this task routes through a
+thunk (§10.7.1). The base does not build green with this list — it refuses
+those callees, and the policy check fails the build with "13
+`cross_module` entries … could not be routed" — and that is the point of
+the narrowing.
+
+The **51** of T23a is a different measurement: it is the base with the
+**older**, 13-entry `cross_module` list, and the two numbers must not be
+compared. The pair of this task is **54 → 73**.
 
 The edges that are still visible are listed in §10.8.
 
@@ -948,8 +968,11 @@ The rule is:
   `index ^ key`. Nothing about the cipher changes, and the permutation of
   the table applies to the cross-TU entries too;
 * every other rule still applies. A cross-TU callee that is variadic, or
-  that has a `byval` / `sret` / `inalloca` / `preallocated` parameter, is
-  still refused — with the reason it always had.
+  that has a `byval` / `inalloca` / `preallocated` parameter, is still
+  refused — with the reason it always had, and the reason **names** the
+  attribute.
+* a callee that has an `sret` parameter is routed as well, through a
+  **thunk** (§10.7.1).
 
 **The EH edges.** The `invoke` rule does not hold for a declaration the
 list names. The rule exists because the pass does not model the EH edges,
@@ -979,6 +1002,76 @@ the pass does not touch. The payload check counts the direct calls that
 are left and prints the number (§11), so the operator sees what the
 routing does not hide.
 
+### 10.7.1 The thunk of a struct-returning call
+
+A callee that takes an `sret` parameter is **routable**: the SDK's `llc`
+accepts an indirect `sret` call on `x86_64-pc-windows-msvc`, with the same
+register placement as the direct call (the hidden pointer in `%rcx`, the
+callee returning it in `%rax`). The rule is **target bound**: it is closed
+on every other target, and the refusal (`sret_parameter`) names the
+attribute.
+
+The call does not become an indirect dispatch at the call site. The pass
+emits a **thunk** for it, and the call site calls the thunk:
+
+```llvm
+define internal i64 @cs2.protect.thunk.7(ptr %scratch) {
+entry:
+  %0 = load ptr, ptr %scratch                  ; the hidden pointer, the cell the `sret` names
+  %1 = getelementptr { ptr, i32 }, ptr %scratch, i32 0, i32 1
+  %2 = load i32, ptr %1                         ; the rest, in the call's order
+  ...                                           ; the decode of the dispatch
+  call void %19(ptr sret({ i64, i64, i64 }) %0, i32 %2)   ; with the `sret` attribute
+  ret i64 0                                     ; the callee returns nothing
+}
+```
+
+* The **scratch** holds the arguments of the call, in the call's order. The
+  hidden pointer is one of the cells — in LLVM IR the hidden pointer is an
+  *explicit* argument of the call, so the scratch already holds it in the
+  right place, and the thunk passes it **unchanged**. It is not always the
+  *first* cell: a member function takes the `this` pointer first and the
+  hidden pointer after it, and the `sret` attribute is what says which
+  parameter it is.
+* The scratch lives in the **caller's** frame, next to the temporary the
+  callee writes through. The temporary is the caller's: the callee writes
+  into the caller's stack, and the interpreter's frame is not involved.
+* The thunk's call keeps the **function type**, the **attributes** and the
+  **calling convention** of the call it replaces, the `sret` attribute
+  included.
+* The callee is reached through the **caller's own table**, so the edge
+  stays hidden: a thunk that called the callee by name would leave the edge
+  in the image, which is the thing the pass exists to remove. The dispatch
+  is the same one the ordinary call sites use, and the image holds one
+  dispatch per rewritten call.
+* The **EH edges** survive: the call site keeps its `invoke` and its
+  landing pad, and the thunk's own call is a plain call, so an exception
+  unwinds through the thunk's frame and reaches the caller's handler. That
+  is the case of a call **in an ordinary block**, and it is the one the
+  differential fixture tests: the throwing callee is in another
+  translation unit, so the call goes through the thunk and the exception
+  unwinds through its frame.
+* A call **inside a catch handler** is a case of its own. The handler is a
+  **funclet** in the MSVC EH model — a separate machine-level function — and
+  every call in it carries a `"funclet"(token ...)` operand bundle. The
+  bundle is what tells LLVM's Windows-EH codegen that the call lives in a
+  funclet, and the replacement call the pass emits **keeps the bundles of
+  the call it replaces**: without them the codegen mis-lowers the funclet
+  (it drops the body after the prologue, never emits the parent's
+  continuation) and the image traps. The ordinary path does not have to
+  think about this: it mutates the call it rewrites, so the call keeps its
+  bundles; only the thunk path builds a *new* call. The differential
+  fixture has this case too (`cs2_fixture_functlet_caller`), and the
+  plugin's own test asserts that the bundle is there.
+
+The rule is narrowed to `sret` **only**: a `byval`, an `inalloca` and a
+`preallocated` parameter stay refused, and the refusal names the attribute
+(`byval_parameter`, `inalloca_parameter`, `preallocated_parameter`). The
+`byval` argument is copied onto the callee's stack by the caller, and the
+copy is a caller-side action the uniform signature cannot express; the
+`inalloca` and the `preallocated` frames are the caller's, and their size
+and their layout are part of the call.
+
 ### 10.8 What is still visible
 
 Stated plainly, because the claim of the protection must not be stronger
@@ -994,13 +1087,14 @@ than what it is:
   image. The `cross_module` list is a declaration about the edges of the
   protected functions; it does not make the *symbols* unreadable, and the
   call graph of the whole payload still has these edges in it. The payload
-  check counts them and prints the number (§11): in the current tree, **46**
-  of them are left — 40 in `field.cpp`, one in `damage.cpp`, two in
-  `geometry.cpp`, two in `montecarlo.cpp` and one in `occlusion.cpp`.
-* **The `sret` edges.** Eleven cross-TU callees return a big aggregate, so
-  the call carries an `sret` parameter and the indirect call cannot
-  reproduce it. The rule is not narrowed by this task; the payload check
-  names the eleven and does not fail for them.
+  check counts them and prints the number (§11): in the current tree, **60**
+  of them are left — the calls of the functions the pass does not protect,
+  which is what the number measures.
+* **The `sret` edges are gone.** Thirteen cross-TU callees return an
+  aggregate, so the call carries an `sret` parameter. The rule that
+  refused them is narrowed, the calls go through a thunk (§10.7.1), and
+  the payload check does not except them any more: a cross-TU callee of
+  a protected function that stays direct fails the build.
 * **The same-module EH edges.** The pass does not model the EH edges of
   the calls it does not route, and the `invoke` edges of the same-module
   calls stay direct.
@@ -1168,14 +1262,25 @@ given, so **no build wiring changes**.
   (`variadic_callee`, `musttail`, `optnone_callee`): no `cross_module`
   entry will ever route it, and the advice says so instead of sending the
   operator in a circle.
-* **The `sret` edges are excepted**, and the check **names** them: the
-  rule that refuses them is not narrowed by this task, and the eleven
-  cross-TU callees that return a big aggregate stay direct. The check says
-  so instead of failing on them. The exception is decided per
-  **(module, symbol)** pair and not per symbol: the coverage of one module
-  is the evidence of that module, and a symbol that one module excepts and
-  another module refuses for another reason is a failure, whatever the
-  order the coverage files are read in.
+* **Nothing is excepted.** The `sret` edges used to be excepted by name:
+  the rule that refused them is narrowed, so there is nothing left to
+  except. A cross-TU callee of a protected function that stays direct is
+  a **failure**, and the check says so when the list is empty. The
+  decision is per **(module, symbol)** pair and not per symbol: the
+  coverage of one module is the evidence of that module, and a symbol that
+  one module reports with one reason and another module with another one
+  is a failure, whatever the order the coverage files are read in.
+* **The coverage is not keyed by the build seed.** The name of a coverage
+  file is derived from the policy's digest and the module's identity, and
+  the **seed is not part of it**: a coverage of *another* build of the same
+  tree is read as the evidence of this one. The direction of the error is
+  the safe one — a stale coverage that still lists the `sret` edges as
+  direct makes the check **fail** — but the "no cross-TU callee of a
+  protected function stayed direct" message is printed when the coverage
+  holds **no** `direct` line at all, so a **partial** coverage (a module
+  that was not recompiled and whose coverage file was deleted) makes that
+  message vacuous. The message is evidence of *what the coverage says*,
+  not of *what the build did*.
 * **The stale entries.** Every `cross_module` entry that matched a
   declaration names the mangled symbol it named, and the check asks
   whether the payload's own libraries define it. An entry that names a
@@ -1736,7 +1841,7 @@ only known at the end.
 | `eh_pad` | the function has an EH pad, an `invoke`, a `landingpad` or a `resume`: the interpreter cannot model unwinding |
 | `variadic_function` | the function itself is variadic |
 | `variadic_callee` | it calls a variadic callee: the indirect call cannot reproduce the variadic ABI |
-| `indirect_parameter` | a callee has a `byval` / `sret` / `inalloca` / `preallocated` parameter: Windows x64 rejects these in an indirect signature |
+| `indirect_parameter` | a callee has a `byval` / `sret` / `inalloca` / `preallocated` parameter: the interpreter's uniform signature cannot carry them |
 | `musttail` | the tail-call contract does not survive the rewrite |
 | `indirect_call` | it makes an indirect call: there is no relocatable address for the pool |
 | `volatile_access` | a volatile access: the ordering guarantees are not modelled |

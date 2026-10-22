@@ -1,6 +1,6 @@
 ; The fixture of the IR test.
 ;
-; "caller" is the function the policy selects. It makes six calls:
+; "caller" is the function the policy selects. It makes seven calls:
 ;
 ;   * @target is defined in this module, so the pass rewrites the call into
 ;     an indirect dispatch through the encrypted descriptor;
@@ -9,16 +9,28 @@
 ;     too, and the table holds the symbol itself (a relocatable pointer
 ;     the linker resolves);
 ;   * @variadic_target is variadic, so the pass leaves the call alone;
-;   * @sret_target has an `sret` parameter, so the pass leaves the call
-;     alone;
+;   * @sret_target has an `sret` parameter, so the pass routes the call
+;     through a **thunk**: the thunk carries the `sret` attribute of the
+;     call and the hidden pointer, which it takes out of the cell of the
+;     scratch that the `sret` attribute names -- the first one here, the
+;     callee being a free function;
+;   * @external_sret_target is a declaration with an `sret` parameter: the
+;     policy's `cross_module` list names it, so the pass routes it through
+;     a thunk as well, and the table holds the external symbol;
 ;   * @musttail_target is called in tail position with `musttail`, so the
 ;     pass leaves the call alone;
 ;   * @printf is an import, so the pass leaves the call alone.
 ;
-; The pass must touch the first two calls and nothing else.
+; The pass must touch the first four calls and nothing else.
+;
+; The triple is the one the `sret` narrowing was measured on: the rule is
+; closed on every other target.
+
+target triple = "x86_64-pc-windows-msvc"
 
 declare i32 @printf(ptr, ...)
 declare i32 @external_target(i32 %x)
+declare void @external_sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x)
 
 define i32 @target(i32 %x) {
 entry:
@@ -52,6 +64,7 @@ entry:
   %e = call i32 @external_target(i32 %x)
   %b = call i32 (i32, ...) @variadic_target(i32 %x, i32 %x)
   call void @sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x)
+  call void @external_sret_target(ptr sret({ i64, i64, i64 }) %out, i32 %x)
   %d = add i32 %a, %b
   br i1 true, label %tail, label %exit
 

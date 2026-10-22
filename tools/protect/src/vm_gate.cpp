@@ -73,6 +73,15 @@ namespace {
 /// `inalloca` and `preallocated` parameters, the variadic callee, the
 /// `musttail` call and the indirect call are the same rules in the two
 /// phases, and the same reasons.
+///
+/// The transform's rule is *narrower* than the virtualizer's for one
+/// parameter: the transform routes a call to a callee that takes an `sret`
+/// parameter (on the target the narrowing was measured on), because the
+/// dispatch keeps the `sret` attribute of the call. The virtualizer cannot
+/// do that: its uniform signature carries the arguments in a scratch of cells,
+/// and the hidden pointer of an `sret` call is not one of them -- so the
+/// virtualizer asks the rules with `sret_routable = false` and keeps its
+/// refusal.
 [[nodiscard]] auto vm_failure(CallSkipReason reason, const llvm::CallBase& call)
     -> std::expected<void, VmFailure> {
   const auto* callee = call.getCalledFunction();
@@ -81,10 +90,22 @@ namespace {
     case CallSkipReason::variadic_callee:
       return std::unexpected(
           VmFailure{VmRefusal::variadic_callee, "the callee '" + name + "' is variadic"});
-    case CallSkipReason::indirect_parameter:
+    case CallSkipReason::byval_parameter:
       return std::unexpected(VmFailure{
           VmRefusal::indirect_parameter,
-          "the callee '" + name + "' has a byval, sret, inalloca or preallocated parameter"});
+          "the callee '" + name + "' has a byval parameter: the caller copies the argument"});
+    case CallSkipReason::inalloca_parameter:
+      return std::unexpected(VmFailure{VmRefusal::indirect_parameter,
+                                       "the callee '" + name + "' has an inalloca parameter"});
+    case CallSkipReason::preallocated_parameter:
+      return std::unexpected(VmFailure{VmRefusal::indirect_parameter,
+                                       "the callee '" + name + "' has a preallocated parameter"});
+    case CallSkipReason::sret_parameter:
+    case CallSkipReason::sret_result:
+      return std::unexpected(VmFailure{VmRefusal::indirect_parameter,
+                                       "the callee '" + name +
+                                           "' has an sret parameter: the interpreter's uniform "
+                                           "signature cannot carry the hidden pointer"});
     case CallSkipReason::musttail:
       return std::unexpected(VmFailure{VmRefusal::musttail, "the call is a musttail call"});
     case CallSkipReason::indirect_callee:
@@ -107,11 +128,11 @@ namespace {
 /// The rules of the calls that the virtual machine refuses, in the order
 /// of the transform's rules: the first rule that holds is the reason that
 /// is reported.
-constexpr std::array<CallSkipReason, 4> k_call_rules = {
-    CallSkipReason::variadic_callee,
-    CallSkipReason::indirect_parameter,
-    CallSkipReason::musttail,
-    CallSkipReason::indirect_callee,
+constexpr std::array<CallSkipReason, 8> k_call_rules = {
+    CallSkipReason::variadic_callee,    CallSkipReason::byval_parameter,
+    CallSkipReason::inalloca_parameter, CallSkipReason::preallocated_parameter,
+    CallSkipReason::sret_parameter,     CallSkipReason::sret_result,
+    CallSkipReason::musttail,           CallSkipReason::indirect_callee,
 };
 
 /// Whether the address of the function is taken.
@@ -167,7 +188,9 @@ constexpr std::array<CallSkipReason, 4> k_call_rules = {
   std::vector<std::optional<CallSkipReason>> reasons;
   reasons.reserve(calls.size());
   for (const llvm::CallBase* call : calls) {
-    reasons.push_back(skip_reason(*call));
+    // The virtualizer's own rule set: an `sret` callee is refused, because
+    // the interpreter's uniform signature cannot carry the hidden pointer.
+    reasons.push_back(skip_reason(*call, /*sret_routable=*/false));
   }
   for (const CallSkipReason rule : k_call_rules) {
     for (std::size_t index = 0; index < calls.size(); ++index) {
