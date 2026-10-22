@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "cs2/aim/geometry.hpp"
+#include "cs2/aim/spread.hpp"
 
 namespace cs2::aim {
 
@@ -37,6 +38,31 @@ struct WeaponProfile {
   // 4 shotgun, 5 sniper, 6 machinegun, 7 c4, 8 taser, 9 grenade, 10 equipment, … -1
   // when unknown. Only firearms (1-6) are ragebot targets.
   int weapon_type = -1;
+  // The VData's own revolver discriminator (`CCSWeaponBaseVData::m_bIsRevolver`,
+  // +0x71E). The engine compares the weapon **id**; this is the VData's "this is
+  // the revolver" flag, and the payload's read of that id. False when unknown.
+  bool is_revolver = false;
+  // The engine's **attack type** (`C_CSWeaponBase::m_weaponMode`, weapon + 0x1A00):
+  // 0 the primary attack, 1 the secondary. `ATTACK_TYPE_UNKNOWN` when the payload
+  // cannot know it — and the conservative reading of that is "not the secondary
+  // attack", so the revolver's `1 - r^2` is not applied
+  // (`docs/re/aim.md` §"The attack type").
+  int attack_type = ATTACK_TYPE_UNKNOWN;
+  // The engine's **per-shot recoil counter** (`C_CSWeaponBase::m_flRecoilIndex`,
+  // weapon + 0x1A28): 0, 1, 2, … after every shot. `RECOIL_INDEX_UNKNOWN` when
+  // the payload cannot read it — and the conservative reading of that is **no
+  // transform** (the negev's rule).
+  int recoil_index = RECOIL_INDEX_UNKNOWN;
+  // The weapon's pellet count (`CCSWeaponBaseVData::m_nNumBullets`, +0x730) and its
+  // spread seed (`m_nSpreadSeed`, +0x7D8): the shotgun pattern table's inputs.
+  int num_bullets = 0;
+  int spread_seed = 0;
+  // The `weapon_accuracy_shotgun_spread_patterns` convar: when it is on, the engine
+  // draws the weapon's **fixed** pellet pattern instead of the random cone. It is
+  // **off by default**. The payload cannot read the convar (that needs a convar
+  // address the dumper does not resolve), so this stays false and the shotgun's
+  // cone is not modelled (`docs/re/aim.md` §"The pattern table").
+  bool shotgun_patterns = false;
 };
 
 // The inaccuracy for the shooter's state: the engine's effective value when the payload

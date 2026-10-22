@@ -143,21 +143,98 @@ auto md5_pseudo_random(std::uint32_t sequence) noexcept -> std::int32_t {
   return static_cast<std::int32_t>(md5_first_dword(bytes, 4));
 }
 
+auto shotgun_pattern_table(int spread_seed, int num_bullets) noexcept
+    -> std::optional<std::array<ShotgunPatternEntry, PATTERN_TABLE_ENTRIES>> {
+  // The engine marks the block invalid when the weapon fires fewer than two
+  // bullets, and the lookup then falls back to the random cone.
+  if (num_bullets < 2) {
+    return std::nullopt;
+  }
+  // The engine clamps the bullet count to the table's length.
+  int count = num_bullets;
+  if (count > PATTERN_TABLE_ENTRIES) {
+    count = PATTERN_TABLE_ENTRIES;
+  }
+  const double inverse = 1.0 / static_cast<double>(count);
+  std::array<ShotgunPatternEntry, PATTERN_TABLE_ENTRIES> table{};
+  UniformRandomStream stream(spread_seed);
+  int k = 0;
+  for (int index = 0; index < PATTERN_TABLE_ENTRIES; ++index) {
+    // The engine's draw order: the **angle** first, then the radius.
+    const float angle = stream.random_float(0.0F, TWO_PI);
+    const float low = static_cast<float>(static_cast<double>(k) * inverse);
+    const float high = static_cast<float>(static_cast<double>(k + 1) * inverse);
+    const float radius = stream.random_float(low, high);
+    table[static_cast<std::size_t>(index)] =
+        ShotgunPatternEntry{.angle = angle, .radius = radius};
+    // The radius band cycles: 0, 1, …, N-1, 0, 1, …
+    k = (k + 1) % count;
+  }
+  return table;
+}
+
 auto pellet_offsets(std::int32_t random_seed, float spread, float inaccuracy, int pellets,
-                    SpreadPattern pattern) -> std::vector<Vec2> {
+                    SpreadPattern pattern, const SpreadRules& rules) -> std::vector<Vec2> {
   std::vector<Vec2> offsets;
   if (pellets <= 0) {
     return offsets;
   }
   UniformRandomStream stream(random_seed);
   offsets.reserve(static_cast<std::size_t>(pellets));
+
+  const RadiusTransform transform = radius_transform(pattern, rules);
+  // The shotgun's pattern table: the engine builds it once per weapon and reads
+  // the entry the shot's index names. It is only read when the convar is on.
+  std::optional<std::array<ShotgunPatternEntry, PATTERN_TABLE_ENTRIES>> table;
+  if (rules.shotgun_patterns) {
+    table = shotgun_pattern_table(rules.spread_seed, rules.num_bullets);
+  }
+
+  // The **spread** radius and angle: drawn once for the shot (pellet 0), and
+  // again for every pellet when the shotgun-pattern convar is on. The engine
+  // keeps the first pair and reuses it for the later pellets otherwise.
+  float r1 = 0.0F;
+  float a1 = 0.0F;
   for (int i = 0; i < pellets; ++i) {
-    float r1 = stream.random_float(0.0F, 1.0F);
-    const float a1 = stream.random_float(0.0F, TWO_PI);
-    const float r2 = stream.random_float(0.0F, 1.0F);
-    const float a2 = stream.random_float(0.0F, TWO_PI);
-    if (pattern == SpreadPattern::revolver) {
-      r1 = 1.0F - r1 * r1;
+    if (i == 0 || rules.shotgun_patterns) {
+      r1 = stream.random_float(0.0F, 1.0F);
+      a1 = stream.random_float(0.0F, TWO_PI);
+      if (transform == RadiusTransform::revolver) {
+        r1 = 1.0F - r1 * r1;
+      } else if (transform == RadiusTransform::negev) {
+        for (int step = 0; step < negev_exponent(rules.recoil_index); ++step) {
+          r1 = r1 * r1;
+        }
+        r1 = 1.0F - r1;
+      }
+    }
+    // The **inaccuracy** radius and angle: drawn per pellet.
+    float r2 = 0.0F;
+    float a2 = 0.0F;
+    if (rules.shotgun_patterns) {
+      // The pattern table: the entry the shot's index names, or the random
+      // cone when the index is out of the table's range.
+      const int index = rules.recoil_index * rules.num_bullets + i;
+      if (table.has_value() && index >= 0 && index < PATTERN_TABLE_ENTRIES) {
+        const ShotgunPatternEntry& entry = (*table)[static_cast<std::size_t>(index)];
+        a2 = entry.angle;
+        r2 = entry.radius;
+      } else {
+        // The engine's fallback draws the **angle** first, then the radius.
+        a2 = stream.random_float(0.0F, TWO_PI);
+        r2 = stream.random_float(0.0F, 1.0F);
+      }
+    } else {
+      r2 = stream.random_float(0.0F, 1.0F);
+      a2 = stream.random_float(0.0F, TWO_PI);
+    }
+    if (transform == RadiusTransform::revolver) {
+      r2 = 1.0F - r2 * r2;
+    } else if (transform == RadiusTransform::negev) {
+      for (int step = 0; step < negev_exponent(rules.recoil_index); ++step) {
+        r2 = r2 * r2;
+      }
+      r2 = 1.0F - r2;
     }
     offsets.push_back(Vec2{.x = spread * r1 * std::cos(a1) + inaccuracy * r2 * std::cos(a2),
                            .y = spread * r1 * std::sin(a1) + inaccuracy * r2 * std::sin(a2)});

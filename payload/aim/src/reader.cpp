@@ -72,6 +72,25 @@ constexpr std::uintptr_t k_vdata_inaccuracy_jump_initial = 0x7B8;
 constexpr std::uintptr_t k_vdata_inaccuracy_jump_apex = 0x7BC;
 // `m_WeaponType` (`SWeaponType`, +0x520): the ragebot's firearm gate.
 constexpr std::uintptr_t k_vdata_weapon_type = 0x520;
+// `m_bIsRevolver` (bool, +0x71E): the VData's own revolver discriminator — the
+// payload's read of the weapon **id** the engine compares
+// (`docs/re/aim.md` §"The attack type").
+constexpr std::uintptr_t k_vdata_is_revolver = 0x71E;
+// `m_nNumBullets` (int32, +0x730) and `m_nSpreadSeed` (int32, +0x7D8): the
+// shotgun pattern table's inputs (`docs/re/aim.md` §"The pattern table").
+constexpr std::uintptr_t k_vdata_num_bullets = 0x730;
+constexpr std::uintptr_t k_vdata_spread_seed = 0x7D8;
+// `C_CSWeaponBase::m_weaponMode` (int32, weapon + 0x1A00): the engine's attack
+// type (0 primary, 1 secondary). It is a **sticky** flag — one path sets it, the
+// fire path consumes and clears it — so a payload that reads it before the engine
+// fires reads the engine's **previous** decision, and three of the four
+// `CSBaseGunFire` call sites do not pass it at all
+// (`docs/re/aim.md` §"The attack type").
+constexpr std::uintptr_t k_weapon_mode = 0x1A00;
+// `C_CSWeaponBase::m_flRecoilIndex` (float32, weapon + 0x1A28): the per-shot
+// recoil counter the negev's rule is keyed on. It counts 0, 1, 2, … after every
+// shot (`docs/re/aim.md` §"The spread cone").
+constexpr std::uintptr_t k_weapon_recoil_index = 0x1A28;
 // The **effective** inaccuracy the engine computed for the local pawn
 // (`CsPlayerPawn::m_flInterpolatedInaccuracy`, client `+0x1F50`, `docs/re/aim.md`
 // §"Inaccuracy"): the crosshair value — the engine's own composition of the stance/move/
@@ -190,6 +209,11 @@ auto read_weapon_profile(std::uintptr_t weapon_vdata, WeaponProfile& profile) no
   (void)game::read(weapon_vdata + k_vdata_inaccuracy_jump_initial, profile.inaccuracy_jump_initial);
   (void)game::read(weapon_vdata + k_vdata_inaccuracy_jump_apex, profile.inaccuracy_jump_apex);
   (void)game::read(weapon_vdata + k_vdata_weapon_type, profile.weapon_type);
+  // The VData's own revolver flag: the payload's read of the weapon **id** the
+  // engine compares. The deagle's is false, the R8's is true.
+  (void)game::read(weapon_vdata + k_vdata_is_revolver, profile.is_revolver);
+  (void)game::read(weapon_vdata + k_vdata_num_bullets, profile.num_bullets);
+  (void)game::read(weapon_vdata + k_vdata_spread_seed, profile.spread_seed);
   return true;
 }
 
@@ -230,6 +254,29 @@ auto build_input(const game::Snapshot& snapshot, const WeaponProfile& weapon, in
     if (float effective = 0.0F;
         game::read(local.pawn + k_pawn_interpolated_inaccuracy, effective) && effective >= 0.0F) {
       input.weapon.inaccuracy = effective;
+    }
+    // The engine's **attack type** and its **per-shot recoil counter** live on the
+    // weapon *entity*, not on its VData.
+    //
+    // **The attack type is evidence, not knowledge.** The field is sticky: the
+    // engine's secondary path sets it to 1 and the fire path consumes and clears
+    // it, so a payload that reads it *before* the engine fires sees the engine's
+    // **previous** decision — and three of the four `CSBaseGunFire` call sites do
+    // not pass the field at all (they pass a literal `1`, a literal `0`, or
+    // `ammo_in_clip & 1`). The payload therefore cannot know the engine's attack
+    // type for the shot it is about to take; the conservative reading of what it
+    // reads is "not the secondary attack", so the revolver's `1 - r^2` is not
+    // applied (`docs/re/aim.md` §"The attack type").
+    if (std::int32_t mode = 0; game::read(local.weapon_entity + k_weapon_mode, mode)) {
+      input.weapon.attack_type =
+          (mode == ATTACK_TYPE_SECONDARY) ? ATTACK_TYPE_SECONDARY : ATTACK_TYPE_PRIMARY;
+    }
+    // The **recoil counter**: the engine increments it by one after every shot and
+    // resets it when the weapon stops firing. An unreadable counter leaves the
+    // negev's transform off (`RECOIL_INDEX_UNKNOWN`).
+    if (float recoil = 0.0F;
+        game::read(local.weapon_entity + k_weapon_recoil_index, recoil) && recoil >= 0.0F) {
+      input.weapon.recoil_index = static_cast<int>(recoil);
     }
   }
   input.pawn = target->pawn;

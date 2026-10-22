@@ -26,14 +26,21 @@ constexpr float TIE_EPSILON = 1.0e-6F;
 // is an error, never a silently wrong attribution.
 constexpr int MAX_TRACKED_TARGETS = 32;
 
+// The shot's **spread** radius and angle, carried across the pellets: the engine
+// draws them once (for pellet 0) and reuses them for the later pellets.
+struct SpreadPair {
+  float radius = 0.0F;
+  float angle = 0.0F;
+};
+
 // The engine's per-pellet draw, in the engine's order (`docs/re/aim.md` §"The spread
 // cone"):
 //
-//   r1, a1 = RandomFloat(0, 1), RandomFloat(0, 2pi)   (spread)
-//   r2, a2 = RandomFloat(0, 1), RandomFloat(0, 2pi)   (inaccuracy)
-//   off    = spread·r1·(cos a1, sin a1) + inaccuracy·r2·(cos a2, sin a2)
+//   per shot:   r1, a1 = RandomFloat(0, 1), RandomFloat(0, 2pi)   (the spread)
+//   per pellet: r2, a2 = RandomFloat(0, 1), RandomFloat(0, 2pi)   (the inaccuracy)
 //
-// with the revolver's `r1 -> 1 - r1²` transform. The draw order is load-bearing: the
+// with the revolver's `r -> 1 - r^2` and the negev's `r -> 1 - r^(2^k)` transforms,
+// which the engine applies to **both** radii. The draw order is load-bearing: the
 // offsets must be the engine's, so the expression order matches `pellet_offsets`
 // exactly — and the host test asserts the two are **bit-identical** (exact
 // equality, not a tolerance), so the claim is enforced rather than asserted.
@@ -45,14 +52,61 @@ constexpr int MAX_TRACKED_TARGETS = 32;
 // edited, the test fails) and **not** an independent derivation of the engine's
 // recipe. The recipe itself rests on the repo's RE (`docs/re/aim.md`), which
 // `spread.hpp` still marks as unvalidated against the live engine.
+//
+// The **spread** radius and angle are drawn **once**, for pellet 0, and again for
+// every pellet only when the shotgun-pattern convar is on; the **inaccuracy**
+// radius and angle are drawn **per pellet**. `carried` holds the shot's spread
+// pair, so the later pellets reuse the first one.
 [[nodiscard]] auto draw_pellet(UniformRandomStream& stream, float spread, float inaccuracy,
-                               SpreadPattern pattern) noexcept -> Vec2 {
-  float r1 = stream.random_float(0.0F, 1.0F);
-  const float a1 = stream.random_float(0.0F, TWO_PI);
-  const float r2 = stream.random_float(0.0F, 1.0F);
-  const float a2 = stream.random_float(0.0F, TWO_PI);
-  if (pattern == SpreadPattern::revolver) {
-    r1 = 1.0F - r1 * r1;
+                               SpreadPattern pattern, const SpreadRules& rules, int pellet,
+                               SpreadPair& carried,
+                               const std::optional<std::array<ShotgunPatternEntry,
+                                                             PATTERN_TABLE_ENTRIES>>& table)
+    -> Vec2 {
+  float r1 = carried.radius;
+  float a1 = carried.angle;
+  if (pellet == 0 || rules.shotgun_patterns) {
+    r1 = stream.random_float(0.0F, 1.0F);
+    a1 = stream.random_float(0.0F, TWO_PI);
+    if (radius_transform(pattern, rules) == RadiusTransform::revolver) {
+      r1 = 1.0F - r1 * r1;
+    } else if (radius_transform(pattern, rules) == RadiusTransform::negev) {
+      const int exponent = negev_exponent(rules.recoil_index);
+      for (int step = 0; step < exponent; ++step) {
+        r1 = r1 * r1;
+      }
+      r1 = 1.0F - r1;
+    }
+    carried.radius = r1;
+    carried.angle = a1;
+  }
+  float r2 = 0.0F;
+  float a2 = 0.0F;
+  if (rules.shotgun_patterns) {
+    // The pattern table: the entry the shot's index names, or the random cone
+    // when the index is out of the table's range.
+    const int index = rules.recoil_index * rules.num_bullets + pellet;
+    if (table.has_value() && index >= 0 && index < PATTERN_TABLE_ENTRIES) {
+      const ShotgunPatternEntry& entry = (*table)[static_cast<std::size_t>(index)];
+      a2 = entry.angle;
+      r2 = entry.radius;
+    } else {
+      // The engine's fallback draws the angle first, then the radius.
+      a2 = stream.random_float(0.0F, TWO_PI);
+      r2 = stream.random_float(0.0F, 1.0F);
+    }
+  } else {
+    r2 = stream.random_float(0.0F, 1.0F);
+    a2 = stream.random_float(0.0F, TWO_PI);
+  }
+  if (radius_transform(pattern, rules) == RadiusTransform::revolver) {
+    r2 = 1.0F - r2 * r2;
+  } else if (radius_transform(pattern, rules) == RadiusTransform::negev) {
+    const int exponent = negev_exponent(rules.recoil_index);
+    for (int step = 0; step < exponent; ++step) {
+      r2 = r2 * r2;
+    }
+    r2 = 1.0F - r2;
   }
   return Vec2{.x = spread * r1 * std::cos(a1) + inaccuracy * r2 * std::cos(a2),
               .y = spread * r1 * std::sin(a1) + inaccuracy * r2 * std::sin(a2)};
@@ -257,9 +311,11 @@ auto to_string(MonteCarloError error) noexcept -> const char* {
 }
 
 auto pattern_supported(const WeaponProfile& weapon) noexcept -> bool {
-  // The shotgun's pattern table (`FUN_1807cd1b0`) and the negev's `r -> 1 - r^(2^k)`
-  // are not modelled (`payload/aim/include/cs2/aim/spread.hpp`). The machineguns are
-  // refused with the negev because `WeaponProfile` carries the weapon *type* only.
+  // The shotgun's **convar** is not readable by the payload, so the payload
+  // cannot know whether the engine draws the fixed pattern table or the random
+  // cone; the machinegun cannot be told apart from the negev (the VData carries
+  // no flag for it). Both are refused rather than silently given the standard
+  // pattern (`cs2/aim/montecarlo.hpp`).
   return weapon.weapon_type != WEAPON_TYPE_SHOTGUN && weapon.weapon_type != WEAPON_TYPE_MACHINEGUN;
 }
 
@@ -277,7 +333,13 @@ auto spread_kernel(const WeaponProfile& weapon, int pellets, SpreadPattern patte
   return SpreadKernel{.spread = weapon.spread,
                       .inaccuracy = weapon.inaccuracy,
                       .pellets = pellets,
-                      .pattern = pattern};
+                      .pattern = pattern,
+                      .rules = SpreadRules{.is_revolver = weapon.is_revolver,
+                                           .attack_type = weapon.attack_type,
+                                           .recoil_index = weapon.recoil_index,
+                                           .shotgun_patterns = weapon.shotgun_patterns,
+                                           .num_bullets = weapon.num_bullets,
+                                           .spread_seed = weapon.spread_seed}};
 }
 
 auto draw_pellet_offsets(std::int32_t seed, const SpreadKernel& kernel,
@@ -292,9 +354,17 @@ auto draw_pellet_offsets(std::int32_t seed, const SpreadKernel& kernel,
     return std::unexpected(MonteCarloError::buffer_too_small);
   }
   UniformRandomStream stream(seed);
+  // The shotgun's pattern table: the engine builds it once per weapon; it is
+  // only read when the convar is on.
+  std::optional<std::array<ShotgunPatternEntry, PATTERN_TABLE_ENTRIES>> table;
+  if (kernel.rules.shotgun_patterns) {
+    table = shotgun_pattern_table(kernel.rules.spread_seed, kernel.rules.num_bullets);
+  }
+  SpreadPair carried;
   for (int i = 0; i < kernel.pellets; ++i) {
     out[static_cast<std::size_t>(i)] =
-        draw_pellet(stream, kernel.spread, kernel.inaccuracy, kernel.pattern);
+        draw_pellet(stream, kernel.spread, kernel.inaccuracy, kernel.pattern, kernel.rules, i,
+                    carried, table);
   }
   return kernel.pellets;
 }

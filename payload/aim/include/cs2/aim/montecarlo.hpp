@@ -68,6 +68,14 @@ struct SpreadKernel {
   float inaccuracy = 0.0F;  ///< the inaccuracy magnitude (radians)
   int pellets = 1;
   SpreadPattern pattern = SpreadPattern::standard;
+  // The engine's **per-shot rules** (the profile's): the revolver's and the
+  // negev's transforms, and the shotgun-pattern convar.
+  //
+  // **They are a parameter, not a constant.** The spread radius and angle are
+  // drawn **once** for the shot and again per pellet only when the convar is on,
+  // and the transforms depend on the attack type and the recoil counter, which
+  // are per-shot state the engine keeps on the weapon.
+  SpreadRules rules{};
 };
 
 // The largest pellet count the sampler accepts. The engine's shotguns and the negev
@@ -96,12 +104,19 @@ inline constexpr int HITGROUP_GENERIC = 10;
 
 // Whether the engine's pellet pattern for `weapon` is modelled by the kernel.
 //
-// **The shotgun's pattern table (`FUN_1807cd1b0`) and the negev's `r -> 1 - r^(2^k)`
-// are not modelled** (`payload/aim/include/cs2/aim/spread.hpp`). `WeaponProfile`
-// carries the weapon *type* only, so a machinegun cannot be told apart from the
-// negev: both are refused rather than silently given the standard pattern. A caller
-// that knows its weapon uses the standard pattern clears the type (or passes -1) and
-// takes the responsibility.
+// **The shotgun is refused** — not because its pattern table is unknown (the
+// table's values are reproducible, `cs2/aim/spread.hpp`), but because the
+// **convar** that selects it is not readable by the payload: the engine draws
+// the fixed table only when `weapon_accuracy_shotgun_spread_patterns` is on and
+// the random cone otherwise, and the payload cannot tell which one the server
+// enabled. A shotgun scored with the wrong cone is a wrong number, so the
+// refusal stands.
+//
+// **The machineguns are refused** because the payload cannot tell the negev from
+// the M249: both are weapon type 6 and the VData carries no flag for the negev
+// (the engine compares the weapon **id**). The negev's transform itself is
+// modelled (`SpreadPattern::negev`); a caller that knows its weapon is the negev
+// clears the type (or passes -1) and takes the responsibility.
 //
 // **Every entry point that can produce a number checks this** — `spread_kernel`,
 // `evaluate_sample`, `evaluate_hit_chance` and `solve_montecarlo` all refuse an
@@ -113,17 +128,17 @@ inline constexpr int HITGROUP_GENERIC = 10;
 // The kernel of a weapon: its spread and its effective inaccuracy. Fails for the
 // weapons whose pellet pattern is not modelled (`pattern_supported`).
 //
-// **The pattern is a required argument — there is no silent default.** `WeaponProfile`
-// carries the weapon *type* only, so the module cannot tell a revolver from a
-// rifle (both are type 3): the caller states the weapon's pattern, and the
-// revolver's `1 - r²` is applied only if the caller says so. A default would have
-// dropped it without a word.
+// **The pattern is a required argument — there is no silent default.** The
+// pattern names the weapon's *class*; the engine's own conditions (the VData's
+// `m_bIsRevolver` and the attack type) come from the **profile** and are applied
+// by the draw, so the caller's class can never put a transform on that the engine
+// would not apply.
 [[nodiscard]] auto spread_kernel(const WeaponProfile& weapon, int pellets,
                                  SpreadPattern pattern) noexcept
     -> std::expected<SpreadKernel, MonteCarloError>;
 
-// The engine's `K` pellet offsets for `seed` — the same draw `pellet_offsets` makes,
-// in the engine's order (`r1, a1, r2, a2` per pellet, sequential across the pellets).
+// The engine's `K` pellet offsets for `seed` — the same draw `pellet_offsets`
+// makes, in the engine's order (`r1, a1` once for the shot, `r2, a2` per pellet).
 // The number of offsets written is returned; `out` is the caller's buffer (no
 // allocation).
 //
