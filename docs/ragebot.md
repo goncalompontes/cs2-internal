@@ -1371,3 +1371,37 @@ state, and it is the one that owns the fields it changes.
 bumped: it is shared between two separately compiled binaries, and a version
 bump is a silent-corruption risk.
 
+### 15.6 The operator's live check
+
+**This is the operator's** — the agent cannot see the screen, and the live run
+is the one thing static review cannot close.
+
+With the payload injected and the game in a map:
+
+```
+{"id": 1, "cmd": "rage", "args": {"objective": "monte_carlo"}}
+{"id": 2, "cmd": "rage", "args": {}}
+```
+
+The second request must answer **`"objective": "monte_carlo"`** (and
+`"objective_source": "control"`), seconds after the first — before this, it
+answered `"hitchance"`. Through the harness the same check is:
+
+```python
+game.rage(objective="monte_carlo")   # -> objective == "monte_carlo"
+# ... a second later
+game.rage()                          # -> objective == "monte_carlo"   (was "hitchance")
+```
+
+The MCP tool `cs2_rage` takes the same arguments
+(`cs2_rage {"objective": "monte_carlo"}`, then `cs2_rage {}`).
+
+**And the other half of the rule**: with the objective still in force, change
+a *different* rage field in the menu (the FOV slider) — the objective must
+**stay** `"monte_carlo"`, `objective_source` must stay `"control"`, and
+`menu_fields` must list the FOV but **not** the objective (the objective is
+the control channel's). Then set the objective in the menu: it must become the
+menu's (`objective_source: "menu"`, and the objective appears in
+`menu_fields`).
+
+
