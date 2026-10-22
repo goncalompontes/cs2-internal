@@ -455,6 +455,19 @@ published as `"unmapped"`: only two fields of the record are mapped, and the raw
 bytes are published so a later RE pass can map the rest **from the probe's own
 output** without re-running the game.
 
+> **Open: the entry point is not a curated signature.** `payload/sdk/offsets.hpp`
+> has `physics_query_interface`, `physics_query_filter` and `entities_in_box` as
+> curated (`OffsetSource::signature`) entries, but **no** `trace_line_intervals`:
+> the probe therefore always uses the hard-coded fallback `0xA19E90`. The next game
+> update moves the function and the probe would call a random address (the guard
+> would probably catch it, but the failure would look like "the engine call
+> faults" rather than "the offset moved"). The dumper's curated set
+> (`external/dumper/src/analysis.rs`) is **not this task's file**, so this is
+> reported as a follow-up instead of fixed here: the signature is the byte
+> sequence of the prologue the live build has (`4c 8b dc 49 89 5b 08 …` at
+> `0xa19e90`) together with the name string `TraceLineIntervals` (now at
+> `client + 0x1c32448`).
+
 **A finding about the shared fault guard (2026-10-22).** `cs2::diag::call_guarded`
 — the guard every engine call in the payload uses — **cannot recover on a
 clang-cl build**. Its vectored handler is a `noexcept` function, and clang-cl marks

@@ -528,3 +528,24 @@ without re-running the game.
 * the **worst case** is the world's first parse (10k brush shapes), which happens
   **once per session** and is reported as `engine.world_cached == false`. Run the
   heatmap once before the probe and the probe's answer is cheap.
+
+### Process notes (recorded here, because they were recorded nowhere)
+
+* **Ownership.** The T39 spec's file list does not include the root
+  `meson.build` or a new `payload/control/include/cs2/control/trace_guard.hpp`,
+  and the branch's earlier commits touched both: the `meson.build` edit is two
+  additive `executable()` + `test()` blocks (the host tests have to be registered
+  somewhere), and the guard header is the probe's own fault guard. The deviation
+  is stated in the fix commits rather than left implicit.
+* **A deletion in the shared temp directory.** The branch's earlier report
+  mentioned deleting **~3 GB** from the shared temp directory
+  (`%LOCALAPPDATA%\Temp\opencode`). The deletion is not in the branch, so it
+  cannot be reviewed from here; it is recorded so the next agent knows the
+  directory was touched. The REA cache (8 entries) and the Ghidra projects under
+  `C:\Users\gpmpo\ghidra-analysis` were intact when the review checked them.
+  **The shared temp directory is shared**: a deletion there is a process risk and
+  belongs in the report, not only in a scratch file.
+* **The entry point is not a curated signature** (`trace_line_intervals` is absent
+  from `payload/sdk/offsets.hpp`): the probe uses the hard-coded `0xA19E90`
+  fallback, and the dumper's curated set is not this task's file — the follow-up
+  is described in `docs/re/bullet-trace.md`.
