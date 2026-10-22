@@ -18,8 +18,8 @@ string literals, and analyses whether a function *could* be virtualized.
 | **T19** — the call encryption | **merged** | a direct call to a same-module callee becomes an indirect dispatch through an encrypted descriptor; relocation-safe |
 | **T20a** — the virtualizer's front end | **merged** | the ISA (one `isa.def`), the fail-closed gate, the IR→bytecode lowering, the encoder (encrypted, per-build opcode permutation). **Read-only**: the image does not change |
 | **T21** — the string encryption | **merged** | the string selection, the gate, the encryption, the decode emitted into the using function, the salted coverage, the image scan — **and the measurement that says the strings do not leave the image** (§3.2) |
-| **T23a** — the cross-TU routing | **merged** | a call to a declaration the policy's `cross_module` list names goes through the caller's own table; the dispatch count **37 → 51**; the 14 cross-TU edges of the aim graph (4 of them EH edges) leave the image |
-| **T24** — the per-build polymorphism | **in review** | the seed becomes mandatory, the mixer's constants and rotation become per-build, the pass permutes the module's function list: **83.53 %** of the `.text` differs between two seeded builds |
+| **T23a** — the cross-TU routing | **merged** | a call to a declaration the policy's `cross_module` list names goes through the caller's own table; the dispatch count **37 → 54**; the 14 cross-TU edges of the aim graph (4 of them EH edges) leave the image |
+| **T24** — the per-build polymorphism | **merged** | the seed is **mandatory** (the plugin's gate and the configure step's), the mixer's constants and rotation are per build, and the pass permutes the module's function list: **83 %** of the `.text` differs between two seeded builds, and two builds with the same seed are byte-identical |
 | **T23b** — the `sret` edges | **specced** | the last 12 cross-TU edges: T19's refusal of a struct-returning callee is a *policy*, not a limit of the target (`llc` accepts an indirect `sret` call) |
 | **T22** — the integrity check | **specced** | a post-link binder and a run-time self-check: anti-tamper, not anti-reversal |
 
@@ -211,6 +211,38 @@ shipped one.
   from the contract), but no interpreter runs it **in the payload**.
 - The **run-time cost** of the extra dispatches (T23a) and of the virtualizer
   (T20c) is **not measured** by this repository.
+
+## 7a. A known flake in the tree (not the protection work)
+
+`cs2-internal:features-chams-desc-cache` — "FAIL: the generation really
+advanced" — is **flaky**: measured **1 failure in 12 runs** on the
+integration tree, *without* the protection changes. It is a race in the
+chams description cache's test (the advancer thread and the generation bump),
+not a protection regression.
+
+It matters here because the **merge gate runs it**: a flake aborts a merge
+that is otherwise green (it did, once, on T24's merge — the merge was
+re-run and passed). If it fails, re-run the test before hunting a cause.
+
+## 7b. The policy's `cross_module` list is derived from the aim code
+
+The list names the cross-TU callees **of the selected functions** — not the
+aim module's whole cross-TU graph. An entry that matches no declaration
+**fails the build** ("6 cross_module entries matched no declaration"), and a
+callee the selected functions call that is **not** in the list fails the
+payload check and *names* it:
+
+```
+check_payload: 1 cross-TU callees that a protected function calls directly are
+the payload's own code: ?hitbox_valid@aim@cs2@@YA_NAEBUHitbox@12@@Z
+(external_callee). A callee that is not in the policy's `cross_module` list is
+refused with `external_callee`, and the list routes it: add it to the list.
+```
+
+So when the aim code changes (a new cross-TU callee appears), the list has to
+be re-derived — and the build **tells you what to add**. That is the intended
+way to maintain it; do not silence the check.
+
 
 ## 8. The next task
 
