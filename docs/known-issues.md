@@ -658,3 +658,27 @@ again:
 **The lesson:** three times, a careful implementer re-derived the engine
 instead of trusting the spec, and **the engine was right every time**. Write the
 specs from the **live build**.
+
+## 18. The operator's live-test list (2026-10-22, the cleanup tree)
+
+The operator's own list, in their order, after the cleanup merged into `master`.
+It is kept here so no item is lost between sessions. **Item 8 is done**; the rest
+are open, and each says what is already known so the next session starts at the
+finding rather than at the symptom.
+
+| # | item | state | what is already known / where to start |
+|---|---|---|---|
+| **O1** | **The ragebot does not shoot at all.** | **open — being traced** | The fire path publishes its own verdict: the `rage` answer's `fire_refusal` (`ok`, `no-solve`, `fire-off`, `clip-unknown`, `no-ammo`, `reloading`, `deploying`, `edge`, `interval`, `rate-unknown`) and `player_press` (`held`/`released`/`unknown`) — and the `debug` column shows both live. Start there: `no-solve` means the *solve* never produced an aim (target selection / FOV / `min_damage` / `min_hitchance` / occlusion completeness), not the press. `presses` counts the ragebot's attempts, `shots` the **engine's** shots (the clip fell): the split says whether the payload pressed and the engine ignored it, or the payload never pressed. `payload/control/src/service.cpp` (`decide_rage_fire`, `rage_tick`), `docs/ragebot.md` §16. |
+| **O2** | **The chams do not render at all.** | **open** | The feature and its guard are `docs/known-issues.md` §5/§14 and `docs/re/chams.md`; the draw hook is `payload/features/src/chams.cpp` + `test_chams_draw_hook`. Check the hook's install verdict and the `chams` settings block first — a disabled feature and a hook that never fired look identical from the outside. |
+| **O3** | **The glow does not work.** | **open** | No glow feature exists in the tree (grep `glow`): the ESP draws boxes/health/names/skeleton/hitboxes; a glow needs the engine's glow object manager or a dedicated pass. Decide which before writing code (`docs/re/esp.md` is absent — this may be the first write-up). |
+| **O4** | **The dropped-weapon ESP draws weapons that do not exist and flickers.** | **open** | Compare with a real solution (UnknownCheats) before changing the iteration: the ESP's world-item pass is `payload/features/src/esp_world.cpp` (`esp_world_class.cpp`), the same code path that also draws the other world entities. A "phantom item + flicker" pair is the signature of iterating a stale/duplicated list or trusting a handle that was never validated — pin which, do not tune thresholds. |
+| **O5** | **The local player is not updated when we take over a bot.** | **open** | The local player comes from the snapshot (`game::StateReader`, `snapshot.local`), and the takeover changes the controller/pawn identity. Check whether the payload re-resolves the local controller (rather than caching the pawn), and whether the *state machine* re-derives with it (`payload/game/src/state_reader.cpp`). |
+| **O6** | **The ESP flags should be in an uppercase pixel font next to the weapon name; the name itself stays as it is.** | **open** | The flags are drawn by the ESP's text pass; the font is the backend's single stock ImGui font (`payload/render/src/imgui_backend.cpp`, `load_fonts`). This needs a **second** font (a pixel face, uppercase only) and a per-`Text` font selector — the `DrawList` `Text` command has none today. |
+| **O7** | **Auto-stop is not a real implementation** — it moves in the opposite direction and does not slow the player; needs a real deceleration and UnknownCheats research. | **open** | `payload/control/src/input.cpp` (the auto-stop path) + `docs/re/strafing.md`. The engine's own deceleration is `PM_Friction`/`PM_WalkMove` with `sv_stopspeed`; a counter-strafe is only one way to reach it, and the current code writes the opposite wish without the acceleration model, which is why it neither stops nor helps. Read a real implementation's approach (counter-strafe at the friction optimum vs. zeroing the wish) before coding. |
+| **O8** | **The big ragebot occlusion bug** — the world mesh was not seen; prove it against the engine's own trace. | **DONE (2026-10-22)** | Root cause: map walls are collision **meshes**, i.e. open sheets, and `fragment_layers` dropped every zero-thickness span, so a wall was free; a second defect paired unrelated triangle crossings into fake 466/326-unit solids. Fixed in `payload/aim` (`fix(aim): a mesh wall is a surface`), measured live with the restored `trace_probe` (`docs/re/occlusion.md` §"the measurement"), pinned by `aim-occlusion`. |
+
+**Also landed this session** (not on the list, but it is what made the list
+traceable): the `trace_probe` command and its MCP tool, the `debug` view (the
+payload's own answers as an outlined text column in the corner), the world shape
+histogram now surviving the cache, and the MCP build/test tools working again
+(their `cmd` quoting had broken every build on this host).
