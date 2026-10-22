@@ -58,7 +58,19 @@ struct Fragment {
       continue;
     }
     const float thickness = std::min(span->exit, distance) - span->entry;
-    if (thickness <= 0.0F) {
+    // A zero-length span is not always "no wall". A collision **mesh** is a
+    // triangle soup, and the map's walls are open sheets: the ray crosses the
+    // surface once, so the two nearest crossings `ray_span` builds the span from
+    // are the *same* triangle and `exit == entry`. That crossing is exactly the
+    // surface the bullet hits, and the engine still charges the surface's entry
+    // cost (`penetration_layer_damage`: the entry fraction and the power term are
+    // independent of the thickness) — so it must be kept. Dropping it made every
+    // mesh wall invisible to the ragebot (`docs/re/bullet-trace.md`).
+    //
+    // On the other kinds a zero span is a degenerate contact (a ray tangent to a
+    // box corner, a grazing capsule): there is no wall there, and charging the
+    // entry cost would attenuate a shot that nothing actually blocks.
+    if (thickness <= 0.0F && occluder->kind != SolidKind::mesh) {
       continue;
     }
     PenetrationLayer layer;

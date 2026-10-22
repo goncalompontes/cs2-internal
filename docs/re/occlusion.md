@@ -510,7 +510,53 @@ whether the answer means anything:
 Then the **numbered answer** (§"the measurement" above): which of the six places
 the world geometry is lost.
 
-### The measurement — **OWED** (not yet run)
+### The measurement — **RUN (2026-10-22, de_dust2)**: the walls are mesh *surfaces*
+
+The probe was run live on de_dust2 (payload built from the tree, bot match, the world's
+cache warm). The answer settles the question this section was written for.
+
+**The world's meshes are enumerated, projected and hit — at the engine's own
+distances.** One run (eye `(-822.4, -795.6, 181.0)`, yaw `107`), the view ray:
+
+| our occluder | span (units) | engine record |
+|---|---|---|
+| mesh cluster 11 | **196.216 → 196.216** | `196.216` |
+| mesh cluster 9 | **672.148 → 672.148** | `672.148` |
+| mesh cluster 20 | **1476.142 → 1476.142** | `1476.142` |
+| mesh cluster 19 | **2170.482 → 2170.482** | `2170.481` |
+| mesh cluster 16 | **2195.578 → 2195.578** | `2195.578` |
+
+`world.mesh_clusters = 83`, `world.world_cache_hulls = 10226` (10143 hulls + 83
+clusters) — so the world body's six meshes **are** parsed into spatial clusters, and
+the pyramid keeps the ones the ray crosses. The geometry was never the loss.
+
+**Two defects in how a mesh is *valued*, both in `payload/aim`:**
+
+1. **A zero-thickness layer was dropped.** A map wall is an **open sheet**: the ray
+   crosses the surface once, so `ray_span` returned `entry == exit`, and
+   `fragment_layers` discarded every layer with `thickness <= 0`. Every mesh wall was
+   therefore free — the ragebot saw no wall where the bullet hits one. Fixed: a zero
+   span on a **mesh** is a surface and keeps its entry cost
+   (`penetration_layer_damage` charges the entry fraction and the power term, both
+   thickness-independent); on the other kinds a zero span is a degenerate contact and
+   is still dropped.
+2. **Two unrelated crossings were paired into one fake solid.** The span used to be
+   the **two nearest** triangle crossings. In a soup that pairs a wall with whatever
+   is behind it in the same cluster: the same run reported mesh clusters 4 and 6 as
+   **466** and **326** units thick — which zeroes the damage of every shot through
+   them. Fixed: a mesh crossing is **one surface** (`entry == exit`), which is what
+   the engine reports for it.
+
+Both are pinned by `aim-occlusion` (`an open mesh wall attenuates the head`). The
+engine's interval records for these surfaces are **single** records — the engine has
+no enter/exit pair for a sheet either.
+
+The `engine_only` rows the probe still prints (`10.127 -> 1015.895`) are the
+**player's own body and the map's closed brush volume**, not a lost wall: our answer
+starts at the first hull (1015.9) and the engine's interval starts 10 units from the
+eye because the eye is inside a solid there (`startsolid`).
+
+### The measurement (the general recipe)
 
 The live measurement needs the **operator**: stop the bots, point at a wall that is
 100 % solid, and report the view angles. The probe is built and the engine call's

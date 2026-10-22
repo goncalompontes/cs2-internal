@@ -80,31 +80,38 @@ using HalfPlane = ConvexClipEdge;
   return t;
 }
 
-// The ray interval inside a collision **mesh** (a triangle soup): the nearest two
-// triangle crossings are the entry and the exit of the first solid the ray enters.
-// A mesh is not convex, so this is a triangle intersection, not a half-space clip
-// (`docs/re/vphysics2.md` — the map's large/merged surfaces are meshes). `triangles`
-// is a flat list of world-space points, 3 per triangle.
+// The ray's crossing of a collision **mesh** (a triangle soup): the **nearest**
+// triangle crossing, as a zero-thickness span — the surface the bullet hits.
+//
+// A collision mesh is not a convex solid and, in CS2, it is not a closed shell
+// either: the world body's meshes are the map's merged wall/terrain **surfaces**
+// (`docs/re/bullet-trace.md`), and live probing shows the engine reports them as a
+// single record at exactly the crossing distance. Pairing the two nearest
+// crossings (the old rule) was wrong twice over on such a soup: an isolated wall
+// gave entry == exit (and was then dropped as zero thickness), while two unrelated
+// surfaces in the same cluster — a wall and the floor behind it — were paired into
+// one **fake** solid hundreds of units thick, which zeroed the damage of every shot
+// through that cluster. One crossing is one surface; the engine charges the surface's
+// entry cost (`penetration_layer_damage`), which is thickness-independent.
+//
+// A closed collision mesh would therefore be counted surface by surface rather than
+// as one solid. That is the conservative direction (each surface costs its entry
+// fee) and it is the case CS2 does not produce: gameplay props are multi-hull
+// bodies, not meshes (`docs/re/occlusion.md`, "Still to pin" 3).
 [[nodiscard]] auto ray_mesh_span(const Vec3& eye, const Vec3& direction,
                                  const std::vector<Vec3>& triangles) noexcept
     -> std::optional<RaySpan> {
-  float t0 = 1.0e30F;
-  float t1 = 1.0e30F;
+  float nearest = 1.0e30F;
   for (std::size_t i = 0; i + 2 < triangles.size(); i += 3) {
     if (const auto t = ray_triangle(eye, direction, triangles[i], triangles[i + 1],
                                     triangles[i + 2])) {
-      if (*t < t0) {
-        t1 = t0;
-        t0 = *t;
-      } else if (*t < t1) {
-        t1 = *t;
-      }
+      nearest = std::min(nearest, *t);
     }
   }
-  if (t0 >= 1.0e30F) {
+  if (nearest >= 1.0e30F) {
     return std::nullopt;
   }
-  return RaySpan{.entry = t0, .exit = t1 >= 1.0e30F ? t0 : t1};
+  return RaySpan{.entry = nearest, .exit = nearest};
 }
 
 // Distance from `p` to an axis-aligned box (`mn`,`mx`) — 0 inside.
@@ -360,8 +367,7 @@ auto ray_mesh_bvh(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction)
   if (bvh.nodes.empty()) {
     return std::nullopt;
   }
-  float t0 = 1.0e30F;
-  float t1 = 1.0e30F;
+  float t0 = 1.0e30F;  // the nearest crossing: the surface the ray hits
   struct Entry {
     std::uint32_t node = 0;
     float tnear = 0.0F;
@@ -376,8 +382,8 @@ auto ray_mesh_bvh(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction)
   stack[depth++] = Entry{.node = 0, .tnear = tnear};
   while (depth > 0) {
     const Entry current = stack[--depth];
-    if (current.tnear > t1) {
-      continue;  // farther than the second-nearest crossing already found
+    if (current.tnear > t0) {
+      continue;  // farther than the nearest crossing already found
     }
     const MeshBvh::Node& node = bvh.nodes[current.node];
     if (node.count > 0) {
@@ -385,12 +391,7 @@ auto ray_mesh_bvh(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction)
         const std::uint32_t tri = bvh.order[node.start + i] * 3;
         if (const auto t = ray_triangle(eye, direction, bvh.triangles[tri], bvh.triangles[tri + 1],
                                         bvh.triangles[tri + 2])) {
-          if (*t < t0) {
-            t1 = t0;
-            t0 = *t;
-          } else if (*t < t1) {
-            t1 = *t;
-          }
+          t0 = std::min(t0, *t);
         }
       }
       continue;
@@ -420,7 +421,9 @@ auto ray_mesh_bvh(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction)
   if (t0 >= 1.0e30F) {
     return std::nullopt;
   }
-  return RaySpan{.entry = t0, .exit = t1 >= 1.0e30F ? t0 : t1};
+  // One crossing is one surface: see `ray_mesh_span` for why the two nearest
+  // crossings must not be paired into a fake solid.
+  return RaySpan{.entry = t0, .exit = t0};
 }
 
 auto project_occluder(const Vec3& eye, const Basis& basis,

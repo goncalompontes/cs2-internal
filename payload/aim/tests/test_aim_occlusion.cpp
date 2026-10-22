@@ -6,6 +6,7 @@
 #include <optional>
 #include <vector>
 
+#include "cs2/aim/damage.hpp"
 #include "cs2/aim/heatmap.hpp"
 #include "cs2/aim/occlusion.hpp"
 
@@ -438,9 +439,13 @@ auto main() -> int {
     expect(mesh.has_value(), "the mesh projects");
     if (mesh.has_value()) {
       expect(mesh->kind == cs2::aim::SolidKind::mesh, "the cell carries the mesh kind");
+      // A mesh is a triangle **soup**: the span is the nearest crossing, i.e. the
+      // surface the bullet hits. Pairing the two nearest crossings would turn a
+      // wall in front of the floor into one fake solid hundreds of units thick
+      // (`docs/re/bullet-trace.md`), so one crossing is one surface.
       const auto span = mesh->ray_span(Vec3{}, Vec3{.x = 1.0F, .y = 0.0F, .z = 0.0F});
-      expect(span.has_value() && near(span->entry, x0, 0.1F) && near(span->exit, x1, 0.1F),
-             "the mesh ray span is the box's near/far faces");
+      expect(span.has_value() && near(span->entry, x0, 0.1F) && near(span->exit, x0, 0.1F),
+             "the mesh ray span is the nearest surface");
       expect(near(mesh->lower_bound_distance(Vec3{}), x0, 0.05F),
              "the mesh lower bound is the AABB distance");
       expect(!mesh->ray_span(Vec3{}, Vec3{.x = 0.0F, .y = 1.0F, .z = 0.0F}).has_value(),
@@ -473,7 +478,9 @@ auto main() -> int {
       }
     }
 
-    // The heatmap attenuates a head behind the mesh wall (thickness 2).
+    // The heatmap attenuates a head behind the mesh surface: the engine's entry
+    // cost, applied to the weapon's damage and then scaled by the headshot
+    // multiplier — 100 - (0.16 * 100 + (3/4 * 1.25) * 3) = 81.1875, times 4.
     std::vector<TargetPose> poses;
     TargetPose pose;
     pose.target = 1;
@@ -482,13 +489,73 @@ auto main() -> int {
     HeatmapOptions options;
     options.weapon = WeaponProfile{
         .damage = 100.0F, .range_modifier = 1.0F, .penetration = 4.0F, .headshot_multiplier = 4.0F};
+    options.penetration = cs2::aim::PenetrationModel::engine;
+    options.penetration_params.weapon_penetration = 4.0F;
     if (mesh.has_value()) {
       options.occlusion.push_back(*mesh);
     }
     const auto map = cs2::aim::build_heatmap(Vec3{}, basis, 1.0F, poses, options);
     expect(!map.cells.empty(), "the mesh occluder leaves a cell");
     for (const auto& cell : map.cells) {
-      expect(near(cell.value, 200.0F, 5.0F), "the mesh wall attenuates the head (1 - 2/4)");
+      expect(near(cell.value, 324.75F, 0.5F), "the mesh surface charges its entry cost");
+    }
+  }
+
+  // --- an OPEN mesh surface (a map wall, not a closed prop) ------------------
+  // A collision mesh is a triangle **soup**, and the map's walls are open sheets:
+  // a ray crosses the surface once, so the two nearest crossings the span is built
+  // from are the *same* triangle (entry == exit). The wall is still a wall — it is
+  // what the bullet hits — so the shot must lose the surface's entry cost. This is
+  // the regression the live ragebot hit: every mesh wall was silently dropped
+  // because the layer needed `thickness > 0` (`docs/re/bullet-trace.md`).
+  {
+    const float wall_x = 50.0F;
+    const std::vector<Vec3> verts = {{.x = wall_x, .y = -40.0F, .z = -40.0F},
+                                     {.x = wall_x, .y = 40.0F, .z = -40.0F},
+                                     {.x = wall_x, .y = 40.0F, .z = 40.0F},
+                                     {.x = wall_x, .y = -40.0F, .z = 40.0F}};
+    // Two triangles, both windings absent: the ray test does not cull.
+    const std::vector<Vec3> tris = {verts[0], verts[1], verts[2], verts[0], verts[2], verts[3]};
+    const auto wall = cs2::aim::project_mesh_occluder(Vec3{}, basis, verts, tris, 1.0F);
+    expect(wall.has_value(), "the open mesh wall projects");
+    if (wall.has_value()) {
+      const auto span = wall->ray_span(Vec3{}, Vec3{.x = 1.0F, .y = 0.0F, .z = 0.0F});
+      expect(span.has_value() && near(span->entry, wall_x, 0.1F),
+             "the open mesh wall is hit at the surface");
+      // The surface is infinitely thin: entry and exit are the same crossing.
+      expect(span.has_value() && near(span->exit, span->entry, 1e-3F),
+             "an open sheet's span has no depth");
+
+      std::vector<TargetPose> wall_poses;
+      TargetPose pose;
+      pose.target = 1;
+      pose.hitboxes.push_back(head_capsule(100.0F));
+      wall_poses.push_back(std::move(pose));
+      // The **engine** model is what the ragebot runs (`solve_input->penetration`
+      // in `service.cpp`), and its entry cost does not depend on the depth.
+      HeatmapOptions wall_options;
+      wall_options.weapon = WeaponProfile{
+          .damage = 100.0F, .range_modifier = 1.0F, .penetration = 4.0F, .headshot_multiplier = 4.0F};
+      wall_options.penetration = cs2::aim::PenetrationModel::engine;
+      wall_options.penetration_params.weapon_penetration = 4.0F;
+      wall_options.occlusion.push_back(*wall);
+      const auto unoccluded = cs2::aim::build_heatmap(
+          Vec3{}, basis, 1.0F, wall_poses, HeatmapOptions{.weapon = wall_options.weapon});
+      const auto blocked = cs2::aim::build_heatmap(Vec3{}, basis, 1.0F, wall_poses, wall_options);
+      expect(!blocked.cells.empty(), "the open mesh wall leaves a cell");
+      float unoccluded_value = 0.0F;
+      for (const auto& cell : unoccluded.cells) {
+        unoccluded_value = std::max(unoccluded_value, cell.value);
+      }
+      // The engine's entry cost, applied to the weapon's damage and *then* scaled by
+      // the headshot multiplier: 100 - (0.16 * 100 + (3/4 * 1.25) * 3) = 81.1875,
+      // times 4 = 324.75. The thickness term is zero: the surface is a sheet.
+      for (const auto& cell : blocked.cells) {
+        expect(near(cell.value, 324.75F, 0.5F),
+               "an open mesh wall attenuates the head (a thin surface still costs)");
+        expect(cell.value < unoccluded_value, "the open mesh wall is not free");
+      }
+      expect(blocked.used_occluders.size() == 1, "the open mesh wall is the used solid");
     }
   }
 

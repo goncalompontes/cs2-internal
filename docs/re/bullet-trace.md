@@ -219,6 +219,23 @@ only for the broad phase) and computes the exact depth/thickness with a
 **ray/triangle intersection** (`OccluderCell::ray_span` for `SolidKind::mesh`). The
 bullet collision mask was also corrected to the engine's **`0x1c300b`**.
 
+**A mesh crossing is a SURFACE, not a solid (live, 2026-10-22).** The map's meshes are
+**open sheets**, and the live trace probe puts our crossings exactly on the engine's
+own records (`196.216 / 672.148 / 1476.142 / 2170.481 / 2195.578` on one de_dust2
+ray). Two rules in the aim side were wrong for a soup and are fixed:
+
+* a **zero-thickness** span must be kept for a mesh (the ray crosses the sheet once,
+  `entry == exit`): the engine charges the surface's entry cost regardless of depth —
+  it was dropped, so every mesh wall was free;
+* the span must be the **nearest crossing**, not the two nearest: pairing a wall with
+  a surface behind it in the same cluster produced fake solids **hundreds of units
+  thick** (466 and 326 live), which zeroed the damage through them.
+
+A closed collision mesh would now be counted surface by surface. That is the
+conservative direction and it is the case CS2 does not produce: gameplay props are
+multi-hull bodies (`docs/re/occlusion.md`), so the only meshes are the world's
+merged wall/terrain surfaces. `docs/re/occlusion.md` §"the measurement" has the run.
+
 `RnMesh_t` layout used (live-verified): vertex count `+0x30`, vertices `+0x38`
 (stride `0xC`); triangle count `+0x18`; **triangle vertex indices `+0x50`** (3 ×
 `int32` per triangle).
@@ -363,10 +380,11 @@ whole wave of work. One mechanism, one owner, one test — and the tree's
 2. **The interval record's full layout** — only the distance `+0x0C` and the
    enter/exit byte `+0x32` are pinned. Map the remaining `0x38` bytes and surface
    provenance before treating interval output as a complete damage oracle.
-3. **Mesh interval semantics** — the aim-side mesh ray path keeps only two triangle
-   crossings. The host BVH test proves BVH-vs-flat equivalence for that rule, not
-   equivalence to the engine's ordered intervals, especially on open/disconnected
-   clusters and rays starting inside a mesh.
+3. **Mesh interval semantics** — the aim-side mesh ray path now takes the **nearest**
+   crossing as one surface (see above), which matches the engine on the live ray for
+   the surfaces it reports. What is still unverified: a cluster the ray crosses more
+   than once (two walls in one cluster) contributes only the nearest surface, and a
+   ray that *starts inside* a mesh is not distinguished from one that enters it.
 4. **The mesh vertex scale** (`shape+0xB8`) is assumed uniform; a non-uniform mesh
    scale is not modelled.
 5. The enumeration is still a body-box overlap; swapping it for the engine's own
