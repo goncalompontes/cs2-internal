@@ -188,6 +188,12 @@ killed the game.**
 those and then look for `[crash] handler installed`. That gives **4 died, 8
 survived**.
 
+> **Careful:** T42's own commit message (`1695973`) says *"eleven of them
+> killed the game"* — that is the **overcount** (it matched a *later*
+> injection's line). The number to use is **four**. The handoff and
+> `docs/known-issues.md` §17 both carry the corrected figure; the branch's
+> commit message does not, and it is not amended (the task forbids it).
+
 ---
 
 ## 6. The operator's four findings — where each landed
