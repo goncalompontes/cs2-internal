@@ -27,7 +27,7 @@ payload was injected once and the game was driven from the agent session.
 | **L6** | nit | **The dumper binary in `external/dumper/target/release/` is gitignored and goes stale.** A stale copy there makes the new `scenario-resolve-offsets-offline` suite fail (it runs the real binary and asks it for `--list-signature-modules`, which the old binary does not have) — with the *host* suite otherwise green. The cure: `cargo build --release` and copy the exe over. | the gitignored artefact | **not fixed — deferred** |
 | **L7** | nit | **The cs2 MCP server loaded the scenario modules when it started**, so it still runs the pre-merge code: the new `bot-match` flow (the new keys `round`, `waited_s`, `team_joined`) and any new scenario (the hit log's) are invisible to `cs2_run_scenario` until the server is restarted. The repository's own runner picks them up at once: `python scripts\run-scenario.py <name>`. | the MCP server | **not fixed — deferred** |
 | **L2** | minor | **`strafe_ignored_during_window: -18`** — a counter that goes **negative**. | the strafe's status | — (not yet assigned) |
-| **L3** | minor | The `bot-match` scenario **returns during the freeze/buy window** (`screen: "buy-time"`), so the operator has to wait by hand; and the team join happens late (as a side effect of driving to a live round). | `scripts/scenario/awaiting.py` | **`feat/t31-bot-match-live`** (in flight) |
+| **L3** | minor | The `bot-match` scenario **returns during the freeze/buy window** (`screen: "buy-time"`), so the operator has to wait by hand; and the team join happens late (as a side effect of driving to a live round). | `scripts/scenario/awaiting.py` | **merged** (`f2b3a50`) — **without an adversarial review** (§10), so §9's rule is not satisfied and the row **stays** |
 | **L4** | nit | The payload's log has **no rotation** — 65 MB of accumulated history from three days. The growth rate is fine (113 B/s). | `%LOCALAPPDATA%\cs2-internal\cs2-payload.log` | — |
 
 **What the live run confirmed as working:** the auto-strafe accelerates
@@ -40,12 +40,36 @@ hook fires; the offsets refresh offline reproduces the dump exactly.
 
 ---
 
-## 2. The camera crash — the root cause, and the one that is still live
+## 2. The camera crash — the root cause, and the live run it still needs
 
-| # | severity | finding | where | fix |
-|---|---|---|---|---|
-| **C1** | **blocker (live)** | **The third-person camera crashes the game.** `0xc0000005`, reading `0xffffffffffffffff`, at an address **inside the payload**, right after "[cs2-features] third person: the camera update is hooked". The cause is the **`thread_local` re-entrancy guard in the detour**: the payload is **manually mapped**, the loader never runs for it, the image's TLS index is **154** (above the 64 inline slots `cs2::tls::ensure_thread_tls` supports — it returns at `bootstrap.cpp:49`), so the guard's read dereferences uninitialised TEB memory. **The address is *not* stale**: `client.dll + 0xB62A20` is a valid 3789-byte function on the live build. | `payload/features/src/thirdperson.cpp:39` | **`feat/t27-thirdperson-crash`** (the fix round is in review; **until it is merged the camera must stay off**) |
-| **C2** | major | The replacement guard (the per-owner one) had **two blockers** in review: the refusal depended on the slot scan order (a same-thread recursion could slip through) and a double claim leaked a slot, so a thread that was **not** recursing could be refused forever. The shipped 8-thread test was **flaky** (49 failures in 3000 runs). | `payload/features/include/cs2/features/recursion_guard.hpp` | **`feat/t27-thirdperson-crash`** (the fix round: a two-pass `try_enter`, `compare_exchange_strong`; 3000 rounds with 0 failures) |
+The camera crashed the game: `0xc0000005`, reading `0xffffffffffffffff`, at
+an address **inside the payload**, right after "[cs2-features] third person:
+the camera update is hooked". The cause was the **`thread_local` re-entrancy
+guard in the detour** — the payload is **manually mapped**, the loader never
+runs for it, the image's TLS index is **154** (above the 64 inline slots
+`cs2::tls::ensure_thread_tls` supports — it returns at `bootstrap.cpp:49`),
+so the guard's read dereferences uninitialised TEB memory. The address was
+**not** stale: `client.dll + 0xB62A20` is a valid 3789-byte function on the
+live build. The replacement guard (the per-owner one) also had **two
+blockers** in review — the refusal depended on the slot scan order, and a
+double claim leaked a slot — and the shipped 8-thread test was **flaky** (49
+failures in 3000 runs).
+
+**Those rows are closed.** The fix — the two-pass `try_enter`
+(`compare_exchange_strong`; 3000 rounds with 0 failures), no per-frame module
+lookup, `docs/re/thirdperson.md` — **merged** (`8f215c2`) and was
+**re-reviewed** (`SHIP WITH FIXES`: the two-pass `try_enter` really does
+break a same-thread recursion whatever the order of the slots, a thread
+really does hold at most one slot, and the shipped 8-thread case is **0
+failures in 3000 rounds**), so §9's rule is satisfied and the rows were
+**deleted**. Their content is not lost: it is in `docs/re/thirdperson.md`
+(§1 the symptom, §2 the faulting instruction, §4 the address, §6 the guard
+that replaces it) and in the review reports.
+
+**What is still owed is the live run.** The **fixed** camera has never run
+against a real game, so the operator's first camera run is the first
+observation of the new guard — `docs/operator-live-check.md` §3, and the RE
+document's own list in `docs/re/thirdperson.md` §9.
 
 ---
 
@@ -59,23 +83,33 @@ hook fires; the offsets refresh offline reproduces the dump exactly.
 | **A3** | major | `docs/re/animfix.md` §10.1 stated the **opposite** of the code in three sentences. The file is append-only: the fix appends a dated §11 that corrects it. | `docs/re/animfix.md` | **`feat/t20b-animfix-estimator`** — §11 corrects §10.1 ✓, but §11 itself carries **two new false sentences** of the same class ("it is never an inflated one", "the 245 ms old capture is gone") — measured false by the re-review. Not merged with the branch |
 | **A4** | minor | The duty cycle was computed from counters with **mismatched windows** (the denominator counted every tick since the payload started) → the scenario reported 0.0 % for a feature that was working perfectly. | `scripts/scenario/scenarios/animfix.py` | **merged** (`14a64e1`) |
 | **A5** | minor | The install path **logged a line on every tick** when the calibration dump was stale (~500 MB/day). | `payload/control/src/input.cpp` | **merged** (`14a64e1`) |
-| **A6** | minor | The scenario's fallback to an older payload's counter was **silent** (two different denominators, no marker). | `animfix.py` | **`feat/t20b-animfix-estimator`** (in review) |
-| **A7** | minor | The refusal counters mixed per-tick and per-slot units; the status's comment asserted a unit the code did not keep. | `input.cpp`, `service.cpp` | **`feat/t20b-animfix-estimator`** (in review) |
-| **A8** | nit | The reported snapshot interval was `0` for a server faster than the floor — ambiguous with "not observed yet". | `animfix.hpp` | **`feat/t20b-animfix-estimator`** (in review) |
-| **A9** | nit | One of the three new burst tests was **green against the pre-fix code** (it only exercised the initial fill). | `test_control_animfix.cpp` | **`feat/t20b-animfix-estimator`** (in review) |
+| **A6** | minor | The scenario's fallback to an older payload's counter was **silent** (two different denominators, no marker). | `animfix.py` | **not fixed** — deferred (the branch is **parked**: its re-review returned **DO NOT SHIP** — §10) |
+| **A7** | minor | The refusal counters mixed per-tick and per-slot units; the status's comment asserted a unit the code did not keep. | `input.cpp`, `service.cpp` | **not fixed** — deferred (the branch is **parked**: its re-review returned **DO NOT SHIP** — §10) |
+| **A8** | nit | The reported snapshot interval was `0` for a server faster than the floor — ambiguous with "not observed yet". | `animfix.hpp` | **not fixed** — deferred (the branch is **parked**: its re-review returned **DO NOT SHIP** — §10) |
+| **A9** | nit | One of the three new burst tests was **green against the pre-fix code** (it only exercised the initial fill). | `test_control_animfix.cpp` | **not fixed** — deferred (the branch is **parked**: its re-review returned **DO NOT SHIP** — §10) |
 
 ---
 
-## 4. The prediction's copy — the defect was latent, and the fix is in review
+## 4. The prediction's copy — the fix is merged, and the checks around it are not
 
 | # | severity | finding | where | fix |
 |---|---|---|---|---|
-| **P1** | minor | The prediction's copy buffer was a `thread_local` — on a manually mapped image that can never get a block (the TLS index is 154). **The defect was latent, not a live outage**: `Input::simulate_landing` has **no call site** in the tree, and `predict_` defaults to false. The buffer is now the caller's stack local. | `payload/control/src/input.cpp` | **`feat/t30-prediction-tls`** (in review) |
 | **P2** | major | The source check that guards "no `thread_local` in the control module" has **three reproducible false negatives**: a C++ **digit separator** (`1'000`) makes the stripper discard the rest of the file, `__declspec(thread)` is not the word it looks for, and a **raw string** containing a `"` leaves it inside a string. | `payload/control/tests/test_control_prediction.cpp` | **not fixed** — deferred |
 | **P3** | major | The property "a failed read leaves the engine's object alone" is asserted on a **model of the caller** written inside the test, not on the caller: a change in `input.cpp` that restores unconditionally would write 4064 zero bytes over the engine's `CCSPlayer_MovementServices` and the test would stay green. | `test_control_prediction.cpp` | **not fixed** — deferred |
 | **P4** | minor | The restore writer is a raw `memcpy` although the payload has a fault-safe `cs2::game::write_bytes`; and `writable()` proves **readability**, not writability — the comment says otherwise. | `input.cpp` | **not fixed** — deferred |
 | **P5** | nit | The check's scope is `payload/control` while the document states the rule as "no `thread_local` in the payload" (one module out of seven). | the test, `docs/re/prediction.md` | **not fixed** — deferred |
 | **P6** | nit | `predict_snapshot_failed_` latches forever, so only the first failure in the payload's lifetime is ever logged. | `input.cpp` | **not fixed** — deferred |
+
+**The row that was fixed here is closed.** The prediction's copy buffer was a
+`thread_local` — on a manually mapped image that can never get a block (the
+TLS index is 154). **The defect was latent, not a live outage**:
+`Input::simulate_landing` has **no call site** in the tree, and `predict_`
+defaults to false. The buffer is now the caller's stack local
+(`input.cpp:1293`), and the fix **merged** (`269a093`) and was
+**re-reviewed** (`SHIP WITH FIXES`: the premise correction holds — the
+`thread_local` was a latent trap, not a live outage), so §9's rule is
+satisfied and the row was **deleted**. Its record is in
+`docs/re/prediction.md` and in §11.3's table.
 
 ---
 
@@ -178,7 +212,10 @@ re-review falsified must be corrected.
 merged tree still carries the camera detour's `thread_local`; the camera's
 hook is the **live** crash. T27's fix round exists (two-pass guard, 3000
 rounds with 0 failures) and is in review; until it lands, the camera must
-not be switched on.
+not be switched on. **The condition is met:** T27 **merged** (`8f215c2`) and
+was **re-reviewed** (`SHIP WITH FIXES`), so the camera may be switched on
+again — but the **fixed** camera has still never run against a real game
+(**§2**), so its first run is the operator's.
 
 **2026-10-21 — the bot match (T31) was merged without an adversarial
 review**, because the operator stopped the agent budget to move on to new
