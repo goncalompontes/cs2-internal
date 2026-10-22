@@ -2676,14 +2676,15 @@ void Input::apply_command(void* cmd, bool fresh) noexcept {
   // see).
   const auto base = *reinterpret_cast<std::uintptr_t*>(bytes + k_cmd_pb_offset + k_pb_base_offset);
   const auto buttons_pb = *reinterpret_cast<std::uintptr_t*>(base + k_base_buttons_pb_offset);
-  std::uint64_t pb_held = 0;
-  std::uint64_t pb_changed = 0;
-  if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
-    const auto* words =
-        reinterpret_cast<const std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
-    pb_held = words[0];
-    pb_changed = words[1];
-  }
+  // The words themselves, or **null** when the PB is not writable. One guard,
+  // one place: the write below is guarded by the very same condition, and by
+  // nothing else — a guard of the form "there is something to write" is what
+  // skipped the release.
+  auto* pb_words = writable(buttons_pb, k_buttonstate_values_offset + 16)
+                       ? reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset)
+                       : nullptr;
+  const std::uint64_t pb_held = pb_words != nullptr ? pb_words[0] : 0;
+  const std::uint64_t pb_changed = pb_words != nullptr ? pb_words[1] : 0;
   const cs2::control::FireWriteInputs write_inputs{
       .current_mask = current,
       .control_set = control_set,
@@ -2709,11 +2710,10 @@ void Input::apply_command(void* cmd, bool fresh) noexcept {
   fire_commands_.wrote(command_number, (value & button::k_attack) != 0);
   // The PB's button state: the **held** word follows the command's mask (so the
   // withdrawal is a release the engine can see) and the **changed** word
-  // carries the attack edge.
-  if (writable(buttons_pb, k_buttonstate_values_offset + 16)) {
-    auto* state = reinterpret_cast<std::uint64_t*>(buttons_pb + k_buttonstate_values_offset);
-    state[0] = write.pb_held;
-    state[1] = write.pb_changed;
+  // carries the attack edge. The write is guarded by **writability alone**.
+  if (pb_words != nullptr) {
+    pb_words[0] = write.pb_held;
+    pb_words[1] = write.pb_changed;
     *reinterpret_cast<std::uint32_t*>(buttons_pb + k_buttonstate_has_bits_offset) |= 0x3U;
   }
   // The engine's own held-button word (`CInButtonState` at the movement
