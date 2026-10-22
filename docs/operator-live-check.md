@@ -1,9 +1,14 @@
 # The live run — the operator's checklist
 
 > Everything in this repository is verified statically. **This is the one thing
-> that is not**: no feature in this tree has ever been observed in a running
-> CS2 (the agent runs in Windows session 0, with no GPU and no desktop). This
-> page is the checklist for the person who can press the keys.
+> that is not**: one session has been observed in a running CS2 — the
+> operator's, on 2026-10-21 (`docs/known-issues.md` §1). It saw the
+> **auto-strafe** accelerate, the **ESP** publish and draw, the payload's
+> hooks install and the animfix's **anim-tick** hook fire. What has **never**
+> run against a real game is the **chams' detour**, the **Monte-Carlo
+> objective**, the animfix's **graph capture** and the **third-person
+> camera**: this page is the checklist for those. (The agent cannot join in —
+> it runs in Windows session 0, with no GPU and no desktop.)
 >
 > Read it once before the first run; it is deliberately short.
 
@@ -29,11 +34,13 @@ cmd /c "call `"$vc`" >nul 2>&1 && set CC=clang-cl && set CXX=clang-cl && meson c
 ```
 
 > **Where the counts come from.** "59/59" is what `meson test -C build`
-> prints at this commit — one Meson test per C++ host test — and "504" is what
-> `python -m unittest discover -s scripts\scenario\tests -t scripts` prints
-> (the scenario library's own suite). The counts move as the tree grows: if a
-> count here does not match what the commands print, **the page is stale, not
-> the tree** — fix the page.
+> prints at this commit: **40** C++ host tests and **19** Python entries — the
+> **18** scenario suites plus the mypy gate. "504" is what
+> `python -m unittest discover -s scripts\scenario\tests -t scripts` prints:
+> the **same 18 suites** counted per test method, so the Python suite is
+> **inside** the 59, not a second gate beside it. The counts move as the tree
+> grows: if a count here does not match what the commands print, **the page is
+> stale, not the tree** — fix the page.
 
 > **The payload is injected with the STATIC CRT (`/MT`).** A build that
 > defaults to the dynamic CRT (`b_vscrt=from_buildtype` with a release-ish
@@ -103,7 +110,7 @@ the payload; the MCP tools (`tools.cs2.*`) drive it from an agent session.
 
 | feature | what to look at | what a good run looks like |
 |---|---|---|
-| **the auto-strafe** | the `input` status: `strafe_gain`, `strafe_steered`, `strafe_steered_ticks`, `strafe_ignored` | the speed **gains** while airborne; `strafe_steered` climbs. If `strafe_ignored` climbs instead, the server ignores the sub-tick view angles (§5.1 of `docs/handoff-wave2.md`) — that is the server's policy, not the payload's |
+| **the auto-strafe** | the `input` status: `strafe_gain`, `strafe_steered`, `strafe_steered_ticks`, `strafe_ignored` | the speed **gains** while airborne; `strafe_steered` climbs. The **baseline** is the 2026-10-21 run — `speed_gain: 112.1`, `strafe_steered: True`, 1228 writes — so a run that gains nothing is a **regression**, not a first observation. If `strafe_ignored` climbs instead, the server ignores the sub-tick view angles (§5.1 of `docs/handoff-wave2.md`) — that is the server's policy, not the payload's |
 | **the animfix** | `animfix_duty_cycle` (≈ 1.0), `animfix_client_tick_seen` (must be **true**), `animfix_corrected_ticks` vs `animfix_client_ticks`, and the server's aim yaw next to the client's predicted one | the duty cycle is high, the flag is seen, and the **server's** value is the one in the graph. If `animfix_client_tick_seen` is false, the anim tick's flag polarity is wrong for this build and the feature cannot work |
 | **the anti-aim** | the camera yaw next to the fake yaw | the **camera does not follow** the fake yaw. If it does, the split is not working — the scenario fails on it |
 | **the chams** | the chams' status: `hook=`, `seen=`, `chams=`, `skip=`, `rec=`, `pool=`, `tdn=`, `gu=` | the hook installs (`hook=installed`), the models are drawn with the flat material, and the colour is the one the operator picked. If the hook is refused, the status names the reason (no offset → the calibration is stale; prologue mismatch → not the build the RE measured). **The counters are the health:** `rec=` (the guard broke a recursion — it should stay **0**, and a climbing one means the hook's target is wrong), `pool=` (**the guard's pool was exhausted — the primitive was not drawn at all**, so a climbing `pool` means the chams are eating the scene), `tdn=` (a draw that arrived while the hook was torn down — one per teardown) and `gu=` (the desc cache's give-ups — the cache's health; it should stay **low**, because while it climbs the draw path pays two engine reads per *primitive* instead of per *model*). **The live run is still owed:** the detour has **never run against the real draw**, the tier0 render-job count is **unmeasured** (the 64-slot pool is headroom, not a measurement), and the fail-closed refusal's real-world frequency is unknown — so these counters are what the operator's first run is for. See `docs/known-issues.md` §14 |
@@ -327,7 +334,7 @@ game.rage(on=True, force=True, objective="monte_carlo")
 **What to look for in the HUD.** The one-line status carries the objective's
 name and, under the Monte-Carlo objective, a marker: `mc83%` is the measured
 probability, and `mc-refused` says the solver refused — the aim then came from
-the `damage` objective, and §2.4 says a fallback must never be silent.
+the `damage` objective, and §6.4 says a fallback must never be silent.
 
 **The status's new keys.** `mc_can_kill`, `mc_hitgroup` and `mc_hits` are in
 the `rage` status now; `objective` names the **effective** objective (the
