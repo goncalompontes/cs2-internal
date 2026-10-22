@@ -9,8 +9,8 @@
 > only removed when the fix is **merged and re-reviewed**. A finding that is
 > known and not fixed is a known defect, not a surprise.
 
-Last updated: 2026-10-22, after the chams' merge and the Monte-Carlo's review
-round.
+Last updated: 2026-10-22, after the chams' two merges and the Monte-Carlo's
+review round.
 
 ---
 
@@ -84,15 +84,24 @@ hook fires; the offsets refresh offline reproduces the dump exactly.
 | # | severity | finding | where | fix |
 |---|---|---|---|---|
 | **H1** | blocker (historical) | The draw hook's target came from an RTTI **lambda** type; a lambda's `operator()` is static, so the nine-argument detour shifted the whole argument list and the game crashed with `0xc0000005`. The real target is `scenesystem.dll + 0x580A0` — a nine-argument member function whose signature is **exactly** the payload's existing typedef (the material at index 3). | `payload/features/src/chams.cpp` | **merged** (the signature, the pure decision function, the prologue verification) |
-| **H2** | major | The re-entrancy guard was **process-wide** and its early return **drops the draw**. The scene system renders the draw list on the **tier0 thread pool** (`g_pThreadPool`, `Thread_RenderSceneDrawList`, `"rendering in %i jobs"`, `sc_disableThreading`), so two jobs can be inside the detour at once. | `chams.cpp` | **fixed** by the per-owner guard (the branch's fix round) |
-| **H4** | minor | `status_line()` allocated a `std::string` **on the game's render thread, every frame**. | `chams.cpp` | **fixed** by the fix round (`snprintf` into the caller's buffer) |
-| **H5** | minor | Two new public accessors were dead code; the module-identity check skipped an empty module string; `describe(installed)` returned `"on"`; the counters were not reset on toggle. | `chams.cpp` | **fixed** by the fix round |
 
-The rows that were fixed on `feat/t33-chams-race` are **closed**: that branch
-**merged** (`1c80086`) and was **re-reviewed** (`SHIP WITH FIXES` — no blockers,
-no majors), so §9's rule is satisfied and the rows were **deleted**. Their
-content is not lost: it is in `docs/re/chams.md` §10 and in the review reports.
-What that branch left open is in **§14**.
+The rows that were fixed on `feat/t26-chams-draw-hook` and on
+`feat/t33-chams-race` are **closed**: both branches **merged** and were
+**re-reviewed**, so §9's rule is satisfied and the rows were **deleted**.
+
+* **T26** (`be413b3`, re-reviewed — `SHIP WITH FIXES`: the guard is the
+  shared, **per-owner** one, the refusal latch is cleared by the switch-off,
+  the status line no longer allocates on the render thread, and the four
+  accessors are used) closed **H2**, **H4** and **H5**.
+* **T33** (`1c80086`, re-reviewed — `SHIP WITH FIXES`, no blockers, no
+  majors) closed **H2a**, **H3**, **H6**, **H7** and **H8**.
+
+Their content is not lost: it is in `docs/re/chams.md` **§9** (the guard, the
+latch, the status line, the module identity) and **§10** (the desc cache,
+the fail-closed policy, the trampoline's lifetime), and in the review
+reports. **H5's fourth clause** — the counters are not reset on toggle — is
+now the **documented design** (`docs/re/chams.md` §10.5, and §11.1's item 3),
+not a defect. What T33 left open is in **§14**.
 
 ---
 
@@ -197,7 +206,9 @@ section is the plan, not the work.
 > the entry (**H2a**), the latch's wiring is pinned — and the *value* it
 > stores with it (**H3**), the guard's scope order is pinned (**H6**), the
 > fail-closed policy and the per-instance pool are in (**H7**), and the doc's
-> file names are right (**H8**). The rows are **closed** (§5) and this recipe
+> file names are right (**H8**). The recipe's **premise** — the per-owner
+> guard — came with T26 (`be413b3`, re-reviewed), and with it **H2**,
+> **H4** and **H5** are closed. The rows are **closed** (§5) and this recipe
 > is kept as the record of what was done; the branch's own commits are
 > listed in `docs/re/chams.md` §10, and what it left open is in **§14**.
 
