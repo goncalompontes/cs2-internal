@@ -81,6 +81,21 @@ void permute(std::vector<llvm::Function*>& callees, std::uint64_t seed) {
   return text->getString().str();
 }
 
+/// The parameter that carries the `sret` attribute, if the callee has one.
+///
+/// The hidden pointer is **not** necessarily the first parameter: a member
+/// function takes the `this` pointer first, and the hidden pointer after it.
+/// The attribute is what says which parameter it is, and the call site
+/// carries the same attribute, so the two agree.
+[[nodiscard]] auto sret_parameter(const llvm::Function& callee) -> const llvm::Argument* {
+  for (const llvm::Argument& argument : callee.args()) {
+    if (argument.hasStructRetAttr()) {
+      return &argument;
+    }
+  }
+  return nullptr;
+}
+
 /// Why a call is not rewritten, if it is not.
 ///
 /// The order of the rules is the order of the specification's table: the
@@ -120,7 +135,8 @@ void permute(std::vector<llvm::Function*>& callees, std::uint64_t seed) {
         return CallSkipReason::preallocated_parameter;
       }
     }
-    if (callee->arg_size() != 0 && callee->getArg(0)->hasStructRetAttr()) {
+    const llvm::Argument* hidden = sret_parameter(*callee);
+    if (hidden != nullptr) {
       if (!sret_routable) {
         return CallSkipReason::sret_parameter;
       }
@@ -699,7 +715,7 @@ auto transform_module(llvm::Module& module, const Config& config,
         // A callee that takes an `sret` parameter is called through a
         // thunk: the thunk adapts the call to the uniform signature and
         // carries the `sret` attribute of the call it replaces.
-        const bool sret = callee->arg_size() != 0 && callee->getArg(0)->hasStructRetAttr();
+        const bool sret = sret_parameter(*callee) != nullptr;
         sites.push_back(Site{call, callee, function, function_index, 0, cross, sret});
       }
     }

@@ -784,6 +784,86 @@ void test_transform_sret() {
   }
 }
 
+/// The transform routes a callee whose hidden pointer is **not** the first
+/// parameter.
+///
+/// A member function takes the `this` pointer first, and the hidden pointer
+/// after it: the attribute is what says which parameter it is.
+void test_transform_sret_member() {
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic error;
+  auto module = llvm::parseAssemblyString(
+      "define void @member_target(ptr %this, ptr sret({ i64, i64, i64 }) %out) {\n"
+      "entry:\n"
+      "  store { i64, i64, i64 } zeroinitializer, ptr %out\n"
+      "  ret void\n"
+      "}\n"
+      "define void @caller(ptr %out) {\n"
+      "entry:\n"
+      "  call void @member_target(ptr null, ptr sret({ i64, i64, i64 }) %out)\n"
+      "  ret void\n"
+      "}\n",
+      error, context);
+  if (module == nullptr) {
+    std::fprintf(stderr, "FAIL: the member module does not parse\n");
+    ++g_failures;
+    return;
+  }
+  module->setModuleIdentifier("member.obj");
+  module->setTargetTriple(llvm::Triple("x86_64-pc-windows-msvc"));
+
+  cs2::protect::Policy policy;
+  policy.protect.push_back({"caller", "", cs2::protect::ProtectionLevel::call});
+  cs2::protect::Config config;
+  config.policy = policy;
+
+  const auto selection = cs2::protect::select_functions(*module, config);
+  cs2::protect::record_selection(*module, selection);
+  const auto recorded = cs2::protect::read_selection(*module);
+  const auto result = cs2::protect::transform_module(*module, config, recorded);
+
+  check(result.functions.size() == 1, "the transform reports one function");
+  check(result.functions[0].rewritten == 1, "the call is rewritten");
+  check(result.functions[0].skipped.empty(), "no call is skipped");
+
+  // The thunk: the hidden pointer is the **second** parameter, and the
+  // scratch holds it in the second cell.
+  llvm::Function* thunk = nullptr;
+  for (llvm::Function& function : *module) {
+    if (function.getName().starts_with("cs2.protect.thunk.")) {
+      thunk = &function;
+    }
+  }
+  check(thunk != nullptr, "the thunk of the sret call is emitted");
+  if (thunk == nullptr) {
+    return;
+  }
+  const auto calls = calls_of(*thunk);
+  check(calls.size() == 1, "the thunk makes one call");
+  if (calls.size() != 1) {
+    return;
+  }
+  const llvm::CallBase* call = calls[0];
+  check(call->getCalledFunction() == nullptr, "the call of the thunk is indirect");
+  check(call->getParamAttr(1, llvm::Attribute::StructRet).isValid(),
+        "the call of the thunk carries the sret attribute on the second parameter");
+  check(!call->getParamAttr(0, llvm::Attribute::StructRet).isValid(),
+        "the call of the thunk carries the sret attribute on the first parameter");
+  // The hidden pointer: the second cell of the scratch.
+  const auto* load = llvm::dyn_cast<llvm::LoadInst>(call->getArgOperand(1));
+  check(load != nullptr, "the hidden pointer is loaded out of the scratch");
+  if (load != nullptr) {
+    const auto* address = llvm::dyn_cast<llvm::GEPOperator>(load->getPointerOperand());
+    check(address != nullptr, "the hidden pointer is not the first cell of the scratch");
+    if (address != nullptr) {
+      check(
+          address->getNumIndices() == 2 &&
+              address->getOperand(2) == llvm::ConstantInt::get(llvm::Type::getInt32Ty(context), 1),
+          "the hidden pointer is not the second cell of the scratch");
+    }
+  }
+}
+
 /// The transform still refuses the parameters an indirect call cannot carry.
 ///
 /// The refusal **names** the attribute: a refusal that says "byval" is
@@ -2520,6 +2600,7 @@ auto main() -> int {
   test_transform();
   test_transform_sret_other_target();
   test_transform_sret();
+  test_transform_sret_member();
   test_transform_parameters();
   test_transform_sret_result();
   test_layout_permutation();
