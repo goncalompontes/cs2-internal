@@ -2354,17 +2354,21 @@ fit becomes a near jump. The permuted unit's block therefore changes
 So the honest statement is: *the code the plugin does not compile is still
 the same code, with the same internal order, but its **offsets move** with
 everything else*. The MSVC STL's `vector_algorithms.obj` is 11.2 % of the
-`.text` and the imgui is 43 % of it, and **neither keeps its place**: the
-imgui's code moves by hundreds of kilobytes between two builds of two seeds
-(the measurement is below). A signature that names the offset of an STL
-function, or of an imgui function, does **not** survive this task — not
+`.text` and the imgui is 43 % of it, and **neither keeps its place**: a
+32-byte chunk of `imgui_draw.cpp.obj` — a unit the plugin never compiles —
+moves by 17,280 bytes between two builds of two seeds (the measurement is
+below). A signature that names the offset of an STL function, or of an imgui
+function, does **not** survive this task — not
 because the permutation reaches into the STL, but because everything after
 the first permuted unit shifted with it.
 
 What the permutation does **not** buy: a stable layout for the units the
-plugin does not compile, and a *partial* immunity for the part of the image
-that lies before every permuted unit. That is why the mixer's constants
-matter (§10.2): the *protection's* bytes are gone whatever the layout does.
+plugin does not compile. A quarter of the functions — **844 of the 3,351**
+the unwind table names — kept their address between the two builds, and
+they are the ones whose offset happened not to change: they are scattered
+over the image (from RVA 0x7030 to 0x1a12e0), not a block that kept its
+place. That is why the mixer's constants matter (§10.2): the *protection's*
+bytes are gone whatever the layout does.
 
 ### The measurement
 
