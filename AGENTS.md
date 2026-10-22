@@ -147,18 +147,12 @@ agent, each on its own branch) and in the task board
   are merged and re-reviewed — their findings are in
   `docs/known-issues.md` §2, §5 and §6. See `docs/handoff-wave2.md` §5.
 
-**The protection workstream is in scope again** (the operator's decision,
-2026-10-21 evening): the tasks in `docs/handoff-protect.md` are tasks for this
-repository — the string encryption (T21), the cross-TU routing (T23a/T23b),
-the per-build polymorphism (T24) and the integrity check (T22).
-
-**The virtualization (T20b, T20c) is not.** That was the operator's decision
-of 2026-10-21, and the **measurement** agrees: T20a's gate says **none** of
-the payload's protected functions is virtualizable (the aim maths is a float
-pipeline with EH edges), so the interpreter would protect nothing. T20a — the
-front end, the ISA, the gate, the lowering, the encoder — **is** merged, and
-it is the precondition for any future VM work. See
-`docs/orchestration/plan-protect.md` §1.3.
+**The protection pass is a separate project** — `C:\Users\gpmpo\cs2-protect`
+(its own repository, CMake build, LLVM SDK, tests and docs). This repository
+consumes the built `Cs2Protect.dll`; it does not build, test or document it.
+See [`docs/protection.md`](docs/protection.md) for the wiring
+(`-Dprotect_tools=<repo>`). The protection workstream's handoff, plan, specs
+and research live in that repository's `docs/`.
 
 **The live run** — the one thing static review cannot close — has its own
 checklist: **[`docs/operator-live-check.md`](docs/operator-live-check.md)**.

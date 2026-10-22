@@ -84,8 +84,8 @@ For this project the loop is:
 
 | group | steps |
 |---|---|
-| `fast` | the host build (`meson compile`), the payload, the overlay, the injector, the **protection plugin's build** (`scripts/build-protect-plugin.py`) |
-| `tests` | the host tests (`meson test`), the Python suite, the **protection plugin's own tests** (`ctest --test-dir tools/protect/build`) |
+| `fast` | the host build (`meson compile`), the payload, the overlay, the injector |
+| `tests` | the host tests (`meson test`), the Python suite |
 | `slow` | the type gate |
 
 The three Windows targets need the MSVC environment, so they run inside
@@ -93,16 +93,12 @@ The three Windows targets need the MSVC environment, so they run inside
 getting it wrong - is in the plugin's `docs\configuration.md` §"The Windows
 quoting rule".
 
-**The plugin's build and its tests are in the loop because they used not to
-be, and the gap was found the hard way.** The plugin is a **build-time tool**:
-a change to it changes the payload, and the plugin's own suite (the IR test,
-the differential test, the coverage readers, the value test, the image scan
-test) is where its behaviour is pinned. A merge gate that does not run it can
-merge a plugin that does not work: during the protection wave the gate passed
-a tree whose `tools/protect/build/Cs2Protect.dll` was **stale** - it predated
-a merged change - and the *protected* build failed with a plugin that could
-not read its own policy. The loop now builds the plugin and runs its tests
-before it says the tree is good.
+**The protection pass is not in this loop any more.** It is a separate
+project (`C:\Users\gpmpo\cs2-protect`) with its own CMake build, its own
+tests and its own CI. This tree only *loads* the built DLL when
+`-Dprotect=true` is passed, and `-Dprotect_tools=<repo>` points at the
+checkers. A stale plugin therefore cannot be produced here: it is not built
+here.
 
 The loop runs in the **task's worktree**, and a worktree is only as good as
 its inputs. The `calibration\` dumps are gitignored and the SDK generation

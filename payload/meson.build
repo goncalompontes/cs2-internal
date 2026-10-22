@@ -42,8 +42,9 @@ endif
 
 # --- The protection pass ----------------------------------------------------
 # The LLVM pass plugin that selects the functions to protect. It is a
-# build-time tool, not a project artifact, so it is built by CMake (see
-# tools/protect/README.md); this project only loads it.
+# **separate project** (`C:\Users\gpmpo\cs2-protect` by default): its own CMake
+# build, its own tests, its own LLVM SDK. This project only loads the built
+# DLL; `-Dprotect_tools=<repo>` is where the checkers live.
 #
 # The flag is `/clang:-fpass-plugin=<dll>`: clang-cl ignores the plain
 # `-fpass-plugin=` spelling ("unknown argument ignored in clang-cl"), and the
@@ -80,7 +81,17 @@ if protect_enabled
     error('the plugin path must not contain a space (it is one compiler argument): ' + protect_plugin)
   endif
 
-  protect_tool = meson.current_source_dir() / '..' / 'tools' / 'protect'
+  protect_tool = get_option('protect_tools')
+  if protect_tool == ''
+    error('-Dprotect=true needs -Dprotect_tools=<path to the cs2-protect repository> ' +
+          '(it holds verify_plugin.py, check_policy.py and check_payload.py)')
+  endif
+  if not fs.is_absolute(protect_tool)
+    error('the protection tools path must be absolute: ' + protect_tool)
+  endif
+  if not fs.is_dir(protect_tool)
+    error('the protection tools directory does not exist: ' + protect_tool)
+  endif
   protect_verify = find_program(protect_tool / 'verify_plugin.py')
   protect_check = find_program(protect_tool / 'check_policy.py')
   protect_payload_check = find_program(protect_tool / 'check_payload.py')
@@ -126,7 +137,7 @@ if protect_enabled
   protect_policy = policy_probe.stdout().strip()
   if protect_policy == ''
     error('-Dprotect=true needs a policy file: set CS2_PROTECT_CONFIG=<path to a policy ' +
-          'JSON file> (see tools/protect/policy.example.json). A protected build without ' +
+          'JSON file> (see <protect_tools>/policy.example.json). A protected build without ' +
           'a policy protects nothing, and that is indistinguishable from an unprotected one.')
   endif
   if not fs.exists(protect_policy)
@@ -142,7 +153,7 @@ if protect_enabled
   # same way.
   #
   # The plugin refuses to run without a seed as well
-  # (tools/protect/src/config.cpp): the wiring catches it here, where the
+  # (the cs2-protect repository, src/config.cpp): the wiring catches it here, where the
   # message can name both sources.
   #
   # The rule is the **plugin's**, and the probe that applies it is the
