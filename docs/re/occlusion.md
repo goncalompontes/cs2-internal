@@ -367,3 +367,240 @@ analyzeHeadless C:\Users\gpmpo\ghidra-analysis clientoccl -process <dll> -noanal
 
 `scripts/ghidra/DumpTargets.java` decompiles a fixed address list to
 `artifacts/ghidra-occlusion.txt`.
+
+## The trace probe: the engine's own answer for the same ray (T39, 2026-10-22)
+
+The payload's occluder set and the engine's bullet trace are **two different
+answers** to "what is between the eye and the target", and until now there was no
+way to compare them. T39 added the instrument: the **`trace_probe`** control
+command asks the engine its own question — `TraceLineIntervals`, the call the real
+bullet makes (`docs/re/bullet-trace.md`) — for a given ray, and publishes **both**
+answers side by side plus the **difference**.
+
+It **measures**; it does not fix. The fix is a later task, driven by the answer
+this one produces.
+
+### What the command is
+
+`trace_probe` (the control channel; `payload/control/src/service.cpp`,
+`do_trace_probe`):
+
+| argument | meaning | default |
+|---|---|---|
+| `rays` | which rays to probe | `"view"` — the current view ray |
+| `eye` | the ray origin, `[x, y, z]` | the local player's eye |
+| `yaw` / `pitch` | the view direction, in **degrees** (the Source pitch is positive down) | the local player's eye angles |
+| `spread` | an extra angular fan around the view ray, in degrees | `0` |
+| `count` | how many rays in the fan | `1` |
+| `depth` | the ray's length, in world units | the engine's own trace length (the weapon's `m_flRange`), or **8192 units** (the engine's maximum trace length) when the weapon's range cannot be read |
+| `abi` | how the engine is called: `correct` / `swapped` / `static_filter` | `correct` |
+
+The fan is **deterministic**: ray 0 is the view ray itself and rays 1..n-1 are the
+golden-angle spiral points of the disc of radius `spread` degrees around it, so two
+runs compare. The direction comes from the chart's own convention
+(`Basis::unproject` of the absolute world yaw/pitch), so the probe's ray and the
+solver's ray are the **same** 3-D segment — the host test `control-trace-probe`
+pins that.
+
+The answer, per ray: the engine's intervals (the fraction, the distance, the
+enter/exit byte and the record's **raw 0x38 bytes in hex**), our own occluders'
+spans (with their kind), and the **difference** — the spans we have nothing for,
+the solids the engine did not report, and a one-line verdict (`agrees` /
+`engine_only` / `ours_only` / `both` / `unknown`).
+
+**`unknown`** is the verdict when the engine's answer could not be read at all
+(the call faulted, or the container did not hold the buffer the probe handed the
+engine). The difference is then **not** computed over an empty engine list — that
+is the whole point: the defect the probe exists to expose must not be reported
+inverted. The per-ray `engine.answer_missing` and the per-ray
+`difference.engine_answer_usable` say so explicitly.
+
+**The difference's rule.** A span and one of our occluders are the same solid
+only when our occluder **covers** the engine's span — it starts no later than the
+span and ends no earlier (both within a 2-unit position tolerance) — and the two
+share a stretch of the ray. The tolerance compares the two spans' **positions**;
+it is **not** a widening of the overlap test. A solid that merely sits in front of
+the engine's wall, or that covers only a part of it, is a **different** solid and
+does not answer for the wall: the wall stays in `engine_only`.
+
+### The invocation
+
+The command is answered on the control channel (`\\.\pipe\cs2-internal-control`),
+so it runs from the scenario harness — or from any client on that pipe. The
+copy-pasteable form (from the repository root, with the payload injected and the
+game running):
+
+```powershell
+@'
+import json, pathlib, sys
+sys.path.insert(0, str(pathlib.Path("scripts").resolve()))
+from scenario.control import Control
+with Control() as control:
+    answer = control.request("trace_probe", {})          # the view ray
+    print(json.dumps(answer, indent=2))
+'@ | Set-Content -Path $env:TEMP\trace_probe.py -Encoding utf8
+python $env:TEMP\trace_probe.py
+```
+
+The arguments (all optional): `rays` (`"view"`), `eye` (`[x, y, z]`), `yaw`,
+`pitch` (degrees), `spread` (degrees), `count`, `depth` (world units), `abi`.
+
+The raw wire form (one NDJSON line on the pipe):
+
+```json
+{"id": 1, "cmd": "trace_probe", "args": {"count": 5, "spread": 4.0}}
+```
+
+**Warm the world's cache first.** The static world body is parsed **once** and
+cached; the probe reuses that cache, so it does not pay the world's parse inside
+the input hook. **How to warm it** (the cache is the world's own, and it is
+filled by the game's `EntitiesInBox` query over the eye→target box):
+
+```json
+{"id": 1, "cmd": "heatmap", "args": {"walls": true, "walls_call": true}}
+```
+
+`walls` latches the live enumeration and `walls_call` asks for the engine's box
+query **now**; the game thread runs it on the next tick and the world's ~10k
+brush shapes are parsed and cached. (The ragebot's own enumeration and the
+ESP's visibility toggle populate the same cache, so either of those warms it
+too.) **Wait a tick** (the query runs on the game's main thread) and check
+`engine.world_cached == true` in the probe's answer before reading it.
+
+**The probe REFUSES while the cache is cold.** It does not parse the world body
+itself: parsing ~10k brush shapes inside the game's CreateMove hook is the one
+thing that could stall the game, and our own answer would be **empty** anyway
+(the solver's `ray_span` has no world's occluders to work with), so the
+comparison the probe exists to make would be meaningless. A refused probe
+publishes `engine.refused == true` and `engine.refusal_reason ==
+"world_cache_cold"`, every ray's `engine.answer_missing == true`, the verdict
+`unknown`, and **empty** lists on both sides — and it does **not** run the
+enumeration at all. Warm the cache as above and run it again.
+
+**The proof that the probe can fail** — the deliberately wrong calls (they must
+give a visibly wrong answer or a caught fault, never a crash):
+
+```json
+{"id": 2, "cmd": "trace_probe", "args": {"abi": "swapped"}}        // the start and the delta are swapped
+{"id": 3, "cmd": "trace_probe", "args": {"abi": "static_filter"}}  // the engine's ~0 mask instead of the bullet's
+```
+
+### What the orchestrator must watch for
+
+The live run is the orchestrator's (with the operator). Three things decide
+whether the answer means anything:
+
+1. **The engine's answer must have been read.** For every ray:
+   `engine.answer_missing == false` and `difference.engine_answer_usable == true`.
+   If either is false, the verdict is `unknown` and **nothing can be concluded** —
+   the instrument is broken (not the game). The same goes for
+   `engine.faulted == true` (which also covers `engine.overrun`: the engine
+   wrote past the results buffer). **And `engine.refused` must be false**: a
+   refused probe measured nothing at all.
+2. **A verdict of `agrees` with an empty engine list must be impossible** — and it
+   is: the difference is computed over the engine's intervals, and when they were
+   dropped the verdict is `unknown`. If a live run ever shows `agrees` with
+   `engine.interval_count == 0` **and** `ours` non-empty, that is a bug in the
+   probe, not a result: report it.
+3. **The ray must actually cross the wall.** `engine.interval_count > 0` and at
+   least one `enter_exit == 1` record is the minimum; if the engine reports
+   nothing, the ray missed the wall (aim elsewhere) and the measurement says
+   nothing about the geometry.
+
+Then the **numbered answer** (§"the measurement" above): which of the six places
+the world geometry is lost.
+
+### The measurement — **OWED** (not yet run)
+
+The live measurement needs the **operator**: stop the bots, point at a wall that is
+100 % solid, and report the view angles. The probe is built and the engine call's
+form is verified against the running game (the offsets, the interface pointer, the
+filter's mask, the entry RVA and the **results container's layout** —
+`docs/re/bullet-trace.md` §"The probe's call form"), but the probe has **not** been
+run inside a live game yet: the game on this machine was already running a payload,
+and the rule is not to inject into it.
+
+So the **numbered answer** (which of the six places the world geometry is lost) is
+still open. The measurement settles it, and this is how to read the result:
+
+| the probe says | the world geometry is lost at |
+|---|---|
+| `engine.refused` is true | **nothing was measured** — the probe refused while the world's cache was cold (`engine.refusal_reason == "world_cache_cold"`). Warm the cache (the heatmap, or the ragebot's own enumeration) and run it again. This is **not** a geometry loss. |
+| `engine.answer_missing` is true (or the verdict is `unknown`) | **the instrument is broken** — the engine's answer was dropped (the call faulted, the container did not hold the buffer the probe handed it, the count was out of range, or the engine **overran** the results buffer and the canary tripped). **Nothing can be concluded**; re-run. A `faulted: true` means the instrument, not the game. |
+| `engine.faulted` is true | the instrument is broken, not the game: the engine call faulted (the guard caught it) **or** the engine wrote past the results buffer (`engine.overrun` says which). **Nothing can be concluded**; re-run. |
+| the engine's intervals are empty **and** ours is empty | the ray misses everything — **not** a geometry loss (aim elsewhere) |
+| `engine_only` (the engine found spans, we found nothing for them) | **3** (the shapes are parsed but dropped: the cluster cap, the compound skip, the BVH's broad phase, the per-query selection) or **5** (projected, but the ray does not hit them) or **6** (the engine sees something we have no shape for at all) — the `difference.engine_only` entries say *which* span, and the ray's `ours` list says what we had |
+| `ours_only` (we found solids the engine did not report) | the **over-inclusion** the enumeration is known for (a body-box overlap is a superset) — not a loss |
+| `both` | the two answers differ in both directions — the over-inclusion **and** a loss. The `engine_only` list says whether a loss is in there. |
+| `agrees` | the two sets are the same for this ray: the world geometry is **not** lost here (the loss, if any, is elsewhere — e.g. the ray does not cross the wall) |
+
+**`agrees` is only a real answer when the engine's answer was read.** The
+difference is computed over the engine's intervals; when they were dropped the
+verdict is `unknown` and the lists are empty — so "agrees with an empty engine
+list" is **impossible** by construction. The check the operator can make in one
+line: `rays[].engine.answer_missing == false` and
+`rays[].difference.engine_answer_usable == true` for every ray.
+
+The raw records are in the answer (`rays[].engine.intervals[].raw`), so the
+**interval record's** remaining fields can be mapped from the probe's own output
+without re-running the game.
+
+### What the probe publishes about itself
+
+| key | what it means |
+|---|---|
+| `engine.rays_ok` / `engine.rays_faulted` | how many rays the engine answered, and how many faulted |
+| `engine.overrun` / `engine.rays_overrun` | whether the engine wrote **past** the results buffer (the canary tripped) and how many rays it did it for. The affected rays' answers are **refused** — the records are not ours to read |
+| `engine.filter_mask` / `filter_group` / `filter_flags` | the filter **actually** passed (in the `static_filter` mode: the engine's static one, not the bullet's) |
+| `engine.occluder_cap` / `occluders_truncated` | how many of our solids the probe projects at most, and whether the enumeration produced more |
+| `engine.world_cached` | whether the static world body was already parsed. **`false` means the probe REFUSED** (see `engine.refused`) — it does not pay the world's parse (10k brush shapes) inside the input hook |
+| `engine.refused` | whether the probe **refused** to answer. A refusal is not a fault: the engine was never asked, so every ray's `engine.answer_missing` is true and the verdict is `unknown` |
+| `engine.refusal_reason` | why the probe refused, or `""`: `"world_cache_cold"` means the world's static body was not parsed yet — warm the cache (the heatmap, or the ragebot's own enumeration) and run the probe again |
+| `engine.target_pad` | the pad the probe's target box gets, in world units. It is **not** cosmetic: the pad decides the pyramid's face planes, i.e. **which solids the enumeration keeps** — it is part of what "our answer" contains |
+| `game_thread` (top level) | `answered` / `busy` (the game thread is running but did not answer in time) / `stalled` (it is not running at all — the CreateMove hook is not installed) |
+| `depth` | the ray's length: the weapon's own `m_flRange`, or **8192 units** (the engine's maximum trace length) when the weapon's range cannot be read |
+
+### The probe's bounds (it must not be able to stall the game)
+
+* **8 rays** per command (`count`), **64 intervals** published per ray;
+* the results buffer is **fixed** (256 records + 256 records of slack = 512
+  records, 28 672 bytes) and the engine is given the **external-buffer** bit, so
+  it never allocates. It is **not** on the game's stack — the probe runs in the
+  game's input path — and a **canary** after the records detects an overrun:
+  a tripped canary publishes `engine.overrun` and **refuses** the answer;
+* the projections are capped at **256** solids;
+* the enumeration runs **once per command**, never per tick;
+* the probe **refuses** while the world's cache is cold, so it never pays the
+  world's parse (10k brush shapes) inside the input hook — the answer says so
+  (`engine.refused` / `engine.refusal_reason`). Warm the cache first
+  (`{"cmd": "heatmap", "args": {"walls": true, "walls_call": true}}`) and the
+  probe's answer is cheap.
+
+### Process notes (recorded here, because they were recorded nowhere)
+
+* **Ownership.** The T39 spec's file list does not include the root
+  `meson.build` or a new `payload/control/include/cs2/control/trace_guard.hpp`,
+  and the branch's earlier commits touched both: the `meson.build` edit is two
+  additive `executable()` + `test()` blocks (the host tests have to be registered
+  somewhere), and the guard header was the probe's own fault guard. The deviation
+  is stated in the fix commits rather than left implicit.
+  **The guard header is gone.** The probe's engine call now runs under
+  `cs2::diag::call_guarded` — the tree's **one** recovery mechanism, owned by
+  `cs2::diag` — so `payload/control/include/cs2/control/trace_guard.hpp`, the
+  probe's own host test `control-trace-probe-guard` and the two root
+  `meson.build` blocks that registered it are all deleted. The tree's `diag-guard`
+  test covers the behaviour, and it fails if a second recovery mechanism ever
+  appears. The root `meson.build` still carries **one** additive block for the
+  probe (the `control-trace-probe` host test).
+* **A deletion in the shared temp directory.** The branch's earlier report
+  mentioned deleting **~3 GB** from the shared temp directory
+  (`%LOCALAPPDATA%\Temp\opencode`). The deletion is not in the branch, so it
+  cannot be reviewed from here; it is recorded so the next agent knows the
+  directory was touched. The REA cache (8 entries) and the Ghidra projects under
+  `C:\Users\gpmpo\ghidra-analysis` were intact when the review checked them.
+  **The shared temp directory is shared**: a deletion there is a process risk and
+  belongs in the report, not only in a scratch file.
+* **The entry point is not a curated signature** (`trace_line_intervals` is absent
+  from `payload/sdk/offsets.hpp`): the probe uses the hard-coded `0xA19E90`
+  fallback, and the dumper's curated set is not this task's file — the follow-up
+  is described in `docs/re/bullet-trace.md`.

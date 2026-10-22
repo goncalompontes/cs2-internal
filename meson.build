@@ -519,6 +519,32 @@ control_sound_test = executable('control_sound_test',
 )
 test('control-sound', control_sound_test)
 
+# The trace probe (`docs/re/bullet-trace.md`): the probe's ray construction (the
+# probe's ray and the solver's ray must be the same 3-D segment), the interval
+# record reader, the difference logic and the probe's bounds. The probe's pure
+# parts live in `cs2/control/occlusion_query.hpp`, so the test compiles the aim
+# module's geometry and occlusion sources next to it (the solver's own
+# `OccluderCell::ray_span` is what the probe's "our answer" must use).
+control_trace_probe_test = executable('control_trace_probe_test',
+  files(
+    'payload/control/tests/test_control_trace_probe.cpp',
+    'payload/aim/src/geometry.cpp',
+    'payload/aim/src/occlusion.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+    include_directories('payload/aim/include'),
+    include_directories('payload/game/include'),
+  ],
+  dependencies : control_host_dep,
+)
+test('control-trace-probe', control_trace_probe_test,
+  # The last check is a **source** check: the service needs the game, so the
+  # wiring (the command's call sites use the rules, they do not re-implement
+  # them) is checked by reading the service's own source.
+  args : [meson.current_source_dir()],
+)
+
 # The payload's fault guard (`cs2::diag::call_guarded`).
 #
 # The guard is the payload's only safety net for an engine call that faults,

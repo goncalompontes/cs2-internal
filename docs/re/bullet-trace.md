@@ -107,9 +107,17 @@ void FUN_180a19e90(undefined8 *iface, int *results, undefined8 start, undefined8
 ```
 
 - **Result buffer**: a `CUtlVector`-like header — count `@+0x00`, data pointer `@+0x08`
-  (`*(longlong*)(results+2)` = `results + 8`). **Record stride `0x38`** (56 bytes).
+  (`*(longlong*)(results+2)` = `results + 8`), capacity `@+0x10`, flags `@+0x14`
+  (the live build's two writers and the external-buffer bit are in §"The probe's
+  call form" below). **Record stride `0x38`** (56 bytes).
 - **`mask`** is a *pointer* (`filter + 8`), i.e. the qword holding the collision mask
-  (`0x1c300b`); the low byte's bit 1 selects the second query.
+  (`0x1c300b`); the low byte's bit 1 selects the second query. The engine's own
+  **first** trace **clears** that bit and restores it afterwards
+  (`FUN_1808830e0`: `and rax, 0xfffffffffffffffd; mov qword ptr [r14], rax`), so
+  that trace is answered by the world query alone; the penetration loop's trace
+  leaves it set and gets both query kinds. The probe passes the mask as it is —
+  the bullet's `0x1c300b`, bit 1 set — so it asks the engine the **bullet's**
+  question; both writers honour the external-buffer bit, so neither allocates.
 - **`max_fraction`** = `0xbf800000` = `-1.0f` from every live caller.
 - The world query is the physics-world vtable **`+0x520`** (the sibling `TraceShape`
   uses `+0x560` for the sorted branch, `+0x558` for the single-trace branch).
@@ -328,15 +336,18 @@ carried its own copy of the guard because it could not use the shared one —
 and the shared one was the broken one.
 
 **Which way the reconciliation goes — `cs2::diag` keeps the one mechanism.**
-`cs2::diag` owns it; the trace probe's own guard goes away. The probe will
-call `cs2::diag::call_guarded(&invoke_trace, &call)` where it calls
-`trace_call_guarded(&invoke_trace, &call)` today — the two signatures are
-identical, so the call site does not change — and
+`cs2::diag` owns it; the trace probe's own guard is **gone**. The probe calls
+`cs2::diag::call_guarded(&invoke_trace, &call)` where it used to call
+`trace_call_guarded(&invoke_trace, &call)` — the two signatures are identical, so
+the call site did not otherwise change — and
 `payload/control/include/cs2/control/trace_guard.hpp` is **deleted**, with
 `payload/control/tests/test_control_trace_probe_guard.cpp` and the two root
-`meson.build` blocks that register it. (The steps are listed in
-`docs/handoff-wave3.md` §5; the reconciliation is a fix round on T39's
-branch, after this one has merged.)
+`meson.build` blocks that registered it. (The steps are listed in
+`docs/handoff-wave3.md` §5; the reconciliation was a fix round on T39's
+branch, after this one had merged.) The tree's `diag-guard` test is the one
+that covers the behaviour now, and it covers it better: it makes **ten**
+deliberate faults in a row and it is built with clang-cl, the compiler the
+payload ships with.
 
 **Why that way and not the other.** Two vectored handlers with **independent**
 `jmp_buf`s and **independent** `active` flags is exactly the fragility this
@@ -361,3 +372,238 @@ whole wave of work. One mechanism, one owner, one test — and the tree's
 5. The enumeration is still a body-box overlap; swapping it for the engine's own
    `TraceLineIntervals` segment trace (exact same solids, no over-inclusion) is the
    Tier-1 step.
+
+## The probe's call form — verified against the live build (2026-10-22)
+
+T39 added a **probe** (`trace_probe`): a control command that asks the engine its
+own question for a ray and publishes **both** answers side by side plus the
+difference (`docs/re/occlusion.md` §"the trace probe"). The call form below was
+re-derived from the **live** build's own call sites — not from the decompile above
+— because the decompile does not say how the two vectors are passed.
+
+**The build.** The live `client.dll` is now sha256 `5a46a09b…` (the game updated on
+2026-10-21; the notes above are for `659940c1…`). The **entry RVA is unchanged**:
+`TraceLineIntervals` is still `FUN_180a19e90` at `0xa19e90` (the name string is now
+at `client + 0x1c32448`; the function spans `0xa19e90..0xa19ff4`).
+
+**The call.** The engine's own caller — the per-pellet function's first trace,
+`FUN_1808830e0` — sets the arguments up like this:
+
+```asm
+0x883164  lea      r9, [rsp + 0x30]              ; arg4 = &the extension (a local)
+0x883169  movss    xmm0, dword ptr [rip + 0x1242f3b]   ; -1.0f
+0x883171  mov      r8, r15                       ; arg3 = &the start vector
+0x883174  movss    dword ptr [rsp + 0x28], xmm0  ; arg6 = max_fraction = -1.0f
+0x88317a  mov      rdx, rdi                      ; arg2 = &results
+0x88317d  mov      qword ptr [rsp + 0x20], r14    ; arg5 = filter + 8
+0x88318d  mov      rcx, qword ptr [rip + 0x19a3ec4]  ; arg1 = *(client + 0x2227058)
+0x883196  call     0x180a19e90
+```
+
+so the call form is
+
+```c
+TraceLineIntervals(*(client + 0x2227058),  // arg1: the query interface
+                    &results,               // arg2: the trace's results container
+                    &start,                 // arg3: a POINTER to a 12-byte Vector
+                    &delta,                 // arg4: a POINTER to the EXTENSION
+                    filter + 8,             // arg5: the collision-mask qword
+                    -1.0f);                 // arg6: max_fraction
+```
+
+(The mask is the **5th** argument and the float the **6th**: in `FUN_180a19e90`
+they are read from `[entry_rsp + 0x28]` and `[entry_rsp + 0x30]`. An earlier note
+in this file called them the 7th and the 8th — that was wrong.)
+
+**The results container is NOT the overlap query's `CUtlVector`.** It is a
+different type with a different header, and the probe got that wrong once (the
+review's blocker). The layout was re-derived from the **live** build
+(client.dll sha256 `5a46a09b…`, 2026-10-22) from the **two functions that write
+it**:
+
+* the physics world's own query — `vphysics2.dll`, the world's vtable **`+0x520`**,
+  which `TraceLineIntervals` calls (`(*(*world + 0x520))(world, results, start,
+  delta, mask, flags, max_fraction)`); and
+* the append helper the **second** query kind uses — `client.dll`'s
+  `FUN_18084d1a0` (`mov rcx, results; call append`).
+
+Both read the count at **`+0x00`** and the record pointer at **`+0x08`**, both
+compare the count against the **capacity** at **`+0x10`**, and both grow the
+array **only** when `count == capacity` **and** bit 30 of the **flags** at
+**`+0x14`** is clear:
+
+```asm
+; vphysics2.dll +0x64f80 (the world query)          ; client.dll FUN_18084d1a0
+movsxd r13, dword ptr [r15]              ; 0x...75113  movsxd r14, dword ptr [rcx]      ; 0x18084d1b0
+cmp    r13d, dword ptr [r15 + 0x10]      ; 0x...7511d  cmp    r14d, dword ptr [rcx + 0x10] ; 0x18084d1b9
+jne    skip_growth                       ; 0x...75121  jne    skip_growth                ; 0x18084d1bd
+test   dword ptr [r15 + 0x14], 0x40000000; 0x...75127  test dword ptr [rcx + 0x14], 0x40000000 ; 0x18084d1c3
+jne    skip_growth                       ; 0x...7512f  jne    skip_growth                ; 0x18084d1ca
+```
+
+| offset | field |
+|---|---|
+| `+0x00` | `int32` count (the records) |
+| `+0x08` | `void*` data (the record array) |
+| `+0x10` | `int32` capacity (in records) |
+| `+0x14` | `int32` flags: bit 30 (`0x40000000`) = **the buffer is external — never grow**; bits 30/31 (`0xC0000000`) = **never free the buffer** |
+
+**So "the engine never allocates" is established for this container**: with bit 30
+set, *both* writers jump straight past their growth, so neither the allocator nor
+the reallocator is reached. The overlap vector's `0x80000000` at `+0x1C` belongs
+to a **different** type and means nothing here — the probe used to set it, which
+is what made the engine write through a null pointer.
+
+Because the engine appends **at** `data[count]` (it increments the count
+afterwards), a trace that produced more records than the advertised capacity
+would write past the end of the buffer — and the engine's growth is switched off
+(the external-buffer bit), so nothing stops it. The probe therefore does three
+things about it:
+
+* **The buffer is not on the game's stack.** The probe runs on the game's **main
+  thread**, in its input path, and 32 KB of stack there is not the payload's to
+  spend. It is a function-local static behind a typed accessor — the ADR-0010
+  escape hatch the payload already uses for the ESP's provider registry
+  (`cs2/features/esp_cache.hpp`): constant-initialised, so the mapped image
+  never runs the CRT's static-init guard, and trivially destructible, so no
+  atexit handler is registered. The injector maps the whole image with
+  `MEM_COMMIT`, so the OS zeroes it (the buffer is in the image's `.bss`).
+* **It is sized for a count the engine cannot plausibly exceed.** The buffer
+  holds **512** interval records (28 672 bytes): the engine's own bullet path
+  sizes the same container for **64** records and grows it — so the engine
+  expects a ray to cross a few dozen solids (each crossed solid contributes an
+  "enter" and a "leave" record) — and 512 records are **eight times** that, i.e.
+  256 solids crossed. That is **not a proof**: the engine has no hard limit.
+* **An overrun is detected, and it costs the answer.** A **canary** sits
+  immediately after the records. It is re-armed before every engine call and
+  checked immediately after it — **before** the count is trusted — so a write
+  past the records is visible. A tripped canary publishes `engine.overrun`
+  (and `engine.faulted`), marks the ray's `engine.answer_missing`, and refuses
+  the answer: the verdict is `unknown`, never a comparison over records the
+  probe cannot vouch for.
+
+So the "bounded" claim is not "the engine cannot overrun it" (that is not
+provable) but "**the probe cannot publish an answer it cannot vouch for**".
+The answer also publishes `intervals_overflow` when the count exceeds the
+published maximum (64 records per ray).
+
+**The fourth argument is the EXTENSION (`end - start`), not the absolute end
+point.** The engine's own caller fills it with `normalize(direction) * range`
+(`FUN_18089ca80` writes `normalize(dir) * max_range` into it), and the interval
+consumer scales the fractions by *its* length. So the segment the query walks is
+`start → start + delta`, and the fraction at `+0x0C` is relative to `|delta|`.
+(The decompile above names the argument "end"; it is the ray's `m_Delta`. Passing
+an absolute end point instead would trace the wrong segment entirely.)
+
+**The interval record.** The consumer (`FUN_180886090`) reads:
+
+* `+0x0C` — a float, the **fraction** along the ray. The thickness it computes is
+  `(leave - enter) * |delta|` — the fraction difference times the ray's length
+  (`FUN_180165340` is `sqrt(x²+y²+z²)`, the length of the extension the consumer
+  is handed). So `distance = fraction × |delta|`.
+* `+0x32` — a byte: `1` = the ray **enters** a solid, `0` = it leaves one (the
+  consumer pairs an `enter` record with the next `leave` record).
+* the stride is `0x38` (`mov edx, 0x38` in the consumer).
+
+**The live process confirms every offset** (read out of the running `cs2.exe`,
+2026-10-22, read-only):
+
+| what | value |
+|---|---|
+| `client.dll` base | `0x7fffd1f60000` |
+| `*(client+0x2227058)` (the interface) | `0x7fffd44aaf30` — a live pointer |
+| `*(client+0x2227070)` (the filter's vtable) | `client + 0x1ad4838` — the vtable named above |
+| `*(client+0x2227078)` (the filter's mask) | `0xffffffffffffffff` — all contents, as above |
+| the filter's flags / group (`+0x37` / `+0x38`) | `0x0f` / `3` |
+| the bytes at `client + 0xa19e90` | `4c 8b dc 49 89 5b 08 …` — the same prologue as the file on disk |
+| the name string at `client + 0x1c32448` | `TraceLineIntervals` |
+
+**What the probe publishes** (`payload/control/src/occlusion_query.cpp`,
+`probe_trace`): for each ray the engine's interval records — the fraction, the
+distance (`fraction × |delta|`), the enter/exit byte and the record's **raw 0x38
+bytes in hex** — our own occluders' spans, and the difference. The surface is
+published as `"unmapped"`: only two fields of the record are mapped, and the raw
+bytes are published so a later RE pass can map the rest **from the probe's own
+output** without re-running the game.
+
+> **Open: the entry point is not a curated signature.** `payload/sdk/offsets.hpp`
+> has `physics_query_interface`, `physics_query_filter` and `entities_in_box` as
+> curated (`OffsetSource::signature`) entries, but **no** `trace_line_intervals`:
+> the probe therefore always uses the hard-coded fallback `0xA19E90`. The next game
+> update moves the function and the probe would call a random address (the guard
+> would probably catch it, but the failure would look like "the engine call
+> faults" rather than "the offset moved"). The dumper's curated set
+> (`external/dumper/src/analysis.rs`) is **not this task's file**, so this is
+> reported as a follow-up instead of fixed here: the signature is the byte
+> sequence of the prologue the live build has (`4c 8b dc 49 89 5b 08 …` at
+> `0xa19e90`) together with the name string `TraceLineIntervals` (now at
+> `client + 0x1c32448`).
+
+**A finding about the shared fault guard (2026-10-22) — and the fix.**
+`cs2::diag::call_guarded` — the guard every engine call in the payload uses —
+**could not recover on a clang-cl build**. Its vectored handler was a `noexcept`
+function, and clang-cl marks a `noexcept` function `nounwind`, so MSVC's
+`longjmp` refuses to unwind through it and raises
+`STATUS_STACK_BUFFER_OVERRUN` (0xC0000409) instead of returning. The same code
+built with MSVC's `cl.exe` recovers, and so does the same code with the
+handler's `noexcept` dropped — both measured standalone on this machine.
+
+**The fix has landed** (`payload/diag/src/crash_handler.cpp`: the handler is no
+longer `noexcept`, and the arming is a compare-exchange on an atomic slot, so
+two threads can never both take the slot). The tree's `diag-guard` test proves
+it: ten deliberate faults in a row, all recovered, built with clang-cl.
+
+> **The log evidence, re-measured (2026-10-22).** The payload's own log
+> (`%LOCALAPPDATA%\cs2-internal\cs2-payload.log`, 70.6 MB, 548 370 lines) holds
+> **1017** `[crash]` lines, of which **199** are `[crash] handler installed` and
+> **12** are `[crash] guarded`. The earlier claim ("nine `[crash] guarded` lines,
+> each followed by a fresh `[crash] handler installed` — the process died and was
+> re-injected, every time") was **wrong on both counts**:
+>
+> * there are **twelve** guarded lines, not nine — four in the 88 k-line region
+>   (lines 88136, 88388, 88410, 90370) and eight in the 533 k-line region
+>   (533405, 533479, 533602, 533681, 533729, 533891, 533951, 534204);
+> * **only the first four** are followed by a fresh `[crash] handler installed` and
+>   the payload's start-up banner — those are the process dying and being
+>   re-injected. The other **eight** are followed by the payload's own continued
+>   `[state]` output: **the process survived** them;
+> * and the log **cannot** support the inference in any case. The `guarded` phase is
+>   logged by the diag handler **on the recovery path**, immediately *before* the
+>   `longjmp` (`payload/diag/src/crash_handler.cpp`: `log_exception("guarded",
+>   info); std::longjmp(g_guard_jmp, 1);`), so a `guarded` line means the handler
+>   was **entered** — it is written in the success case too. A failed recovery
+>   leaves **no** line at all.
+>
+> **Four died, eight survived — and the two groups do not look alike.** The four
+> deaths (88136, 88388, 88410, 90370) each sit immediately before a fresh
+> `[crash] handler installed`; three of them fault at `tier0+0x1ffe29 read
+> addr=0x40` (the tier0 allocator) and one at `read addr=0x0`. The eight
+> recoveries (533405, 533479, 533602, 533681, 533729, 533891, 533951, 534204) are
+> injections #190–#199 — the ten most recent in the log — and each one sits
+> immediately after a fresh `[crash] handler installed` and faults at a **null
+> pointer** with frames in **`ntdll`**. That is a **different signature** from the
+> four deaths: the difference between "the guard killed the game" and "the guard
+> recovered".
+>
+> **The eight are not evidence that the fix ran live.** T42's fix commit is
+> `06:01:52` on 2026-10-22 and injections #190–#199 **predate** it; the
+> integration tree never carried the fix before it merged. So the eight came from
+> the **broken** handler, and the honest statement is this: the broken guard
+> recovered eight times and killed the payload four times — which is **not** what
+> the standalone reproduction predicts (there, the `noexcept` handler fast-fails
+> with 0xC0000409 every time). That discrepancy is an **open item**, recorded on
+> T42's branch; it is not resolved by this document.
+
+So the **diagnosis** stands (the shared guard could not recover under clang-cl —
+reproduced standalone: a `noexcept` vectored handler fast-fails with 0xC0000409,
+the same program without the `noexcept` prints "recovered" and exits 0), the
+**evidence as stated was wrong**, and the **fix has landed**. The record is
+corrected here so the next task does not cite it.
+
+The probe's engine call therefore runs under the tree's **one** guard,
+`cs2::diag::call_guarded` — the same guard the rest of the payload's engine
+calls use. The probe's own copy of the guard
+(`payload/control/include/cs2/control/trace_guard.hpp`, the same vectored
+handler + `setjmp`/`longjmp`, with a handler the unwinder would cross) is
+**deleted**, along with its own host test `control-trace-probe-guard`: the
+tree's `diag-guard` test covers the behaviour, and it covers it better.
