@@ -53,6 +53,30 @@ struct Fragment {
   layers.reserve(fragment.covering.size());
   const Vec3 direction = basis.unproject(polygon_centroid(fragment.polygon));
   for (const OccluderCell* occluder : fragment.covering) {
+    if (occluder->kind == SolidKind::mesh) {
+      // A mesh cluster is a soup over a whole area: this ray can cross it several
+      // times, and each crossing is a surface the bullet pays for. `ray_span` would
+      // report only the nearest, so a shot through the cluster (a wall, the floor,
+      // another wall) was valued as one thin surface. One layer per crossing, in
+      // order, zero thickness — the engine's own per-surface cost.
+      std::vector<float> crossings;
+      occluder->ray_surfaces(eye, direction, crossings);
+      for (const float at : crossings) {
+        if (at >= distance) {
+          continue;  // beyond the hitbox: not between the shot and it
+        }
+        PenetrationLayer layer;
+        layer.thickness = 0.0F;
+        layer.entry = at;
+        layer.enter.penetration_modifier = occluder->surface_modifier;
+        layer.enter.damage_modifier = occluder->damage_modifier;
+        layer.enter.material = occluder->material;
+        layer.enter.grate = occluder->grate;
+        layer.exit = layer.enter;
+        layers.push_back(layer);
+      }
+      continue;
+    }
     const std::optional<RaySpan> span = occluder->ray_span(eye, direction);
     if (!span.has_value() || span->entry >= distance) {
       continue;

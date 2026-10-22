@@ -299,6 +299,41 @@ auto OccluderCell::ray_span(const Vec3& eye, const Vec3& direction) const noexce
   return RaySpan{.entry = std::max(t_enter, 0.0F), .exit = t_exit};
 }
 
+// Defined below, next to the BVH span it shares its traversal with.
+namespace {
+void ray_mesh_crossings(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction,
+                        std::vector<float>& out, int max_surfaces);
+}  // namespace
+
+void OccluderCell::ray_surfaces(const Vec3& eye, const Vec3& direction,
+                                std::vector<float>& out, int max_surfaces) const {
+  if (max_surfaces <= 0) {
+    return;
+  }
+  if (kind != SolidKind::mesh) {
+    if (const std::optional<RaySpan> span = ray_span(eye, direction); span.has_value()) {
+      out.push_back(span->entry);
+      if (span->exit > span->entry) {
+        out.push_back(span->exit);
+      }
+    }
+    return;
+  }
+  const std::size_t before = out.size();
+  if (mesh_bvh != nullptr && !mesh_bvh->empty()) {
+    ray_mesh_crossings(*mesh_bvh, eye, direction, out, max_surfaces);
+  } else {
+    for (std::size_t i = 0; i + 2 < triangles.size() && static_cast<int>(out.size()) < max_surfaces;
+         i += 3) {
+      if (const auto t =
+              ray_triangle(eye, direction, triangles[i], triangles[i + 1], triangles[i + 2])) {
+        out.push_back(*t);
+      }
+    }
+  }
+  std::sort(out.begin() + static_cast<std::ptrdiff_t>(before), out.end());
+}
+
 auto OccluderCell::lower_bound_distance(const Vec3& eye) const noexcept -> float {
   if (kind == SolidKind::sphere) {
     return std::max(0.0F, game::distance(eye, a) - radius);
@@ -361,6 +396,61 @@ auto build_mesh_bvh(std::vector<Vec3> triangles) -> MeshBvh {
   build_mesh_node(bvh, tmin, tmax, 0, static_cast<std::uint32_t>(triangle_count));
   return bvh;
 }
+
+namespace {
+
+// Every triangle the ray hits, appended unsorted. The BVH is the acceleration only:
+// the answer is the same as scanning the soup (the host test pins that).
+void ray_mesh_crossings(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction,
+                        std::vector<float>& out, int max_surfaces) {
+  if (bvh.nodes.empty()) {
+    return;
+  }
+  struct Entry {
+    std::uint32_t node = 0;
+  };
+  Entry stack[128];
+  int depth = 0;
+  float tnear = 0.0F;
+  float tfar = 0.0F;
+  if (!ray_aabb(eye, direction, bvh.nodes[0].min, bvh.nodes[0].max, tnear, tfar)) {
+    return;
+  }
+  stack[depth++] = Entry{.node = 0};
+  while (depth > 0) {
+    const Entry current = stack[--depth];
+    const MeshBvh::Node& node = bvh.nodes[current.node];
+    if (node.count > 0) {
+      for (std::uint32_t i = 0; i < node.count; ++i) {
+        if (static_cast<int>(out.size()) >= max_surfaces) {
+          return;
+        }
+        const std::uint32_t tri = bvh.order[node.start + i] * 3;
+        if (const auto t = ray_triangle(eye, direction, bvh.triangles[tri],
+                                        bvh.triangles[tri + 1], bvh.triangles[tri + 2])) {
+          out.push_back(*t);
+        }
+      }
+      continue;
+    }
+    const std::uint32_t left = current.node + 1;
+    const std::uint32_t right = node.right;
+    float lt = 0.0F;
+    float lf = 0.0F;
+    float rt = 0.0F;
+    float rf = 0.0F;
+    if (ray_aabb(eye, direction, bvh.nodes[left].min, bvh.nodes[left].max, lt, lf) &&
+        depth + 2 <= 128) {
+      stack[depth++] = Entry{.node = left};
+    }
+    if (ray_aabb(eye, direction, bvh.nodes[right].min, bvh.nodes[right].max, rt, rf) &&
+        depth + 2 <= 128) {
+      stack[depth++] = Entry{.node = right};
+    }
+  }
+}
+
+}  // namespace
 
 auto ray_mesh_bvh(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction)
     -> std::optional<RaySpan> {

@@ -496,8 +496,59 @@ auto main() -> int {
     }
     const auto map = cs2::aim::build_heatmap(Vec3{}, basis, 1.0F, poses, options);
     expect(!map.cells.empty(), "the mesh occluder leaves a cell");
+    // The ray crosses the box **twice** (the near face at 49 and the far face at 51),
+    // and every crossing is a surface the bullet pays for — this is a closed shape, so
+    // two entry costs: 100 → 81.1875 → 65.385, times the headshot multiplier.
     for (const auto& cell : map.cells) {
-      expect(near(cell.value, 324.75F, 0.5F), "the mesh surface charges its entry cost");
+      expect(near(cell.value, 261.5F, 0.5F), "each mesh face charges its entry cost");
+    }
+  }
+
+  // --- several surfaces inside ONE cluster ----------------------------------
+  // The regression that made the ragebot shoot through walls: a mesh cluster covers a
+  // whole area of the map, so one ray can cross it several times (a wall, then the
+  // floor, then another wall). Reporting only the nearest crossing made every surface
+  // after the first free.
+  {
+    const float near_x = 30.0F;
+    const float far_x = 70.0F;
+    std::vector<Vec3> verts;
+    std::vector<Vec3> tris;
+    for (const float x : {near_x, far_x}) {
+      verts.push_back(Vec3{.x = x, .y = -40.0F, .z = -40.0F});
+      verts.push_back(Vec3{.x = x, .y = 40.0F, .z = -40.0F});
+      verts.push_back(Vec3{.x = x, .y = 40.0F, .z = 40.0F});
+      verts.push_back(Vec3{.x = x, .y = -40.0F, .z = 40.0F});
+      const std::size_t base = verts.size() - 4;
+      tris.insert(tris.end(), {verts[base], verts[base + 1], verts[base + 2], verts[base],
+                               verts[base + 2], verts[base + 3]});
+    }
+    const auto two = cs2::aim::project_mesh_occluder(Vec3{}, basis, verts, tris, 1.0F);
+    expect(two.has_value(), "the two-sheet cluster projects");
+    if (two.has_value()) {
+      std::vector<float> crossings;
+      two->ray_surfaces(Vec3{}, Vec3{.x = 1.0F, .y = 0.5F, .z = 0.1F}, crossings);
+      expect(crossings.size() == 2, "a ray crosses both sheets");
+      if (crossings.size() == 2) {
+        expect(near(crossings[0], near_x, 0.1F) && near(crossings[1], far_x, 0.1F),
+               "the crossings are in order along the ray");
+      }
+      // And the field charges for both: 100 → 81.1875 → 65.385, times 4.
+      std::vector<TargetPose> two_poses;
+      TargetPose two_pose;
+      two_pose.target = 1;
+      two_pose.hitboxes.push_back(head_capsule(100.0F));
+      two_poses.push_back(std::move(two_pose));
+      HeatmapOptions two_options;
+      two_options.weapon = WeaponProfile{.damage = 100.0F, .range_modifier = 1.0F,
+                                          .penetration = 4.0F, .headshot_multiplier = 4.0F};
+      two_options.penetration = cs2::aim::PenetrationModel::engine;
+      two_options.penetration_params.weapon_penetration = 4.0F;
+      two_options.occlusion.push_back(*two);
+      const auto two_map = cs2::aim::build_heatmap(Vec3{}, basis, 1.0F, two_poses, two_options);
+      for (const auto& cell : two_map.cells) {
+        expect(near(cell.value, 261.5F, 0.5F), "both sheets in the cluster attenuate");
+      }
     }
   }
 

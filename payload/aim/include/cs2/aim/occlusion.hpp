@@ -112,6 +112,20 @@ struct OccluderCell {
   [[nodiscard]] auto ray_span(const Vec3& eye, const Vec3& direction) const noexcept
       -> std::optional<RaySpan>;
 
+  // **Every** surface this solid puts on the ray, ascending, appended to `out`.
+  //
+  // A collision **mesh** is a soup covering a whole area of the map, so one ray can
+  // cross it several times (a wall, then the floor, then another wall — all in the
+  // same cluster). `ray_span` reports only the nearest crossing, so a shot through
+  // the cluster was valued as one surface and the rest were free. This is what the
+  // engine reports: one crossing per triangle it hits. For the other kinds it is the
+  // single span (a convex solid is entered and left once).
+  //
+  // Bounded by `max_surfaces`: a ray that grazes a dense soup must not turn into
+  // unbounded work, and the engine's own penetration budget caps what can matter.
+  void ray_surfaces(const Vec3& eye, const Vec3& direction, std::vector<float>& out,
+                    int max_surfaces = 32) const;
+
   // A **lower bound** on the distance from `eye` to this solid (0 when the eye is
   // inside it). Cheap broad-phase for "can this solid be nearer than the hitbox?":
   // because it never over-estimates, pruning when it is `>= hitbox_distance` cannot
