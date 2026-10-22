@@ -147,6 +147,12 @@ inline constexpr int HITGROUP_GENERIC = 10;
 // `m_bIsRevolver` and the attack type) come from the **profile** and are applied
 // by the draw, so the caller's class can never put a transform on that the engine
 // would not apply.
+//
+// **A caller may pass the class or the pattern in force** — the core applies
+// the transform only when the engine's own conditions hold, so the two differ
+// only in what the *status* reports. The live path passes the pattern **in
+// force** (`cs2::control::applied_spread_pattern`), so the status cannot claim
+// a transform the core does not apply.
 [[nodiscard]] auto spread_kernel(const WeaponProfile& weapon, int pellets,
                                  SpreadPattern pattern) noexcept
     -> std::expected<SpreadKernel, MonteCarloError>;

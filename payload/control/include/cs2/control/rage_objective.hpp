@@ -307,6 +307,9 @@ inline constexpr int SEED_SOURCE_DEFAULT = SEED_SOURCE_SEQUENCE;
 // **Every class has a name**: the negev is the negev's own class, not the
 // standard one — a status that called it "standard" would be lying about the
 // weapon it is reporting.
+//
+// **The live path gives it the pattern in force** (`applied_spread_pattern`),
+// so the name it reports is the pattern the core actually applies.
 [[nodiscard]] constexpr auto spread_pattern_name(cs2::aim::SpreadPattern pattern) noexcept
     -> std::string_view {
   switch (pattern) {
