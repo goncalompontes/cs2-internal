@@ -9,7 +9,8 @@
 > only removed when the fix is **merged and re-reviewed**. A finding that is
 > known and not fixed is a known defect, not a surprise.
 
-Last updated: 2026-10-21, after the first live run.
+Last updated: 2026-10-22, after the chams' merge and the Monte-Carlo's review
+round.
 
 ---
 
@@ -84,19 +85,14 @@ hook fires; the offsets refresh offline reproduces the dump exactly.
 |---|---|---|---|---|
 | **H1** | blocker (historical) | The draw hook's target came from an RTTI **lambda** type; a lambda's `operator()` is static, so the nine-argument detour shifted the whole argument list and the game crashed with `0xc0000005`. The real target is `scenesystem.dll + 0x580A0` — a nine-argument member function whose signature is **exactly** the payload's existing typedef (the material at index 3). | `payload/features/src/chams.cpp` | **merged** (the signature, the pure decision function, the prologue verification) |
 | **H2** | major | The re-entrancy guard was **process-wide** and its early return **drops the draw**. The scene system renders the draw list on the **tier0 thread pool** (`g_pThreadPool`, `Thread_RenderSceneDrawList`, `"rendering in %i jobs"`, `sc_disableThreading`), so two jobs can be inside the detour at once. | `chams.cpp` | **fixed** by the per-owner guard (the branch's fix round) |
-| **H2a** | **major** | **The per-owner guard exposes a desc-cache race.** The guard lets two jobs into the draw path *by design*, but the desc cache is published with three separate atomics (the desc last) — a protocol that is safe for **one** writer and not for two. Two descs that hash to the same slot (`(desc >> 4) & 63` — routine with hundreds of models) can leave a reader seeing **desc A with entity B**, so the chams are decided on the **wrong player** (the CT's model chamsed, the T not). The reviewer's probe of the exact protocol reproduced **965–3048** such mismatches per run. `desc_cache_stamp_` is a second, simpler race (a plain `std::uint64_t`). The branch's own comments now contradict each other (`chams.cpp:202-210` says two threads may be inside; `chams.hpp:256` says "the render thread owns the cache"). | `payload/features/include/cs2/features/chams.hpp` (the `DescEntry`), `payload/features/src/chams.cpp` (the publish protocol) | **fixed on `feat/t33-chams-race`** — the cache is a **per-slot seqlock** with the generation inside the entry (`chams.hpp`'s `DescCache`), and the probe is `payload/features/tests/test_chams_desc_cache.cpp` (four threads, two descs in one slot: **zero** mismatches; the pre-fix protocol is reproduced in the test as the control and reports hundreds). The writer's claim is ordered before the entry's writes by a release fence (`a4493ba`), the reader's give-up path is measured (`c239bb2`). **Not merged** — see the note below the table |
-| **H3** | minor | After a refusal the status stuck at "installing" forever and the refusal was never re-reported (`install_failed_` was never cleared). | `chams.cpp` | **fixed on `feat/t33-chams-race`** — the switch-off clears the latch (`chams.cpp`'s `configure()`), and the test now pins **the value that is stored** — the switch's own answer — not merely that the rule is mentioned nearby (`fc5c8ba`); the neutered call now fails the suite |
 | **H4** | minor | `status_line()` allocated a `std::string` **on the game's render thread, every frame**. | `chams.cpp` | **fixed** by the fix round (`snprintf` into the caller's buffer) |
 | **H5** | minor | Two new public accessors were dead code; the module-identity check skipped an empty module string; `describe(installed)` returned `"on"`; the counters were not reset on toggle. | `chams.cpp` | **fixed** by the fix round |
-| **H6** | minor | **Nothing pins that the guard is held *across* the trampoline call** — moving the scope after the original leaves the suite green, and that is the guard's entire purpose (the recursion it breaks happens *inside* the call to the original). | the test | **fixed on `feat/t33-chams-race`** — `test_chams_draw_hook.cpp` fails when the scope moves after the call (the branch's own test, `440fe4b`) |
-| **H7** | minor | The shared guard's **fail-open** rationale is the camera's ("refusing would drop a camera update"); for the chams the arithmetic is the other way round: a refusal drops **one primitive**, while failing open lets the recursion run until the stack overflows (`0xc00000fd`) and takes the renderer with it. | `recursion_guard.hpp` | **fixed on `feat/t33-chams-race`** — the policy is **per instance** (`RecursionGuard::Policy`): the chams' guard fails closed, the camera's keeps failing open and `thirdperson.hpp` is untouched. The **pool's size** is per instance too: the draw path's pool holds 64 concurrent render jobs, so the tenth job's draw is not refused (`3ad442e`). The refusals are counted **by cause** (`rec=`, `pool=`, `tdn=`, `88eb291`) |
-| **H8** | nit | `docs/re/chams.md` names `test_chams_guard.cpp`; the file is `test_chams_draw_hook.cpp`. The shared header cites `docs/re/thirdperson.md`, which arrives with T27. | the docs | **fixed on `feat/t33-chams-race`** — `docs/re/chams.md` names the file that exists, and the shared header's citation resolves |
 
-The rows marked **fixed on `feat/t33-chams-race`** are fixed **on that branch**, and
-the branch is **not merged**: this file's rule (§9) is that a row is deleted
-only when the fix is merged **and re-reviewed**. So they are annotated here
-and the deletion is left to the orchestrator after the merge. The branch's
-own commits are listed in `docs/re/chams.md` §10.
+The rows that were fixed on `feat/t33-chams-race` are **closed**: that branch
+**merged** (`1c80086`) and was **re-reviewed** (`SHIP WITH FIXES` — no blockers,
+no majors), so §9's rule is satisfied and the rows were **deleted**. Their
+content is not lost: it is in `docs/re/chams.md` §10 and in the review reports.
+What that branch left open is in **§14**.
 
 ---
 
@@ -195,19 +191,21 @@ section is the plan, not the work.
 
 ### 11.1 Fully fix the chams
 
-> **Status (2026-10-21):** the whole recipe below is implemented on
-> `feat/t33-chams-race`, which is **not merged**: the desc cache is a
-> per-slot seqlock with the generation inside the entry (**H2a**), the
-> latch's wiring is pinned — and the *value* it stores with it (**H3**), the
-> guard's scope order is pinned (**H6**), the fail-closed policy and the
-> per-instance pool are in (**H7**), and the doc's file names are right
-> (**H8**). The rows in §5 stay until the merge and the re-review; see
-> `docs/re/chams.md` §10.
+> **Status (2026-10-22):** the whole recipe below is **merged**
+> (`1c80086`) and **re-reviewed** (`SHIP WITH FIXES` — no blockers, no
+> majors). The desc cache is a per-slot seqlock with the generation inside
+> the entry (**H2a**), the latch's wiring is pinned — and the *value* it
+> stores with it (**H3**), the guard's scope order is pinned (**H6**), the
+> fail-closed policy and the per-instance pool are in (**H7**), and the doc's
+> file names are right (**H8**). The rows are **closed** (§5) and this recipe
+> is kept as the record of what was done; the branch's own commits are
+> listed in `docs/re/chams.md` §10, and what it left open is in **§14**.
 
 The feature is in place (the target is resolved through a dumper signature and
-verified against the prologue ✓) and the guard is per-owner ✓. What is left
-is the **race the per-owner guard exposed** (**H2a**) and the test gaps around
-it (**H3**, **H6**, **H7**, **H8**).
+verified against the prologue ✓) and the guard is per-owner ✓. What was left
+— the **race the per-owner guard exposed** (**H2a**) and the test gaps around
+it (**H3**, **H6**, **H7**, **H8**) — is **done**: the recipe below is what
+it was, and it is kept as the record of how it was done.
 
 The recipe the review measured and the fix round's own review confirmed:
 
@@ -383,3 +381,36 @@ plus the scenario suite (the MCP tools' advertised schema).
 
 **What is not:** the live run. The operator's steps are in
 `docs/operator-live-check.md` §6.
+
+---
+
+## 14. The chams' residue — what the merged branch left open (2026-10-22)
+
+> Added with task T36. The chams' branch (T33) **merged** (`1c80086`) and was
+> **re-reviewed**, so the rows it closed are **gone** from §5. These are the
+> **residue** its own fix round reported and did **not** fix: known defects
+> and one deliberate trade, recorded here so that nobody has to rediscover
+> them.
+>
+> **The live run is still owed.** The chams' detour has **never run against
+> the real draw** — the live run needs a GPU and an interactive desktop — so
+> two of the numbers below are unmeasured and one is unobserved: the tier0
+> render-job count is unknown, and the fail-closed refusal's real-world
+> frequency is unknown. The operator's steps are in
+> `docs/operator-live-check.md` §3.
+
+| # | severity | finding | where | fix |
+|---|---|---|---|---|
+| **H9** | minor | **The other `g_active`s are plain pointers.** The chams' own is an `std::atomic<Chams*>` — published with a release store and read with an acquire load — but **four** others still hold a plain pointer with the shape the chams' had: the camera's (`payload/features/src/thirdperson.cpp:18`), the present hook's (`payload/features/src/game_present_hook.cpp:28`), the input's (`payload/control/src/input.cpp:34`) and the event log's (`payload/control/src/events.cpp:74`). Each is written by the payload's **own** thread (the install, the uninstall) and read by a **game** thread (the camera thread, the present thread, the create-move and codec threads, the game's event thread). A pointer store is atomic on x86-64, so the value is never torn — but it is **not ordered** against the object's construction and its destruction, so a reader can see a non-null pointer to an object that is not yet built, or a stale pointer to one that is already gone. | the four modules | **not fixed — deferred** (the camera's behaviour must not change, so this is not a chams task; the fix is the one the chams got — an `std::atomic<T*>` with a release store and an acquire load) |
+| **H10** | nit | **The trampoline's pages are never unmapped.** `InlineHook::uninstall()` **retires** the trampoline — the pointer is published as `nullptr` and dropped — but does not release the pages: they stay mapped and executable until the process exits. This is a **deliberate trade**, not an oversight: it buys an unconditional safety property ("no thread can execute freed trampoline memory") that holds even when the detour is inside the hook and the hook is destroyed under it — which the engine can never rule out, because the detour is the **caller's** function and the engine never sees it enter or leave. The cost is a bounded leak: **one page per uninstall** (the chams: one per switch-off; the camera, the present hook and the animfix: one per state change they hook), reclaimed by the operating system when the process exits. | `payload/hooks/src/inline.cpp` | **by design** (`docs/re/chams.md` §10.6 — the property is proved by `payload/hooks/tests/test_inline.cpp`) |
+| **H11** | minor | **The scene system's render-job count is unmeasured.** The draw path's guard pool holds **64** concurrent owners, and 64 is **headroom, not a measurement**: the tier0 thread pool has about as many threads as the machine has hardware threads, so 64 covers a machine with up to 64 hardware threads. Nothing in the tree has ever measured how many render jobs actually overlap in one frame, because the detour has still never run against the real draw. On a machine with more than 64 hardware threads the pool can be exhausted again — and a refusal on the draw path **drops the primitive**, so the models are hole-ridden, every frame. The drops are **counted** (`pool=`), which is the mitigation: the operator sees it. | `payload/features/include/cs2/features/recursion_guard.hpp` (`DRAW_PATH_SLOT_COUNT`), `docs/re/chams.md` §10.4.1 | **not fixed — deferred** (it needs a live run) |
+
+**What is verified:** the host tests — `features-chams-desc-cache` (the probe:
+four threads, two descs in one slot, **zero** mismatches; the generation bump
+under a concurrent publisher; the reader's give-up path),
+`features-chams-draw-hook` (the latch's wiring, the guard's scope order, the
+fail-closed policy, the per-instance pool, the refusals counted by cause, the
+status line's 192-byte bound) and `hooks-inline` (the trampoline's lifetime).
+
+**What is not:** the live run. Nothing in this section has been observed in
+the game.
