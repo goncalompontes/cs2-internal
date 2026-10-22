@@ -6,6 +6,12 @@
 > it keyed the revolver's transform on a *distance*, and it carried the old
 > build's addresses. The addresses, the draw order, the attack type, the negev's
 > rule and the pattern table are re-derived below.
+>
+> **The attack type, decided.** The payload reads `m_weaponMode` and publishes
+> it as **evidence**, but it **cannot** know the engine's attack type for the
+> shot it is about to take, so it treats the weapon as **NOT** in secondary
+> mode: the revolver's `1 − r²` is **not** applied and the cone is the standard
+> one (§"The attack type" below).
 
 Image base `0x180000000`. Addresses are **absolute VAs**; RVA = `VA - 0x180000000`.
 
@@ -23,10 +29,16 @@ Image base `0x180000000`. Addresses are **absolute VAs**; RVA = `VA - 0x18000000
 | **the live build** | **`5a46a09b521bbd607012146364dafae2abfa50364246638391990d4c7dfb9d49`** | 39 205 528 B | **2026-10-21 18:37** |
 
 **The game auto-updated on 2026-10-21**: the module on disk is no longer
-`659940c1`. Every RVA cited below was re-checked against the on-disk build
-with capstone and **all of them still hold** — the module's size is unchanged
-and the code did not move. The **schema offsets** are unaffected (they come from
-the schema dump, not from a signature).
+`659940c1`. The **six addresses in the table below** were re-checked against
+the on-disk build with capstone and **all of them still hold** — the module's
+size is unchanged and the code did not move. The **schema offsets** are
+unaffected (they come from the schema dump, not from a signature).
+
+> **What the re-check does *not* cover.** The **Inaccuracy** section below still
+> carries the old build's `0x80b880` / `0x80cba0`: on the live build they
+> resolve to unrelated functions, and that section says so. They are **not**
+> among the six re-checked addresses, and the spread model's composition is
+> still open work (`docs/ragebot.md` §0).
 
 ### The addresses
 
@@ -55,7 +67,8 @@ remaining uncertainty is only the target's lag-compensated pose.
 
 Called from `FX_FireBullets` (`FUN_180d237d0`, RVA `0xd237d0`), which passes
 `(weaponId, numBullets, attackType, seed, spreadMag, inaccMag, recoilIndex, out)`.
-Decompiled:
+**Simplified** from the disassembly (the three debug convars are not modelled —
+see the note under the listing):
 
 ```
 RandomSeed(seed);
@@ -65,7 +78,8 @@ for each pellet:
      r1 = RandomFloat(0, 1);  a1 = RandomFloat(0, 2*pi);      // the **spread**
      r1 = revolver ? 1 - r1^2 : r1;
      r1 = negev    ? 1 - r1^(2^k) : r1;                        // k = 3 - recoilIndex
-     if (weapon_debug_max_inaccuracy) r1 = 1;
+     if (weapon_debug_max_inaccuracy) r1 = 1;                  // pellet 0's block only
+     if (weapon_debug_inaccuracy_only_up && spreadMag != 0) a1 = pi/2;
      r1 = r1 * spreadMag;
   }
   if (shotgun_patterns_convar) {
@@ -76,10 +90,17 @@ for each pellet:
   r2 = revolver ? 1 - r2^2 : r2;
   r2 = negev    ? 1 - r2^(2^k) : r2;
   if (weapon_debug_max_inaccuracy) r2 = 1;
-  if (weapon_debug_inaccuracy_only_up) a2 = pi/2;
+  if (weapon_debug_inaccuracy_only_up && spreadMag != 0) a2 = pi/2;
   off_x = spreadMag*r1*cos(a1) + inaccMag*r2*cos(a2);
   off_y = spreadMag*r1*sin(a1) + inaccMag*r2*sin(a2);
 ```
+
+> **The two `pi/2` forcings are gated on the spread magnitude being non-zero**
+> (`test r15b,r15b` — the spread magnitude — at `0x180d24248` and
+> `0x180d243b2`): "inaccuracy only up" forces the **spread** angle and the
+> **inaccuracy** angle to π/2, and only when the shot has a spread to speak
+> of. The listing above is a **simplification** of the disassembly, not a
+> decompilation: the payload models none of the three debug convars.
 
 **The draw order is the engine's, and it is not "four numbers per pellet":**
 
@@ -96,18 +117,35 @@ multi-pellet shot **reuses** the spread pair. The offset is applied in the
 > **The repo's model was wrong here.** It drew all four numbers per pellet, so
 > its RNG stream desynchronised from pellet 1 onward: every pellet after the
 > first was wrong. The payload's model is fixed (`payload/aim/src/spread.cpp`),
-> and the single-pellet case is bit-identical to the old one.
+> and **the single-pellet case is bit-identical for the standard pattern** (the
+> golden vector in the Monte-Carlo core's test pins it).
+>
+> **The R8's offsets change by design.** The old model applied the revolver's
+> `1 − r²` to the spread radius whenever the *designer name* was `revolver` —
+> always. The engine's rule is the weapon **id** **and** `attackType == 1`
+> (§"The revolver" below), the transform covers the **inaccuracy** radius too,
+> and the payload cannot prove the pending shot's attack type (§"The attack
+> type"), so the R8 is scored with the **standard** cone. **This is a
+> §2.1-vs-§2.3 conflict, resolved in favour of the engine:** the specification's
+> §2.1 asks for the single-pellet case to be bit-identical "for the rifles
+> **and the R8**", and §2.3 mandates the engine's rule, which moves the R8. The
+> two cannot both hold; the engine's rule wins, and the R8's move is recorded
+> here rather than hidden.
 
 ### The three debug convars
 
-The cone sampler reads three `ConVar`s by their `ConVar*` (each inside a 16-byte
-`ConVarRef` global, the pointer at **+8**, and the value at **+0x58**):
+The cone sampler reads three convars. Each one is reached through a **global
+slot** that holds a pointer to a `ConVarRef`; the slot's image in the file is
+**zero** — the pointer is filled in at run time — so the **slot's** address is
+what a reader can name, and the `ConVarRef` it points to is a **run-time
+object** with no address in the file. The sampler does **not** dereference a
+`ConVar*`: it reads the **value** at `+0x58` off the `ConVarRef`.
 
-| ConVarRef | `ConVar*` | name | what it does |
-|---|---|---|---|
-| `0x1825beca8` | `0x1825becb0` | **`weapon_debug_max_inaccuracy`** | forces both radii to 1 ("Force all shots to have maximum inaccuracy") |
-| `0x1825becb8` | `0x1825becc0` | **`weapon_debug_inaccuracy_only_up`** | forces the inaccuracy angle to π/2 ("Force weapon inaccuracy to be in exactly the up direction") |
-| `0x1825becd8` | `0x1825bece0` | **`weapon_accuracy_shotgun_spread_patterns`** | selects the **pattern table** instead of the random cone (off by default) |
+| the global slot the sampler reads | name | what it does |
+|---|---|---|
+| `0x1825becb0` | **`weapon_debug_max_inaccuracy`** | forces both radii to 1 ("Force all shots to have maximum inaccuracy") |
+| `0x1825becc0` | **`weapon_debug_inaccuracy_only_up`** | forces the angles to π/2 ("Force weapon inaccuracy to be in exactly the up direction") |
+| `0x1825bece0` | **`weapon_accuracy_shotgun_spread_patterns`** | selects the **pattern table** instead of the random cone (off by default) |
 
 The identities are pinned by the **registration code** (the `ConVarRef` each
 name is registered into), not by the order of the globals.
@@ -132,8 +170,8 @@ name is registered into), not by the order of the globals.
   name.
 * the transform is applied to **both** radii.
 * the payload reads the **VData's** `m_bIsRevolver` flag (VData `+0x71E`) as
-  its stand-in for the id comparison, and the attack type from
-  `m_weaponMode` (see below).
+  its stand-in for the id comparison. The attack type it needs is the
+  **pending** shot's, which it **cannot** know (see below).
 
 ## The attack type
 
@@ -150,30 +188,53 @@ signature is needed.**
 `CSBaseGunFire` (`FUN_180803830`) has **four** call sites. The **attack type**
 each of them passes:
 
-| call site | the attack type it passes |
-|---|---|
-| `0x180822610` | **`m_weaponMode`** — `*(int*)(weapon + 0x1A00)` |
-| `0x180824740` | the literal `1` (the secondary path; it *sets* `m_weaponMode = 1` first) |
-| `0x180831010` | `ammo_in_clip & 1` (a virtual call) |
-| `0x180831060` | the literal `0` |
+| the call instruction | the enclosing function | the attack type it passes |
+|---|---|---|
+| `0x1808227b4` | `0x180822610` | **`m_weaponMode`** — `*(int*)(weapon + 0x1A00)` |
+| `0x180824a14` | `0x180824740` | the literal `1` (the secondary path; it *sets* `m_weaponMode = 1` first) |
+| `0x180831047` | `0x180831010` | `ammo_in_clip & 1` (a virtual call) |
+| `0x180831080` | `0x180831060` | the literal `0` |
 
 The third caller of `FX_FireBullets` (`0x18080ac20`) passes the literal `0`,
 and the first (`0x1807a5d50`) passes a **shot-struct field** (`+0x68`) of
 unknown provenance.
 
-**The field is sticky.** One path sets it to 1, the fire path **consumes and
-clears** it. A payload that computes the cone *before* the engine fires
-therefore reads the engine's **previous** decision — and for three of the four
-paths the field is not the engine's attack type at all.
+**The field is sticky, and only one path clears it.** The secondary path
+**sets** it to 1 (`0x1808249ef`) and nothing clears it there; the primary path
+clears it **after** the fire (`0x180822881`); the two other paths never touch
+it. A payload that computes the cone *before* the engine fires therefore reads
+the engine's **previous** decision — and for three of the four paths the field
+is not the engine's attack type at all.
 
-**What the payload does.** It reads the field (`weapon + 0x1A00`) into the
-weapon profile (`WeaponProfile::attack_type`) and reports **-1 (unknown)** when
-the read fails. The engine's rule is applied by the core
-(`cs2::aim::radius_transform`): the revolver's `1 - r²` needs the VData's
-`m_bIsRevolver` **and** `attackType == 1`. **Where the payload cannot know the
-attack type it treats the weapon as NOT in secondary mode**, so the transform is
-not applied and the cone is the standard one. In practice the field is cleared
-by the fire path, so the payload reads 0 (primary) for every shot it takes.
+### What the payload does with it
+
+**The payload reads the field and publishes it as evidence. It never lets it
+drive the transform.**
+
+* **The read** (`weapon + 0x1A00`) lands in the weapon profile as
+  `WeaponProfile::observed_attack_type` — what the field said, and nothing
+  more. It is published because it is information; it is **not** knowledge.
+* **The transform** (`cs2::aim::radius_transform`) reads the **pending** shot's
+  attack type (`SpreadRules::pending_attack_type`), which the payload **cannot
+  know**: there is no signal that proves the shot it is about to take is the
+  secondary one — the field it would read is the engine's *previous* decision,
+  and three of the four fire paths do not pass it to the cone sampler at all.
+  The pending value therefore stays **unknown**, and the kernel's builder does
+  not copy the observed value into it.
+
+**So the payload treats the weapon as NOT in secondary mode**: the revolver's
+`1 − r²` is **not** applied, and the cone is the **standard** one. This is the
+specification's §2.2 rule ("where the payload cannot know the engine's attack
+type, the conservative choice is to treat the weapon as NOT in secondary mode"),
+applied literally.
+
+> **The old claim, and why it was wrong.** An earlier revision of this file said
+> "in practice the field is cleared by the fire path, so the payload reads 0
+> (primary) for every shot it takes". That holds only if every shot went
+> through the one clearing path **and** no secondary-mode shot preceded it — and
+> the secondary path leaves the field at 1. A stale 1 would have put `1 − r²` on
+> a shot the engine fires with the standard cone: a wrong direction, silently,
+> up to half the spread radius.
 
 ## The pattern table
 
@@ -223,12 +284,31 @@ otherwise the engine falls back to the random cone.
   }
   ```
 
+**The band bounds are computed in single precision** — `(float)k * (1.0f /
+(float)N)` (`0x1807cb2b4` / `0x1807cb2ee`) — and the payload computes them the
+same way. In **double** the reciprocal and the product round differently: over
+N = 1…64 the two computations disagree on **937 of the 4 288** bounds by
+**exactly one ulp** (5.96e-8), and the drawn radius moves with them. The
+payload's table is therefore the single-precision one; the only remaining
+difference from the engine is the float conversion of the draw itself (§"The
+RNG" below).
+
 **The convar gate.** The whole path is gated on
 `weapon_accuracy_shotgun_spread_patterns`, which is **off by default** — so a
 shotgun uses the **random cone** unless the server enables it. The convar is
 the payload's problem: it is a `ConVar` the payload has no address for, and
 reading it would need a **dumper signature** the repo does not have
-(ADR-0012). The Monte-Carlo core therefore still **refuses** the shotgun.
+(ADR-0012).
+
+**So the Monte-Carlo core still refuses the shotgun — and the reason is a
+policy, not a modelling limit.** The table **is** reproducible (the payload
+builds it, above), and the convar is **off by default**, so the payload *could*
+model the **default** (the random cone) and be right unless a server enables
+the convar. It refuses anyway: the payload cannot tell which cone the server
+enabled, and **a wrong number is worse than no number**. Reading the convar
+would need a dumper signature this task may not add (ADR-0012), so the refusal
+stands. It is **not** a regression: the shotgun was refused before this change
+too.
 
 ## The RNG
 
@@ -249,13 +329,17 @@ bit for bit.
 
 **One difference, and it is the payload's.** tier0's `RandomFloat` scales the
 31-bit integer in **single** precision (`(float)i * 2^-31`, capped at
-`0.9999999f`) and finishes in single precision; the payload's
+`0x3F7FFFFE` = `0.99999988f`) and finishes in single precision; the payload's
 `random_float` scales it in **double** (`1 / 2147483647`) and finishes in
 double. The two agree on the integer and differ by **at most one float ulp**
-(≤ 6·10⁻⁸) on the scaled value — on about 6 % of the `(0,1)` draws and 68 %
-of the `(0,2π)` draws. That is far below anything the cone's physics can
-notice, but it means the payload's offsets are **not bit-identical** to the
-engine's.
+(≤ 6·10⁻⁸) on the scaled value.
+
+**Measured** (6 seeds × 100 000 draws each, an independent re-implementation of
+both float paths): **1.37 %** of the `(0,1)` draws and **24.81 %** of the
+`(0,2π)` draws differ, and the largest difference is **one ulp** in both
+(5.96e-8 at the `(0,1)` magnitude, 4.77e-7 at the `(0,2π)` one). That is far
+below anything the cone's physics can notice, but it means the payload's
+offsets are **not bit-identical** to the engine's.
 
 ### The seed
 
