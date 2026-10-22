@@ -1,4 +1,5 @@
-// Unit tests for the deterministic spread model (docs/ragebot.md §2/§9).
+// Unit tests for the deterministic spread model (docs/ragebot.md §2/§9,
+// docs/re/aim.md §"The spread cone").
 
 #include <cmath>
 #include <cstdint>
@@ -26,9 +27,15 @@ constexpr float k_two_pi = 6.28318530717958647F;
 }  // namespace
 
 auto main() -> int {
+  using cs2::aim::ATTACK_TYPE_PRIMARY;
+  using cs2::aim::ATTACK_TYPE_SECONDARY;
+  using cs2::aim::ATTACK_TYPE_UNKNOWN;
   using cs2::aim::md5_pseudo_random;
   using cs2::aim::pellet_offsets;
+  using cs2::aim::RECOIL_INDEX_UNKNOWN;
+  using cs2::aim::shotgun_pattern_table;
   using cs2::aim::SpreadPattern;
+  using cs2::aim::SpreadRules;
   using cs2::aim::UniformRandomStream;
   using cs2::aim::Vec2;
 
@@ -53,6 +60,32 @@ auto main() -> int {
     expect(near(c.random_float(0.0F, 1.0F), 0.61710943F, 1e-6F), "RNG first float (seed 999)");
   }
 
+  // The generator is **tier0's `CUniformRandomStreamImpl`** — the one the
+  // engine's cone sampler draws from (`tier0.dll` `0x15e1b0`,
+  // `GenerateRandomNumber_Locked`) and the one the shotgun's pattern table is
+  // built with. The values below are that function's own output, transcribed
+  // from an instruction-level emulation of it (the warm-up's 40 steps, the
+  // Schrage step `m*16807 - q*2147483647` and the shuffle index
+  // `(iy + (iy<0 ? 0x3ffffff : 0)) >> 26`): the repo's stream and tier0's
+  // agree **bit for bit** over 20 000 seeds and four draws each
+  // (`docs/re/aim.md` §"The RNG").
+  {
+    UniformRandomStream a(12345);
+    expect(a.random_int() == 1982386332, "tier0's first draw (seed 12345)");
+    expect(a.random_int() == 715426902, "tier0's second draw (seed 12345)");
+    expect(a.random_int() == 424962143, "tier0's third draw (seed 12345)");
+    expect(a.random_int() == 2038867620, "tier0's fourth draw (seed 12345)");
+    UniformRandomStream b(0);
+    expect(b.random_int() == 893351816, "tier0's first draw (seed 0)");
+    expect(b.random_int() == 197493099, "tier0's second draw (seed 0)");
+    UniformRandomStream c(4242);
+    expect(c.random_int() == 2122186564, "tier0's first draw (seed 4242)");
+    expect(c.random_int() == 1235562359, "tier0's second draw (seed 4242)");
+    UniformRandomStream d(31337);
+    expect(d.random_int() == 1627753057, "tier0's first draw (seed 31337)");
+    expect(d.random_int() == 461619958, "tier0's second draw (seed 31337)");
+  }
+
   // The stream is deterministic and stays in range.
   {
     UniformRandomStream a(12345);
@@ -74,10 +107,19 @@ auto main() -> int {
            "different seeds differ");
   }
 
-  // The pellet offsets follow the documented draw order.
+  // The **single-pellet** case is the recipe before the draw order was fixed:
+  // the shot draws `r1, a1, r2, a2` in that order and nothing else.
+  //
+  // **The comparison is a tolerance, not `==`.** A re-derived expression cannot
+  // be bit-exact across compilers: the FMA contraction rounds the sum once
+  // where the implementation rounds it twice (the repo's golden vector says the
+  // same). The **bit-exactness** is enforced by the Monte-Carlo core's
+  // cross-check, which compares the two assemblies with `==`; this check pins
+  // the *values*, and the golden vector in the core's test is the pre-existing
+  // pin that shows the single-pellet case did not move.
   {
-    const auto offsets = pellet_offsets(12345, 0.01F, 0.02F, 3);
-    expect(offsets.size() == 3, "one offset per pellet");
+    const auto offsets = pellet_offsets(12345, 0.01F, 0.02F, 1);
+    expect(offsets.size() == 1, "one offset per pellet");
     UniformRandomStream t(12345);
     const float r1 = t.random_float(0.0F, 1.0F);
     const float a1 = t.random_float(0.0F, k_two_pi);
@@ -86,8 +128,43 @@ auto main() -> int {
     const Vec2 expected{.x = 0.01F * r1 * std::cos(a1) + 0.02F * r2 * std::cos(a2),
                         .y = 0.01F * r1 * std::sin(a1) + 0.02F * r2 * std::sin(a2)};
     expect(near(offsets[0].x, expected.x) && near(offsets[0].y, expected.y),
-           "the first pellet follows the recipe");
-    expect(offsets[0].x != offsets[1].x || offsets[0].y != offsets[1].y, "pellets differ");
+           "the single pellet follows the four-draw recipe");
+  }
+
+  // The **multi-pellet** case follows the engine's rule: the spread radius and
+  // angle are drawn **once** (pellet 0) and the inaccuracy radius and angle are
+  // drawn **per pellet**. The old recipe drew all four per pellet, so the stream
+  // desynchronised from pellet 1 onward.
+  {
+    const auto offsets = pellet_offsets(12345, 0.01F, 0.02F, 3);
+    expect(offsets.size() == 3, "one offset per pellet");
+    UniformRandomStream t(12345);
+    const float r1 = t.random_float(0.0F, 1.0F);
+    const float a1 = t.random_float(0.0F, k_two_pi);
+    const float r2 = t.random_float(0.0F, 1.0F);
+    const float a2 = t.random_float(0.0F, k_two_pi);
+    const float r3 = t.random_float(0.0F, 1.0F);
+    const float a3 = t.random_float(0.0F, k_two_pi);
+    const float r4 = t.random_float(0.0F, 1.0F);
+    const float a4 = t.random_float(0.0F, k_two_pi);
+    // Pellet 0: the first four draws.
+    expect(near(offsets[0].x, 0.01F * r1 * std::cos(a1) + 0.02F * r2 * std::cos(a2)) &&
+               near(offsets[0].y, 0.01F * r1 * std::sin(a1) + 0.02F * r2 * std::sin(a2)),
+           "the first pellet draws the spread pair and the inaccuracy pair");
+    // Pellet 1: the **same** spread pair, the next inaccuracy pair.
+    expect(near(offsets[1].x, 0.01F * r1 * std::cos(a1) + 0.02F * r3 * std::cos(a3)) &&
+               near(offsets[1].y, 0.01F * r1 * std::sin(a1) + 0.02F * r3 * std::sin(a3)),
+           "the second pellet reuses the spread pair and draws its own inaccuracy");
+    // Pellet 2: the same again.
+    expect(near(offsets[2].x, 0.01F * r1 * std::cos(a1) + 0.02F * r4 * std::cos(a4)) &&
+               near(offsets[2].y, 0.01F * r1 * std::sin(a1) + 0.02F * r4 * std::sin(a4)),
+           "the third pellet reuses the spread pair and draws its own inaccuracy");
+    // The old (wrong) recipe would have drawn a second spread pair for pellet 1,
+    // so its offsets differ from the engine's.
+    const Vec2 old_recipe{.x = 0.01F * r3 * std::cos(a3) + 0.02F * r4 * std::cos(a4),
+                          .y = 0.01F * r3 * std::sin(a3) + 0.02F * r4 * std::sin(a4)};
+    expect(!near(offsets[1].x, old_recipe.x) || !near(offsets[1].y, old_recipe.y),
+           "the second pellet is not the old four-draws-per-pellet recipe");
   }
 
   // A zero-spread weapon fires straight.
@@ -95,16 +172,185 @@ auto main() -> int {
     expect(offset.x == 0.0F && offset.y == 0.0F, "zero spread -> zero offset");
   }
 
-  // The revolver pattern widens the spread radius `r -> 1 - r^2`.
+  // The revolver's `1 - r^2` needs the weapon id **and** the attack type == 1.
+  // The engine applies it to **both** radii.
+  //
+  // **The attack type the transform reads is the *pending* one** — the attack
+  // type of the shot about to be taken. The payload cannot know it (the field is
+  // sticky), so it is `ATTACK_TYPE_UNKNOWN` and the transform is never applied.
   {
-    const auto plain = pellet_offsets(5, 0.1F, 0.0F, 1, SpreadPattern::standard);
-    const auto revolver = pellet_offsets(5, 0.1F, 0.0F, 1, SpreadPattern::revolver);
+    const SpreadRules secondary{.is_revolver = true, .pending_attack_type = ATTACK_TYPE_SECONDARY};
+    const SpreadRules primary{.is_revolver = true, .pending_attack_type = ATTACK_TYPE_PRIMARY};
+    const SpreadRules unknown{.is_revolver = true, .pending_attack_type = ATTACK_TYPE_UNKNOWN};
+    const SpreadRules deagle{.is_revolver = false, .pending_attack_type = ATTACK_TYPE_SECONDARY};
     UniformRandomStream t(5);
     const float r1 = t.random_float(0.0F, 1.0F);
     const float a1 = t.random_float(0.0F, k_two_pi);
-    expect(near(plain[0].x, 0.1F * r1 * std::cos(a1)), "plain spread radius is r");
-    expect(near(revolver[0].x, 0.1F * (1.0F - r1 * r1) * std::cos(a1)),
-           "revolver spread radius is 1 - r^2");
+    const float r2 = t.random_float(0.0F, 1.0F);
+    const float a2 = t.random_float(0.0F, k_two_pi);
+    const float plain = 0.1F * r1 * std::cos(a1) + 0.05F * r2 * std::cos(a2);
+    const float plain_y = 0.1F * r1 * std::sin(a1) + 0.05F * r2 * std::sin(a2);
+    // The engine's transform: **square, then subtract** — two roundings. A
+    // fused multiply-add would round once, and the exact comparison below would
+    // fail for a reason that has nothing to do with the model.
+    float t1 = r1 * r1;
+    t1 = 1.0F - t1;
+    float t2 = r2 * r2;
+    t2 = 1.0F - t2;
+    const float turned = 0.1F * t1 * std::cos(a1) + 0.05F * t2 * std::cos(a2);
+    const float turned_y = 0.1F * t1 * std::sin(a1) + 0.05F * t2 * std::sin(a2);
+
+    const auto standard = pellet_offsets(5, 0.1F, 0.05F, 1, SpreadPattern::standard);
+    expect(near(standard[0].x, plain) && near(standard[0].y, plain_y),
+           "the standard pattern uses both radii as drawn");
+
+    const auto revolver =
+        pellet_offsets(5, 0.1F, 0.05F, 1, SpreadPattern::revolver, secondary);
+    expect(near(revolver[0].x, turned) && near(revolver[0].y, turned_y),
+           "the revolver turns both radii to 1 - r^2 in the secondary mode");
+
+    const auto primary_shot =
+        pellet_offsets(5, 0.1F, 0.05F, 1, SpreadPattern::revolver, primary);
+    expect(near(primary_shot[0].x, plain) && near(primary_shot[0].y, plain_y),
+           "the revolver's transform needs the secondary attack type");
+
+    const auto unknown_shot =
+        pellet_offsets(5, 0.1F, 0.05F, 1, SpreadPattern::revolver, unknown);
+    expect(near(unknown_shot[0].x, plain) && near(unknown_shot[0].y, plain_y),
+           "an unknown attack type applies no transform");
+
+    const auto deagle_shot =
+        pellet_offsets(5, 0.1F, 0.05F, 1, SpreadPattern::revolver, deagle);
+    expect(near(deagle_shot[0].x, plain) && near(deagle_shot[0].y, plain_y),
+           "a weapon that is not the revolver applies no transform");
+
+    // **The observed attack type is evidence and never drives the transform.**
+    // A stale read of `m_weaponMode` (the field holds the engine's *previous*
+    // decision) must not put `1 - r^2` on the shot the engine is about to fire
+    // with the standard cone.
+    {
+      const SpreadRules stale{.is_revolver = true,
+                              .observed_attack_type = ATTACK_TYPE_SECONDARY,
+                              .pending_attack_type = ATTACK_TYPE_UNKNOWN};
+      const auto stale_shot =
+          pellet_offsets(5, 0.1F, 0.05F, 1, SpreadPattern::revolver, stale);
+      expect(near(stale_shot[0].x, plain) && near(stale_shot[0].y, plain_y),
+             "the observed attack type does not drive the transform");
+    }
+  }
+
+  // The negev's `1 - r^(2^k)`: `k = 3 - the recoil index`, for the first three
+  // shots of a burst, and on **both** radii.
+  {
+    UniformRandomStream t(9);
+    const float r1 = t.random_float(0.0F, 1.0F);
+    const float a1 = t.random_float(0.0F, k_two_pi);
+    const float r2 = t.random_float(0.0F, 1.0F);
+    const float a2 = t.random_float(0.0F, k_two_pi);
+    const auto turned = [](float value, int exponent) -> float {
+      for (int step = 0; step < exponent; ++step) {
+        value = value * value;
+      }
+      return 1.0F - value;
+    };
+    const auto shot = [&](int recoil_index) {
+      return pellet_offsets(9, 0.1F, 0.05F, 1, SpreadPattern::negev,
+                            SpreadRules{.recoil_index = recoil_index});
+    };
+    // The spread radius is turned with `r1`, the inaccuracy radius with `r2`.
+    const auto expect_radius = [&](int exponent) {
+      return 0.1F * turned(r1, exponent) * std::cos(a1) +
+             0.05F * turned(r2, exponent) * std::cos(a2);
+    };
+    // The recoil index 0, 1, 2: the exponents 3, 2, 1.
+    expect(near(shot(0)[0].x, expect_radius(3)),
+           "the negev's first shot turns the radii to 1 - r^8");
+    expect(near(shot(1)[0].x, expect_radius(2)),
+           "the negev's second shot turns the radii to 1 - r^4");
+    expect(near(shot(2)[0].x, expect_radius(1)),
+           "the negev's third shot turns the radii to 1 - r^2");
+    // The recoil index 3 and above: no transform.
+    const float plain = 0.1F * r1 * std::cos(a1) + 0.05F * r2 * std::cos(a2);
+    expect(near(shot(3)[0].x, plain), "the negev's fourth shot applies no transform");
+    expect(near(shot(9)[0].x, plain), "a later shot applies no transform");
+    // An unknown recoil counter: no transform.
+    const auto unknown_shot = pellet_offsets(9, 0.1F, 0.05F, 1, SpreadPattern::negev,
+                                              SpreadRules{.recoil_index = RECOIL_INDEX_UNKNOWN});
+    expect(near(unknown_shot[0].x, plain), "an unknown recoil index applies no transform");
+  }
+
+  // The shotgun's **pattern table**: the angle first, then the radius, and the
+  // radius band cycles 0/N, 1/N, …, N-1/N, 0/N, …
+  {
+    expect(!shotgun_pattern_table(1234, 1).has_value(),
+           "a weapon that fires one bullet has no pattern table");
+    expect(!shotgun_pattern_table(1234, 0).has_value(),
+           "a weapon that fires no bullets has no pattern table");
+    const auto table = shotgun_pattern_table(1234, 8);
+    expect(table.has_value(), "the pattern table is built");
+    if (table.has_value()) {
+      UniformRandomStream t(1234);
+      const float angle0 = t.random_float(0.0F, k_two_pi);
+      const float radius0 = t.random_float(0.0F, 0.125F);
+      expect((*table)[0].angle == angle0 && (*table)[0].radius == radius0,
+             "the first entry draws the angle and then the radius of the first band");
+      const float angle1 = t.random_float(0.0F, k_two_pi);
+      const float radius1 = t.random_float(0.125F, 0.25F);
+      expect((*table)[1].angle == angle1 && (*table)[1].radius == radius1,
+             "the second entry draws the second band");
+      // The ninth entry cycles back to the first band: the entries 2..7 sit in
+      // between.
+      for (int i = 0; i < 6; ++i) {
+        (void)t.random_float(0.0F, k_two_pi);
+        (void)t.random_float(static_cast<float>(i + 2) / 8.0F,
+                             static_cast<float>(i + 3) / 8.0F);
+      }
+      const float angle8 = t.random_float(0.0F, k_two_pi);
+      const float radius8 = t.random_float(0.0F, 0.125F);
+      expect((*table)[8].angle == angle8 && (*table)[8].radius == radius8,
+             "the radius band cycles back to the first band");
+    }
+  }
+
+  // The band bounds are computed in **single** precision, like the engine's
+  // (`(float)k * (1.0f / (float)N)`). In double the reciprocal and the product
+  // round differently: over N = 1…64 the two computations disagree on 464 of
+  // the 2 144 band boundaries (`k/N`) by **one ulp**, and the drawn radius moves
+  // with them.
+  //
+  // The seven-bullet table is the pin: its third entry's band (2/7 … 3/7) is one
+  // of the bounds that differ, and the draw on it differs too — so the entry is
+  // the **single** one.
+  {
+    constexpr int k_count = 7;
+    const auto table7 = shotgun_pattern_table(1, k_count);
+    expect(table7.has_value(), "the seven-bullet table is built");
+    if (table7.has_value()) {
+      const float inverse = 1.0F / static_cast<float>(k_count);
+      UniformRandomStream t(1);
+      for (int entry = 0; entry < 2; ++entry) {
+        (void)t.random_float(0.0F, k_two_pi);
+        (void)t.random_float(static_cast<float>(entry) * inverse,
+                             static_cast<float>(entry + 1) * inverse);
+      }
+      (void)t.random_float(0.0F, k_two_pi);
+      const float single = t.random_float(2.0F * inverse, 3.0F * inverse);
+      expect((*table7)[2].radius == single,
+             "the band bounds are the engine's single-precision ones");
+      // **What the double bounds would have given**: the assertion above fails
+      // if the bounds go back to double.
+      const double inverse_double = 1.0 / static_cast<double>(k_count);
+      UniformRandomStream u(1);
+      for (int entry = 0; entry < 2; ++entry) {
+        (void)u.random_float(0.0F, k_two_pi);
+        (void)u.random_float(static_cast<float>(static_cast<double>(entry) * inverse_double),
+                             static_cast<float>(static_cast<double>(entry + 1) * inverse_double));
+      }
+      (void)u.random_float(0.0F, k_two_pi);
+      const float doubled = u.random_float(static_cast<float>(2.0 * inverse_double),
+                                           static_cast<float>(3.0 * inverse_double));
+      expect(doubled != single, "the double bounds give another radius");
+    }
   }
 
   if (failures == 0) {

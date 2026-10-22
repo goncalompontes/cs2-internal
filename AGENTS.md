@@ -63,8 +63,18 @@ patterns in a binary. See [`docs/re/offsets.md`](docs/re/offsets.md) and
 
 ## Where to resume (current work)
 
-**Start at [`NEXT_SESSION_WAVE2.md`](NEXT_SESSION_WAVE2.md) →
-[`docs/handoff-wave2.md`](docs/handoff-wave2.md).**
+**Start at [`NEXT_SESSION_WAVE3.md`](NEXT_SESSION_WAVE3.md) →
+[`docs/handoff-wave3.md`](docs/handoff-wave3.md).**
+
+That is the 2026-10-22 handoff: what landed (eight tasks — the chams' desc
+cache, the Monte-Carlo core and its live wiring, the fire path, the spread
+patterns, the settings ownership, the ledger and the flaky-test fix), the **two
+branches that are not merged** (the payload's fault guard, and the engine trace
+probe — **in that order**, and the probe must be reconciled with the guard),
+and the **live test** the operator has been asking for: rebuild, restart the
+game, inject once, point at a solid wall, and compare the engine's trace with
+our occluder logic. The earlier handoff is
+[`docs/handoff-wave2.md`](docs/handoff-wave2.md).
 
 That is the 2026-10-21 handoff for the feature wave: where every artifact lives
 (the repo, the task worktrees, the neverlose reversal, the Linux box, the OpenCode
@@ -114,26 +124,28 @@ per-weapon profiles) is described in `docs/ragebot.md` and audited in
 injection, live state and overlay are validated on native Windows — see
 `docs/handoff.md` and `docs/windows-validation.md`.
 
-**Uncommitted:** no — the integration tree is clean (2026-10-21). The
+**Uncommitted:** no — the integration tree is clean (2026-10-22). The
 open work is in the task worktrees under `C:\Users\gpmpo\cs2-wt\` (one per
 agent, each on its own branch) and in the task board
 (`orchestrate.status({project: "cs2"})`).
 
 **What is open now** (the specifications are in `docs/orchestration/`):
 
-* **T26 — the chams' draw hook.** The target is **re-derived** (the real
-  `CAnimatableSceneObjectDesc::DrawPrimitive` is at `scenesystem.dll + 0x580A0`
-  — nine arguments, the material at index 3, exactly the payload's existing
-  typedef). The task resolves it through a **dumper signature** (ADR-0012),
-  **verifies the prologue** before it patches, and removes the `thread_local`
-  guard. See `docs/handoff-wave2.md` §5.2.
-* **T27 — the third-person camera's crash.** The hook's address is **valid**
-  on the live build; the fault is the **`thread_local` in the detour** (the
-  payload is manually mapped — the game's threads have no TLS block). See
-  `docs/handoff-wave2.md` §5.1b.
-* **T28 — the curated offsets, resolved offline.** The dumper's `--file` mode
-  resolves the same signatures **without the game**, so a new signature
-  becomes usable without the operator launching CS2.
+* **T42 — the payload's fault guard.** It is the only safety net for an engine
+  call that faults, and it **killed the payload 4 times in 12** on the fault it
+  was written for. It is **implemented and green but was never reviewed** — run
+  the review, then the fix round, then the merge. **This is first.**
+* **T39 — the engine trace probe.** The instrument for the occlusion
+  investigation: it asks the engine its own question (`TraceLineIntervals`) and
+  publishes both answers plus the difference. It is **re-reviewed** and must
+  land **after T42**, reconciled with T42's one-guard rule.
+* **The live run.** The chams' detour, the Monte-Carlo objective, the animfix's
+  graph capture and the **fixed** camera have never run in a real game. The
+  procedure is in `docs/handoff-wave3.md` §4.
+* **The earlier wave's items are closed or recorded**: the chams' draw hook
+  (T26), the third-person camera's crash (T27) and the curated offsets (T28)
+  are merged and re-reviewed — their findings are in
+  `docs/known-issues.md` §2, §5 and §6. See `docs/handoff-wave2.md` §5.
 
 **The protection workstream is in scope again** (the operator's decision,
 2026-10-21 evening): the tasks in `docs/handoff-protect.md` are tasks for this

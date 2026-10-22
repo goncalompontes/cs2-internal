@@ -491,3 +491,37 @@ When you finish a subsystem, update this map and the per-module doc.
 Warm analysis is automatic now (see §8): a later session reuses the stored
 project instead of re-importing. Re-derive addresses from the curated signatures
 (`external/dumper/src/analysis.rs`) rather than memorising them.
+
+---
+
+# Addendum 2026-10-22 (T38) — the shot model, re-derived
+
+**The live build moved again.** The module on disk is now
+
+| | sha256 | size | mtime |
+|---|---|---|---|
+| the live `client.dll` | **`5a46a09b521bbd607012146364dafae2abfa50364246638391990d4c7dfb9d49`** | 39 205 528 B | **2026-10-21 18:37** |
+
+(the build the notes above call `659940c1` is one auto-update older). The **six
+addresses** the rewrite re-checked against the on-disk build **all still hold**
+(the table in [`aim.md` §"The build"](aim.md#the-build)); the **schema offsets**
+are unaffected.
+
+[`aim.md`](aim.md) was **rewritten** for it. The new sections:
+
+| Section | What it settles |
+|---|---|
+| [§ The build](aim.md#the-build) | the three builds' hashes, and the **old → current → live** address table (`FX_FireBullets` `0xd237d0`, the cone sampler `0xd23fe0`, the pattern lookup `0x7cdad0`, the pattern table global `0x1822195e8`) |
+| [§ The spread cone](aim.md#the-spread-cone--fun_180d23fe0-rva-0xd23fe0) | the **draw order**: the spread pair **once** for the shot, the inaccuracy pair **per pellet**; the three debug convars; the negev's and the revolver's rules |
+| [§ The attack type](aim.md#the-attack-type) | `m_weaponMode` (`weapon + 0x1A00`), the `CSWeaponMode` enum, the **four** `CSBaseGunFire` call sites and what each passes, the stickiness that makes the field **evidence** rather than knowledge — and the payload's decision: it **cannot** know the pending shot's attack type, so the revolver's transform is **never** applied |
+| [§ The pattern table](aim.md#the-pattern-table) | the global, the `0x608`-byte block, the **three regions**, the **two builders**, the VData inputs, the index formula, the `< 0x40` bound, the **single-precision** band bounds and the convar gate |
+| [§ The RNG](aim.md#the-rng) | tier0's `CUniformRandomStreamImpl` against the payload's `UniformRandomStream`: the **integer stream is bit-identical**, the float conversion differs by ≤ 1 ulp |
+
+**The repo's own model was wrong** for multi-pellet weapons: it drew four
+numbers per pellet, so its stream desynchronised from pellet 1 onward. The
+payload's model is fixed (`payload/aim/src/spread.cpp`); **the single-pellet
+case is bit-identical for the standard pattern** (the golden vector pins it).
+**The R8's offsets change by design** — §2.3 replaces the designer-name rule
+with the engine's `id + attackType == 1` rule, the payload cannot prove the
+pending attack type (§2.2), so the R8 is scored with the standard cone, and
+where the transform *is* on it covers the **inaccuracy** radius too.

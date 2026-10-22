@@ -261,6 +261,32 @@ class TestPingValidator(unittest.TestCase):
         self.assertIs(validate_ping(raw), raw)
 
 
+class TestRageResult(unittest.TestCase):
+    """The typed rage status declares the keys the payload writes.
+
+    The typed view is the harness's own contract (``docs/ragebot.md`` §15):
+    a key the payload writes but the type does not declare is a key the
+    client cannot read without a ``type: ignore``.
+    """
+
+    def test_the_ownership_keys_are_declared(self) -> None:
+        """The rage status says who owns what — the type has to say it too."""
+        keys = set(protocol.RageResult.__annotations__)
+        for key in ("objective", "objective_value", "objective_global",
+                    "objective_source", "objective_global_source",
+                    "menu_objective", "menu_fields"):
+            with self.subTest(key=key):
+                self.assertIn(key, keys)
+
+    def test_the_ownership_keys_are_strings(self) -> None:
+        """The owners and the field list are names, not numbers."""
+        hints = get_type_hints(protocol.RageResult)
+        for key in ("objective_source", "objective_global_source",
+                    "menu_objective", "menu_fields"):
+            with self.subTest(key=key):
+                self.assertIs(hints[key], str)
+
+
 class TestValidatorWiring(unittest.TestCase):
     """The validator has to run where the payload's answer is read."""
 

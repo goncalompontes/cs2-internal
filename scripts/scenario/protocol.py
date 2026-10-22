@@ -789,7 +789,29 @@ class RageResult(TypedDict, total=False):
     hitbox: int
     solves: int
     writes: int
+    #: The **engine's** shots: the clip fell while the ragebot was pressing
+    #: (a reload and a failed clip read are not shots).
     shots: int
+    #: The ragebot's **attempts**: the ticks the fire path decided to assert
+    #: the attack.
+    presses: int
+    #: The release->re-press **edges** the fire path produced.
+    edges: int
+    #: The weapon's fire mode as the payload reads it: ``auto``, ``semi`` or
+    #: ``unknown`` (``docs/ragebot.md`` §15).
+    fire_mode: str
+    #: The fire path's gate's verdict: ``ok`` when the shot can be taken, the
+    #: blocking condition's name when it cannot (``no-solve``, ``fire-off``,
+    #: ``clip-unknown``, ``no-ammo``, ``reloading``, ``deploying``, ``edge``,
+    #: ``interval``, ``rate-unknown``).
+    fire_refusal: str
+    #: Whether the **player** is known to be holding the trigger.
+    player_attack: bool
+    #: What the payload knows about the **player's** own press of the trigger:
+    #: ``held``, ``released`` or ``unknown`` (the payload cannot tell the
+    #: player's press from its own, and an unknown reading never removes the
+    #: attack bit).
+    player_press: str
     occluders: int
     occlusion_query_complete: bool
     occlusion_query_issues: int
@@ -806,6 +828,22 @@ class RageResult(TypedDict, total=False):
     objective_value: int
     #: The **global** objective's name (the setting, not the effective one).
     objective_global: str
+    #: Who owns the objective **in force** (the effective one): ``"menu"``,
+    #: ``"control"`` or ``"profile"`` — a per-weapon profile's objective
+    #: comes from the profile file, so no channel owns it.
+    objective_source: str
+    #: Who owns the **global** objective (the setting the two channels
+    #: write): ``"menu"`` or ``"control"``.
+    objective_global_source: str
+    #: The objective the **menu's tab is showing** (the shared block's byte).
+    #: It differs from :attr:`objective` when the control channel owns the
+    #: objective: the menu has three options and cannot show the
+    #: Monte-Carlo one, so the tab and the ragebot can disagree.
+    menu_objective: str
+    #: The rage fields the **menu** owns, comma-separated. A field that is
+    #: not in the list belongs to the control channel. This is the
+    #: **ownership map**, not a log of recent edits.
+    menu_fields: str
     #: The Monte-Carlo objective's own state: the sample count in force, the
     #: seed policy, the numbers the last solve produced and the reason it
     #: refused if it did.

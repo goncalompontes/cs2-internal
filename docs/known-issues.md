@@ -461,3 +461,200 @@ status line's 192-byte bound) and `hooks-inline` (the trampoline's lifetime).
 
 **What is not:** the live run. Nothing in this section has been observed in
 the game.
+
+---
+
+## 15. The desc-cache probe's flakiness (2026-10-22)
+
+> Added with task T41. The finding is **reported** and the fix is **not
+> merged**, so the row below stays until the merge **and** a re-review.
+
+| # | severity | finding | where | fix |
+|---|---|---|---|---|
+| **H12** | major | **The desc cache's acceptance test was flaky — it failed one run in four on a fast machine, and it had nothing to do with the cache.** `features-chams-desc-cache` asserted four *counts* — "the generation really advanced", "the probe still read the cache" (twice) and "the reader gave up at least once" — and every one of them was a statement about the **scheduler**, not about the cache. The **shipped cache reported zero mismatches in every run**, including the two that failed: run 1 printed `0 hits` with 160 000 give-ups, run 2 printed `0 advances`. The control (the old three-atomic protocol) reported between **0 and 23 257** mismatches across runs and was **printed, not asserted**, so it proved nothing. A flaky test in the merged tree fails CI and trains everyone to ignore red, and it made T33's "the probe bites" indistinguishable from "the test is noisy". | `payload/features/tests/test_chams_desc_cache.cpp` | **fixed, not merged** — branch `feat/t41-flaky-desc-cache-test` (`9eaeb74`, `ed752ec`, `d1bfe58`): every check is now an **invariant** or an **arranged** fact (the test drives the contention until the path it wants to cover has been taken, and the bumps are the main thread's own), and the **control is asserted** on an interleaving that is put together by hand, so it fails on every run. The shipped cache is **unchanged**. |
+
+**What is verified:** the host test `features-chams-desc-cache` — **twenty
+runs in a row with zero failures**, and the **old protocol** put back into the
+shipped cache (`payload/features/include/cs2/features/chams.hpp`, the class's
+interface unchanged) — **twenty runs, every one of them failing**. Two
+variants were used: the old protocol **with** the generation check (the
+harder case — the failure is then attributable to the concurrency defect
+alone: four checks fail, two of them the "never pairs two writes"
+invariants) and the **literal** three-atomic protocol of the pre-T33 cache,
+without the generation check (six checks fail, the two generation ones among
+them). The contention is unchanged: four threads, two descs in one slot, a
+generation bump under a concurrent publisher, and eight writers hammering
+one slot.
+
+**What is not:** the live run. Nothing here has been observed in the game —
+the probe is a host test, and the cache it drives is the shipped one.
+
+
+
+---
+
+## 16. The settings sink clobbered the control channel's rage values (2026-10-22)
+
+> Added with task T40
+> (`docs/orchestration/spec-t40-control-owns-settings.md`). **Fixed on the
+> branch `feat/t40-control-owns-settings`** — the rule, the status's new keys
+> and the host test are in `docs/ragebot.md` §15. **The live run is still the
+> operator's**: nothing below has been exercised in the game.
+
+### 16.1 The finding
+
+The overlay's settings sink (`payload/src/payload_main.cpp`,
+`on_movement_settings`) re-applied the **whole** rage group on **every**
+publication, and the menu publishes its block every frame — so whatever the
+control channel had set was overwritten within a second:
+
+```
+cs2_rage {objective: "expected"}   ->  the answer says  objective: "expected"
+cs2_rage {}          (a second)   ->  the answer says  objective: "hitchance"
+```
+
+**It was not specific to the objective.** Every rage field the wire owns was
+clobbered the same way (`enabled`, `key`, `fire`, `objective`, `hitbox`, `fov`,
+`min_damage`, `min_hitchance`, `autostop`, `autoscope`, `autoreload`,
+`only_visible`, `mode`, `per_weapon`, `recoil`, `stop_speed`, `backtrack`), so
+the harness's control of the ragebot was transient for all of them.
+
+**It made the T35 feature unreachable.** The Monte-Carlo objective is
+selectable **only** over the control channel (the menu has no such option, by
+design), so the operator selected it and a frame later it was gone: the
+feature T35 shipped was inert in practice.
+
+**How it was found:** by the operator trying to use the feature in a live
+game on 2026-10-22, and by the orchestrator chasing why the objective would
+not stick. This ledger had no entry for it (a grep for `clobber`,
+`settings sink`, `on_movement_settings` and the wire/objective pairing
+returned nothing) — the repo did not know about it.
+
+### 16.2 The fix
+
+The rule, the fields, the recomputed-value question and the status's new keys
+are in `docs/ragebot.md` §15. In short: the sink compares the block's rage
+group against the menu's **last view** and writes only the fields the operator
+changed; the service applies only the fields the write carries; the status
+carries `objective_source`, `objective_global_source`, `menu_objective` and
+`menu_fields`.
+
+**The wire block and the menu are not touched**, and the block's version is
+not bumped: it is shared between two separately compiled binaries, and a
+version bump is a silent-corruption risk.
+
+### 16.3 The limits the fix has (read this before the live run)
+
+Two limits are **inherent** to the rule, and both are documented where the
+operator reads them (`docs/ragebot.md` §15.1):
+
+* **An action that leaves the displayed value unchanged is invisible to the
+  rule.** Dear ImGui's combo writes its index only when the selection
+  differs, so clicking the entry the menu already shows writes nothing into
+  the block — the mask is empty and the control channel's value stays in
+  force. With the Monte-Carlo objective in force the menu's `Objective` combo
+  still reads "Hitchance" (it has three options and cannot show the
+  Monte-Carlo one), so **clicking "Hitchance" does not take the objective
+  back**: the operator has to pick a *different* value first ("Damage"), then
+  pick the wanted one. A real fix needs the operator's *action* rather than
+  the value — Dear ImGui's `MarkItemEdited` — and **the menu is out of scope**
+  for this task, so the difference is reported in the status instead
+  (`objective` is what runs, `menu_objective` is what the tab shows).
+* **The first publication applies the whole group**, so a control-channel
+  value set before the menu's first frame is undone by it. The window is
+  **one frame** wide (the game's first `Present` after the injection); the
+  mitigation is to re-assert the objective after the first frame.
+
+**The movement group still has the old shape**: the menu re-applies the
+auto-strafe and the bhop every frame, so a control-side `strafe`/`bhop` set is
+still corrected on the next frame (`docs/control-harness.md` §"Where the
+movement features are controlled"). The ESP and the chams are driven from the
+block itself, so the `settings` route still works for them.
+
+### 16.4 The tests
+
+The host test `control-rage-settings`
+(`payload/control/tests/test_control_rage_settings.cpp`) covers the rule, and
+every check in it was **broken on purpose** in a scratch copy to prove it can
+fail:
+
+| the break | the check that caught it |
+|---|---|
+| the sink applies the whole group on every publication (the defect) | "the sink consults the rule before it applies" |
+| the sink consults the rule but the write ignores it | "the write carries the fields the operator changed" |
+| the comparison forgets a field | "… is a field the rule covers" |
+| the comparison always reports every field | "an unchanged block reports nothing" |
+| a NaN in the block is reported as a change on every frame | "a NaN is not a change: the field is treated as unchanged" |
+| the objective is reported as changed on every publication | "the pull-back converges: the next publication reports nothing" |
+| the weapon's bytes are compared instead of its name | "a stale byte after the NUL is not a change of the name" |
+| the ownership is inverted | "a set bit means the menu owns the field" |
+| a rage field is added to the wire and the rule does not cover it | "every rage field the wire owns is either compared or excluded on purpose" |
+| the service stores a field without a mask | "the service masks every rage field" |
+| the status stops saying who owns the objective | "the status says which channel owns the objective in force" |
+| the status stops naming the objective the menu's tab shows | "the status says which objective the menu's tab is showing" |
+| the menu's float slider writes the block back | "the menu's float slider does not write the value back" |
+
+**What is verified:** the host tests — `control-rage-settings` (the rule, the
+coverage, the wiring) and the rest of the suite (`meson test`, 60 tests), plus
+the payload, the overlay and the injector builds.
+
+**What is not:** the live run. **The operator's steps for this fix are in
+`docs/ragebot.md` §15.6** (not in `docs/operator-live-check.md` §6, which is
+T35's checklist and does not carry the ownership steps).
+
+---
+
+## 17. This session's open items (2026-10-22)
+
+The full handoff is [`docs/handoff-wave3.md`](handoff-wave3.md). These are the
+rows the next session needs; the rest of the wave's state is there.
+
+| # | severity | finding | where | state |
+|---|---|---|---|---|
+| **G1** | **blocker (live)** | **The payload's fault guard does not work on the build it ships in, and it kills the game.** The vectored handler in `payload/diag/src/crash_handler.cpp` was `noexcept`, so its frame carried a **C++ exception-handler record whose action is `std::terminate`**; MSVC's `longjmp` unwinds the frames it leaves, so that cleanup ran and the runtime **fast-failed with `0xC0000409`** — a fast fail **bypasses the vectored handlers**, so the guard never recovered. It has **fired 12 times**, every one the **tier0 allocator fault** (`read addr=0x40`) the guard was written for, and **4 of the 12 killed the payload** (it had to be re-injected). The **MSVC-built** copy of any test passes on the broken code, which is why the host suite could never have caught it. | `payload/diag/src/crash_handler.cpp` | **fixed on `feat/t42-guard-recovery`** (`1695973`), **not merged** — the review never ran (the report is an empty stub) |
+| **G2** | **major** | **The engine trace probe passes the wrong results container.** The probe handed `TraceLineIntervals` the **overlap** query's layout (record pointer at `+0x10`) while the live build reads the trace's record pointer at **`+0x08`** (capacity `+0x10`, flags `+0x14`, the external-buffer bit **`0x40000000`**). The engine either faulted or wrote into a buffer the probe never read — and then the probe published `interval_count > 0` with an **empty** interval list and computed its verdict from that empty list, i.e. it reported **"agrees" while the engine had hit the wall**. | `payload/control/src/occlusion_query.cpp` | **fixed on `feat/t39-trace-probe`** (`fa98422`), re-reviewed **SHIP WITH FIXES** — **not merged**; it must land **after** G1 and be reconciled with it |
+| **G3** | minor | The probe's results buffer is **320 records on the stack** and the engine appends at `data[count]` with its growth skipped, so a ray crossing more than 320 solids would write **past** it — stack corruption in the game's input path, which the guard **cannot** catch. The "bounded" claim rests on an unproven bound. | `payload/control/src/occlusion_query.cpp` | **not fixed** |
+| **G4** | minor | A code comment promises a refusal the probe does not implement: it says *"the probe refuses to answer while the world's cache is cold"*, but the probe **parses ~10 k brush shapes inside the `CreateMove` hook** and only publishes the fact afterwards. | `payload/control/src/service.cpp` | **not fixed** (the published `world_cached` is truthful; only the comment is not) |
+| **G5** | minor | Three documents still claim that a wrong engine call **aborts the process** because the payload has no exception tables. That was **false** (the injector registers the `.pdata`, and the guard's `longjmp` needs them) and G1's fix makes it false in a second way. | `docs/re/occlusion.md:321`, `docs/ragebot.md:462`, `docs/re/chams.md:501` | **not fixed** — the files are outside the tasks' ownership |
+| **G6** | minor | The status now reports **"standard"** for **every** weapon, because the revolver's transform is off while the pending attack type is unknown. The weapon's *class* is lost from the status. | `payload/control/include/cs2/control/rage_objective.hpp` | **not fixed** (T38's re-review) |
+| **G7** | minor | Reading the convar `weapon_accuracy_shotgun_spread_patterns` needs a **new dumper signature** (ADR-0012). It is what keeps the shotgun's pattern **refused** — the table itself is reproducible and the convar is **off by default**, so the payload *could* model the default and be right unless a server enables it. | `external/dumper/src/analysis.rs` | **not fixed** — reported by T38 and T39 |
+| **G8** | nit | The desc-cache probe's flakiness (H12) is **fixed and merged** (`b28e805`), so the row may be **deleted**. | `docs/known-issues.md` §15 | **the row is still here** — deleting it is the next session's first ledger edit |
+
+### 17.1 The orchestrator's decisions this session
+
+**2026-10-22 — a task may merge over a `DO NOT SHIP` review.** The operator
+asked for the ability to live-test features that still carry findings:
+`orchestrate.merge({..., allow_unreviewed: true})` overrides the review gate.
+The **verify loop is not** overridable — the merged tree must compile and pass,
+which is the right line: a behavioural finding may ride to the live test, a
+broken build may not.
+
+**2026-10-22 — the verify loop runs the payload's tests.** The `payload tests`
+step was added to the cs2 project's verify list, because the payload's
+**clang-cl** copy of a test is the only one that can catch a clang-cl-only
+defect — and G1 is exactly that.
+
+**2026-10-22 — the protection workstream is in the integration branch anyway.**
+A **parallel session** merged it (T20a, T23a, T23b, T24) while this session
+worked, although `AGENTS.md` still calls it out of scope. That is the
+**operator's** call, not the orchestrator's; it is in the tree.
+
+### 17.2 The corrections the implementers forced on the orchestrator
+
+Recorded because they are the kind of thing the next spec will get wrong
+again:
+
+* the shotgun pattern table's band **cycles** (`0…N−1,0…`) — it is **not**
+  `min(counter, N−1)`;
+* the trace's results container is **not** the overlap query's: the record
+  pointer is at **`+0x08`** and the external-buffer bit is **`0x40000000`** at
+  `+0x14`;
+* the payload's log was **not** empty: **12** guarded faults, **4** of them
+  fatal (the split must skip the stack-frame lines the diag handler logs before
+  it dies);
+* a `noexcept` frame is not "nounwind with no unwind information" — it carries
+  a **terminate** cleanup, and the runtime's `longjmp` runs it.
+
+**The lesson:** three times, a careful implementer re-derived the engine
+instead of trusting the spec, and **the engine was right every time**. Write the
+specs from the **live build**.

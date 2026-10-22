@@ -6,8 +6,9 @@ payload, then lets the payload's own per-frame solve + per-tick silent write +
 attack do the work. It asserts:
 
 * the payload's ``rage`` status shows solves climbing (the render-thread solve
-  runs) and ``writes``/``shots`` climbing (the per-tick ``Input::apply`` writes
-  the silent sub-tick angle and presses attack);
+  runs), ``writes`` climbing (the per-tick ``Input::apply`` writes the silent
+  sub-tick angle) and ``shots`` climbing (the **engine's** shots: the clip
+  fell — the fire path's own attempts are ``presses``);
 * the bot's **health drops** (the shot follows the silent angle);
 * the **camera does not move** (the aim is silent).
 
@@ -117,10 +118,18 @@ def run(game: Game, *, hold: float = HOLD_SECONDS, map_name: str = "de_dust2",
     solves = int(rage_status.get("solves", 0))
     writes = int(rage_status.get("writes", 0))
     shots = int(rage_status.get("shots", 0))
+    presses = int(rage_status.get("presses", 0))
+    fire_refusal = str(rage_status.get("fire_refusal", ""))
     if solves == 0:
         raise SessionError(f"ragebot never solved: {diagnostics}")
     if writes == 0:
         raise SessionError(f"ragebot never wrote the silent angle: {diagnostics}")
+    if fire and presses == 0:
+        # The fire path never asserted the attack. The gate refused, and the
+        # refusal **names** the condition (``docs/ragebot.md`` §15.3) — a
+        # silent refusal is the defect this block exists to catch.
+        raise SessionError(
+            f"ragebot never pressed attack (refusal: {fire_refusal or 'unknown'}): {diagnostics}")
     if fire and shots == 0:
         raise SessionError(f"ragebot never fired: {diagnostics}")
 
@@ -140,4 +149,6 @@ def run(game: Game, *, hold: float = HOLD_SECONDS, map_name: str = "de_dust2",
         "solves": solves,
         "writes": writes,
         "shots": shots,
+        "presses": presses,
+        "fire_refusal": fire_refusal,
     }

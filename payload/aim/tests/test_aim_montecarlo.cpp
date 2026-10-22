@@ -80,7 +80,7 @@ auto main() -> int {
     for (int index = 0; index < 8; ++index) {
       const auto seed = cs2::aim::md5_pseudo_random(static_cast<std::uint32_t>(1000 + index));
       const auto engine = cs2::aim::pellet_offsets(seed, kernel.spread, kernel.inaccuracy,
-                                                   kernel.pellets, kernel.pattern);
+                                                   kernel.pellets, kernel.pattern, kernel.rules);
       const auto count = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{mine});
       expect(count.has_value() && *count == kernel.pellets, "the sampler draws every pellet");
       expect(engine.size() == mine.size(), "the offsets have the same count");
@@ -97,14 +97,19 @@ auto main() -> int {
     }
     expect(mismatches == 0, "the sampler's offsets are bit-identical to the engine's");
 
-    // The revolver's `r -> 1 - r^2` transform is part of the draw.
+    // The revolver's `r -> 1 - r^2` transform is part of the draw — and it needs
+    // the weapon id **and** the attack type == 1.
     const SpreadKernel revolver{.spread = 0.02F,
                                 .inaccuracy = 0.01F,
                                 .pellets = 2,
-                                .pattern = cs2::aim::SpreadPattern::revolver};
+                                .pattern = cs2::aim::SpreadPattern::revolver,
+                                .rules = cs2::aim::SpreadRules{
+                                    .is_revolver = true,
+                                    .pending_attack_type = cs2::aim::ATTACK_TYPE_SECONDARY}};
     const auto seed = cs2::aim::md5_pseudo_random(4242U);
     const auto engine = cs2::aim::pellet_offsets(seed, revolver.spread, revolver.inaccuracy,
-                                                 revolver.pellets, revolver.pattern);
+                                                 revolver.pellets, revolver.pattern,
+                                                 revolver.rules);
     std::vector<Vec2> revolver_offsets(2);
     const auto revolver_count =
         cs2::aim::draw_pellet_offsets(seed, revolver, std::span<Vec2>{revolver_offsets});
@@ -117,6 +122,56 @@ auto main() -> int {
       }
     }
     expect(revolver_mismatches == 0, "the revolver pattern is drawn the same way");
+
+    // The **same** weapon with the primary attack type: the transform is off, and
+    // the two assemblies agree on that too.
+    SpreadKernel primary = revolver;
+    primary.rules.pending_attack_type = cs2::aim::ATTACK_TYPE_PRIMARY;
+    const auto primary_engine = cs2::aim::pellet_offsets(seed, primary.spread, primary.inaccuracy,
+                                                          primary.pellets, primary.pattern,
+                                                          primary.rules);
+    std::vector<Vec2> primary_offsets(2);
+    const auto primary_count =
+        cs2::aim::draw_pellet_offsets(seed, primary, std::span<Vec2>{primary_offsets});
+    expect(primary_count.has_value() && *primary_count == 2, "the primary shot draws its pellets");
+    int primary_mismatches = 0;
+    for (std::size_t i = 0; i < primary_engine.size(); ++i) {
+      if (primary_engine[i].x != primary_offsets[i].x ||
+          primary_engine[i].y != primary_offsets[i].y) {
+        ++primary_mismatches;
+      }
+    }
+    expect(primary_mismatches == 0, "the primary attack type is drawn the same way");
+    expect(primary_offsets[0].x != revolver_offsets[0].x ||
+               primary_offsets[0].y != revolver_offsets[0].y,
+           "the revolver's transform needs the secondary attack type");
+
+    // The negev's `r -> 1 - r^(2^k)`: the recoil index 2 is the third shot of a
+    // burst, so the exponent is 1 and both radii become `1 - r^2`.
+    const SpreadKernel negev{.spread = 0.02F,
+                             .inaccuracy = 0.01F,
+                             .pellets = 1,
+                             .pattern = cs2::aim::SpreadPattern::negev,
+                             .rules = cs2::aim::SpreadRules{.recoil_index = 2}};
+    const auto negev_seed = cs2::aim::md5_pseudo_random(31337U);
+    std::vector<Vec2> negev_offsets(1);
+    const auto negev_count =
+        cs2::aim::draw_pellet_offsets(negev_seed, negev, std::span<Vec2>{negev_offsets});
+    expect(negev_count.has_value() && *negev_count == 1, "the negev shot draws its pellet");
+    {
+      cs2::aim::UniformRandomStream stream(negev_seed);
+      float r1 = stream.random_float(0.0F, 1.0F);
+      const float a1 = stream.random_float(0.0F, cs2::aim::TWO_PI);
+      float r2 = stream.random_float(0.0F, 1.0F);
+      const float a2 = stream.random_float(0.0F, cs2::aim::TWO_PI);
+      r1 = r1 * r1;
+      r1 = 1.0F - r1;
+      r2 = r2 * r2;
+      r2 = 1.0F - r2;
+      expect(negev_offsets[0].x == 0.02F * r1 * std::cos(a1) + 0.01F * r2 * std::cos(a2) &&
+                 negev_offsets[0].y == 0.02F * r1 * std::sin(a1) + 0.01F * r2 * std::sin(a2),
+             "the negev's radii are turned to 1 - r^2 on the third shot of a burst");
+    }
 
     // A golden vector: the exact offsets of one seed, so a change in the RNG itself
     // cannot pass unnoticed by the cross-check above (both sides use the same
@@ -366,7 +421,10 @@ auto main() -> int {
 
   // --- 6. the union over the pellets ----------------------------------------
   {
-    const SpreadKernel kernel{.spread = 0.05F, .inaccuracy = 0.0F, .pellets = 2};
+    // The **inaccuracy** is not zero here: the engine draws the *spread* pair
+    // once for the shot and the *inaccuracy* pair per pellet, so a weapon with
+    // no inaccuracy fires every pellet along the same ray.
+    const SpreadKernel kernel{.spread = 0.05F, .inaccuracy = 0.02F, .pellets = 2};
     const auto seed = cs2::aim::md5_pseudo_random(4242U);
     std::vector<Vec2> offsets(2);
     const auto drawn = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{offsets});
@@ -771,7 +829,7 @@ auto main() -> int {
     // whole damage used to be credited to the target of the **nearest** hit, so
     // the near target's slot carried 200 — the M2 bug one level down, and the
     // can-kill key then compared one target's health with two targets' damage.
-    const SpreadKernel kernel{.spread = 0.05F, .inaccuracy = 0.0F, .pellets = 2};
+    const SpreadKernel kernel{.spread = 0.05F, .inaccuracy = 0.02F, .pellets = 2};
     const auto seed = cs2::aim::md5_pseudo_random(4242U);
     std::vector<Vec2> offsets(2);
     const auto drawn = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{offsets});
@@ -833,6 +891,91 @@ auto main() -> int {
     expect(sample.has_value() && near(sample->pellet_damage[0] + sample->pellet_damage[1],
                                        sample->damage, 1e-3F),
            "the per-pellet damage sums to the sample's damage");
+  }
+
+  // --- 14. the draw order is the engine's ----------------------------------
+  {
+    // The engine draws the **spread** radius and angle **once** for the shot and
+    // the **inaccuracy** radius and angle **per pellet**. The old recipe drew all
+    // four per pellet, so the stream desynchronised from pellet 1 onward.
+    const SpreadKernel kernel{.spread = 0.05F, .inaccuracy = 0.02F, .pellets = 3};
+    const auto seed = cs2::aim::md5_pseudo_random(4242U);
+    std::vector<Vec2> offsets(3);
+    const auto drawn = cs2::aim::draw_pellet_offsets(seed, kernel, std::span<Vec2>{offsets});
+    expect(drawn.has_value() && *drawn == 3, "the draw-order case draws every pellet");
+
+    cs2::aim::UniformRandomStream stream(seed);
+    const float r1 = stream.random_float(0.0F, 1.0F);
+    const float a1 = stream.random_float(0.0F, cs2::aim::TWO_PI);
+    const float r2 = stream.random_float(0.0F, 1.0F);
+    const float a2 = stream.random_float(0.0F, cs2::aim::TWO_PI);
+    const float r3 = stream.random_float(0.0F, 1.0F);
+    const float a3 = stream.random_float(0.0F, cs2::aim::TWO_PI);
+    const float r4 = stream.random_float(0.0F, 1.0F);
+    const float a4 = stream.random_float(0.0F, cs2::aim::TWO_PI);
+    expect(offsets[0].x == 0.05F * r1 * std::cos(a1) + 0.02F * r2 * std::cos(a2) &&
+               offsets[0].y == 0.05F * r1 * std::sin(a1) + 0.02F * r2 * std::sin(a2),
+           "the first pellet draws the spread pair and the inaccuracy pair");
+    expect(offsets[1].x == 0.05F * r1 * std::cos(a1) + 0.02F * r3 * std::cos(a3) &&
+               offsets[1].y == 0.05F * r1 * std::sin(a1) + 0.02F * r3 * std::sin(a3),
+           "the second pellet reuses the spread pair and draws its own inaccuracy");
+    expect(offsets[2].x == 0.05F * r1 * std::cos(a1) + 0.02F * r4 * std::cos(a4) &&
+               offsets[2].y == 0.05F * r1 * std::sin(a1) + 0.02F * r4 * std::sin(a4),
+           "the third pellet reuses the spread pair and draws its own inaccuracy");
+
+    // A weapon with **no inaccuracy** fires every pellet along the same ray: the
+    // engine's spread pair is shared.
+    const SpreadKernel tight{.spread = 0.05F, .inaccuracy = 0.0F, .pellets = 3};
+    std::vector<Vec2> tight_offsets(3);
+    const auto tight_drawn =
+        cs2::aim::draw_pellet_offsets(seed, tight, std::span<Vec2>{tight_offsets});
+    expect(tight_drawn.has_value() && *tight_drawn == 3, "the tight case draws every pellet");
+    expect(tight_offsets[0].x == tight_offsets[1].x && tight_offsets[0].y == tight_offsets[1].y,
+           "without an inaccuracy the pellets share the shot's spread pair");
+  }
+
+  // --- 15. the kernel carries the profile's rules --------------------------
+  {
+    cs2::aim::WeaponProfile weapon;
+    weapon.weapon_type = 3;  // a rifle: the standard pattern is modelled
+    weapon.spread = 0.02F;
+    weapon.inaccuracy = 0.01F;
+    weapon.is_revolver = true;
+    weapon.observed_attack_type = cs2::aim::ATTACK_TYPE_SECONDARY;
+    weapon.recoil_index = 1;
+    const auto kernel = cs2::aim::spread_kernel(weapon, 1, cs2::aim::SpreadPattern::revolver);
+    expect(kernel.has_value(), "the kernel is built");
+    expect(kernel->rules.is_revolver, "the kernel carries the VData's revolver flag");
+    expect(kernel->rules.recoil_index == 1, "the kernel carries the recoil counter");
+
+    // **The observed attack type is evidence, and it never reaches the
+    // transform.** The field (`m_weaponMode`) is sticky: a payload that reads
+    // it before the engine fires reads the engine's **previous** decision, so
+    // keying the revolver's `1 - r^2` on it would transform a shot the engine
+    // fires with the **standard** cone. The pending shot's attack type is
+    // therefore **unknown**, and the transform is off.
+    expect(kernel->rules.observed_attack_type == cs2::aim::ATTACK_TYPE_SECONDARY,
+           "the kernel carries the observed attack type as evidence");
+    expect(kernel->rules.pending_attack_type == cs2::aim::ATTACK_TYPE_UNKNOWN,
+           "the stale attack type never reaches the transform");
+    expect(cs2::aim::radius_transform(cs2::aim::SpreadPattern::revolver, kernel->rules) ==
+               cs2::aim::RadiusTransform::none,
+           "the kernel applies no revolver transform");
+
+    // A profile that knows nothing applies no transform: the conservative
+    // reading of an unknown attack type or recoil counter.
+    cs2::aim::WeaponProfile plain;
+    plain.weapon_type = 3;
+    const auto plain_kernel =
+        cs2::aim::spread_kernel(plain, 1, cs2::aim::SpreadPattern::revolver);
+    expect(plain_kernel.has_value(), "the plain kernel is built");
+    expect(!plain_kernel->rules.is_revolver, "an unknown weapon is not the revolver");
+    expect(plain_kernel->rules.observed_attack_type == cs2::aim::ATTACK_TYPE_UNKNOWN,
+           "an unknown weapon has an unknown observed attack type");
+    expect(plain_kernel->rules.pending_attack_type == cs2::aim::ATTACK_TYPE_UNKNOWN,
+           "an unknown weapon has an unknown pending attack type");
+    expect(plain_kernel->rules.recoil_index == cs2::aim::RECOIL_INDEX_UNKNOWN,
+           "an unknown weapon has an unknown recoil counter");
   }
 
   if (failures == 0) {

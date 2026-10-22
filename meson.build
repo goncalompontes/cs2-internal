@@ -347,6 +347,26 @@ test('control-rage-objective', control_rage_objective_test,
   args : [meson.current_source_dir()],
 )
 
+# The ragebot's settings **ownership rule** (T40): the pure comparison that
+# decides whether the operator changed a rage field, the wire's rage group as a
+# snapshot, and the field names the status reports. The rule is pure, so the
+# test compiles the header alone; it reads `wire.hpp` to prove the comparison
+# covers every rage field the wire owns, and it reads the payload's entry point
+# and the service to prove the wiring (the sink consults the rule before it
+# applies, and the service applies only the fields the write carries).
+control_rage_settings_test = executable('control_rage_settings_test',
+  files(
+    'payload/control/tests/test_control_rage_settings.cpp',
+  ),
+  include_directories : [
+    include_directories('payload/control/include'),
+    include_directories('overlay/include'),
+  ],
+)
+test('control-rage-settings', control_rage_settings_test,
+  args : [meson.current_source_dir()],
+)
+
 # The per-weapon rage profile's **line codec** (`cs2/control/rage_config.hpp`):
 # the text format of `cs2-rage.cfg` is a property of the file, not of the file
 # system, so the codec is pure and the host test drives it — the round trip
