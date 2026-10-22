@@ -168,8 +168,9 @@ scenario's own `jointeam` — or `"auto"`, the server assigned the team).
   feature on and are removed when they turn it off. (Two hooks are not tied
   to a switch: the present hook installs once at start-up, and the animfix's
   two install on the game's first CreateMove and are never removed — the
-  animfix's detour is inert while the animfix is off.) If a **feature** hook
-  is installed while its feature is off, that is a bug — report it.
+  animfix only *corrects* while it is on; the codec detour just counts the
+  decodes.) If a **feature** hook is installed while its feature is off, that
+  is a bug — report it.
 - **No `thread_local` in a detour.** The payload is manually mapped: only the
   injector's entry thread has a TLS block, and a `thread_local` on a game's
   thread faults (that is what killed the game once — §5.1b).
