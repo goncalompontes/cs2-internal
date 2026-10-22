@@ -320,3 +320,97 @@ silhouette. `walls.mesh_clusters` reports the count.
 5. The enumeration is still a body-box overlap; swapping it for the engine's own
    `TraceLineIntervals` segment trace (exact same solids, no over-inclusion) is the
    Tier-1 step.
+
+## The probe's call form — verified against the live build (2026-10-22)
+
+T39 added a **probe** (`trace_probe`): a control command that asks the engine its
+own question for a ray and publishes **both** answers side by side plus the
+difference (`docs/re/occlusion.md` §"the trace probe"). The call form below was
+re-derived from the **live** build's own call sites — not from the decompile above
+— because the decompile does not say how the two vectors are passed.
+
+**The build.** The live `client.dll` is now sha256 `5a46a09b…` (the game updated on
+2026-10-21; the notes above are for `659940c1…`). The **entry RVA is unchanged**:
+`TraceLineIntervals` is still `FUN_180a19e90` at `0xa19e90` (the name string is now
+at `client + 0x1c32448`; the function spans `0xa19e90..0xa19ff4`).
+
+**The call.** The engine's own caller — the per-pellet function's first trace,
+`FUN_1808830e0` — sets the arguments up like this:
+
+```asm
+0x883164  lea      r9, [rsp + 0x30]              ; arg4 = &the extension (a local)
+0x883169  movss    xmm0, dword ptr [rip + 0x1242f3b]   ; -1.0f
+0x883171  mov      r8, r15                       ; arg3 = &the start vector
+0x883174  movss    dword ptr [rsp + 0x28], xmm0  ; arg8 = max_fraction = -1.0f
+0x88317a  mov      rdx, rdi                      ; arg2 = &results
+0x88317d  mov      qword ptr [rsp + 0x20], r14    ; arg7 = filter + 8
+0x88318d  mov      rcx, qword ptr [rip + 0x19a3ec4]  ; arg1 = *(client + 0x2227058)
+0x883196  call     0x180a19e90
+```
+
+so the call form is
+
+```c
+TraceLineIntervals(*(client + 0x2227058),  // arg1: the query interface
+                    &results,               // arg2: the CUtlVector
+                    &start,                 // arg3: a POINTER to a 12-byte Vector
+                    &delta,                 // arg4: a POINTER to the EXTENSION
+                    filter + 8,             // arg7: the collision-mask qword
+                    -1.0f);                 // arg8: max_fraction
+```
+
+**The fourth argument is the EXTENSION (`end - start`), not the absolute end
+point.** The engine's own caller fills it with `normalize(direction) * range`
+(`FUN_18089ca80` writes `normalize(dir) * max_range` into it), and the interval
+consumer scales the fractions by *its* length. So the segment the query walks is
+`start → start + delta`, and the fraction at `+0x0C` is relative to `|delta|`.
+(The decompile above names the argument "end"; it is the ray's `m_Delta`. Passing
+an absolute end point instead would trace the wrong segment entirely.)
+
+**The interval record.** The consumer (`FUN_180886090`) reads:
+
+* `+0x0C` — a float, the **fraction** along the ray. The thickness it computes is
+  `(leave - enter) * |delta|` — the fraction difference times the ray's length
+  (`FUN_180165340` is `sqrt(x²+y²+z²)`, the length of the extension the consumer
+  is handed). So `distance = fraction × |delta|`.
+* `+0x32` — a byte: `1` = the ray **enters** a solid, `0` = it leaves one (the
+  consumer pairs an `enter` record with the next `leave` record).
+* the stride is `0x38` (`mov edx, 0x38` in the consumer).
+
+**The live process confirms every offset** (read out of the running `cs2.exe`,
+2026-10-22, read-only):
+
+| what | value |
+|---|---|
+| `client.dll` base | `0x7fffd1f60000` |
+| `*(client+0x2227058)` (the interface) | `0x7fffd44aaf30` — a live pointer |
+| `*(client+0x2227070)` (the filter's vtable) | `client + 0x1ad4838` — the vtable named above |
+| `*(client+0x2227078)` (the filter's mask) | `0xffffffffffffffff` — all contents, as above |
+| the filter's flags / group (`+0x37` / `+0x38`) | `0x0f` / `3` |
+| the bytes at `client + 0xa19e90` | `4c 8b dc 49 89 5b 08 …` — the same prologue as the file on disk |
+| the name string at `client + 0x1c32448` | `TraceLineIntervals` |
+
+**What the probe publishes** (`payload/control/src/occlusion_query.cpp`,
+`probe_trace`): for each ray the engine's interval records — the fraction, the
+distance (`fraction × |delta|`), the enter/exit byte and the record's **raw 0x38
+bytes in hex** — our own occluders' spans, and the difference. The surface is
+published as `"unmapped"`: only two fields of the record are mapped, and the raw
+bytes are published so a later RE pass can map the rest **from the probe's own
+output** without re-running the game.
+
+**A finding about the shared fault guard (2026-10-22).** `cs2::diag::call_guarded`
+— the guard every engine call in the payload uses — **cannot recover on a
+clang-cl build**. Its vectored handler is a `noexcept` function, and clang-cl marks
+a `noexcept` function `nounwind`, so MSVC's `longjmp` refuses to unwind through it
+and raises `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409) instead of returning. The
+evidence is in the payload's own log: nine "[crash] guarded" lines, each followed
+by a fresh "[crash] handler installed" — the process died and was re-injected,
+every time. The same code built with MSVC's `cl.exe` recovers, and so does the
+same code with the handler's `noexcept` dropped.
+
+The repo-wide fix is **one word** — drop the `noexcept` from
+`LONG CALLBACK vectored_handler(...)` in `payload/diag/src/crash_handler.cpp`.
+Until that lands, the probe's engine call runs under **its own** guard
+(`payload/control/include/cs2/control/trace_guard.hpp`, the same vectored handler
++ `setjmp`/`longjmp`, with a handler the unwinder will cross), and the host test
+`control-trace-probe-guard` proves that guard recovers from a deliberate fault.

@@ -352,3 +352,103 @@ analyzeHeadless C:\Users\gpmpo\ghidra-analysis clientoccl -process <dll> -noanal
 
 `scripts/ghidra/DumpTargets.java` decompiles a fixed address list to
 `artifacts/ghidra-occlusion.txt`.
+
+## The trace probe: the engine's own answer for the same ray (T39, 2026-10-22)
+
+The payload's occluder set and the engine's bullet trace are **two different
+answers** to "what is between the eye and the target", and until now there was no
+way to compare them. T39 added the instrument: the **`trace_probe`** control
+command asks the engine its own question — `TraceLineIntervals`, the call the real
+bullet makes (`docs/re/bullet-trace.md`) — for a given ray, and publishes **both**
+answers side by side plus the **difference**.
+
+It **measures**; it does not fix. The fix is a later task, driven by the answer
+this one produces.
+
+### What the command is
+
+`trace_probe` (the control channel; `payload/control/src/service.cpp`,
+`do_trace_probe`):
+
+| argument | meaning | default |
+|---|---|---|
+| `rays` | which rays to probe | `"view"` — the current view ray |
+| `eye` | the ray origin, `[x, y, z]` | the local player's eye |
+| `yaw` / `pitch` | the view direction, in **degrees** (the Source pitch is positive down) | the local player's eye angles |
+| `spread` | an extra angular fan around the view ray, in degrees | `0` |
+| `count` | how many rays in the fan | `1` |
+| `depth` | the ray's length, in world units | the engine's own trace length (the weapon's `m_flRange`) |
+| `abi` | how the engine is called: `correct` / `swapped` / `static_filter` | `correct` |
+
+The fan is **deterministic**: ray 0 is the view ray itself and rays 1..n-1 are the
+golden-angle spiral points of the disc of radius `spread` degrees around it, so two
+runs compare. The direction comes from the chart's own convention
+(`Basis::unproject` of the absolute world yaw/pitch), so the probe's ray and the
+solver's ray are the **same** 3-D segment — the host test `control-trace-probe`
+pins that.
+
+The answer, per ray: the engine's intervals (the fraction, the distance, the
+enter/exit byte and the record's **raw 0x38 bytes in hex**), our own occluders'
+spans (with their kind), and the **difference** — the spans we have nothing for,
+the solids the engine did not report, and a one-line verdict
+(`agrees` / `engine_only` / `ours_only` / `both`).
+
+### The invocation
+
+The command is answered on the control channel, so it runs from the scenario
+harness (or any client on `\\.\pipe\cs2-internal-control`):
+
+```powershell
+# The operator's ray: the view ray, the engine's own trace length.
+python scripts\run-scenario.py ... # or, directly:
+#   {"id": 1, "cmd": "trace_probe", "args": {}}
+```
+
+In Python (the harness's own client):
+
+```python
+from scenario.control import Control
+
+with Control() as control:
+    answer = control.request("trace_probe", {})            # the view ray
+    answer = control.request("trace_probe", {"spread": 4.0, "count": 5})  # a fan
+    answer = control.request("trace_probe", {"yaw": 90.0, "pitch": -3.0, "depth": 2000.0})
+```
+
+The raw wire form (one NDJSON line on the pipe):
+
+```json
+{"id": 1, "cmd": "trace_probe", "args": {"count": 5, "spread": 4.0}}
+```
+
+**The proof that the probe can fail** — the deliberately wrong calls (they must
+give a visibly wrong answer or a caught fault, never a crash):
+
+```json
+{"id": 2, "cmd": "trace_probe", "args": {"abi": "swapped"}}        // the start and the delta are swapped
+{"id": 3, "cmd": "trace_probe", "args": {"abi": "static_filter"}}  // the engine's ~0 mask instead of the bullet's
+```
+
+### The measurement — **OWED** (not yet run)
+
+The live measurement needs the **operator**: stop the bots, point at a wall that is
+100 % solid, and report the view angles. The probe is built and the engine call's
+form is verified against the running game (the offsets, the interface pointer, the
+filter's mask and the entry RVA — `docs/re/bullet-trace.md` §"The probe's call
+form"), but the probe has **not** been run inside a live game yet: the game on this
+machine was already running a payload, and the rule is not to inject into it.
+
+So the **numbered answer** (which of the six places the world geometry is lost) is
+still open. The measurement settles it, and this is how to read the result:
+
+| the probe says | the world geometry is lost at |
+|---|---|
+| the engine's intervals are empty and ours is empty | the ray misses everything — **not** a geometry loss (aim elsewhere) |
+| `engine_only` (the engine found spans, we found nothing for them) | **3** (the shapes are parsed but dropped: the cluster cap, the compound skip, the BVH's broad phase, the per-query selection) or **5** (projected, but the ray does not hit them) or **6** (the engine sees something we have no shape for at all) — the `difference.engine_only` entries say *which* span, and the ray's `ours` list says what we had |
+| `ours_only` (we found solids the engine did not report) | the **over-inclusion** the enumeration is known for (a body-box overlap is a superset) — not a loss |
+| `both` | the two answers differ in both directions — the over-inclusion **and** a loss |
+| `agrees` | the two sets are the same for this ray: the world geometry is **not** lost here (the loss, if any, is elsewhere — e.g. the ray does not cross the wall) |
+
+The raw records are in the answer (`rays[].engine.intervals[].raw`), so the
+**interval record's** remaining fields can be mapped from the probe's own output
+without re-running the game.
