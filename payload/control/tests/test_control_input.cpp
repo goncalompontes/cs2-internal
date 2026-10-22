@@ -366,6 +366,17 @@ void test_the_ragebot_never_clears_the_players_own_attack() {
   const std::uint64_t trigger_held =
       cs2::control::compose_button_mask(0, 0, 0, button::k_attack, false);
   assert((trigger_held & button::k_attack) != 0);
+
+  // **The invariant itself**, for every feature mask: the composition adds
+  // the features' bits and never clears one. A composition that cleared them
+  // would take the player's own press of the attack button away — the rule
+  // the ragebot's scoped release rests on.
+  const std::uint64_t features[] = {0ULL, button::k_attack, button::k_jump, ~0ULL};
+  for (const std::uint64_t bits : features) {
+    const std::uint64_t mask = cs2::control::compose_button_mask(engine, 0, 0, bits, false);
+    assert((mask & engine) == engine);
+    assert((mask & bits) == bits);  // the feature's own bits are there
+  }
 }
 
 }  // namespace
@@ -382,9 +393,9 @@ auto main() -> int {
   test_the_counter_wish_drops_the_rounding_noise();
 
   test_the_fire_mode_is_classified();
-  test_the_unknown_fire_mode_is_conservative_and_reported();
   test_a_semi_weapon_gets_a_release_between_two_shots();
   test_the_semi_weapon_sequence_carries_the_edge();
+  test_the_unknown_fire_mode_is_conservative_and_reported();
   test_a_full_auto_weapon_keeps_the_trigger_down();
   test_the_gate_blocks_each_condition();
   test_the_ragebot_never_clears_the_players_own_attack();
