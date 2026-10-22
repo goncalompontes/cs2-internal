@@ -274,9 +274,12 @@ void test_the_tree_has_one_guard(const std::filesystem::path& base) {
     if (code.empty()) {
       continue;
     }
+    // The tokens a recovery mechanism is made of: a vectored handler, a
+    // `setjmp` (the include of `<csetjmp>` counts) and a `longjmp`.
     const bool registers = code.find("AddVectoredExceptionHandler") != std::string::npos;
     const bool jumps = code.find("longjmp") != std::string::npos;
-    if (!registers && !jumps) {
+    const bool saves = code.find("setjmp") != std::string::npos;
+    if (!registers && !jumps && !saves) {
       continue;
     }
     assert(path == owner);
