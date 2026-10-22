@@ -171,15 +171,25 @@ killed the game.**
   it leaves — ran that cleanup and the runtime **fast-failed with
   `0xC0000409`**. Because it is a fast fail it **bypasses the vectored
   handlers**, so the guard never recovered.
-* **It has fired 12 times**, every one the **tier0 allocator fault**
-  (`read addr=0x40` — the fault the guard was written for), and **4 of the 12
-  killed the payload**, which then had to be re-injected.
+* **It has fired 12 times**, in **two different signatures**, and **4 of the 12
+  killed the payload**, which then had to be re-injected:
+  * the **four deaths** are the tier0 allocator fault (`read addr=0x40` — the
+    fault the guard was written for; three of the four) and a null read
+    (`read addr=0x0`; the fourth). Each is preceded by a live `[state]` line
+    and followed **immediately** by a fresh `[crash] handler installed`;
+  * the **eight survivors** are a different signature: a null-pointer access
+    (`addr=0x0`) whose fault frames are in ntdll (`#0 ntdll+0xcc196`,
+    `#1 ntdll+0xcb935`, `#2 ntdll+0x164e3e`), at a **fresh injection** — each
+    is preceded immediately by a `[crash] handler installed`, and they are
+    injections #190–#199, the last ten in the log. The payload kept rendering
+    afterwards.
 * The fix is **one word** (drop the `noexcept`); T42 implements it, with ten
   deliberate faults recovered on **clang-cl** and ten `0xC0000409` against the
   pre-fix code.
-* The **MSVC-built** copy passes on the broken code — which is why the host
-  suite could never have caught it, and why the test must be built with
-  **clang-cl** and **run**.
+* The **MSVC-built** copy passes on the broken code — which is why a test
+  built with `cl.exe` can never see the defect. This repository's host suite
+  is clang-cl, so the test is registered in **both** builds and **run** in
+  both; the defect survived because **no test existed**.
 
 **A correction to the record:** three accounts of the log's split existed
 (4 died / 3 died / 11 died). The measurement that settles it: the line
@@ -193,6 +203,17 @@ survived**.
 > injection's line). The number to use is **four**. The handoff and
 > `docs/known-issues.md` §17 both carry the corrected figure; the branch's
 > commit message does not, and it is not amended (the task forbids it).
+
+**And the eight survivors are not evidence that the broken handler worked.**
+The handler has carried `noexcept` since the file's first commit (`66bc92c`),
+and with it the `longjmp` out of the handler's frame runs that frame's
+terminate cleanup — so under the old build a fault killed the process every
+time (measured: the pre-fix handler exits 0xC0000409). The eight therefore
+came from a build whose handler was already fixed — most plausibly T42's own
+build, injected to test the fix live — but **the log does not record which
+build that was**, so that is *inferred, not measured*. What the log says,
+exactly: **four deaths with the tier0-allocator signature, eight recoveries
+at a fresh injection with a different signature.**
 
 ---
 

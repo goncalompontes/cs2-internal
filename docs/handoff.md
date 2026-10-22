@@ -562,16 +562,43 @@ the accuracy work (spread/records, trace cross-validation).
   `payload/diag/tests/test_diag_guard.cpp`, which is built with **clang-cl**
   (the compiler the payload ships with): ten deliberate faults, ten
   recoveries, the process alive. It was **not** proven before: the handler was
-  `noexcept`, and a `noexcept` frame is `nounwind`, so the `longjmp` out of it
-  ran the frame's `std::terminate` cleanup and killed the process with
-  0xC0000409 instead of recovering.
+  `noexcept`, and a `noexcept` frame is not `nounwind` — clang-cl gives it a
+  C++ exception-handler unwind record whose cleanup action is
+  `std::terminate`, so the `longjmp` out of it ran that cleanup and killed the
+  process with 0xC0000409 instead of recovering.
   **It had fired.** The payload's own log (`%LOCALAPPDATA%\cs2-internal\cs2-payload.log`,
   measured 2026-10-22) carries 199 `[crash] handler installed` lines and
-  **12 `[crash] guarded` lines** — and in 11 of the 12 the next crash line is a
-  fresh `[crash] handler installed`, i.e. **the process died and was
-  re-injected**. The first three are the tier0 allocator fault
-  (`tier0+0x1ffe29`, `read addr=0x40`) that the guard exists to catch. So the
-  safety net was not there, and it cost the game at least eleven times.
+  **12 `[crash] guarded` lines** — all of them `EXCEPTION_ACCESS_VIOLATION`,
+  and they split **four deaths and eight recoveries**:
+  * **Four died.** Each of the four is preceded by a live `[state]` line and
+    followed **immediately** by a fresh `[crash] handler installed`: the
+    process died and was re-injected. Three of them fault at the tier0
+    allocator (`tier0+0x1ffe29`, `read addr=0x40` — the fault the guard was
+    written for); the fourth is a null read (`read addr=0x0`).
+  * **Eight recovered.** Each of the eight is preceded **immediately** by a
+    `[crash] handler installed` — they are injections #190–#199, the last ten
+    in the log — and followed by the payload's own live output (`[state]`,
+    `presenting frames`): the process was alive and rendering. Their
+    signature is different: a null-pointer access (`addr=0x0`) whose fault
+    frames are in ntdll (`#0 ntdll+0xcc196`, `#1 ntdll+0xcb935`,
+    `#2 ntdll+0x164e3e`).
+
+  So the safety net was missing, and its absence cost the game **four**
+  times — not the eleven this branch's commit message (`1695973`) claims:
+  that count matched a *later* injection's line, because the handler writes
+  its stack frames **before** it dies and the scan has to skip them.
+
+  **What the eight recoveries do not say.** They are *not* evidence that the
+  broken handler worked: the handler has carried `noexcept` since the file's
+  first commit (`66bc92c`), and with it the `longjmp` out of the handler's
+  frame runs that frame's terminate cleanup, so a fault under the old build
+  killed the process every time (measured: the pre-fix handler exits
+  0xC0000409). The eight therefore came from a build whose handler was
+  already fixed — most plausibly this branch's own build, injected to test
+  the fix live — but **the log does not say which build that was**, so that
+  part is *inferred, not measured*. What the log does say, exactly, is four
+  deaths with the tier0-allocator signature and eight recoveries at a fresh
+  injection with a different signature.
 - **The game relaunch is flaky** — the map load sometimes crashes on startup; just
   run `scripts/run-scenario.py` again.
 - The game auto-updated mid-session: `client.dll` sha `659940c1…` (was `44af2aa0…`);
