@@ -29,8 +29,8 @@
 #endif
 
 #if defined(_WIN32)
-#include <windows.h>
 #include <bcrypt.h>
+#include <windows.h>
 #endif
 
 namespace cs2::control {
@@ -335,8 +335,8 @@ void Service::run() noexcept {
   }
 }
 
-auto Service::dispatch_command(std::string_view command, const Json& arguments,
-                               Json& out) noexcept -> bool {
+auto Service::dispatch_command(std::string_view command, const Json& arguments, Json& out) noexcept
+    -> bool {
   if (command == "quit" || command == "shutdown") {
     set_ok(out, Json::object());
     return false;
@@ -459,8 +459,7 @@ auto Service::handle_rpc(const std::string& line, std::string& response) noexcep
 
   if (name == "initialize") {
     const Json* token = arguments.find("token");
-    const bool matches = token != nullptr && token->is_string() &&
-                         token->as_string() == token_;
+    const bool matches = token != nullptr && token->is_string() && token->as_string() == token_;
     if (!matches) {
       Json error = Json::object();
       error.set("code", Json::integer(-32001));
@@ -1384,9 +1383,8 @@ void Service::do_animfix(const Json& args, Json& out) noexcept {
     on = arg->as_bool();
   }
   animfix_requested_.store(on, std::memory_order_relaxed);
-  const bool animfix_allowed =
-      (capability_mask_.load(std::memory_order_relaxed) &
-       game::capability_bit(game::Capability::animfix)) != 0;
+  const bool animfix_allowed = (capability_mask_.load(std::memory_order_relaxed) &
+                                game::capability_bit(game::Capability::animfix)) != 0;
   input_.set_animfix(on && animfix_allowed);
   set_ok(out, input_status());
 }
@@ -1425,9 +1423,8 @@ void Service::do_antiaim(const Json& args, Json& out) noexcept {
   }
   input_.set_anti_aim_move_rebase(rebase);
   anti_aim_requested_.store(on, std::memory_order_relaxed);
-  const bool anti_aim_allowed =
-      (capability_mask_.load(std::memory_order_relaxed) &
-       game::capability_bit(game::Capability::anti_aim)) != 0;
+  const bool anti_aim_allowed = (capability_mask_.load(std::memory_order_relaxed) &
+                                 game::capability_bit(game::Capability::anti_aim)) != 0;
   input_.set_anti_aim(on && anti_aim_allowed);
   set_ok(out, input_status());
 }
@@ -1435,9 +1432,8 @@ void Service::do_antiaim(const Json& args, Json& out) noexcept {
 void Service::set_movement_features(bool auto_strafe, bool bhop) noexcept {
   movement_strafe_requested_.store(auto_strafe, std::memory_order_relaxed);
   movement_bhop_requested_.store(bhop, std::memory_order_relaxed);
-  const bool allowed =
-      (capability_mask_.load(std::memory_order_relaxed) &
-       game::capability_bit(game::Capability::movement)) != 0;
+  const bool allowed = (capability_mask_.load(std::memory_order_relaxed) &
+                        game::capability_bit(game::Capability::movement)) != 0;
   input_.set_strafe(auto_strafe && allowed);
   input_.set_bhop(bhop && allowed);
 }
@@ -2189,8 +2185,8 @@ void Service::on_game_thread() noexcept {
   //
   // The triggerbot runs in the same sink (`docs/ragebot.md` §"The trigger"): it is
   // per-tick work on the game thread, and it never writes a view angle.
-  const bool rage_wanted = (rage_enabled_.load() || rage_force_.load()) &&
-                          gate.can(game::Capability::aim);
+  const bool rage_wanted =
+      (rage_enabled_.load() || rage_force_.load()) && gate.can(game::Capability::aim);
   const bool trigger_wanted = trigger_.enabled() && gate.can(game::Capability::trigger);
   if (!rage_wanted && !trigger_wanted) {
     input_.clear_rage_aim();
@@ -2269,8 +2265,7 @@ void Service::on_snapshot(const game::Snapshot& snapshot) noexcept {
   // Lag-record sampling is the heatmap's history and the backtrack poses. With backtrack
   // disabled (the default) and no heatmap asking for it, skip the walk entirely: it was
   // ~0.6 ms/tick on the render thread for records nothing consumed.
-  const bool want_records = occlusion_live_.load() ||
-                            (rage_requested && rage_backtrack_.load());
+  const bool want_records = occlusion_live_.load() || (rage_requested && rage_backtrack_.load());
   if (want_records) {
     sample_records(snapshot);
   }
@@ -2571,31 +2566,32 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
       same->max.z = (std::max)(same->max.z, box_hi.z);
     }
     for (TargetBox& box : boxes) {
-      box.min = game::Vec3{.x = box.min.x - k_margin, .y = box.min.y - k_margin,
-                           .z = box.min.z - k_margin};
-      box.max = game::Vec3{.x = box.max.x + k_margin, .y = box.max.y + k_margin,
-                           .z = box.max.z + k_margin};
+      box.min = game::Vec3{
+          .x = box.min.x - k_margin, .y = box.min.y - k_margin, .z = box.min.z - k_margin};
+      box.max = game::Vec3{
+          .x = box.max.x + k_margin, .y = box.max.y + k_margin, .z = box.max.z + k_margin};
     }
     lo = game::Vec3{.x = lo.x - k_margin, .y = lo.y - k_margin, .z = lo.z - k_margin};
     hi = game::Vec3{.x = hi.x + k_margin, .y = hi.y + k_margin, .z = hi.z + k_margin};
     // Could this solid occlude **any** hitbox of the solve? A tagged solid is only
     // tested against its own target's box; an untagged (shared) one against all.
+    //
+    // **The test is the tag, not an AABB overlap with the hitbox.** The enumeration
+    // already kept a solid only when it lay inside that target's eye→hitbox pyramid,
+    // and a wall 2000 units in front of the hitbox does not overlap the hitbox's own
+    // box — comparing the two dropped exactly the walls in between. It made the solve
+    // value a headshot at 3300 units at full damage (125.8) through the map, which is
+    // the live "shoots through solid walls".
     const auto relevant = [&boxes](const OcclusionHull& hull) -> bool {
-      if (!hull.has_bounds) {
-        return true;
+      if (hull.target < 0) {
+        return true;  // shared: only the whole-solve box below bounds it
       }
       for (const TargetBox& box : boxes) {
-        if (hull.target >= 0 && hull.target != box.target) {
-          continue;
+        if (box.target == hull.target) {
+          return true;
         }
-        if (hull.bounds_max.x < box.min.x || hull.bounds_min.x > box.max.x ||
-            hull.bounds_max.y < box.min.y || hull.bounds_min.y > box.max.y ||
-            hull.bounds_max.z < box.min.z || hull.bounds_min.z > box.max.z) {
-          continue;
-        }
-        return true;
       }
-      return false;
+      return false;  // enumerated for a target that is not in this solve
     };
     const std::uint64_t t_project = now_us();
     const std::scoped_lock lock(occlusion_mutex_);
@@ -2617,7 +2613,8 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
                                              hull.radius, hull.surface_modifier);
       } else if (hull.kind == aim::SolidKind::mesh) {
         cell = aim::project_mesh_occluder(solve_input->eye, solve_input->basis, hull.vertices,
-                                          hull.triangles, hull.surface_modifier, hull.mesh_bvh);
+                                          hull.triangles, hull.surface_modifier, hull.mesh_bvh,
+                                          hull.source);
       } else {
         cell = aim::project_occluder(solve_input->eye, solve_input->basis, hull.vertices,
                                      hull.planes, hull.surface_modifier);
@@ -2916,8 +2913,6 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   }
   rage_solves_.fetch_add(1);
   rage_solve_refusal_.store(static_cast<int>(SolveRefusal::ok), std::memory_order_relaxed);
-
-
 }
 
 void Service::read_weapon_fire_state(const game::PlayerSnapshot& local,
@@ -3830,32 +3825,29 @@ void Service::do_rage(const Json& args, Json& out) noexcept {
                   rage_solve_refusal_.load(std::memory_order_relaxed))))));
   // The two stages the occlusion work is spent in, in microseconds (the before/after
   // of the projection filtering and the layer budget).
-  payload.set("project_us", Json::number(static_cast<double>(
-                                rage_project_us_.load(std::memory_order_relaxed))));
-  payload.set("solve_us", Json::number(static_cast<double>(
-                              rage_solve_us_.load(std::memory_order_relaxed))));
+  payload.set("project_us",
+              Json::number(static_cast<double>(rage_project_us_.load(std::memory_order_relaxed))));
+  payload.set("solve_us",
+              Json::number(static_cast<double>(rage_solve_us_.load(std::memory_order_relaxed))));
   // The last solve's own answer (`docs/ragebot.md` §3): what the damage field
   // produced, and the weapon facts the fire gate used.
   payload.set("solve_ran", Json::boolean(rage_solve_ran_.load(std::memory_order_relaxed)));
   payload.set("solve_value",
               Json::number(static_cast<double>(rage_solve_value_.load(std::memory_order_relaxed))));
-  payload.set("solve_hitchance", Json::number(static_cast<double>(rage_solve_hitchance_.load(
-                                     std::memory_order_relaxed))));
+  payload.set(
+      "solve_hitchance",
+      Json::number(static_cast<double>(rage_solve_hitchance_.load(std::memory_order_relaxed))));
   payload.set("solve_penetrated",
               Json::boolean(rage_solve_penetrated_.load(std::memory_order_relaxed)));
-  payload.set("solve_cells",
-              Json::integer(rage_solve_cells_.load(std::memory_order_relaxed)));
+  payload.set("solve_cells", Json::integer(rage_solve_cells_.load(std::memory_order_relaxed)));
   payload.set("solve_yaw",
               Json::number(static_cast<double>(rage_solve_yaw_.load(std::memory_order_relaxed))));
   payload.set("solve_pitch",
               Json::number(static_cast<double>(rage_solve_pitch_.load(std::memory_order_relaxed))));
   payload.set("fire_clip", Json::integer(rage_clip_.load(std::memory_order_relaxed)));
-  payload.set("fire_clip_known",
-              Json::boolean(rage_clip_known_.load(std::memory_order_relaxed)));
-  payload.set("fire_reloading",
-              Json::boolean(rage_reloading_.load(std::memory_order_relaxed)));
-  payload.set("fire_deploying",
-              Json::boolean(rage_deploying_.load(std::memory_order_relaxed)));
+  payload.set("fire_clip_known", Json::boolean(rage_clip_known_.load(std::memory_order_relaxed)));
+  payload.set("fire_reloading", Json::boolean(rage_reloading_.load(std::memory_order_relaxed)));
+  payload.set("fire_deploying", Json::boolean(rage_deploying_.load(std::memory_order_relaxed)));
   payload.set("fire_ready", Json::boolean(rage_ready_.load(std::memory_order_relaxed)));
   payload.set("occlusion_query_complete",
               Json::boolean(rage_occlusion_query_complete_.load(std::memory_order_relaxed)));
@@ -4126,8 +4118,8 @@ auto Service::debug_lines(char* out, std::size_t size) noexcept -> std::size_t {
   add("\nrage %s   active %d   target %d   hitbox %d   solve %s",
       rage_enabled_.load() ? "on" : "off", input_.rage_active() ? 1 : 0, input_.rage_target(),
       input_.rage_hitbox(),
-      solve_refusal_name(static_cast<SolveRefusal>(
-          rage_solve_refusal_.load(std::memory_order_relaxed))));
+      solve_refusal_name(
+          static_cast<SolveRefusal>(rage_solve_refusal_.load(std::memory_order_relaxed))));
   add("\nfire %s   %s   presses %llu   shots %llu",
       fire_mode_name(static_cast<FireMode>(rage_fire_mode_.load(std::memory_order_relaxed))),
       fire_refusal_name(static_cast<FireRefusal>(rage_refusal_.load(std::memory_order_relaxed))),
@@ -4137,8 +4129,8 @@ auto Service::debug_lines(char* out, std::size_t size) noexcept -> std::size_t {
       stats.mesh_clusters, stats.world_box_kept, stats.world_cache_hulls);
   add("\nshape types hull %d mesh %d sphere %d capsule %d compound %d", stats.type_counts[2],
       stats.type_counts[3], stats.type_counts[0], stats.type_counts[1], stats.type_counts[4]);
-  add("\nsolve occluders %d   query %s   issues 0x%x   solves %llu",
-      rage_occluders_.load(), rage_occlusion_query_complete_.load() ? "complete" : "pending",
+  add("\nsolve occluders %d   query %s   issues 0x%x   solves %llu", rage_occluders_.load(),
+      rage_occlusion_query_complete_.load() ? "complete" : "pending",
       rage_occlusion_query_issues_.load(std::memory_order_relaxed),
       static_cast<unsigned long long>(rage_solves_.load()));
   add("\ntime project %lluus   solve %lluus",
@@ -4324,8 +4316,8 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
   game::Vec3 box_lo{};
   game::Vec3 box_hi{};
   bool have_box = false;
-  if (const Json* lo_arg = args.find("box_min"); lo_arg != nullptr && lo_arg->is_array() &&
-                                                    lo_arg->items().size() == 3) {
+  if (const Json* lo_arg = args.find("box_min");
+      lo_arg != nullptr && lo_arg->is_array() && lo_arg->items().size() == 3) {
     const Json* hi_arg = args.find("box_max");
     if (hi_arg != nullptr && hi_arg->is_array() && hi_arg->items().size() == 3) {
       const std::vector<Json>& items = lo_arg->items();
@@ -4570,8 +4562,7 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
     // Of the spans that matched, how many were answered by **our surfaces** (a mesh
     // slab's two faces) rather than by one solid covering the span. It keeps "we have
     // the wall as sheets" distinguishable from "we have it as a volume".
-    difference.set("spans_bounded_by_surfaces",
-                   Json::integer(ray.diff.spans_bounded_by_surfaces));
+    difference.set("spans_bounded_by_surfaces", Json::integer(ray.diff.spans_bounded_by_surfaces));
     Json engine_only = Json::array();
     for (const TraceSpan& span : ray.diff.engine_only) {
       Json record = Json::object();
@@ -4655,14 +4646,13 @@ void Service::write_session_file() noexcept {
     return;
   }
   session_file_ = path;
-  const std::string body =
-      "{\"transport\":\"" + std::string(channel_.is_unix() ? "unix" : "tcp") +
-      "\",\"path\":\"" + json_escape(channel_.endpoint()) + "\",\"port\":" +
-      std::to_string(channel_.port()) + ",\"token\":\"" + token_ + "\",\"pid\":" +
-      std::to_string(GetCurrentProcessId()) + ",\"protocol\":" +
-      std::to_string(k_protocol_version) + "}";
-  const HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+  const std::string body = "{\"transport\":\"" + std::string(channel_.is_unix() ? "unix" : "tcp") +
+                           "\",\"path\":\"" + json_escape(channel_.endpoint()) +
+                           "\",\"port\":" + std::to_string(channel_.port()) + ",\"token\":\"" +
+                           token_ + "\",\"pid\":" + std::to_string(GetCurrentProcessId()) +
+                           ",\"protocol\":" + std::to_string(k_protocol_version) + "}";
+  const HANDLE file =
+      CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
     return;
   }
