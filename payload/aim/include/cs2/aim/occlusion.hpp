@@ -37,6 +37,14 @@ struct RaySpan {
   float exit = 0.0F;
 };
 
+// One crossing of a collision mesh, with the face it hit.
+struct MeshCrossing {
+  float distance = 0.0F;
+  // The ray meets the triangle's **front** face (its outward normal opposes the ray):
+  // it is entering the solid the shell bounds. False when it leaves it.
+  bool entering = false;
+};
+
 // A median-split bounding-volume hierarchy over a triangle soup (flat triples, 3
 // world-space points per triangle). `OccluderCell::ray_span` uses it for collision
 // **meshes** so a ray tests O(log n) triangles instead of the whole soup — the
@@ -46,14 +54,16 @@ struct MeshBvh {
   struct Node {
     Vec3 min{};
     Vec3 max{};               // node AABB
-    std::uint32_t start = 0;   // leaf: first index into `order`
-    std::uint32_t count = 0;   // 0 = internal node, else the leaf's triangle count
-    std::uint32_t right = 0;   // internal: right child index (left = own index + 1)
+    std::uint32_t start = 0;  // leaf: first index into `order`
+    std::uint32_t count = 0;  // 0 = internal node, else the leaf's triangle count
+    std::uint32_t right = 0;  // internal: right child index (left = own index + 1)
   };
   std::vector<Node> nodes;
   std::vector<std::uint32_t> order;  // triangle indices, leaves contiguous
   std::vector<Vec3> triangles;       // the soup (3 points per triangle)
-  [[nodiscard]] bool empty() const noexcept { return nodes.empty(); }
+  [[nodiscard]] bool empty() const noexcept {
+    return nodes.empty();
+  }
 };
 
 // Build the BVH over `triangles` (flat triples). Returns an empty tree for no triangles.
@@ -86,9 +96,9 @@ struct OccluderCell {
   // uses it; otherwise it scans the flat soup. Shared, so projecting the same mesh for
   // many hitboxes does not rebuild it (`docs/ragebot-perf.md` §3.7).
   std::shared_ptr<const MeshBvh> mesh_bvh;
-  Vec3 a{};                           // sphere: centre; capsule: endpoint a; mesh: AABB min
-  Vec3 b{};                           // capsule: endpoint b; mesh: AABB max
-  float radius = 0.0F;                // sphere / capsule radius
+  Vec3 a{};             // sphere: centre; capsule: endpoint a; mesh: AABB min
+  Vec3 b{};             // capsule: endpoint b; mesh: AABB max
+  float radius = 0.0F;  // sphere / capsule radius
   // The target (enemy) whose eye→enemy pyramid enumerated this solid. A solid only
   // attenuates that enemy's hitboxes, so `aim::solve` feeds each hitbox just its own
   // target's occluders (`-1` = shared/unknown, applies to every hitbox). Passing every
@@ -96,10 +106,10 @@ struct OccluderCell {
   int target = -1;
   // The surface's penetration properties (docs/re/penetration.md). Until the
   // payload resolves the per-solid material these default to a neutral surface.
-  float surface_modifier = 1.0F;      // surfacedata_t.game.penetrationmodifier
-  float damage_modifier = 1.0F;       // surfacedata_t.game.damagemodifier
-  int material = -1;                  // surfacedata_t.game.material (CHAR_TEX_*)
-  bool grate = false;                 // CONTENTS_GRATE / glass
+  float surface_modifier = 1.0F;  // surfacedata_t.game.penetrationmodifier
+  float damage_modifier = 1.0F;   // surfacedata_t.game.damagemodifier
+  int material = -1;              // surfacedata_t.game.material (CHAR_TEX_*)
+  bool grate = false;             // CONTENTS_GRATE / glass
 
   // The wall thickness along `direction` (unit): the distance between the hull's
   // entry and exit support planes.
@@ -119,12 +129,18 @@ struct OccluderCell {
   // same cluster). `ray_span` reports only the nearest crossing, so a shot through
   // the cluster was valued as one surface and the rest were free. This is what the
   // engine reports: one crossing per triangle it hits. For the other kinds it is the
-  // single span (a convex solid is entered and left once).
+  // entry and the exit of the one span (a convex solid is entered and left once).
+  //
+  // Each crossing carries **the face it hit**, and `mesh_spans` pairs a front face
+  // with the back face that closes it. That pairing is what gives a closed shell its
+  // thickness: treating its two faces as two independent sheets charges two entry
+  // fees and no thickness, so a shot through a 1500-unit building cost the same as a
+  // shot through a doorway — the live "shoots through solid walls".
   //
   // Bounded by `max_surfaces`: a ray that grazes a dense soup must not turn into
   // unbounded work, and the engine's own penetration budget caps what can matter.
-  void ray_surfaces(const Vec3& eye, const Vec3& direction, std::vector<float>& out,
-                    int max_surfaces = 32) const;
+  void ray_crossings(const Vec3& eye, const Vec3& direction, std::vector<MeshCrossing>& out,
+                     int max_surfaces = 32) const;
 
   // A **lower bound** on the distance from `eye` to this solid (0 when the eye is
   // inside it). Cheap broad-phase for "can this solid be nearer than the hitbox?":
@@ -134,6 +150,20 @@ struct OccluderCell {
   // stays correct even for a solid whose nearest point is a face interior.
   [[nodiscard]] auto lower_bound_distance(const Vec3& eye) const noexcept -> float;
 };
+
+// Pair a mesh's crossings, in order, into the **solid spans** the bullet travels
+// through: two consecutive crossings that face **opposite ways** are the near and far
+// faces of a solid, and the distance between them is its thickness. Two crossings
+// that face the same way are two independent **open sheets** (the map's walls), each a
+// zero-thickness span.
+//
+// The absolute polarity does not matter: a shell can be wound either way round, and
+// only the *change* of facing means a boundary was crossed. This is the engine's own
+// interval shape — one enter/leave pair per solid — and it is what gives a closed shell
+// its thickness. Without it the two faces of a building were two independent sheets:
+// two entry fees and no thickness, so a shot through 1500 units of solid valued the
+// same as a shot through an open doorway (the live "shoots through solid walls").
+[[nodiscard]] auto mesh_spans(const std::vector<MeshCrossing>& crossings) -> std::vector<RaySpan>;
 
 // Project a world-space convex solid (its world vertices + inward planes) into the
 // chart. Returns nullopt when it does not project meaningfully (behind the eye /

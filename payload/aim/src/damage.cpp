@@ -55,19 +55,24 @@ struct Fragment {
   for (const OccluderCell* occluder : fragment.covering) {
     if (occluder->kind == SolidKind::mesh) {
       // A mesh cluster is a soup over a whole area: this ray can cross it several
-      // times, and each crossing is a surface the bullet pays for. `ray_span` would
-      // report only the nearest, so a shot through the cluster (a wall, the floor,
-      // another wall) was valued as one thin surface. One layer per crossing, in
-      // order, zero thickness — the engine's own per-surface cost.
-      std::vector<float> crossings;
-      occluder->ray_surfaces(eye, direction, crossings);
-      for (const float at : crossings) {
-        if (at >= distance) {
+      // times (a wall, then the floor, then another wall). `ray_span` would report
+      // only the nearest, so a shot through the cluster was valued as one thin
+      // surface. `ray_crossings` reports every triangle it hits **with the face**, and
+      // `mesh_spans` pairs a front face with the back face that closes it: a closed
+      // shell is one solid with its own thickness, and an open sheet is one surface.
+      // Treating the two faces of a building as two independent sheets (the previous
+      // rule) charged two entry fees and no thickness — a shot through 1500 units of
+      // solid valued like a shot through a doorway, which is the live "shoots through
+      // solid walls".
+      std::vector<MeshCrossing> crossings;
+      occluder->ray_crossings(eye, direction, crossings);
+      for (const RaySpan& span : mesh_spans(crossings)) {
+        if (span.entry >= distance) {
           continue;  // beyond the hitbox: not between the shot and it
         }
         PenetrationLayer layer;
-        layer.thickness = 0.0F;
-        layer.entry = at;
+        layer.entry = span.entry;
+        layer.thickness = std::max(0.0F, std::min(span.exit, distance) - span.entry);
         layer.enter.penetration_modifier = occluder->surface_modifier;
         layer.enter.damage_modifier = occluder->damage_modifier;
         layer.enter.material = occluder->material;
@@ -234,7 +239,8 @@ auto occlude_polygon(const Vec3& eye, const Basis& basis, const Polygon& silhoue
         // (cheap: one span per covering solid) and stop at the budget before paying
         // for the penetration arithmetic. `max_penetrations` walls are applied; the
         // next one stops the shot, and the solver's own valuation says the same.
-        const std::vector<PenetrationLayer> layers = fragment_layers(fragment, eye, basis, distance);
+        const std::vector<PenetrationLayer> layers =
+            fragment_layers(fragment, eye, basis, distance);
         if (layers.size() > static_cast<std::size_t>(max_penetrations) ||
             fragment_value(layers, base, multiplier, distance, weapon, model, params) <= 0.0F) {
           continue;  // provably blocked — identical to the value the full split would give

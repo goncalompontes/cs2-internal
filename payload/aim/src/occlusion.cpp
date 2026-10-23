@@ -53,8 +53,11 @@ using HalfPlane = ConvexClipEdge;
 
 // Möller–Trumbore ray/triangle intersection; the ray distance when it hits the
 // triangle at `t > 0`, else nullopt. Exact for a collision-mesh triangle.
+// `entering` (optional) reports the face the ray met: the triangle's outward normal
+// opposes the ray (front face, the ray enters the shell) or follows it (back face).
 [[nodiscard]] auto ray_triangle(const Vec3& eye, const Vec3& direction, const Vec3& a,
-                                const Vec3& b, const Vec3& c) noexcept -> std::optional<float> {
+                                const Vec3& b, const Vec3& c, bool* entering = nullptr) noexcept
+    -> std::optional<float> {
   const Vec3 e1 = b - a;
   const Vec3 e2 = c - a;
   const Vec3 p = game::cross(direction, e2);
@@ -76,6 +79,11 @@ using HalfPlane = ConvexClipEdge;
   const float t = game::dot(e2, q) * inv;
   if (t <= 0.0F) {
     return std::nullopt;
+  }
+  if (entering != nullptr) {
+    // `det = dot(e1, cross(direction, e2)) = -dot(direction, cross(e1, e2))`, so the
+    // sign is the facing without building the normal.
+    *entering = det > 0.0F;
   }
   return t;
 }
@@ -103,8 +111,8 @@ using HalfPlane = ConvexClipEdge;
     -> std::optional<RaySpan> {
   float nearest = 1.0e30F;
   for (std::size_t i = 0; i + 2 < triangles.size(); i += 3) {
-    if (const auto t = ray_triangle(eye, direction, triangles[i], triangles[i + 1],
-                                    triangles[i + 2])) {
+    if (const auto t =
+            ray_triangle(eye, direction, triangles[i], triangles[i + 1], triangles[i + 2])) {
       nearest = std::min(nearest, *t);
     }
   }
@@ -210,9 +218,8 @@ constexpr std::uint32_t k_mesh_leaf = 8;  // triangles per BVH leaf
     cmax.z = std::max(cmax.z, c.z);
   }
   const float extent[3] = {cmax.x - cmin.x, cmax.y - cmin.y, cmax.z - cmin.z};
-  const int axis = extent[0] >= extent[1] && extent[0] >= extent[2]
-                       ? 0
-                       : (extent[1] >= extent[2] ? 1 : 2);
+  const int axis =
+      extent[0] >= extent[1] && extent[0] >= extent[2] ? 0 : (extent[1] >= extent[2] ? 1 : 2);
   const std::uint32_t mid = lo + (hi - lo) / 2;
   const auto key = [&](std::uint32_t tri) -> float {
     const Vec3 c = mesh_centroid(tmin[tri], tmax[tri]);
@@ -302,19 +309,19 @@ auto OccluderCell::ray_span(const Vec3& eye, const Vec3& direction) const noexce
 // Defined below, next to the BVH span it shares its traversal with.
 namespace {
 void ray_mesh_crossings(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction,
-                        std::vector<float>& out, int max_surfaces);
+                        std::vector<MeshCrossing>& out, int max_surfaces);
 }  // namespace
 
-void OccluderCell::ray_surfaces(const Vec3& eye, const Vec3& direction,
-                                std::vector<float>& out, int max_surfaces) const {
+void OccluderCell::ray_crossings(const Vec3& eye, const Vec3& direction,
+                                 std::vector<MeshCrossing>& out, int max_surfaces) const {
   if (max_surfaces <= 0) {
     return;
   }
   if (kind != SolidKind::mesh) {
     if (const std::optional<RaySpan> span = ray_span(eye, direction); span.has_value()) {
-      out.push_back(span->entry);
+      out.push_back(MeshCrossing{.distance = span->entry, .entering = true});
       if (span->exit > span->entry) {
-        out.push_back(span->exit);
+        out.push_back(MeshCrossing{.distance = span->exit, .entering = false});
       }
     }
     return;
@@ -325,13 +332,51 @@ void OccluderCell::ray_surfaces(const Vec3& eye, const Vec3& direction,
   } else {
     for (std::size_t i = 0; i + 2 < triangles.size() && static_cast<int>(out.size()) < max_surfaces;
          i += 3) {
-      if (const auto t =
-              ray_triangle(eye, direction, triangles[i], triangles[i + 1], triangles[i + 2])) {
-        out.push_back(*t);
+      bool entering = false;
+      if (const auto t = ray_triangle(eye, direction, triangles[i], triangles[i + 1],
+                                      triangles[i + 2], &entering)) {
+        out.push_back(MeshCrossing{.distance = *t, .entering = entering});
       }
     }
   }
-  std::sort(out.begin() + static_cast<std::ptrdiff_t>(before), out.end());
+  std::sort(
+      out.begin() + static_cast<std::ptrdiff_t>(before), out.end(),
+      [](const MeshCrossing& a, const MeshCrossing& b) -> bool { return a.distance < b.distance; });
+}
+
+auto mesh_spans(const std::vector<MeshCrossing>& crossings) -> std::vector<RaySpan> {
+  std::vector<RaySpan> spans;
+  spans.reserve(crossings.size());
+  int open = -1;
+  for (int i = 0; i < static_cast<int>(crossings.size()); ++i) {
+    const MeshCrossing& crossing = crossings[static_cast<std::size_t>(i)];
+    if (open < 0) {
+      open = i;
+      continue;
+    }
+    const bool opposite = crossing.entering != crossings[static_cast<std::size_t>(open)].entering;
+    if (opposite) {
+      // The two faces face opposite ways: the ray entered through one and left
+      // through the other. That is a solid, and its thickness is the distance
+      // between them. The absolute polarity is irrelevant — a shell can be wound
+      // either way round, and the engine's own enter/leave flag follows the shell.
+      spans.push_back(RaySpan{.entry = crossings[static_cast<std::size_t>(open)].distance,
+                              .exit = crossing.distance});
+      open = -1;
+      continue;
+    }
+    // The same facing twice with no opposite face between them: the first crossing
+    // was an **open sheet** (the map's walls), not the near face of a solid. It stays
+    // a surface; the new crossing opens the next span.
+    const float at = crossings[static_cast<std::size_t>(open)].distance;
+    spans.push_back(RaySpan{.entry = at, .exit = at});
+    open = i;
+  }
+  if (open >= 0) {
+    const float at = crossings[static_cast<std::size_t>(open)].distance;
+    spans.push_back(RaySpan{.entry = at, .exit = at});
+  }
+  return spans;
 }
 
 auto OccluderCell::lower_bound_distance(const Vec3& eye) const noexcept -> float {
@@ -402,7 +447,7 @@ namespace {
 // Every triangle the ray hits, appended unsorted. The BVH is the acceleration only:
 // the answer is the same as scanning the soup (the host test pins that).
 void ray_mesh_crossings(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction,
-                        std::vector<float>& out, int max_surfaces) {
+                        std::vector<MeshCrossing>& out, int max_surfaces) {
   if (bvh.nodes.empty()) {
     return;
   }
@@ -426,9 +471,10 @@ void ray_mesh_crossings(const MeshBvh& bvh, const Vec3& eye, const Vec3& directi
           return;
         }
         const std::uint32_t tri = bvh.order[node.start + i] * 3;
-        if (const auto t = ray_triangle(eye, direction, bvh.triangles[tri],
-                                        bvh.triangles[tri + 1], bvh.triangles[tri + 2])) {
-          out.push_back(*t);
+        bool entering = false;
+        if (const auto t = ray_triangle(eye, direction, bvh.triangles[tri], bvh.triangles[tri + 1],
+                                        bvh.triangles[tri + 2], &entering)) {
+          out.push_back(MeshCrossing{.distance = *t, .entering = entering});
         }
       }
       continue;
@@ -516,8 +562,7 @@ auto ray_mesh_bvh(const MeshBvh& bvh, const Vec3& eye, const Vec3& direction)
   return RaySpan{.entry = t0, .exit = t0};
 }
 
-auto project_occluder(const Vec3& eye, const Basis& basis,
-                      const std::vector<Vec3>& world_vertices,
+auto project_occluder(const Vec3& eye, const Basis& basis, const std::vector<Vec3>& world_vertices,
                       const std::vector<OccluderPlane>& planes, float surface_modifier)
     -> std::optional<OccluderCell> {
   if (world_vertices.empty()) {

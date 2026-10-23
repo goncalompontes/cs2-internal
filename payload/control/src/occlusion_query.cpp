@@ -1321,8 +1321,8 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
   std::vector<OcclusionHull>& target = collect ? out : sink;
   int* const counts = collect ? type_counts : nullptr;
   for (int b = 0; b < body_count; ++b) {
-    walk_body(bodies[b], eye, lo, hi, target, shapes, counts, stats, collect, targets,
-              target_count, target_ids);
+    walk_body(bodies[b], eye, lo, hi, target, shapes, counts, stats, collect, targets, target_count,
+              target_ids);
   }
 }
 
@@ -1625,8 +1625,7 @@ auto query_world_occluders(const Vec3& from, const Vec3& box_min, const Vec3& bo
 // allocator from the payload's own thread — docs/handoff.md).
 auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
                  const TraceExclude& exclude, bool box_query, const cs2::aim::Vec3* at,
-                 const cs2::aim::Vec3* box_min, const cs2::aim::Vec3* box_max)
-    -> TraceProbeRun {
+                 const cs2::aim::Vec3* box_min, const cs2::aim::Vec3* box_max) -> TraceProbeRun {
   TraceProbeRun run;
   run.abi = abi;
   if (rays.empty()) {
@@ -1783,8 +1782,8 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
   // The kept solids, so a missing wall can be looked up by position: if the wall's
   // bounds are in this list the enumeration kept it, and the loss is downstream
   // (projection or valuation); if they are not, the selection dropped it.
-  run.kept.reserve(std::min(static_cast<int>(occluders.hulls.size()),
-                            TraceProbeRun::k_max_kept_published));
+  run.kept.reserve(
+      std::min(static_cast<int>(occluders.hulls.size()), TraceProbeRun::k_max_kept_published));
   for (const OcclusionHull& hull : occluders.hulls) {
     if (static_cast<int>(run.kept.size()) >= TraceProbeRun::k_max_kept_published) {
       break;
@@ -1792,7 +1791,8 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
     Vec3 mn{};
     Vec3 mx{};
     hull_bounds(hull, mn, mx);
-    run.kept.push_back(TraceHullInfo{.kind = hull.kind, .min = mn, .max = mx, .target = hull.target});
+    run.kept.push_back(
+        TraceHullInfo{.kind = hull.kind, .min = mn, .max = mx, .target = hull.target});
   }
 
   // The projected cells — the very same projection the solver's heatmap uses, so the
@@ -1851,16 +1851,19 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
     for (std::size_t i = 0; i < cells.size(); ++i) {
       const cs2::aim::OccluderCell& cell = cells[i];
       if (cell.kind == cs2::aim::SolidKind::mesh) {
-        std::vector<float> surfaces;
-        surfaces.reserve(static_cast<std::size_t>(k_trace_surfaces_per_mesh));
-        cell.ray_surfaces(eye, ray.direction, surfaces, k_trace_surfaces_per_mesh);
-        for (const float distance : surfaces) {
+        std::vector<cs2::aim::MeshCrossing> crossings;
+        crossings.reserve(static_cast<std::size_t>(k_trace_surfaces_per_mesh));
+        cell.ray_crossings(eye, ray.direction, crossings, k_trace_surfaces_per_mesh);
+        // The solid spans the solver values: paired faces are one volume with its
+        // thickness, a lone face is an open sheet. Publishing the crossings instead
+        // would show the engine's volumes as pairs of unrelated surfaces.
+        for (const cs2::aim::RaySpan& span : cs2::aim::mesh_spans(crossings)) {
           if (static_cast<int>(result.ours.size()) >= k_trace_max_ours) {
             result.ours_truncated = true;
             break;
           }
-          result.ours.push_back(TraceOccluderHit{.entry = distance,
-                                                 .exit = distance,
+          result.ours.push_back(TraceOccluderHit{.entry = span.entry,
+                                                 .exit = span.exit,
                                                  .kind = cell.kind,
                                                  .index = hulls[i],
                                                  .cluster = clusters[i]});

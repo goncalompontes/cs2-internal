@@ -464,8 +464,8 @@ auto main() -> int {
           for (int iz = -6; iz <= 6; ++iz) {
             const Vec3 direction{
                 .x = 1.0F, .y = static_cast<float>(iy) * 0.3F, .z = static_cast<float>(iz) * 0.3F};
-            const auto flat = mesh->ray_span(Vec3{}, direction);       // flat triangle scan
-            const auto fast = mesh_bvh->ray_span(Vec3{}, direction);   // BVH
+            const auto flat = mesh->ray_span(Vec3{}, direction);      // flat triangle scan
+            const auto fast = mesh_bvh->ray_span(Vec3{}, direction);  // BVH
             expect(flat.has_value() == fast.has_value(), "the BVH and flat scan agree on a hit");
             if (flat.has_value() && fast.has_value()) {
               expect(near(flat->entry, fast->entry, 1e-3F) && near(flat->exit, fast->exit, 1e-3F),
@@ -479,8 +479,9 @@ auto main() -> int {
     }
 
     // The heatmap attenuates a head behind the mesh surface: the engine's entry
-    // cost, applied to the weapon's damage and then scaled by the headshot
-    // multiplier — 100 - (0.16 * 100 + (3/4 * 1.25) * 3) = 81.1875, times 4.
+    // cost for the solid the box bounds (one enter/leave span, thickness 2), applied
+    // to the weapon's damage and then scaled by the headshot multiplier:
+    // lost = 2^2/24 + (3/4 * 1.25) * 3 + 0.16 * 100 = 18.98, so 81.02 * 4.
     std::vector<TargetPose> poses;
     TargetPose pose;
     pose.target = 1;
@@ -497,10 +498,12 @@ auto main() -> int {
     const auto map = cs2::aim::build_heatmap(Vec3{}, basis, 1.0F, poses, options);
     expect(!map.cells.empty(), "the mesh occluder leaves a cell");
     // The ray crosses the box **twice** (the near face at 49 and the far face at 51),
-    // and every crossing is a surface the bullet pays for — this is a closed shape, so
-    // two entry costs: 100 → 81.1875 → 65.385, times the headshot multiplier.
+    // but a closed shell is **one solid**: the near face is the entry, the far face
+    // its leave, and the thickness is 2. Charging two entry fees and no thickness
+    // (the old rule) is the bug that let a shot through a building value like a shot
+    // through a doorway.
     for (const auto& cell : map.cells) {
-      expect(near(cell.value, 261.5F, 0.5F), "each mesh face charges its entry cost");
+      expect(near(cell.value, 324.08F, 0.5F), "a closed mesh shell is one solid with thickness");
     }
   }
 
@@ -526,12 +529,20 @@ auto main() -> int {
     const auto two = cs2::aim::project_mesh_occluder(Vec3{}, basis, verts, tris, 1.0F);
     expect(two.has_value(), "the two-sheet cluster projects");
     if (two.has_value()) {
-      std::vector<float> crossings;
-      two->ray_surfaces(Vec3{}, Vec3{.x = 1.0F, .y = 0.5F, .z = 0.1F}, crossings);
+      std::vector<cs2::aim::MeshCrossing> crossings;
+      two->ray_crossings(Vec3{}, Vec3{.x = 1.0F, .y = 0.5F, .z = 0.1F}, crossings);
       expect(crossings.size() == 2, "a ray crosses both sheets");
       if (crossings.size() == 2) {
-        expect(near(crossings[0], near_x, 0.1F) && near(crossings[1], far_x, 0.1F),
-               "the crossings are in order along the ray");
+        expect(
+            near(crossings[0].distance, near_x, 0.1F) && near(crossings[1].distance, far_x, 0.1F),
+            "the crossings are in order along the ray");
+        // Both sheets are wound the same way, so neither is the back face of the
+        // other: they stay two surfaces (no fake volume between them).
+        const std::vector<cs2::aim::RaySpan> spans = cs2::aim::mesh_spans(crossings);
+        expect(spans.size() == 2, "two same-facing sheets stay two surfaces");
+        for (const cs2::aim::RaySpan& span : spans) {
+          expect(near(span.entry, span.exit, 1e-3F), "neither sheet becomes a volume");
+        }
       }
       // And the field charges for both: 100 → 81.1875 → 65.385, times 4.
       std::vector<TargetPose> two_poses;
@@ -540,8 +551,10 @@ auto main() -> int {
       two_pose.hitboxes.push_back(head_capsule(100.0F));
       two_poses.push_back(std::move(two_pose));
       HeatmapOptions two_options;
-      two_options.weapon = WeaponProfile{.damage = 100.0F, .range_modifier = 1.0F,
-                                          .penetration = 4.0F, .headshot_multiplier = 4.0F};
+      two_options.weapon = WeaponProfile{.damage = 100.0F,
+                                         .range_modifier = 1.0F,
+                                         .penetration = 4.0F,
+                                         .headshot_multiplier = 4.0F};
       two_options.penetration = cs2::aim::PenetrationModel::engine;
       two_options.penetration_params.weapon_penetration = 4.0F;
       two_options.occlusion.push_back(*two);
@@ -550,6 +563,33 @@ auto main() -> int {
         expect(near(cell.value, 261.5F, 0.5F), "both sheets in the cluster attenuate");
       }
     }
+  }
+
+  // --- pairing a mesh's crossings into the solids the bullet crosses ---------
+  {
+    using cs2::aim::MeshCrossing;
+    // A closed shell: a front face and the back face that closes it are **one**
+    // solid with the shell's thickness.
+    const std::vector<cs2::aim::RaySpan> box =
+        cs2::aim::mesh_spans({MeshCrossing{.distance = 49.0F, .entering = true},
+                              MeshCrossing{.distance = 51.0F, .entering = false}});
+    expect(box.size() == 1 && near(box[0].entry, 49.0F) && near(box[0].exit, 51.0F),
+           "a front/back pair is one solid with its thickness");
+    // Two sheets wound the same way never become a fake volume between them.
+    const std::vector<cs2::aim::RaySpan> sheets =
+        cs2::aim::mesh_spans({MeshCrossing{.distance = 30.0F, .entering = false},
+                              MeshCrossing{.distance = 70.0F, .entering = false}});
+    expect(sheets.size() == 2 && near(sheets[0].entry, sheets[0].exit) &&
+               near(sheets[1].entry, sheets[1].exit),
+           "two sheets in one cluster stay two surfaces");
+    // A sheet followed by a closed volume: the lone entry stays a surface.
+    const std::vector<cs2::aim::RaySpan> mixed =
+        cs2::aim::mesh_spans({MeshCrossing{.distance = 10.0F, .entering = true},
+                              MeshCrossing{.distance = 20.0F, .entering = true},
+                              MeshCrossing{.distance = 30.0F, .entering = false}});
+    expect(mixed.size() == 2 && near(mixed[0].entry, 10.0F) && near(mixed[0].exit, 10.0F) &&
+               near(mixed[1].entry, 20.0F) && near(mixed[1].exit, 30.0F),
+           "a lone entry is a surface; the pair that follows is a solid");
   }
 
   // --- an OPEN mesh surface (a map wall, not a closed prop) ------------------
@@ -585,8 +625,10 @@ auto main() -> int {
       // The **engine** model is what the ragebot runs (`solve_input->penetration`
       // in `service.cpp`), and its entry cost does not depend on the depth.
       HeatmapOptions wall_options;
-      wall_options.weapon = WeaponProfile{
-          .damage = 100.0F, .range_modifier = 1.0F, .penetration = 4.0F, .headshot_multiplier = 4.0F};
+      wall_options.weapon = WeaponProfile{.damage = 100.0F,
+                                          .range_modifier = 1.0F,
+                                          .penetration = 4.0F,
+                                          .headshot_multiplier = 4.0F};
       wall_options.penetration = cs2::aim::PenetrationModel::engine;
       wall_options.penetration_params.weapon_penetration = 4.0F;
       wall_options.occlusion.push_back(*wall);
