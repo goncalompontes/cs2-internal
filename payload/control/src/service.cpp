@@ -29,6 +29,8 @@
 #endif
 
 #if defined(_WIN32)
+// `windows.h` first: `bcrypt.h` uses the Win32 base types (`LONG`, `ULONG`, `PUCHAR`,
+// `LPCWSTR`) and does not include its own definition of them.
 #include <bcrypt.h>
 #include <windows.h>
 #endif
@@ -2529,69 +2531,87 @@ void Service::rage_tick(const game::Snapshot& snapshot) noexcept {
   // backtracking poses. Only the solids whose AABB can lie between the eye and the
   // candidates are projected (the per-hull AABB is cached, `OcclusionHull::has_bounds`).
   {
-    // The projection set is filtered **per target**, not by the union of every
-    // hitbox. A solid can only occlude a hitbox if it lies in that hitbox's own
-    // eye→hitbox pyramid, and the enumeration already tags each solid with the
-    // target whose pyramid kept it (`OcclusionHull::target`), so a solid outside
-    // its own target's padded box cannot matter to that target. The union box was
-    // what made a dense solve project ~1500 solids a tick (and, with the per-hitbox
-    // cap, fail closed and never shoot).
-    struct TargetBox {
-      int target = -1;
-      game::Vec3 min{};
-      game::Vec3 max{};
-    };
+    // The projection set is filtered **per target and per hitbox line**: a solid can
+    // only occlude a hitbox if its box comes near the eye→hitbox segment (see
+    // `relevant` below), and the enumeration already tags each solid with the target
+    // whose pyramid kept it (`OcclusionHull::target`), so a solid tagged for a target
+    // that is not in this solve is skipped. The old filter compared the solid's box
+    // with the **hitbox's own box**, which dropped every wall between the eye and the
+    // hitbox and made the solve value a headshot at 3300 units at full damage.
     constexpr float k_margin = 8.0F;
     game::Vec3 lo = solve_input->eye;
     game::Vec3 hi = solve_input->eye;
-    std::vector<TargetBox> boxes;
-    boxes.reserve(solve_input->hitboxes.size());
     for (const aim::Hitbox& hitbox : solve_input->hitboxes) {
       extend_box(lo, hi, hitbox);
-      game::Vec3 box_lo{};
-      game::Vec3 box_hi{};
-      hitbox_bounds(hitbox, box_lo, box_hi);
-      const auto same = std::find_if(boxes.begin(), boxes.end(), [&](const TargetBox& box) {
-        return box.target == hitbox.target;
-      });
-      if (same == boxes.end()) {
-        boxes.push_back(TargetBox{.target = hitbox.target, .min = box_lo, .max = box_hi});
-        continue;
-      }
-      same->min.x = (std::min)(same->min.x, box_lo.x);
-      same->min.y = (std::min)(same->min.y, box_lo.y);
-      same->min.z = (std::min)(same->min.z, box_lo.z);
-      same->max.x = (std::max)(same->max.x, box_hi.x);
-      same->max.y = (std::max)(same->max.y, box_hi.y);
-      same->max.z = (std::max)(same->max.z, box_hi.z);
-    }
-    for (TargetBox& box : boxes) {
-      box.min = game::Vec3{
-          .x = box.min.x - k_margin, .y = box.min.y - k_margin, .z = box.min.z - k_margin};
-      box.max = game::Vec3{
-          .x = box.max.x + k_margin, .y = box.max.y + k_margin, .z = box.max.z + k_margin};
     }
     lo = game::Vec3{.x = lo.x - k_margin, .y = lo.y - k_margin, .z = lo.z - k_margin};
     hi = game::Vec3{.x = hi.x + k_margin, .y = hi.y + k_margin, .z = hi.z + k_margin};
-    // Could this solid occlude **any** hitbox of the solve? A tagged solid is only
-    // tested against its own target's box; an untagged (shared) one against all.
-    //
-    // **The test is the tag, not an AABB overlap with the hitbox.** The enumeration
-    // already kept a solid only when it lay inside that target's eye→hitbox pyramid,
-    // and a wall 2000 units in front of the hitbox does not overlap the hitbox's own
-    // box — comparing the two dropped exactly the walls in between. It made the solve
-    // value a headshot at 3300 units at full damage (125.8) through the map, which is
-    // the live "shoots through solid walls".
-    const auto relevant = [&boxes](const OcclusionHull& hull) -> bool {
-      if (hull.target < 0) {
-        return true;  // shared: only the whole-solve box below bounds it
+    // Does the segment `from`→`to` come within `expand` of `min..max`? A slab test
+    // with the box expanded by the hitbox's half-diagonal: a solid that crosses the
+    // eye→hitbox **cone** is within that distance of the centre line, so this is a
+    // conservative "could this solid occlude that hitbox" test — and it is the cheap
+    // one (a segment, not a projection). Comparing the solid's box with the hitbox's
+    // own box instead dropped every wall between them.
+    const auto segment_near_box = [](const game::Vec3& from, const game::Vec3& to,
+                                     const game::Vec3& min, const game::Vec3& max,
+                                     float expand) -> bool {
+      float t0 = 0.0F;
+      float t1 = 1.0F;
+      const game::Vec3 d{.x = to.x - from.x, .y = to.y - from.y, .z = to.z - from.z};
+      const float origin[3] = {from.x, from.y, from.z};
+      const float delta[3] = {d.x, d.y, d.z};
+      const float lo[3] = {min.x - expand, min.y - expand, min.z - expand};
+      const float hi[3] = {max.x + expand, max.y + expand, max.z + expand};
+      for (int axis = 0; axis < 3; ++axis) {
+        if (std::fabs(delta[axis]) < 1e-6F) {
+          if (origin[axis] < lo[axis] || origin[axis] > hi[axis]) {
+            return false;
+          }
+          continue;
+        }
+        const float inv = 1.0F / delta[axis];
+        float t_near = (lo[axis] - origin[axis]) * inv;
+        float t_far = (hi[axis] - origin[axis]) * inv;
+        if (t_near > t_far) {
+          std::swap(t_near, t_far);
+        }
+        t0 = (std::max)(t0, t_near);
+        t1 = (std::min)(t1, t_far);
+        if (t0 > t1) {
+          return false;
+        }
       }
-      for (const TargetBox& box : boxes) {
-        if (box.target == hull.target) {
+      return true;
+    };
+    // Could this solid occlude **any** hitbox of the solve? A tagged solid is only
+    // tested against its own target's hitboxes; an untagged (shared) one against all.
+    // The test is the eye→hitbox **cone**, not an AABB overlap with the hitbox: the
+    // walls in between do not overlap the hitbox at all.
+    const auto relevant = [&](const OcclusionHull& hull) -> bool {
+      if (!hull.has_bounds) {
+        return true;
+      }
+      for (const aim::Hitbox& hitbox : solve_input->hitboxes) {
+        if (hull.target >= 0 && hull.target != hitbox.target) {
+          continue;
+        }
+        game::Vec3 box_lo{};
+        game::Vec3 box_hi{};
+        hitbox_bounds(hitbox, box_lo, box_hi);
+        const game::Vec3 centre{.x = (box_lo.x + box_hi.x) * 0.5F,
+                                .y = (box_lo.y + box_hi.y) * 0.5F,
+                                .z = (box_lo.z + box_hi.z) * 0.5F};
+        // The hitbox's half-diagonal: a solid inside the eye→hitbox cone is within
+        // this distance of the centre line, so expanding the solid's box by it keeps
+        // the segment test conservative for every point of the hitbox.
+        const float expand = 0.5F * std::sqrt((box_hi.x - box_lo.x) * (box_hi.x - box_lo.x) +
+                                              (box_hi.y - box_lo.y) * (box_hi.y - box_lo.y) +
+                                              (box_hi.z - box_lo.z) * (box_hi.z - box_lo.z));
+        if (segment_near_box(solve_input->eye, centre, hull.bounds_min, hull.bounds_max, expand)) {
           return true;
         }
       }
-      return false;  // enumerated for a target that is not in this solve
+      return false;
     };
     const std::uint64_t t_project = now_us();
     const std::scoped_lock lock(occlusion_mutex_);
