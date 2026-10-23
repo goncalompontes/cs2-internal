@@ -344,6 +344,20 @@ pub fn known_signatures() -> Vec<Signature> {
             None,
             None,
         ),
+        // `CGamePhysicsQueryInterface::TraceLineIntervals` — the call the real bullet
+        // makes, and the probe's engine answer (`docs/re/bullet-trace.md` §"The probe's
+        // call form"). It was **not** curated: the probe used the hard-coded
+        // `0xA19E90` fallback, which went stale with the 2026-10-23 update and made
+        // the probe fault *inside* the engine (the guard recovered the access
+        // violation, but the process still died on the corrupted stack). The 32-byte
+        // prologue is unique in client.dll (one match); RVA on this build: `0xa1acc0`.
+        sig(
+            "client.dll",
+            "trace_line_intervals",
+            "4C 8B DC 49 89 5B 08 49 89 6B 10 49 89 73 18 49 89 7B 20 41 54 41 56 41 57 48 81 EC 90 00 00 00",
+            None,
+            None,
+        ),
         // `SurfacePropertiesList` manager (`DAT_18254e100`, `client_base + 0x254e100`),
         // the game's surface-property table (`CGameSurfaceProperties`, docs/re/
         // penetration.md). Anchor on its resolver `FUN_1809e3560`

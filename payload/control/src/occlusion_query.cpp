@@ -1328,9 +1328,12 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
 
 // --- the engine's own trace (docs/re/bullet-trace.md) --------------------------
 //
-// `TraceLineIntervals` = `FUN_180a19e90` (client.dll RVA 0xa19e90), the call the real
-// bullet makes. The call form was re-derived from the **live** build's own call sites
-// (client.dll sha 5a46a09b…, 2026-10-21) and not from the decompile alone:
+// `TraceLineIntervals` = `FUN_180a1acc0` on the 2026-10-23 build (client.dll RVA
+// 0xa1acc0; it was `FUN_180a19e90` at 0xa19e90 and moved with the update), the call the
+// real bullet makes. The RVA comes from the curated `trace_line_intervals` signature;
+// the literal is only the fallback for a dump built without one. The call form was
+// re-derived from the **live** build's own call sites (client.dll sha 5a46a09b…,
+// 2026-10-21) and not from the decompile alone:
 //
 //   TraceLineIntervals(*(client + 0x2227058), &results, &start, &delta,
 //                       filter + 8, -1.0f);
@@ -1352,9 +1355,10 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
 //   Windows x64 convention these are the **5th** and **6th** arguments.
 //
 // The interval record's `+0x0C` is the **fraction** along the ray (the consumer
-// computes the wall thickness as `(leave - enter) * |delta|`), and `+0x32` is 1 for an
-// "enter" record and 0 for a "leave" one.
-constexpr std::uintptr_t k_trace_line_intervals_fallback = 0xA19E90;
+// computes the wall thickness as `(leave - enter) * |delta|`), and `+0x32` is 0 for an
+// "enter" record and 1 for a "leave" one (`pair_trace_spans`, §"The interval record's
+// polarity" in `docs/re/occlusion.md`).
+constexpr std::uintptr_t k_trace_line_intervals_fallback = 0xA1ACC0;
 // The interval record's stride (the consumer's own `mov edx, 0x38`).
 constexpr std::uintptr_t k_trace_interval_stride = TRACE_INTERVAL_SIZE;
 
