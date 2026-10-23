@@ -209,8 +209,7 @@ void set_occlusion_exclude_pawns(const std::uintptr_t* pawns, int count) noexcep
                                          bool verify_enum = false)
     -> OcclusionQueryResult;
 
-// --- the trace probe (docs/re/bullet-trace.md) ---------------------------------
-//
+// --- the trace probe (docs/re/bullet-trace.md) ---------------------------------//
 // The probe asks the engine **its own** question — `TraceLineIntervals`, the call the
 // real bullet makes — for a given ray, and publishes **both** answers side by side plus
 // the difference: what the engine's trace hit, what our occluder set says about the
@@ -560,6 +559,10 @@ struct TraceRayResult {
   bool engine_overrun = false;
   int interval_count = 0;           // the intervals the engine returned
   bool intervals_overflow = false;  // more intervals than the probe publishes
+  // Our own list was cut at the per-ray bound: a mesh cluster can put dozens of
+  // surfaces on one ray, and a diagnostic must stay bounded. The answer says so
+  // instead of silently publishing a short list.
+  bool ours_truncated = false;
   // The engine's answer could **not** be read: the call faulted, the container did
   // not hold the buffer the probe handed it (the engine reallocated — which the
   // external-buffer flag forbids), the count was out of range, or the buffer was

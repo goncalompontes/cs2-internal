@@ -1361,6 +1361,12 @@ void walk_records(std::uintptr_t data, std::int32_t count, const Vec3& eye, cons
 constexpr std::uintptr_t k_trace_line_intervals_fallback = 0xA1ACC0;
 // The interval record's stride (the consumer's own `mov edx, 0x38`).
 constexpr std::uintptr_t k_trace_interval_stride = TRACE_INTERVAL_SIZE;
+// The probe's "our answer" bounds, per solid and per ray. A mesh cluster can put
+// dozens of surfaces on one ray; the engine publishes at most 64 intervals, and a
+// diagnostic must never turn into unbounded work. The answer publishes
+// `ours_truncated` when a ray hits the bound.
+constexpr int k_trace_surfaces_per_mesh = 32;
+constexpr int k_trace_max_ours = 256;
 
 using TraceLineIntervalsFn = void (*)(void*, void*, const void*, const void*, const void*, float);
 
@@ -1832,15 +1838,49 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
   for (const TraceRay& ray : rays) {
     TraceRayResult result;
     result.ray = ray;
-    // Our answer for this ray.
+    // Our answer for this ray, from the **solver's own** per-solid ray test.
+    //
+    // A collision mesh is a soup, and one ray can cross one cluster many times (a
+    // wall, then the floor, then another wall). `ray_span` reports only the **nearest**
+    // crossing, which is the pre-`86275be` valuation — and it was what this probe used
+    // until 2026-10-23, so the probe kept reporting a wall the solver had already
+    // learned to charge (`O8c`: "whole solids missing"). The solver values every
+    // surface (`OccluderCell::ray_surfaces`); the probe must publish the same answer,
+    // or the instrument disagrees with the thing it is measuring. Convex solids still
+    // contribute their one span.
     for (std::size_t i = 0; i < cells.size(); ++i) {
-      const std::optional<cs2::aim::RaySpan> span = cells[i].ray_span(eye, ray.direction);
+      const cs2::aim::OccluderCell& cell = cells[i];
+      if (cell.kind == cs2::aim::SolidKind::mesh) {
+        std::vector<float> surfaces;
+        surfaces.reserve(static_cast<std::size_t>(k_trace_surfaces_per_mesh));
+        cell.ray_surfaces(eye, ray.direction, surfaces, k_trace_surfaces_per_mesh);
+        for (const float distance : surfaces) {
+          if (static_cast<int>(result.ours.size()) >= k_trace_max_ours) {
+            result.ours_truncated = true;
+            break;
+          }
+          result.ours.push_back(TraceOccluderHit{.entry = distance,
+                                                 .exit = distance,
+                                                 .kind = cell.kind,
+                                                 .index = hulls[i],
+                                                 .cluster = clusters[i]});
+        }
+        if (result.ours_truncated) {
+          break;
+        }
+        continue;
+      }
+      const std::optional<cs2::aim::RaySpan> span = cell.ray_span(eye, ray.direction);
       if (!span.has_value()) {
         continue;
       }
+      if (static_cast<int>(result.ours.size()) >= k_trace_max_ours) {
+        result.ours_truncated = true;
+        break;
+      }
       result.ours.push_back(TraceOccluderHit{.entry = span->entry,
                                              .exit = span->exit,
-                                             .kind = cells[i].kind,
+                                             .kind = cell.kind,
                                              .index = hulls[i],
                                              .cluster = clusters[i]});
     }

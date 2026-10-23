@@ -4559,6 +4559,8 @@ void Service::do_trace_probe(const Json& args, Json& out) noexcept {
       ours.push_back(std::move(record));
     }
     item.set("ours", std::move(ours));
+    // Whether our own list hit the per-ray bound — a short list must say so.
+    item.set("ours_truncated", Json::boolean(ray.ours_truncated));
 
     // C. The difference: what the engine found that our set has nothing for, and
     // what our set has that the engine did not report.
