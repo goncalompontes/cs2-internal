@@ -54,6 +54,12 @@ struct OcclusionHull {
   // Without this, every hitbox was split by every enemy's occluders, which is what made
   // `occlude_polygon` explode into tens of thousands of fragments (`docs/ragebot-perf.md`).
   int target = -1;
+  // mesh: the vphysics shape the triangles came from. A collision mesh is split into
+  // spatial **clusters** so one map-wide soup does not make one chart-wide silhouette,
+  // but the solid is the **shape**: the engine's trace enters and leaves the same
+  // shape, and a thick volume's two faces can fall in two different clusters. Pairing
+  // the crossings per shape (not per cluster) is what gives the volume its thickness.
+  std::uintptr_t source = 0;
   // The shape's real surface (`CGameSurfaceProperties`, docs/re/penetration.md).
   float surface_modifier = 1.0F;  // bulletPenetrationDistanceModifier
   float damage_modifier = 1.0F;   // bulletPenetrationDamageModifier
@@ -204,10 +210,8 @@ void set_occlusion_exclude_pawns(const std::uintptr_t* pawns, int count) noexcep
                                          const std::uint16_t* exclude = nullptr,
                                          int exclude_count = 0,
                                          const cs2::aim::Aabb* targets = nullptr,
-                                         int target_count = 0,
-                                         const int* target_ids = nullptr,
-                                         bool verify_enum = false)
-    -> OcclusionQueryResult;
+                                         int target_count = 0, const int* target_ids = nullptr,
+                                         bool verify_enum = false) -> OcclusionQueryResult;
 
 // --- the trace probe (docs/re/bullet-trace.md) ---------------------------------//
 // The probe asks the engine **its own** question — `TraceLineIntervals`, the call the
@@ -990,7 +994,7 @@ inline constexpr float TRACE_SURFACE_SLACK = 0.01F;
   }
   if (hull.kind == cs2::aim::SolidKind::mesh) {
     return cs2::aim::project_mesh_occluder(eye, basis, hull.vertices, hull.triangles,
-                                           hull.surface_modifier, hull.mesh_bvh);
+                                           hull.surface_modifier, hull.mesh_bvh, hull.source);
   }
   return cs2::aim::project_occluder(eye, basis, hull.vertices, hull.planes, hull.surface_modifier);
 }
@@ -1024,8 +1028,7 @@ struct TraceExclude {
 // is a solid the solver would never see.
 [[nodiscard]] auto probe_trace(const std::vector<TraceRay>& rays, bool invoke,
                                TraceAbi abi = TraceAbi::correct,
-                               const TraceExclude& exclude = TraceExclude{},
-                               bool box_query = false,
+                               const TraceExclude& exclude = TraceExclude{}, bool box_query = false,
                                const cs2::aim::Vec3* at = nullptr,
                                const cs2::aim::Vec3* box_min = nullptr,
                                const cs2::aim::Vec3* box_max = nullptr) -> TraceProbeRun;

@@ -96,6 +96,10 @@ struct OccluderCell {
   // uses it; otherwise it scans the flat soup. Shared, so projecting the same mesh for
   // many hitboxes does not rebuild it (`docs/ragebot-perf.md` §3.7).
   std::shared_ptr<const MeshBvh> mesh_bvh;
+  // mesh: the vphysics shape this cluster was split from (`OcclusionHull::source`).
+  // Crossings are paired **per shape**, not per cluster: a thick solid's two faces can
+  // land in two clusters of the same shape, and the engine pairs them.
+  std::uintptr_t source = 0;
   Vec3 a{};             // sphere: centre; capsule: endpoint a; mesh: AABB min
   Vec3 b{};             // capsule: endpoint b; mesh: AABB max
   float radius = 0.0F;  // sphere / capsule radius
@@ -190,8 +194,8 @@ struct OccluderCell {
 [[nodiscard]] auto project_mesh_occluder(const Vec3& eye, const Basis& basis,
                                          const std::vector<Vec3>& vertices,
                                          const std::vector<Vec3>& triangles, float surface_modifier,
-                                         std::shared_ptr<const MeshBvh> bvh = nullptr)
-    -> std::optional<OccluderCell>;
+                                         std::shared_ptr<const MeshBvh> bvh = nullptr,
+                                         std::uintptr_t source = 0) -> std::optional<OccluderCell>;
 
 // The inward face planes of the convex hull of a point set — for a collision **mesh**
 // (docs/re/vphysics2.md: "mesh (convex hull)"), whose world vertices the payload

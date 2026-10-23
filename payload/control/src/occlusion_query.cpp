@@ -678,7 +678,7 @@ auto emit_mesh_clusters(std::vector<std::array<Vec3, 3>>& tris, bool transform_i
 // `transform` the owning body's world transform.
 auto parse_mesh(std::uintptr_t mesh, const Vec3& scale, const BodyTransform& transform,
                 std::vector<OcclusionHull>& out, const ShapeSurface& surface,
-                OcclusionQueryStats* stats) -> bool {
+                OcclusionQueryStats* stats, std::uintptr_t source) -> bool {
   std::int32_t count = 0;
   std::uintptr_t vertices = 0;
   if (!cs2::game::read(mesh + k_mesh_vertex_count, count) || count < 3 ||
@@ -735,6 +735,9 @@ auto parse_mesh(std::uintptr_t mesh, const Vec3& scale, const BodyTransform& tra
   const int before = static_cast<int>(out.size());
   if (!emit_mesh_clusters(tris, transform.is_identity(), out, surface)) {
     mark_incomplete(stats, OcclusionQueryIssue::mesh_cluster_limit);
+  }
+  for (std::size_t i = static_cast<std::size_t>(before); i < out.size(); ++i) {
+    out[i].source = source;
   }
   return static_cast<int>(out.size()) > before;
 }
@@ -815,7 +818,7 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
       if (!cs2::game::read(shape + k_shape_mesh_scale, scale)) {
         mark_incomplete(stats, OcclusionQueryIssue::parser_failure);
       }
-      return parse_mesh(mesh, scale, transform, out, surface, stats);
+      return parse_mesh(mesh, scale, transform, out, surface, stats, shape);
     }
     case 4: {  // GENERIC_SHAPE_COMPOUND — the pool of sub-shapes (docs/re/vphysics2.md)
       std::uintptr_t compound = 0;
@@ -868,7 +871,7 @@ auto parse_shape(std::uintptr_t shape, const BodyTransform& transform,
         const Vec3 scale{.x = 1.0F, .y = 1.0F, .z = 1.0F};
         for (std::int32_t i = 0; i < mesh_count; ++i) {
           if (parse_mesh(mesh_block + static_cast<std::uintptr_t>(i) * k_compound_mesh_stride,
-                         scale, transform, out, surface, stats)) {
+                         scale, transform, out, surface, stats, shape)) {
             any = true;
           }
         }
@@ -1844,34 +1847,52 @@ auto probe_trace(const std::vector<TraceRay>& rays, bool invoke, TraceAbi abi,
     // wall, then the floor, then another wall). `ray_span` reports only the **nearest**
     // crossing, which is the pre-`86275be` valuation — and it was what this probe used
     // until 2026-10-23, so the probe kept reporting a wall the solver had already
-    // learned to charge (`O8c`: "whole solids missing"). The solver values every
-    // surface (`OccluderCell::ray_surfaces`); the probe must publish the same answer,
-    // or the instrument disagrees with the thing it is measuring. Convex solids still
-    // contribute their one span.
+    // learned to charge (`O8c`: "whole solids missing"). The solver now pairs every
+    // crossing of a **shape** into solids with their thickness (`ray_crossings` +
+    // `mesh_spans`); the probe must publish the same answer, or the instrument
+    // disagrees with the thing it is measuring.
+    std::vector<std::pair<std::uintptr_t, std::vector<cs2::aim::MeshCrossing>>> mesh_groups;
+    std::vector<int> mesh_group_cluster;
+    for (std::size_t i = 0; i < cells.size(); ++i) {
+      const cs2::aim::OccluderCell& cell = cells[i];
+      if (cell.kind != cs2::aim::SolidKind::mesh) {
+        continue;
+      }
+      std::size_t group = 0;
+      while (group < mesh_groups.size() && mesh_groups[group].first != cell.source) {
+        ++group;
+      }
+      if (group == mesh_groups.size()) {
+        mesh_groups.emplace_back(cell.source, std::vector<cs2::aim::MeshCrossing>{});
+        mesh_group_cluster.push_back(clusters[i]);
+      }
+      cell.ray_crossings(eye, ray.direction, mesh_groups[group].second, k_trace_surfaces_per_mesh);
+    }
+    for (std::size_t group = 0; group < mesh_groups.size(); ++group) {
+      std::vector<cs2::aim::MeshCrossing>& crossings = mesh_groups[group].second;
+      std::sort(crossings.begin(), crossings.end(),
+                [](const cs2::aim::MeshCrossing& a, const cs2::aim::MeshCrossing& b) -> bool {
+                  return a.distance < b.distance;
+                });
+      for (const cs2::aim::RaySpan& span : cs2::aim::mesh_spans(crossings)) {
+        if (static_cast<int>(result.ours.size()) >= k_trace_max_ours) {
+          result.ours_truncated = true;
+          break;
+        }
+        result.ours.push_back(TraceOccluderHit{.entry = span.entry,
+                                               .exit = span.exit,
+                                               .kind = cs2::aim::SolidKind::mesh,
+                                               .index = -1,
+                                               .cluster = mesh_group_cluster[group]});
+      }
+      if (result.ours_truncated) {
+        break;
+      }
+    }
     for (std::size_t i = 0; i < cells.size(); ++i) {
       const cs2::aim::OccluderCell& cell = cells[i];
       if (cell.kind == cs2::aim::SolidKind::mesh) {
-        std::vector<cs2::aim::MeshCrossing> crossings;
-        crossings.reserve(static_cast<std::size_t>(k_trace_surfaces_per_mesh));
-        cell.ray_crossings(eye, ray.direction, crossings, k_trace_surfaces_per_mesh);
-        // The solid spans the solver values: paired faces are one volume with its
-        // thickness, a lone face is an open sheet. Publishing the crossings instead
-        // would show the engine's volumes as pairs of unrelated surfaces.
-        for (const cs2::aim::RaySpan& span : cs2::aim::mesh_spans(crossings)) {
-          if (static_cast<int>(result.ours.size()) >= k_trace_max_ours) {
-            result.ours_truncated = true;
-            break;
-          }
-          result.ours.push_back(TraceOccluderHit{.entry = span.entry,
-                                                 .exit = span.exit,
-                                                 .kind = cell.kind,
-                                                 .index = hulls[i],
-                                                 .cluster = clusters[i]});
-        }
-        if (result.ours_truncated) {
-          break;
-        }
-        continue;
+        continue;  // paired above, per shape
       }
       const std::optional<cs2::aim::RaySpan> span = cell.ray_span(eye, ray.direction);
       if (!span.has_value()) {

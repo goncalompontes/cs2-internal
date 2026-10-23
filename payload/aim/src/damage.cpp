@@ -52,35 +52,61 @@ struct Fragment {
   }
   layers.reserve(fragment.covering.size());
   const Vec3 direction = basis.unproject(polygon_centroid(fragment.polygon));
+  // Mesh solids are paired **per shape**, not per cluster: a thick solid's two faces
+  // can be split into two clusters of the same shape, and the engine traces the shape.
+  std::vector<std::pair<std::uintptr_t, std::vector<MeshCrossing>>> mesh_groups;
+  for (const OccluderCell* occluder : fragment.covering) {
+    if (occluder->kind != SolidKind::mesh) {
+      continue;
+    }
+    std::vector<MeshCrossing>* group = nullptr;
+    for (auto& [source, crossings] : mesh_groups) {
+      if (source == occluder->source) {
+        group = &crossings;
+        break;
+      }
+    }
+    if (group == nullptr) {
+      mesh_groups.emplace_back(occluder->source, std::vector<MeshCrossing>{});
+      group = &mesh_groups.back().second;
+    }
+    occluder->ray_crossings(eye, direction, *group);
+  }
+  for (auto& [source, crossings] : mesh_groups) {
+    std::sort(crossings.begin(), crossings.end(),
+              [](const MeshCrossing& a, const MeshCrossing& b) -> bool {
+                return a.distance < b.distance;
+              });
+    for (const RaySpan& span : mesh_spans(crossings)) {
+      if (span.entry >= distance) {
+        continue;  // beyond the hitbox: not between the shot and it
+      }
+      // The surface's penetration properties are per shape (our clusters of one shape
+      // all carry the shape's surface), so read them from any cluster of the group.
+      const OccluderCell* source_cell = nullptr;
+      for (const OccluderCell* occluder : fragment.covering) {
+        if (occluder->kind == SolidKind::mesh && occluder->source == source) {
+          source_cell = occluder;
+          break;
+        }
+      }
+      if (source_cell == nullptr) {
+        continue;
+      }
+      PenetrationLayer layer;
+      layer.entry = span.entry;
+      layer.thickness = std::max(0.0F, std::min(span.exit, distance) - span.entry);
+      layer.enter.penetration_modifier = source_cell->surface_modifier;
+      layer.enter.damage_modifier = source_cell->damage_modifier;
+      layer.enter.material = source_cell->material;
+      layer.enter.grate = source_cell->grate;
+      layer.exit = layer.enter;
+      layers.push_back(layer);
+    }
+  }
   for (const OccluderCell* occluder : fragment.covering) {
     if (occluder->kind == SolidKind::mesh) {
-      // A mesh cluster is a soup over a whole area: this ray can cross it several
-      // times (a wall, then the floor, then another wall). `ray_span` would report
-      // only the nearest, so a shot through the cluster was valued as one thin
-      // surface. `ray_crossings` reports every triangle it hits **with the face**, and
-      // `mesh_spans` pairs a front face with the back face that closes it: a closed
-      // shell is one solid with its own thickness, and an open sheet is one surface.
-      // Treating the two faces of a building as two independent sheets (the previous
-      // rule) charged two entry fees and no thickness — a shot through 1500 units of
-      // solid valued like a shot through a doorway, which is the live "shoots through
-      // solid walls".
-      std::vector<MeshCrossing> crossings;
-      occluder->ray_crossings(eye, direction, crossings);
-      for (const RaySpan& span : mesh_spans(crossings)) {
-        if (span.entry >= distance) {
-          continue;  // beyond the hitbox: not between the shot and it
-        }
-        PenetrationLayer layer;
-        layer.entry = span.entry;
-        layer.thickness = std::max(0.0F, std::min(span.exit, distance) - span.entry);
-        layer.enter.penetration_modifier = occluder->surface_modifier;
-        layer.enter.damage_modifier = occluder->damage_modifier;
-        layer.enter.material = occluder->material;
-        layer.enter.grate = occluder->grate;
-        layer.exit = layer.enter;
-        layers.push_back(layer);
-      }
-      continue;
+      continue;  // paired above, per shape
     }
     const std::optional<RaySpan> span = occluder->ray_span(eye, direction);
     if (!span.has_value() || span->entry >= distance) {

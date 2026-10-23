@@ -667,7 +667,8 @@ auto project_capsule_occluder(const Vec3& eye, const Basis& basis, const Vec3& a
 
 auto project_mesh_occluder(const Vec3& eye, const Basis& basis, const std::vector<Vec3>& vertices,
                            const std::vector<Vec3>& triangles, float surface_modifier,
-                           std::shared_ptr<const MeshBvh> bvh) -> std::optional<OccluderCell> {
+                           std::shared_ptr<const MeshBvh> bvh, std::uintptr_t source)
+    -> std::optional<OccluderCell> {
   if (vertices.empty() || triangles.size() < 3) {
     return std::nullopt;
   }
@@ -721,6 +722,7 @@ auto project_mesh_occluder(const Vec3& eye, const Basis& basis, const std::vecto
     cell.triangles = triangles;
   }
   cell.mesh_bvh = std::move(bvh);
+  cell.source = source;
   cell.a = mn;
   cell.b = mx;
   cell.surface_modifier = surface_modifier;
